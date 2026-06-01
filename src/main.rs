@@ -1,5 +1,6 @@
 mod app;
 mod renderer;
+mod sim;
 
 use app::SandArtApp;
 

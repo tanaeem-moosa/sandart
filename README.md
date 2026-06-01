@@ -99,9 +99,9 @@ Once compiled, you can copy the binary from `target/release/sandart` directly to
 
 The project will be built in incremental, testable blocks:
 
-- [ ] **Block 1: Basic Scaffolding & Windowing**: Set up the `egui` layout, menus, panel widgets, and a placeholder canvas utilizing `egui::Painter` to verify layout resizing and responsiveness.
-- [ ] **Block 2: WGPU Render Pipeline Hook**: Integrate `egui_wgpu` with custom paint callbacks. Compile and run a basic vertex/fragment shader rendering a flat, colored circle to prove GPU synchronization.
-- [ ] **Block 3: Heightmap Texture & CPU Buffer Transfer**: Create a $512 \times 512$ float grid on the CPU. Map it to a dynamic WGPU texture, upload it each frame, and display it as a grayscale canvas.
+- [x] **Block 1: Basic Scaffolding & Windowing**: Set up the `egui` layout, menus, panel widgets, and a placeholder canvas utilizing `egui::Painter` to verify layout resizing and responsiveness.
+- [x] **Block 2: WGPU Render Pipeline Hook**: Integrate `egui_wgpu` with custom paint callbacks. Compile and run a basic vertex/fragment shader rendering a flat, colored circle to prove GPU synchronization.
+- [x] **Block 3: Heightmap Texture & CPU Buffer Transfer**: Create a $512 \times 512$ float grid on the CPU. Map it to a dynamic WGPU texture, upload it each frame, and display it as a grayscale canvas.
 - [ ] **Block 4: Coordinate Mapping & Path Drawing**: Map GUI coordinate space to heightmap coordinate space. Track mouse click-and-drag and draw simple trails in the sand.
 - [ ] **Block 5A: Marble Path Interpolation & Volume-conserving Displacement**: Prevent "dotted line" trails at high speeds by interpolating paths. Displace sand volume by pushing it into surrounding side-ridges instead of erasing it.
 - [ ] **Block 5B: CPU Heightmap Settling (Cellular Automata)**: Implement gravity settling using local slopes (angle of repose) inside an active bounding box, capped at a stable transfer rate ($\alpha < 0.25$) to prevent rendering flicker.

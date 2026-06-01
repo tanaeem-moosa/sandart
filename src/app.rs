@@ -36,6 +36,10 @@ pub struct SandArtApp {
     pub frame_counter: u64,
     /// Delta time since the last frame.
     pub dt: f32,
+    /// The physics simulation engine.
+    pub sim: crate::sim::Simulation,
+    /// Shared heightmap data for zero-allocation rendering transfer.
+    pub shared_heightmap: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
 }
 
 impl SandArtApp {
@@ -51,6 +55,8 @@ impl SandArtApp {
             config: AppConfig::default(),
             frame_counter: 0,
             dt: 0.0,
+            sim: crate::sim::Simulation::new(),
+            shared_heightmap: std::sync::Arc::new(std::sync::Mutex::new(vec![0.8; 512 * 512])),
         }
     }
 }
@@ -61,6 +67,11 @@ impl eframe::App for SandArtApp {
         
         // Track frame delta time for frame-rate-independent physics calculations
         self.dt = ctx.input(|i| i.stable_dt).min(0.1);
+
+        // Copy simulation heights to the shared rendering buffer (non-allocating copy)
+        if let Ok(mut shared) = self.shared_heightmap.lock() {
+            shared.copy_from_slice(self.sim.heightmap.as_slice());
+        }
 
         // Draw the top panel for basic info
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -106,7 +117,17 @@ impl eframe::App for SandArtApp {
 
                     ui.add_space(20.0);
                     if ui.button("Reset Sand").clicked() {
-                        // Reset action (to be implemented in simulation)
+                        self.sim.reset();
+                        // Generate a concentric ripple pattern to visually verify height rendering
+                        for y in 0..512 {
+                            for x in 0..512 {
+                                let dx = x as f32 - 256.0;
+                                let dy = y as f32 - 256.0;
+                                let dist = (dx * dx + dy * dy).sqrt();
+                                let val = (dist * 0.1).sin() * 0.3 + 0.5;
+                                self.sim.heightmap.set(x, y, val);
+                            }
+                        }
                     }
                 });
             });
@@ -131,7 +152,9 @@ impl eframe::App for SandArtApp {
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 centered_rect,
-                crate::renderer::SandArtCallback,
+                crate::renderer::SandArtCallback {
+                    heightmap_data: self.shared_heightmap.clone(),
+                },
             ));
 
             // 4. Capture mouse interaction (ignoring input on sliders/panels)

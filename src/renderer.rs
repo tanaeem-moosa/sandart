@@ -4,6 +4,9 @@ use egui_wgpu;
 
 pub struct SandArtRenderResources {
     pub pipeline: wgpu::RenderPipeline,
+    pub heightmap_texture: wgpu::Texture,
+    pub bind_group: wgpu::BindGroup,
+    pub scratch_buffer: Vec<u8>,
 }
 
 impl SandArtRenderResources {
@@ -13,12 +16,85 @@ impl SandArtRenderResources {
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shader.wgsl"))),
         });
 
+        // 1. Create heightmap texture (512x512 R32Float)
+        let texture_size = wgpu::Extent3d {
+            width: 512,
+            height: 512,
+            depth_or_array_layers: 1,
+        };
+        
+        let heightmap_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("heightmap_texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        
+        let heightmap_texture_view = heightmap_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // 2. Create heightmap sampler
+        let heightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("heightmap_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // 3. Create Bind Group Layout
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sand_art_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // 4. Create Bind Group
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sand_art_bind_group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&heightmap_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&heightmap_sampler),
+                },
+            ],
+        });
+
+        // 5. Create Pipeline Layout
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sand_art_pipeline_layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&bind_group_layout],
             push_constant_ranges: &[],
         });
 
+        // 6. Create Render Pipeline
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sand_art_pipeline"),
             layout: Some(&pipeline_layout),
@@ -53,21 +129,64 @@ impl SandArtRenderResources {
             cache: None,
         });
 
-        Self { pipeline }
+        Self {
+            pipeline,
+            heightmap_texture,
+            bind_group,
+            scratch_buffer: vec![0u8; 512 * 512],
+        }
+    }
+
+    /// Upload CPU float heightmap data directly to the WGPU texture.
+    pub fn update_heightmap(&mut self, queue: &wgpu::Queue, data: &[f32]) {
+        if self.scratch_buffer.len() != data.len() {
+            self.scratch_buffer.resize(data.len(), 0);
+        }
+
+        for (src, dst) in data.iter().zip(self.scratch_buffer.iter_mut()) {
+            *dst = (src * 255.0).clamp(0.0, 255.0) as u8;
+        }
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.heightmap_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &self.scratch_buffer,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(512), // 512 bytes per row (1 byte per pixel)
+                rows_per_image: Some(512),
+            },
+            wgpu::Extent3d {
+                width: 512,
+                height: 512,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 }
 
-pub struct SandArtCallback;
+pub struct SandArtCallback {
+    pub heightmap_data: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+}
 
 impl egui_wgpu::CallbackTrait for SandArtCallback {
     fn prepare(
         &self,
         _device: &wgpu::Device,
-        _queue: &wgpu::Queue,
+        queue: &wgpu::Queue,
         _screen_descriptor: &egui_wgpu::ScreenDescriptor,
         _egui_encoder: &mut wgpu::CommandEncoder,
-        _resources: &mut egui_wgpu::CallbackResources,
+        resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(res) = resources.get_mut::<SandArtRenderResources>() {
+            if let Ok(data) = self.heightmap_data.lock() {
+                res.update_heightmap(queue, &data);
+            }
+        }
         vec![]
     }
 
@@ -104,6 +223,7 @@ impl egui_wgpu::CallbackTrait for SandArtCallback {
                 );
 
                 render_pass.set_pipeline(&res.pipeline);
+                render_pass.set_bind_group(0, &res.bind_group, &[]);
                 render_pass.draw(0..6, 0..1);
             }
         }
@@ -171,7 +291,16 @@ mod tests {
             let height = 256;
             let target_format = wgpu::TextureFormat::Rgba8Unorm;
 
-            let resources = SandArtRenderResources::new(&device, target_format);
+            let mut resources = SandArtRenderResources::new(&device, target_format);
+
+            // Populate top half of heightmap with 1.0 (bright) and bottom half with 0.0 (dark)
+            let mut heightmap_data = vec![0.0f32; 512 * 512];
+            for y in 0..256 {
+                for x in 0..512 {
+                    heightmap_data[y * 512 + x] = 1.0;
+                }
+            }
+            resources.update_heightmap(&queue, &heightmap_data);
 
             // Create offscreen texture
             let texture_desc = wgpu::TextureDescriptor {
@@ -223,6 +352,7 @@ mod tests {
 
                 render_pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
                 render_pass.set_pipeline(&resources.pipeline);
+                render_pass.set_bind_group(0, &resources.bind_group, &[]);
                 render_pass.draw(0..6, 0..1);
             }
 
@@ -263,31 +393,32 @@ mod tests {
 
             let data = buffer_slice.get_mapped_range();
             
-            // Check center pixel (128, 128) - should be within the circle (Coral color: ~[229, 102, 76, 255])
-            let center_offset = ((128 * width + 128) * 4) as usize;
-            let r_center = data[center_offset];
-            let g_center = data[center_offset + 1];
-            let b_center = data[center_offset + 2];
-            let a_center = data[center_offset + 3];
+            // Verify top half (y=64, x=128) is bright (1.0 height -> 255)
+            let top_offset = ((64 * width + 128) * 4) as usize;
+            let r_top = data[top_offset];
+            let a_top = data[top_offset + 3];
 
-            // Check corner pixel (0, 0) - should be outside the circle (Dark background color: ~[25, 25, 30, 255])
+            // Verify bottom half (y=192, x=128) is dark (0.0 height -> 0)
+            let bottom_offset = ((192 * width + 128) * 4) as usize;
+            let r_bottom = data[bottom_offset];
+            let a_bottom = data[bottom_offset + 3];
+
+            // Verify corner (Dark Background: 0.1, 0.1, 0.12, 1.0 -> ~25, ~25, ~30, 255)
             let corner_offset = 0usize;
             let r_corner = data[corner_offset];
             let g_corner = data[corner_offset + 1];
             let b_corner = data[corner_offset + 2];
             let a_corner = data[corner_offset + 3];
+            assert!(r_corner >= 25 && r_corner <= 26, "Corner R should be ~25/26 (0.1), got {}", r_corner);
+            assert!(g_corner >= 25 && g_corner <= 26, "Corner G should be ~25/26 (0.1), got {}", g_corner);
+            assert!(b_corner >= 30 && b_corner <= 31, "Corner B should be ~30/31 (0.12), got {}", b_corner);
+            assert_eq!(a_corner, 255);
 
-            // Verify center (Coral Sand Color: 0.9, 0.4, 0.3, 1.0)
-            assert!(r_center > 200, "Center R should be high (coral), got {}", r_center);
-            assert!(g_center > 90 && g_center < 120, "Center G should be moderate, got {}", g_center);
-            assert!(b_center > 60 && b_center < 90, "Center B should be low, got {}", b_center);
-            assert_eq!(a_center, 255, "Center alpha should be 255");
+            assert!(r_top > 200, "Top half R should be high (bright), got {}", r_top);
+            assert_eq!(a_top, 255);
 
-            // Verify corner (Dark Background: 0.1, 0.1, 0.12, 1.0)
-            assert!(r_corner < 40, "Corner R should be low (dark frame), got {}", r_corner);
-            assert!(g_corner < 40, "Corner G should be low, got {}", g_corner);
-            assert!(b_corner > 20 && b_corner < 40, "Corner B should be low, got {}", b_corner);
-            assert_eq!(a_corner, 255, "Corner alpha should be 255");
+            assert!(r_bottom < 50, "Bottom half R should be low (dark), got {}", r_bottom);
+            assert_eq!(a_bottom, 255);
 
             drop(data);
             read_buffer.unmap();
