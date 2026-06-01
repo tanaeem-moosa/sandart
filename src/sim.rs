@@ -88,82 +88,161 @@ impl Simulation {
 
     /// Erase height values inside the marble radius to 0.0 with sub-pixel precision.
     pub fn draw_point(&mut self, pos: Vec2, radius: f32) {
-        if !pos.is_finite() || !radius.is_finite() || radius <= 0.0 {
+        self.displace_line(pos, pos, radius);
+    }
+
+    /// Draw a line between start and end using interpolation to prevent gaps.
+    pub fn draw_line(&mut self, start: Vec2, end: Vec2, radius: f32) {
+        self.displace_line(start, end, radius);
+    }
+
+    /// Displace sand along a line segment from start to end, carving a groove
+    /// and depositing the displaced volume into the surrounding ridge area.
+    pub fn displace_line(&mut self, start: Vec2, end: Vec2, radius: f32) {
+        if !start.is_finite() || !end.is_finite() || !radius.is_finite() || radius <= 0.0 {
             return;
         }
 
         let w = self.heightmap.width;
         let h = self.heightmap.height;
+        if w == 0 || h == 0 {
+            return;
+        }
 
-        // Sub-pixel grid coordinates of the marble center
-        let fx = (pos.x + 1.0) * 0.5 * w as f32;
-        let fy = (1.0 - pos.y) * 0.5 * h as f32;
+        // Convert coordinates to grid space
+        let ax = (start.x + 1.0) * 0.5 * w as f32;
+        let ay = (1.0 - start.y) * 0.5 * h as f32;
+        let bx = (end.x + 1.0) * 0.5 * w as f32;
+        let by = (1.0 - end.y) * 0.5 * h as f32;
 
-        // Convert marble radius to grid units
         let r_grid = radius * (w as f32 / 2.0);
-
-        // Clamp grid radius to prevent excessive loop sizes (DoS protection)
         let r_grid_clamped = r_grid.min(w as f32);
 
-        // Early out if the center is too far outside the grid to affect any cells (prevents integer overflow on casts)
-        let max_bound_x = w as f32 + r_grid_clamped;
-        let max_bound_y = h as f32 + r_grid_clamped;
-        if fx < -r_grid_clamped || fx > max_bound_x || fy < -r_grid_clamped || fy > max_bound_y {
-            return;
-        }
+        // Define ridge width (60% of the marble radius)
+        let w_grid = r_grid_clamped * 0.6;
+        let total_radius = r_grid_clamped + w_grid;
+        let total_radius_clamped = total_radius.min(w as f32);
 
-        let r_grid_i = r_grid_clamped.ceil() as isize;
+        // Early out if the swept area is completely outside the grid
+        let min_center_x = ax.min(bx);
+        let max_center_x = ax.max(bx);
+        let min_center_y = ay.min(by);
+        let max_center_y = ay.max(by);
 
-        let cx = fx as isize;
-        let cy = fy as isize;
+        if max_center_x < -total_radius_clamped
+            || min_center_x > w as f32 + total_radius_clamped
+            || max_center_y < -total_radius_clamped
+            || min_center_y > h as f32 + total_radius_clamped
+            {
+                return;
+            }
 
-        let min_x_raw = cx - r_grid_i;
-        let max_x_raw = cx + r_grid_i;
-        let min_y_raw = cy - r_grid_i;
-        let max_y_raw = cy + r_grid_i;
+        // Safe bounding box calculations in float space before casting to usize
+        let min_x_float = (min_center_x - total_radius_clamped).clamp(0.0, w as f32).floor();
+        let max_x_float = (max_center_x + total_radius_clamped).clamp(0.0, w as f32).ceil();
+        let min_y_float = (min_center_y - total_radius_clamped).clamp(0.0, h as f32).floor();
+        let max_y_float = (max_center_y + total_radius_clamped).clamp(0.0, h as f32).ceil();
 
-        // Early out if the bounding box is completely outside the grid
-        if max_x_raw < 0 || min_x_raw >= w as isize || max_y_raw < 0 || min_y_raw >= h as isize {
-            return;
-        }
+        let min_x = min_x_float as usize;
+        let max_x = (max_x_float as usize).min(w - 1);
+        let min_y = min_y_float as usize;
+        let max_y = (max_y_float as usize).min(h - 1);
 
-        let min_x = min_x_raw.max(0) as usize;
-        let max_x = max_x_raw.min(w as isize - 1) as usize;
-        let min_y = min_y_raw.max(0) as usize;
-        let max_y = max_y_raw.min(h as isize - 1) as usize;
+        // Segment vector
+        let vx = bx - ax;
+        let vy = by - ay;
+        let len_sq = vx * vx + vy * vy;
+        let len = if len_sq >= 1e-6 { len_sq.sqrt() } else { 0.0 };
+        let inv_len_sq = if len_sq >= 1e-6 { 1.0 / len_sq } else { 0.0 };
 
-        let r_grid_sq = r_grid_clamped * r_grid_clamped;
+        let r_groove_sq = r_grid_clamped * r_grid_clamped;
 
+        // Ridge ray sampling offsets
+        let d1 = r_grid_clamped + w_grid * 0.25;
+        let d2 = r_grid_clamped + w_grid * 0.50;
+        let d3 = r_grid_clamped + w_grid * 0.75;
+
+        let samples = [
+            (d1, 0.5),
+            (d2, 1.0 / 3.0),
+            (d3, 1.0 / 6.0),
+        ];
+
+        // Scan bounding box to carve the groove and displace sand radially/perpendicularly
         for y in min_y..=max_y {
-            let dy = (y as f32 + 0.5) - fy;
-            let dy_sq = dy * dy;
+            let py = y as f32 + 0.5;
             let row_offset = y * w;
-            let row_slice = &mut self.heightmap.data[row_offset..row_offset + w];
             for x in min_x..=max_x {
-                let dx = (x as f32 + 0.5) - fx;
-                let dist_sq = dx * dx + dy_sq;
-                if dist_sq <= r_grid_sq {
-                    row_slice[x] = 0.0;
+                let px = x as f32 + 0.5;
+
+                // Distance to segment AB (used for carving)
+                let (closest_x, closest_y) = if len_sq < 1e-6 {
+                    (ax, ay)
+                } else {
+                    let t = (((px - ax) * vx + (py - ay) * vy) * inv_len_sq).clamp(0.0, 1.0);
+                    (ax + t * vx, ay + t * vy)
+                };
+
+                let dx = px - closest_x;
+                let dy = py - closest_y;
+                let dist_sq = dx * dx + dy * dy;
+
+                if dist_sq < r_groove_sq {
+                    let dist = dist_sq.sqrt();
+                    // Spherical groove profile: z_groove = R - sqrt(R^2 - d^2)
+                    let h_target = r_grid_clamped - (r_groove_sq - dist_sq).max(0.0).sqrt();
+                    // Scale this target height to flat sand height (0.8)
+                    let h_target_norm = (h_target / r_grid_clamped) * 0.8;
+                    
+                    let current_idx = row_offset + x;
+                    let current_h = self.heightmap.data[current_idx];
+                    if current_h > h_target_norm {
+                        let diff = current_h - h_target_norm;
+                        self.heightmap.data[current_idx] = h_target_norm;
+
+                        // Projection on the infinite line (used for perpendicular displacement origin/direction)
+                        let (closest_line_x, closest_line_y) = if len_sq < 1e-6 {
+                            (ax, ay)
+                        } else {
+                            let t_unclamped = ((px - ax) * vx + (py - ay) * vy) * inv_len_sq;
+                            (ax + t_unclamped * vx, ay + t_unclamped * vy)
+                        };
+
+                        let dx_line = px - closest_line_x;
+                        let dy_line = py - closest_line_y;
+                        let dist_line_sq = dx_line * dx_line + dy_line * dy_line;
+                        let dist_line = dist_line_sq.sqrt();
+
+                        // Distribute diff: perpendicular to motion if moving, radial if stationary
+                        let (dir_x, dir_y) = if len_sq >= 1e-6 && len > 1e-4 {
+                            if dist_line > 1e-4 {
+                                (dx_line / dist_line, dy_line / dist_line)
+                            } else {
+                                // Default perpendicular direction if exactly on the line
+                                (-vy / len, vx / len)
+                            }
+                        } else {
+                            if dist > 1e-4 {
+                                (dx / dist, dy / dist)
+                            } else {
+                                (1.0, 0.0)
+                            }
+                        };
+
+                        for &(d_sample, weight) in &samples {
+                            let rx = (closest_line_x + dir_x * d_sample).floor() as isize;
+                            let ry = (closest_line_y + dir_y * d_sample).floor() as isize;
+
+                            if rx >= 0 && rx < w as isize && ry >= 0 && ry < h as isize {
+                                let ridx = (ry * w as isize + rx) as usize;
+                                self.heightmap.data[ridx] += diff * weight;
+                            }
+                        }
+                    }
                 }
             }
         }
-    }
 
-    /// Draw a line between start and end using interpolation to prevent gaps.
-    pub fn draw_line(&mut self, start: Vec2, end: Vec2, radius: f32) {
-        let dist = start.distance(end);
-        let step = radius * 0.5; // step size is half the radius to ensure overlap and no gaps
-        if dist > step && step > 0.0 {
-            let steps = (dist / step).ceil() as usize;
-            let steps_clamped = steps.min(1000); // Guard against infinite looping
-            for i in 0..=steps_clamped {
-                let t = i as f32 / steps_clamped as f32;
-                let pos = start.lerp(end, t);
-                self.draw_point(pos, radius);
-            }
-        } else {
-            self.draw_point(end, radius);
-        }
     }
 
     /// Run a physics frame tick.
@@ -175,13 +254,13 @@ impl Simulation {
             if self.was_active {
                 self.prev_marble_pos = self.marble_pos;
                 self.marble_pos = clamped_target;
-                // Draw interpolated line to prevent gaps when dragging fast
-                self.draw_line(self.prev_marble_pos, self.marble_pos, marble_radius);
+                // Displace along the path line segment
+                self.displace_line(self.prev_marble_pos, self.marble_pos, marble_radius);
             } else {
                 // First tick of a new drag/click: teleport without drawing from old position
                 self.marble_pos = clamped_target;
                 self.prev_marble_pos = clamped_target;
-                self.draw_point(clamped_target, marble_radius);
+                self.displace_line(clamped_target, clamped_target, marble_radius);
                 self.was_active = true;
             }
         } else {
@@ -270,10 +349,10 @@ mod tests {
         // Position marble so it sits on the left boundary
         sim.draw_point(Vec2::new(-1.0, 0.0), 0.05);
         
-        // Check that some points are set to 0.0, and bounds are respected
+        // Check that some points are carved below 0.1, and bounds are respected
         let mut modified_count = 0;
         for &val in sim.heightmap.as_slice() {
-            if val == 0.0 {
+            if val < 0.1 {
                 modified_count += 1;
             }
         }
@@ -292,9 +371,9 @@ mod tests {
         let (cx2, cy2) = Simulation::norm_to_grid(Vec2::new(0.0, 0.0), 512, 512);
         let (cx3, cy3) = Simulation::norm_to_grid(Vec2::new(0.5, 0.0), 512, 512);
         
-        assert_eq!(sim.heightmap.get(cx1, cy1), 0.0);
-        assert_eq!(sim.heightmap.get(cx2, cy2), 0.0);
-        assert_eq!(sim.heightmap.get(cx3, cy3), 0.0);
+        assert!(sim.heightmap.get(cx1, cy1) < 0.01);
+        assert!(sim.heightmap.get(cx2, cy2) < 0.01);
+        assert!(sim.heightmap.get(cx3, cy3) < 0.01);
     }
 
     #[test]
@@ -306,5 +385,58 @@ mod tests {
         for &val in sim.heightmap.as_slice() {
             assert_eq!(val, 0.8);
         }
+    }
+
+    #[test]
+    fn test_volume_conservation() {
+        let mut sim = Simulation::new();
+        // Set the heightmap to 0.4 to ensure we have enough headroom (up to 1.0) for ridges
+        sim.heightmap.reset(0.4);
+        let initial_sum: f64 = sim.heightmap.as_slice().iter().map(|&x| x as f64).sum();
+
+        // Perform displacement along a path
+        sim.displace_line(Vec2::new(-0.2, 0.2), Vec2::new(0.2, -0.2), 0.03);
+
+        let final_sum: f64 = sim.heightmap.as_slice().iter().map(|&x| x as f64).sum();
+        
+        // Assert that the total volume (sum of heightmap) is conserved within floating-point epsilon
+        let diff = (final_sum - initial_sum).abs();
+        assert!(diff < 1e-2, "Volume not conserved! diff = {}", diff);
+    }
+
+    #[test]
+    fn test_draw_line_extreme_coordinates_overflow() {
+        let mut sim = Simulation::new();
+        // Spanning across extreme opposite coordinates should not overflow or panic.
+        sim.draw_line(Vec2::new(-1e18, 0.0), Vec2::new(1e18, 0.0), 0.1);
+    }
+
+    #[test]
+    fn test_zero_dimension_heightmap() {
+        let hm = Heightmap::new(0, 0, 0.8);
+        let mut sim = Simulation {
+            heightmap: hm,
+            marble_pos: Vec2::ZERO,
+            prev_marble_pos: Vec2::ZERO,
+            was_active: false,
+        };
+        // Drawing on a 0x0 heightmap should not panic or loop infinitely.
+        sim.draw_line(Vec2::ZERO, Vec2::ZERO, 0.1);
+    }
+
+    #[test]
+    fn test_volume_conservation_with_saturation() {
+        let mut sim = Simulation::new();
+        // Initialize to high level to trigger height clamping (saturation)
+        sim.heightmap.reset(0.70);
+        let initial_sum: f64 = sim.heightmap.as_slice().iter().map(|&x| x as f64).sum();
+
+        // Perform displacement at a single point to trigger local saturation in the inner ridge
+        sim.displace_line(Vec2::ZERO, Vec2::ZERO, 0.02);
+
+        let final_sum: f64 = sim.heightmap.as_slice().iter().map(|&x| x as f64).sum();
+        let diff = (final_sum - initial_sum).abs();
+        // Strict conservation check under saturation conditions
+        assert!(diff < 1e-2, "Volume not conserved! diff = {}", diff);
     }
 }
