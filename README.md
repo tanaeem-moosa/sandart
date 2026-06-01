@@ -75,7 +75,7 @@ Since the Steam Deck's root filesystem is read-only and standard system package 
    ```
 3. **Install build tools and graphics development libraries (inside container)**:
    ```bash
-   sudo pacman -Syu --noconfirm base-devel pkgconf mesa libx11 libxrandr libxi libxcursor wayland libxkbcommon
+   sudo pacman -Syu --noconfirm base-devel pkgconf mesa libx11 libxrandr libxi libxcursor wayland libxkbcommon libxkbcommon-x11
    ```
 4. **Install or load Rust (inside container)**:
    ```bash
