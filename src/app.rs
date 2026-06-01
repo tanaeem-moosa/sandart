@@ -40,7 +40,13 @@ pub struct SandArtApp {
 
 impl SandArtApp {
     /// Create a new instance of the application.
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        if let Some(wgpu_state) = &cc.wgpu_render_state {
+            let device = &wgpu_state.device;
+            let target_format = wgpu_state.target_format;
+            let resources = crate::renderer::SandArtRenderResources::new(device, target_format);
+            wgpu_state.renderer.write().callback_resources.insert(resources);
+        }
         Self {
             config: AppConfig::default(),
             frame_counter: 0,
@@ -110,6 +116,7 @@ impl eframe::App for SandArtApp {
             // 1. Calculate centered square rect based on available space BEFORE allocating
             let available_rect = ui.available_rect_before_wrap();
             let square_side = available_rect.width().min(available_rect.height());
+            let radius = square_side / 2.0;
             
             let offset_x = (available_rect.width() - square_side) / 2.0;
             let offset_y = (available_rect.height() - square_side) / 2.0;
@@ -121,31 +128,11 @@ impl eframe::App for SandArtApp {
             // 2. Allocate the exact centered rect to align mouse interaction with the visuals
             let response = ui.allocate_rect(centered_rect, egui::Sense::drag());
 
-            // 3. Draw visuals centered in the allocated space
-            let painter = ui.painter();
-            let radius = square_side / 2.0;
-            
-            // Draw outer dark frame
-            painter.circle_filled(
-                centered_rect.center(),
-                radius * 0.98,
-                egui::Color32::from_rgb(30, 30, 35),
-            );
-
-            // Draw inner sand color circle placeholder
-            painter.circle_filled(
-                centered_rect.center(),
-                radius * 0.92,
-                egui::Color32::from_rgb(230, 220, 200),
-            );
-
-            // Draw center marble placeholder (scaled dynamically to viewport size)
-            let visual_marble_size = self.config.marble_size * radius;
-            painter.circle_filled(
-                centered_rect.center(),
-                visual_marble_size,
-                egui::Color32::from_rgb(120, 120, 130),
-            );
+            // 3. Draw visuals centered in the allocated space via custom WGPU rendering
+            ui.painter().add(egui_wgpu::Callback::new_paint_callback(
+                centered_rect,
+                crate::renderer::SandArtCallback,
+            ));
 
             // 4. Capture mouse interaction (ignoring input on sliders/panels)
             if response.dragged() && !ctx.wants_pointer_input() {
