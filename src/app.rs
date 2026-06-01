@@ -139,7 +139,8 @@ impl eframe::App for SandArtApp {
                 if let Some(pointer_pos) = response.interact_pointer_pos() {
                     // Normalize relative pointer pos to [-1.0, 1.0] from center of table
                     let _rel_x = (pointer_pos.x - centered_rect.center().x) / radius;
-                    let _rel_y = (pointer_pos.y - centered_rect.center().y) / radius;
+                    // Fix: Invert Y axis to translate from egui screen-space (Y-down) to physics Cartesian space (Y-up)
+                    let _rel_y = -(pointer_pos.y - centered_rect.center().y) / radius;
                     // Mouse coordinates are ready to be sent to simulation in Block 4
                 }
             }
