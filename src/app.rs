@@ -136,7 +136,7 @@ impl eframe::App for SandArtApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             // 1. Calculate centered square rect based on available space BEFORE allocating
             let available_rect = ui.available_rect_before_wrap();
-            let square_side = available_rect.width().min(available_rect.height());
+            let square_side = available_rect.width().min(available_rect.height()).max(0.0);
             let radius = square_side / 2.0;
             
             let offset_x = (available_rect.width() - square_side) / 2.0;
@@ -158,15 +158,29 @@ impl eframe::App for SandArtApp {
             ));
 
             // 4. Capture mouse interaction (ignoring input on sliders/panels)
-            if response.dragged() && !ctx.wants_pointer_input() {
+            let mut target_pos = None;
+            if (response.dragged() || response.clicked()) && radius > 1e-4 {
                 if let Some(pointer_pos) = response.interact_pointer_pos() {
                     // Normalize relative pointer pos to [-1.0, 1.0] from center of table
-                    let _rel_x = (pointer_pos.x - centered_rect.center().x) / radius;
-                    // Fix: Invert Y axis to translate from egui screen-space (Y-down) to physics Cartesian space (Y-up)
-                    let _rel_y = -(pointer_pos.y - centered_rect.center().y) / radius;
-                    // Mouse coordinates are ready to be sent to simulation in Block 4
+                    let rel_x = (pointer_pos.x - centered_rect.center().x) / radius;
+                    // Flip y for standard cartesian coordinate mapping (positive y is up)
+                    let rel_y = -(pointer_pos.y - centered_rect.center().y) / radius;
+                    
+                    let pos = egui::vec2(rel_x, rel_y);
+                    let len = pos.length();
+                    // Constrain marble center to visual sand circle bounds (0.92 radius in Cartesian)
+                    let max_r = (0.92 - self.config.marble_size).max(0.0);
+                    let clamped_pos = if len > max_r {
+                        pos / len * max_r
+                    } else {
+                        pos
+                    };
+                    target_pos = Some(glam::Vec2::new(clamped_pos.x, clamped_pos.y));
                 }
             }
+
+            // Run simulation tick
+            self.sim.update(self.dt, target_pos, self.config.marble_size);
         });
 
         // Keep requesting frames for continuous physics simulation/render
