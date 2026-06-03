@@ -7,6 +7,14 @@ pub enum PatternMode {
     Manual,
     Spiral,
     CustomFile,
+    Lissajous,
+    Rose,
+    Hypotrochoid,
+    FermatSpiral,
+    HilbertCurve,
+    RandomWalk,
+    Lemniscate,
+    MultiMarble,
 }
 
 impl Default for PatternMode {
@@ -28,6 +36,25 @@ impl Default for LedMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum MaterialMode {
+    ButterCream,
+    DrySand,
+    Snow,
+    KineticSand,
+    WetSand,
+    FinePowder,
+    Oobleck,
+    MoonDust,
+    IronFilings,
+}
+
+impl Default for MaterialMode {
+    fn default() -> Self {
+        Self::ButterCream
+    }
+}
+
 /// Application configuration and simulation parameters in normalized space.
 /// Normalized space scales from 0.0 to 1.0 relative to the sand table radius.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -40,7 +67,7 @@ pub struct AppConfig {
     pub spiral_spacing: f32,
     /// Flag to enable auto-play of the spiral pattern.
     pub auto_play: bool,
-    /// Light brightness slider (0.0 to 1.0).
+    /// Light brightness slider (0.0 to 3.0).
     pub light_brightness: f32,
     /// Selection of current drawing pattern source.
     pub pattern_mode: PatternMode,
@@ -56,16 +83,18 @@ pub struct AppConfig {
     pub led_mode: LedMode,
     /// Flag to enable GPU raymarched shadows.
     pub shadows_enabled: bool,
+    /// Material mode selecting simulation physics & parameters.
+    pub material_mode: MaterialMode,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            speed: 0.15,
-            marble_size: 0.025,
+            speed: 0.30,
+            marble_size: 0.018,
             spiral_spacing: 0.030,
             auto_play: false,
-            light_brightness: 0.8,
+            light_brightness: 1.3,
             pattern_mode: PatternMode::Manual,
             custom_file_path: String::new(),
             light_angle: 0.7853982,         // ~45 degrees in radians
@@ -73,6 +102,7 @@ impl Default for AppConfig {
             sand_color: [0.92, 0.89, 0.82], // Warm sandy beige
             led_mode: LedMode::RainbowRing,
             shadows_enabled: true,
+            material_mode: MaterialMode::ButterCream,
         }
     }
 }
@@ -84,10 +114,10 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
-        assert_eq!(config.speed, 0.15);
-        assert_eq!(config.marble_size, 0.025);
+        assert_eq!(config.speed, 0.30);
+        assert_eq!(config.marble_size, 0.018);
         assert_eq!(config.spiral_spacing, 0.030);
-        assert_eq!(config.light_brightness, 0.8);
+        assert_eq!(config.light_brightness, 1.3);
         assert!(!config.auto_play);
         assert_eq!(config.pattern_mode, PatternMode::Manual);
         assert_eq!(config.custom_file_path, "");
@@ -96,6 +126,7 @@ mod tests {
         assert_eq!(config.sand_color, [0.92, 0.89, 0.82]);
         assert_eq!(config.led_mode, LedMode::RainbowRing);
         assert!(config.shadows_enabled);
+        assert_eq!(config.material_mode, MaterialMode::ButterCream);
     }
 
     #[test]
@@ -108,7 +139,7 @@ mod tests {
 
     #[test]
     fn test_json_schema_stability() {
-        let json_str = r#"{"speed":0.15,"marble_size":0.025,"spiral_spacing":0.03,"auto_play":false,"light_brightness":0.8,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.92,0.89,0.82],"led_mode":"RainbowRing","shadows_enabled":true}"#;
+        let json_str = r#"{"speed":0.3,"marble_size":0.018,"spiral_spacing":0.03,"auto_play":false,"light_brightness":1.3,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.92,0.89,0.82],"led_mode":"RainbowRing","shadows_enabled":true,"material_mode":"ButterCream"}"#;
         let deserialized: AppConfig = serde_json::from_str(json_str).unwrap();
         assert_eq!(deserialized, AppConfig::default());
     }

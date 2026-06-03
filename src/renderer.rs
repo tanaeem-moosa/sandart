@@ -10,11 +10,18 @@ pub struct LightingUniforms {
     pub sand_color: [f32; 4],  // rgb color + padding
     pub light_brightness: f32, // intensity
     pub shadow_enabled: u32,   // 1 = enabled, 0 = disabled
-    pub led_mode: u32,         // 0 = Single, 1 = RainbowRing
+    pub led_mode: u32,         // 0 = Single, 1 = RainbowRing, 2 = ColorCycle
     pub time: f32,             // elapsed animation time
     pub marble_pos: [f32; 2],  // x, y coordinate
     pub marble_radius: f32,    // radius in normalized coordinates
-    pub _padding2: u32,        // padding to align to 16 bytes
+    pub material_mode: u32,    // active material preset (0 to 8)
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct CameraUniforms {
+    pub view_proj: [f32; 16], // column-major 4x4 matrix
+    pub camera_pos: [f32; 4], // xyz + padding
 }
 
 pub struct SandArtRenderResources {
@@ -22,6 +29,7 @@ pub struct SandArtRenderResources {
     pub heightmap_texture: wgpu::Texture,
     pub bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
+    pub camera_buffer: wgpu::Buffer,
     pub scratch_buffer: Vec<u8>,
 }
 
@@ -34,10 +42,10 @@ impl SandArtRenderResources {
             ))),
         });
 
-        // 1. Create heightmap texture (512x512 R8Unorm)
+        // 1. Create heightmap texture (GRID_SIZE x GRID_SIZE R8Unorm)
         let texture_size = wgpu::Extent3d {
-            width: 512,
-            height: 512,
+            width: crate::sim::GRID_SIZE as u32,
+            height: crate::sim::GRID_SIZE as u32,
             depth_or_array_layers: 1,
         };
 
@@ -75,6 +83,14 @@ impl SandArtRenderResources {
             mapped_at_creation: false,
         });
 
+        // Create camera uniform buffer
+        let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("camera_uniform_buffer"),
+            size: std::mem::size_of::<CameraUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         // 4. Create Bind Group Layout
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("sand_art_bind_group_layout"),
@@ -105,6 +121,16 @@ impl SandArtRenderResources {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -124,6 +150,10 @@ impl SandArtRenderResources {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: camera_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -175,7 +205,8 @@ impl SandArtRenderResources {
             heightmap_texture,
             bind_group,
             uniform_buffer,
-            scratch_buffer: vec![0u8; 512 * 512],
+            camera_buffer,
+            scratch_buffer: vec![0u8; crate::sim::GRID_SIZE * crate::sim::GRID_SIZE],
         }
     }
 
@@ -199,12 +230,12 @@ impl SandArtRenderResources {
             &self.scratch_buffer,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(512),
-                rows_per_image: Some(512),
+                bytes_per_row: Some(crate::sim::GRID_SIZE as u32),
+                rows_per_image: Some(crate::sim::GRID_SIZE as u32),
             },
             wgpu::Extent3d {
-                width: 512,
-                height: 512,
+                width: crate::sim::GRID_SIZE as u32,
+                height: crate::sim::GRID_SIZE as u32,
                 depth_or_array_layers: 1,
             },
         );
@@ -214,11 +245,17 @@ impl SandArtRenderResources {
     pub fn update_uniforms(&self, queue: &wgpu::Queue, uniforms: &LightingUniforms) {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(uniforms));
     }
+
+    /// Upload camera uniform data directly to the WGPU camera uniform buffer.
+    pub fn update_camera(&self, queue: &wgpu::Queue, camera: &CameraUniforms) {
+        queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
+    }
 }
 
 pub struct SandArtCallback {
     pub heightmap_data: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
     pub uniforms: LightingUniforms,
+    pub camera_uniforms: CameraUniforms,
 }
 
 impl egui_wgpu::CallbackTrait for SandArtCallback {
@@ -235,6 +272,7 @@ impl egui_wgpu::CallbackTrait for SandArtCallback {
                 res.update_heightmap(queue, &data);
             }
             res.update_uniforms(queue, &self.uniforms);
+            res.update_camera(queue, &self.camera_uniforms);
         }
         vec![]
     }
@@ -346,10 +384,11 @@ mod tests {
 
             let mut resources = SandArtRenderResources::new(&device, target_format);
 
-            let mut heightmap_data = vec![0.0f32; 512 * 512];
+            let grid_size = crate::sim::GRID_SIZE;
+            let mut heightmap_data = vec![0.0f32; grid_size * grid_size];
             for y in 0..256 {
-                for x in 0..512 {
-                    heightmap_data[y * 512 + x] = 1.0;
+                for x in 0..grid_size {
+                    heightmap_data[y * grid_size + x] = 1.0;
                 }
             }
             resources.update_heightmap(&queue, &heightmap_data);
@@ -365,9 +404,20 @@ mod tests {
                 time: 0.0,
                 marble_pos: [0.0, 0.0],
                 marble_radius: 0.025,
-                _padding2: 0,
+                material_mode: 0,
             };
             resources.update_uniforms(&queue, &uniforms);
+
+            let camera_uniforms = CameraUniforms {
+                view_proj: [
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ],
+                camera_pos: [0.0, 0.0, 2.0, 0.0],
+            };
+            resources.update_camera(&queue, &camera_uniforms);
 
             let texture_desc = wgpu::TextureDescriptor {
                 label: Some("test_target_texture"),
@@ -465,3 +515,7 @@ mod tests {
         });
     }
 }
+
+// Compile-time layout/size verification assertions for WebGPU uniform alignments
+const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 80);
+const _: () = assert!(std::mem::size_of::<CameraUniforms>() == 80);

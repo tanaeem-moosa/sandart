@@ -13,10 +13,16 @@ struct LightingUniforms {
     time: f32,
     marble_pos: vec2<f32>,
     marble_radius: f32,
-    _padding2: u32,
+    material_mode: u32,
+};
+
+struct CameraUniforms {
+    view_proj: mat4x4<f32>,
+    camera_pos: vec4<f32>,
 };
 
 @group(0) @binding(2) var<uniform> uniforms: LightingUniforms;
+@group(0) @binding(3) var<uniform> camera: CameraUniforms;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -184,7 +190,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     }
     
     // 1. Compute finite difference normal from neighbor heightmap pixels
-    let texel_size = 1.0 / 512.0;
+    let texel_size = 1.0 / 1024.0;
     let h_center = textureSampleLevel(heightmap_tex, heightmap_sampler, uv, 0.0).r;
     let h_left   = textureSampleLevel(heightmap_tex, heightmap_sampler, uv + vec2<f32>(-texel_size, 0.0), 0.0).r;
     let h_right  = textureSampleLevel(heightmap_tex, heightmap_sampler, uv + vec2<f32>(texel_size, 0.0), 0.0).r;

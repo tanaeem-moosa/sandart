@@ -20,6 +20,8 @@ pub struct SandArtApp {
     pub pattern_error: Option<String>,
     /// List of sample pattern file paths scanned on startup.
     pub sample_patterns: Vec<std::path::PathBuf>,
+    /// Toggle state for collapsible side panel UI.
+    pub settings_open: bool,
 }
 
 impl SandArtApp {
@@ -58,10 +60,14 @@ impl SandArtApp {
             dt: 0.0,
             elapsed_time: 0.0,
             sim: crate::sim::Simulation::new(),
-            shared_heightmap: std::sync::Arc::new(std::sync::Mutex::new(vec![0.8; 512 * 512])),
+            shared_heightmap: std::sync::Arc::new(std::sync::Mutex::new(vec![
+                0.8;
+                crate::sim::GRID_SIZE * crate::sim::GRID_SIZE
+            ])),
             playback: crate::pattern::PlaybackController::new(),
             pattern_error: None,
             sample_patterns,
+            settings_open: true,
         }
     }
 
@@ -116,6 +122,13 @@ impl eframe::App for SandArtApp {
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Sands of Time: Kinetic Sand Simulator");
+
+                ui.add_space(16.0);
+                let btn_text = if self.settings_open { "Hide Controls ⚙" } else { "Show Controls ⚙" };
+                if ui.button(btn_text).clicked() {
+                    self.settings_open = !self.settings_open;
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!(
                         "Frames: {} | dt: {:.4}s",
@@ -126,13 +139,14 @@ impl eframe::App for SandArtApp {
         });
 
         // Draw the left control panel
-        egui::SidePanel::left("control_panel")
-            .resizable(true)
-            .default_width(280.0)
-            .min_width(200.0)
-            .show(ctx, |ui| {
-                ui.vertical(|ui| {
-                    ui.add_space(8.0);
+        if self.settings_open {
+            egui::SidePanel::left("control_panel")
+                .resizable(true)
+                .default_width(280.0)
+                .min_width(200.0)
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        ui.add_space(8.0);
                     ui.heading("Controls");
                     ui.separator();
                     ui.add_space(8.0);
@@ -176,6 +190,62 @@ impl eframe::App for SandArtApp {
                                     &mut self.config.pattern_mode,
                                     crate::config::PatternMode::CustomFile,
                                     "Custom File (.thr/.gcode)",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Lissajous,
+                                    "Lissajous Curve",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Rose,
+                                    "Rose Curve",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Hypotrochoid,
+                                    "Hypotrochoid (Spirograph)",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::FermatSpiral,
+                                    "Fermat Spiral",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::HilbertCurve,
+                                    "Hilbert Curve (Space-filling)",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::RandomWalk,
+                                    "Random Walk (Brownian)",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Lemniscate,
+                                    "Lemniscate (Infinity)",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::MultiMarble,
+                                    "Multi-Marble Drawing",
                                 )
                                 .changed();
                             if changed {
@@ -313,6 +383,31 @@ impl eframe::App for SandArtApp {
                             ));
                         }
                     }
+                    ui.add_space(12.0);
+                    ui.label("Material Physics");
+                    egui::ComboBox::from_label("Preset")
+                        .selected_text(match self.config.material_mode {
+                            crate::config::MaterialMode::ButterCream => "Butter-Cream (Viscous)",
+                            crate::config::MaterialMode::DrySand => "Dry Sand (Granular)",
+                            crate::config::MaterialMode::Snow => "Snow (Cohesive)",
+                            crate::config::MaterialMode::KineticSand => "Kinetic Sand",
+                            crate::config::MaterialMode::WetSand => "Wet Sand",
+                            crate::config::MaterialMode::FinePowder => "Fine Powder",
+                            crate::config::MaterialMode::Oobleck => "Oobleck (Non-Newtonian)",
+                            crate::config::MaterialMode::MoonDust => "Moon Dust",
+                            crate::config::MaterialMode::IronFilings => "Iron Filings",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::ButterCream, "Butter-Cream (Viscous)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::DrySand, "Dry Sand (Granular)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Snow, "Snow (Cohesive)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::KineticSand, "Kinetic Sand");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::WetSand, "Wet Sand");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::FinePowder, "Fine Powder");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Oobleck, "Oobleck (Non-Newtonian)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::MoonDust, "Moon Dust");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::IronFilings, "Iron Filings");
+                        });
 
                     ui.add_space(12.0);
                     ui.label("Lighting Settings");
@@ -386,6 +481,7 @@ impl eframe::App for SandArtApp {
                     });
                 });
             });
+        }
 
         // Draw the central canvas
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -438,7 +534,17 @@ impl eframe::App for SandArtApp {
                 time: self.elapsed_time % (2.0 * std::f32::consts::PI * 100.0),
                 marble_pos: [self.sim.marble_pos.x, self.sim.marble_pos.y],
                 marble_radius: self.config.marble_size,
-                _padding2: 0,
+                material_mode: self.config.material_mode as u32,
+            };
+
+            let dummy_camera = crate::renderer::CameraUniforms {
+                view_proj: [
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ],
+                camera_pos: [0.0, 0.0, 2.0, 0.0],
             };
 
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering
@@ -447,6 +553,7 @@ impl eframe::App for SandArtApp {
                 crate::renderer::SandArtCallback {
                     heightmap_data: self.shared_heightmap.clone(),
                     uniforms: current_uniforms,
+                    camera_uniforms: dummy_camera,
                 },
             ));
 

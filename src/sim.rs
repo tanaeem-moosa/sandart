@@ -5,6 +5,8 @@ pub mod physics;
 pub use grid::Heightmap;
 pub use physics::{ActiveBounds, displace_line, settle_tick};
 
+pub const GRID_SIZE: usize = 1024;
+
 /// Coordinates the state of the marble and the sand bed heightmap.
 pub struct Simulation {
     /// The sand heightmap grid.
@@ -27,7 +29,7 @@ pub struct Simulation {
 
 impl Simulation {
     pub fn new() -> Self {
-        let mut heightmap = Heightmap::new(512, 512, 0.8);
+        let mut heightmap = Heightmap::new(GRID_SIZE, GRID_SIZE, 0.8);
         // Add random noise to the initial sand bed
         let mut seed = 12345u32;
         for val in heightmap.data.iter_mut() {
