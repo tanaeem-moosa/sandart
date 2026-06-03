@@ -33,6 +33,14 @@ pub struct AppConfig {
     pub pattern_mode: PatternMode,
     /// Path to a custom .thr or .gcode pattern file.
     pub custom_file_path: String,
+    /// Light angle around the circular bed in radians (0.0 to 2 * PI).
+    pub light_angle: f32,
+    /// Light RGB color components.
+    pub light_color: [f32; 3],
+    /// Sand RGB base color components.
+    pub sand_color: [f32; 3],
+    /// Flag to enable GPU raymarched shadows.
+    pub shadows_enabled: bool,
 }
 
 impl Default for AppConfig {
@@ -45,41 +53,14 @@ impl Default for AppConfig {
             light_brightness: 0.8,
             pattern_mode: PatternMode::Manual,
             custom_file_path: String::new(),
+            light_angle: 0.7853982, // ~45 degrees in radians
+            light_color: [1.0, 0.95, 0.82], // Warm golden white
+            sand_color: [0.92, 0.89, 0.82], // Warm sandy beige
+            shadows_enabled: true,
         }
     }
 }
 
-/// Physical simulation settings (completely decoupled from egui/eframe).
-#[derive(Debug, Clone, Copy)]
-pub struct PhysicsParams {
-    pub marble_radius: f32,
-    pub settling_threshold: f32,
-    pub settling_alpha: f32,
-}
-
-impl Default for PhysicsParams {
-    fn default() -> Self {
-        Self {
-            marble_radius: 0.025,
-            settling_threshold: 0.04,
-            settling_alpha: 0.15,
-        }
-    }
-}
-
-/// Lighting configuration settings (completely decoupled from egui/eframe).
-#[derive(Debug, Clone, Copy)]
-pub struct LightingParams {
-    pub light_brightness: f32,
-}
-
-impl Default for LightingParams {
-    fn default() -> Self {
-        Self {
-            light_brightness: 0.8,
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -95,6 +76,10 @@ mod tests {
         assert!(!config.auto_play);
         assert_eq!(config.pattern_mode, PatternMode::Manual);
         assert_eq!(config.custom_file_path, "");
+        assert_eq!(config.light_angle, 0.7853982);
+        assert_eq!(config.light_color, [1.0, 0.95, 0.82]);
+        assert_eq!(config.sand_color, [0.92, 0.89, 0.82]);
+        assert!(config.shadows_enabled);
     }
 
     #[test]
@@ -107,7 +92,7 @@ mod tests {
 
     #[test]
     fn test_json_schema_stability() {
-        let json_str = r#"{"speed":0.15,"marble_size":0.025,"spiral_spacing":0.03,"auto_play":false,"light_brightness":0.8,"pattern_mode":"Manual","custom_file_path":""}"#;
+        let json_str = r#"{"speed":0.15,"marble_size":0.025,"spiral_spacing":0.03,"auto_play":false,"light_brightness":0.8,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.92,0.89,0.82],"shadows_enabled":true}"#;
         let deserialized: AppConfig = serde_json::from_str(json_str).unwrap();
         assert_eq!(deserialized, AppConfig::default());
     }

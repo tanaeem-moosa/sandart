@@ -257,7 +257,23 @@ impl eframe::App for SandArtApp {
 
                     ui.add_space(12.0);
                     ui.label("Lighting Settings");
-                    ui.add(egui::Slider::new(&mut self.config.light_brightness, 0.0..=1.0).text("Brightness"));
+                    ui.add(egui::Slider::new(&mut self.config.light_brightness, 0.0..=2.0).text("Brightness"));
+                    
+                    ui.horizontal(|ui| {
+                        ui.label("LED Color:");
+                        ui.color_edit_button_rgb(&mut self.config.light_color);
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Sand Color:");
+                        ui.color_edit_button_rgb(&mut self.config.sand_color);
+                    });
+
+                    ui.add(egui::Slider::new(&mut self.config.light_angle, 0.0..=std::f32::consts::TAU)
+                        .text("LED Angle")
+                        .show_value(false));
+
+                    ui.checkbox(&mut self.config.shadows_enabled, "Enable Raymarched Shadows");
 
                     ui.add_space(20.0);
                     ui.horizontal(|ui| {
@@ -290,11 +306,38 @@ impl eframe::App for SandArtApp {
             // 2. Allocate the exact centered rect to align mouse interaction with the visuals
             let response = ui.allocate_rect(centered_rect, egui::Sense::drag());
 
+            // Calculate current lighting uniforms
+            let angle = self.config.light_angle;
+            let x = angle.cos();
+            let y = angle.sin();
+            let z = 0.25; // low height angle for long shadows
+            let light_dir_vec = glam::Vec3::new(x, y, z).normalize();
+
+            let current_uniforms = crate::renderer::LightingUniforms {
+                light_dir: [light_dir_vec.x, light_dir_vec.y, light_dir_vec.z, 0.0],
+                light_color: [
+                    self.config.light_color[0],
+                    self.config.light_color[1],
+                    self.config.light_color[2],
+                    1.0,
+                ],
+                sand_color: [
+                    self.config.sand_color[0],
+                    self.config.sand_color[1],
+                    self.config.sand_color[2],
+                    1.0,
+                ],
+                light_brightness: self.config.light_brightness,
+                shadow_enabled: if self.config.shadows_enabled { 1 } else { 0 },
+                _padding: [0.0; 2],
+            };
+
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 centered_rect,
                 crate::renderer::SandArtCallback {
                     heightmap_data: self.shared_heightmap.clone(),
+                    uniforms: current_uniforms,
                 },
             ));
 

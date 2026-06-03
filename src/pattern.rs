@@ -15,7 +15,6 @@ pub struct PlaybackController {
     pub current_idx: usize,
     pub state: PlaybackState,
     pub loop_pattern: bool,
-    pub accumulated_theta: f32,
 }
 
 impl PlaybackController {
@@ -25,13 +24,18 @@ impl PlaybackController {
             current_idx: 0,
             state: PlaybackState::Stopped,
             loop_pattern: true,
-            accumulated_theta: 0.0,
         }
     }
 
     /// Advance playback and return the target marble position.
     pub fn step_playback(&mut self, current_pos: Vec2, speed: f32, dt: f32) -> Option<Vec2> {
         if self.state != PlaybackState::Playing || self.waypoints.is_empty() {
+            return None;
+        }
+
+        if self.current_idx >= self.waypoints.len() {
+            self.current_idx = 0;
+            self.state = PlaybackState::Stopped;
             return None;
         }
 
@@ -126,7 +130,7 @@ fn strip_comments(line: &str) -> String {
 /// which supports both spaced (X 10) and spaceless (X10) formatting.
 fn parse_coordinate(line: &str, prefix: char) -> Option<f32> {
     if let Some(pos) = line.find(prefix) {
-        let remainder = &line[pos + 1..];
+        let remainder = line[pos + 1..].trim_start();
         let num_str: String = remainder.chars()
             .take_while(|&c| c.is_digit(10) || c == '.' || c == '-' || c == '+')
             .collect();
@@ -156,8 +160,9 @@ pub fn parse_thr(content: &str) -> Result<Vec<Vec2>, String> {
             format!("Invalid rho '{}' on line {}: {}", parts[1], line_idx + 1, e)
         })?;
         
-        // Scale rho to our visual sand bed boundary (0.92)
-        let r = (rho * 0.92).clamp(-0.92, 0.92);
+        // Scale rho to 95% of our sand bed boundary (0.92 * 0.95 = 0.874) to leave space for sand ridges
+        let max_r = 0.874f32;
+        let r = (rho * max_r).clamp(-max_r, max_r);
         waypoints.push(Vec2::new(r * theta.cos(), r * theta.sin()));
     }
     Ok(waypoints)
@@ -225,7 +230,9 @@ pub fn parse_gcode(content: &str) -> Result<Vec<Vec2>, String> {
             max_r = max_r.max(r);
         }
 
-        let scale = if max_r > 1e-4 { 0.92 / max_r } else { 1.0 };
+        // Scale coordinates to 95% of our sand bed boundary (0.92 * 0.95 = 0.874) to leave space for sand ridges
+        let max_limit = 0.874f32;
+        let scale = if max_r > 1e-4 { max_limit / max_r } else { 1.0 };
 
         for p in raw_points {
             let px = (p.x - cx) * scale;
@@ -234,8 +241,9 @@ pub fn parse_gcode(content: &str) -> Result<Vec<Vec2>, String> {
         }
     } else {
         // Single flat coordinate point
+        let max_limit = 0.874f32;
         for p in raw_points {
-            waypoints.push(p.clamp(Vec2::splat(-0.92), Vec2::splat(0.92)));
+            waypoints.push(p.clamp(Vec2::splat(-max_limit), Vec2::splat(max_limit)));
         }
     }
 
@@ -268,9 +276,9 @@ mod tests {
         assert_eq!(parsed.len(), 3);
         
         assert!(parsed[0].length() < 1e-4);
-        // Checking polar conversions
-        let expected1 = Vec2::new(0.46 * 1.57079f32.cos(), 0.46 * 1.57079f32.sin());
-        let expected2 = Vec2::new(0.92 * 3.14159f32.cos(), 0.92 * 3.14159f32.sin());
+        // Checking polar conversions (scaled to 0.874 instead of 0.92)
+        let expected1 = Vec2::new(0.437 * 1.57079f32.cos(), 0.437 * 1.57079f32.sin());
+        let expected2 = Vec2::new(0.874 * 3.14159f32.cos(), 0.874 * 3.14159f32.sin());
         assert!((parsed[1] - expected1).length() < 1e-4);
         assert!((parsed[2] - expected2).length() < 1e-4);
     }
@@ -287,10 +295,10 @@ mod tests {
 
         // Bounding box of raw points is: X: [10, 30] (center 20, max offset 10), Y: [20, 40] (center 30, max offset 10)
         // Max radius is sqrt(10^2 + 10^2) = 14.142
-        // Scale factor = 0.92 / 14.142 = 0.06505
+        // Scale factor = 0.874 / 14.142 = 0.061798
         let p0 = parsed[0];
-        assert!((p0.x + 0.6505).abs() < 1e-3);
-        assert!((p0.y + 0.6505).abs() < 1e-3);
+        assert!((p0.x + 0.61798).abs() < 1e-3);
+        assert!((p0.y + 0.61798).abs() < 1e-3);
     }
 
     #[test]
@@ -314,5 +322,15 @@ mod tests {
         let pos = controller.step_playback(Vec2::new(0.0, 0.0), 10.0, 0.1).unwrap();
         assert_eq!(pos, Vec2::new(0.5, 0.0));
         assert_eq!(controller.current_idx, 0);
+    }
+
+    #[test]
+    fn test_parse_gcode_spaced() {
+        let content = "
+        G1 X 10.5 Y -20.2
+        X -30.0 Y 40.0
+        ";
+        let parsed = parse_gcode(content).unwrap();
+        assert_eq!(parsed.len(), 2);
     }
 }

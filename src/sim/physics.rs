@@ -199,6 +199,9 @@ pub fn settle_tick(
 
     let w = heightmap.width;
     let h = heightmap.height;
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
 
     // Safety check to prevent panics if heightmap is resized
     if temp_heights.len() != heightmap.data.len() {
