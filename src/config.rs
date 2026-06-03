@@ -2,6 +2,19 @@
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PatternMode {
+    Manual,
+    Spiral,
+    CustomFile,
+}
+
+impl Default for PatternMode {
+    fn default() -> Self {
+        Self::Manual
+    }
+}
+
 /// Application configuration and simulation parameters in normalized space.
 /// Normalized space scales from 0.0 to 1.0 relative to the sand table radius.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -16,6 +29,10 @@ pub struct AppConfig {
     pub auto_play: bool,
     /// Light brightness slider (0.0 to 1.0).
     pub light_brightness: f32,
+    /// Selection of current drawing pattern source.
+    pub pattern_mode: PatternMode,
+    /// Path to a custom .thr or .gcode pattern file.
+    pub custom_file_path: String,
 }
 
 impl Default for AppConfig {
@@ -26,6 +43,8 @@ impl Default for AppConfig {
             spiral_spacing: 0.030,
             auto_play: false,
             light_brightness: 0.8,
+            pattern_mode: PatternMode::Manual,
+            custom_file_path: String::new(),
         }
     }
 }
@@ -74,6 +93,8 @@ mod tests {
         assert_eq!(config.spiral_spacing, 0.030);
         assert_eq!(config.light_brightness, 0.8);
         assert!(!config.auto_play);
+        assert_eq!(config.pattern_mode, PatternMode::Manual);
+        assert_eq!(config.custom_file_path, "");
     }
 
     #[test]
@@ -86,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_json_schema_stability() {
-        let json_str = r#"{"speed":0.15,"marble_size":0.025,"spiral_spacing":0.03,"auto_play":false,"light_brightness":0.8}"#;
+        let json_str = r#"{"speed":0.15,"marble_size":0.025,"spiral_spacing":0.03,"auto_play":false,"light_brightness":0.8,"pattern_mode":"Manual","custom_file_path":""}"#;
         let deserialized: AppConfig = serde_json::from_str(json_str).unwrap();
         assert_eq!(deserialized, AppConfig::default());
     }

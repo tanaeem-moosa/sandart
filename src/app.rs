@@ -12,6 +12,12 @@ pub struct SandArtApp {
     pub sim: crate::sim::Simulation,
     /// Shared heightmap data for zero-allocation rendering transfer.
     pub shared_heightmap: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+    /// Playback controller for custom files and mathematical paths.
+    pub playback: crate::pattern::PlaybackController,
+    /// Error message for pattern loading issues.
+    pub pattern_error: Option<String>,
+    /// List of sample pattern file paths scanned on startup.
+    pub sample_patterns: Vec<std::path::PathBuf>,
 }
 
 impl SandArtApp {
@@ -23,12 +29,65 @@ impl SandArtApp {
             let resources = crate::renderer::SandArtRenderResources::new(device, target_format);
             wgpu_state.renderer.write().callback_resources.insert(resources);
         }
+
+        // Scan patterns directory on startup
+        let mut sample_patterns = Vec::new();
+        if let Ok(entries) = std::fs::read_dir("patterns") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    if ext == "thr" || ext == "gcode" || ext == "nc" {
+                        sample_patterns.push(path);
+                    }
+                }
+            }
+        }
+        // Sort patterns alphabetically for neat dropdown display
+        sample_patterns.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
         Self {
             config: AppConfig::default(),
             frame_counter: 0,
             dt: 0.0,
             sim: crate::sim::Simulation::new(),
             shared_heightmap: std::sync::Arc::new(std::sync::Mutex::new(vec![0.8; 512 * 512])),
+            playback: crate::pattern::PlaybackController::new(),
+            pattern_error: None,
+            sample_patterns,
+        }
+    }
+
+    /// Helper to load the custom pattern file specified in config
+    fn load_custom_pattern(&mut self) {
+        if self.config.custom_file_path.is_empty() {
+            self.pattern_error = Some("No path specified".to_string());
+            return;
+        }
+        match std::fs::read_to_string(&self.config.custom_file_path) {
+            Ok(content) => {
+                let path_lower = self.config.custom_file_path.to_lowercase();
+                let res = if path_lower.ends_with(".gcode") || path_lower.ends_with(".nc") {
+                    crate::pattern::parse_gcode(&content)
+                } else {
+                    crate::pattern::parse_thr(&content)
+                };
+                
+                match res {
+                    Ok(waypoints) => {
+                        self.playback.waypoints = waypoints;
+                        self.playback.current_idx = 0;
+                        self.playback.state = crate::pattern::PlaybackState::Playing;
+                        self.pattern_error = None;
+                    }
+                    Err(e) => {
+                        self.pattern_error = Some(format!("Parse error: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                self.pattern_error = Some(format!("File error: {}", e));
+            }
         }
     }
 }
@@ -77,21 +136,140 @@ impl eframe::App for SandArtApp {
 
                     ui.add_space(12.0);
                     ui.label("Pattern Settings");
-                    ui.add(egui::Slider::new(&mut self.config.spiral_spacing, 0.005..=0.2)
-                        .text("Spiral Spacing (R)")
-                        .show_value(true));
-                    ui.checkbox(&mut self.config.auto_play, "Auto-play Spiral");
+                    
+                    // Pattern Mode selection dropdown
+                    egui::ComboBox::from_label("Mode")
+                        .selected_text(format!("{:?}", self.config.pattern_mode))
+                        .show_ui(ui, |ui| {
+                            let mut changed = false;
+                            changed |= ui.selectable_value(&mut self.config.pattern_mode, crate::config::PatternMode::Manual, "Manual (Mouse)").changed();
+                            changed |= ui.selectable_value(&mut self.config.pattern_mode, crate::config::PatternMode::Spiral, "Archimedean Spiral").changed();
+                            changed |= ui.selectable_value(&mut self.config.pattern_mode, crate::config::PatternMode::CustomFile, "Custom File (.thr/.gcode)").changed();
+                            if changed {
+                                self.playback.state = crate::pattern::PlaybackState::Stopped;
+                                self.playback.waypoints.clear();
+                                self.playback.current_idx = 0;
+                                self.pattern_error = None;
+                            }
+                        });
+
+                    if self.config.pattern_mode == crate::config::PatternMode::Spiral {
+                        ui.add_space(8.0);
+                        ui.add(egui::Slider::new(&mut self.config.spiral_spacing, 0.005..=0.2)
+                            .text("Spiral Spacing (R)")
+                            .show_value(true));
+                        
+                        if ui.button("Load Spiral Pattern").clicked() {
+                            let waypoints = crate::pattern::generate_spiral(self.config.spiral_spacing);
+                            self.playback.waypoints = waypoints;
+                            self.playback.current_idx = 0;
+                            self.playback.state = crate::pattern::PlaybackState::Playing;
+                            self.pattern_error = None;
+                        }
+                    }
+
+                    if self.config.pattern_mode == crate::config::PatternMode::CustomFile {
+                        ui.add_space(8.0);
+
+                        // Dropdown for sample patterns if patterns directory has files
+                        if !self.sample_patterns.is_empty() {
+                            ui.horizontal(|ui| {
+                                ui.label("Samples:");
+                                egui::ComboBox::from_id_salt("samples_combo")
+                                    .selected_text(
+                                        std::path::Path::new(&self.config.custom_file_path)
+                                            .file_name()
+                                            .and_then(|f| f.to_str())
+                                            .unwrap_or("Select a sample...")
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        let mut selected_path = None;
+                                        for path in &self.sample_patterns {
+                                            let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
+                                            if ui.selectable_label(self.config.custom_file_path == path.display().to_string(), filename).clicked() {
+                                                selected_path = Some(path.display().to_string());
+                                            }
+                                        }
+                                        if let Some(path_str) = selected_path {
+                                            self.config.custom_file_path = path_str;
+                                            self.load_custom_pattern();
+                                        }
+                                    });
+                            });
+                            ui.add_space(4.0);
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label("File Path:");
+                            ui.text_edit_singleline(&mut self.config.custom_file_path);
+                            
+                            if ui.button("Browse...").clicked() {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("Pattern Files (*.thr, *.gcode, *.nc)", &["thr", "gcode", "nc"])
+                                    .pick_file() {
+                                        self.config.custom_file_path = path.display().to_string();
+                                        self.load_custom_pattern();
+                                    }
+                            }
+                        });
+                        
+                        if ui.button("Load Pattern File").clicked() {
+                            self.load_custom_pattern();
+                        }
+                    }
+
+                    if let Some(err) = &self.pattern_error {
+                        ui.add_space(4.0);
+                        ui.colored_label(egui::Color32::RED, err);
+                    }
+
+                    if self.config.pattern_mode != crate::config::PatternMode::Manual {
+                        ui.add_space(12.0);
+                        ui.label("Playback Controls");
+                        ui.horizontal(|ui| {
+                            let label = match self.playback.state {
+                                crate::pattern::PlaybackState::Playing => "Pause",
+                                _ => "Play",
+                            };
+                            if ui.button(label).clicked() {
+                                if self.playback.state == crate::pattern::PlaybackState::Playing {
+                                    self.playback.state = crate::pattern::PlaybackState::Paused;
+                                } else {
+                                    if self.playback.waypoints.is_empty() {
+                                        if self.config.pattern_mode == crate::config::PatternMode::Spiral {
+                                            self.playback.waypoints = crate::pattern::generate_spiral(self.config.spiral_spacing);
+                                        }
+                                    }
+                                    self.playback.state = crate::pattern::PlaybackState::Playing;
+                                }
+                            }
+                            if ui.button("Stop").clicked() {
+                                self.playback.state = crate::pattern::PlaybackState::Stopped;
+                                self.playback.current_idx = 0;
+                            }
+                            ui.checkbox(&mut self.playback.loop_pattern, "Loop");
+                        });
+                        
+                        if !self.playback.waypoints.is_empty() {
+                            ui.label(format!("Progress: {} / {}", self.playback.current_idx, self.playback.waypoints.len()));
+                        }
+                    }
 
                     ui.add_space(12.0);
                     ui.label("Lighting Settings");
                     ui.add(egui::Slider::new(&mut self.config.light_brightness, 0.0..=1.0).text("Brightness"));
 
                     ui.add_space(20.0);
-                    if ui.button("Reset Sand").clicked() {
-                        self.sim.reset();
-                        // Generate a concentric ripple pattern to visually verify height rendering
-                        crate::pattern::generate_ripples(&mut self.sim.heightmap);
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("Reset Sand").clicked() {
+                            self.sim.reset();
+                            self.playback.state = crate::pattern::PlaybackState::Stopped;
+                            self.playback.current_idx = 0;
+                        }
+                        if ui.button("Draw Ripples").clicked() {
+                            crate::pattern::generate_ripples(&mut self.sim.heightmap);
+                        }
+                    });
                 });
             });
 
@@ -120,25 +298,35 @@ impl eframe::App for SandArtApp {
                 },
             ));
 
-            // 4. Capture mouse interaction (ignoring input on sliders/panels)
+            // 4. Capture target position from mouse or playback controller
             let mut target_pos = None;
-            if (response.dragged() || response.clicked()) && radius > 1e-4 {
-                if let Some(pointer_pos) = response.interact_pointer_pos() {
-                    // Normalize relative pointer pos to [-1.0, 1.0] from center of table
-                    let rel_x = (pointer_pos.x - centered_rect.center().x) / radius;
-                    // Flip y for standard cartesian coordinate mapping (positive y is up)
-                    let rel_y = -(pointer_pos.y - centered_rect.center().y) / radius;
-                    
-                    let pos = egui::vec2(rel_x, rel_y);
-                    let len = pos.length();
-                    // Constrain marble center to visual sand circle bounds (0.92 radius in Cartesian)
-                    let max_r = (0.92 - self.config.marble_size).max(0.0);
-                    let clamped_pos = if len > max_r {
-                        pos / len * max_r
-                    } else {
-                        pos
-                    };
-                    target_pos = Some(glam::Vec2::new(clamped_pos.x, clamped_pos.y));
+            
+            if self.config.pattern_mode == crate::config::PatternMode::Manual {
+                if (response.dragged() || response.clicked()) && radius > 1e-4 {
+                    if let Some(pointer_pos) = response.interact_pointer_pos() {
+                        // Normalize relative pointer pos to [-1.0, 1.0] from center of table
+                        let rel_x = (pointer_pos.x - centered_rect.center().x) / radius;
+                        // Flip y for standard cartesian coordinate mapping (positive y is up)
+                        let rel_y = -(pointer_pos.y - centered_rect.center().y) / radius;
+                        
+                        let pos = egui::vec2(rel_x, rel_y);
+                        let len = pos.length();
+                        // Constrain marble center to visual sand circle bounds (0.92 radius in Cartesian)
+                        let max_r = (0.92 - self.config.marble_size).max(0.0);
+                        let clamped_pos = if len > max_r {
+                            pos / len * max_r
+                        } else {
+                            pos
+                        };
+                        target_pos = Some(glam::Vec2::new(clamped_pos.x, clamped_pos.y));
+                    }
+                }
+            } else {
+                // Feed coordinates from PlaybackController when playing
+                if self.playback.state == crate::pattern::PlaybackState::Playing {
+                    if let Some(next_pos) = self.playback.step_playback(self.sim.marble_pos, self.config.speed, self.dt) {
+                        target_pos = Some(next_pos);
+                    }
                 }
             }
 
