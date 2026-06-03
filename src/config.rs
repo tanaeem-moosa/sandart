@@ -19,6 +19,7 @@ impl Default for PatternMode {
 pub enum LedMode {
     Single,
     RainbowRing,
+    ColorCycle,
 }
 
 impl Default for LedMode {

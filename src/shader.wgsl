@@ -11,6 +11,9 @@ struct LightingUniforms {
     shadow_enabled: u32,
     led_mode: u32,
     time: f32,
+    marble_pos: vec2<f32>,
+    marble_radius: f32,
+    _padding2: u32,
 };
 
 @group(0) @binding(2) var<uniform> uniforms: LightingUniforms;
@@ -61,9 +64,123 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let center = vec2<f32>(0.5, 0.5);
     let dist = distance(uv, center);
     
+    // 1. Draw outer frame and emissive LED ring
     if (dist >= 0.46) {
-        // Outer dark frame (table rim)
-        return vec4<f32>(0.07, 0.07, 0.08, 1.0);
+        if (dist >= 0.46 && dist < 0.475) {
+            // Emissive LED strip channel
+            if (uniforms.led_mode == 0u) {
+                // Single Light Mode: Draw a single glowing LED spot at the angle of uniforms.light_dir
+                let angle_light = atan2(uniforms.light_dir.y, uniforms.light_dir.x);
+                let led_center = vec2<f32>(
+                    cos(angle_light) * 0.468 + 0.5,
+                    -sin(angle_light) * 0.468 + 0.5
+                );
+                let d_to_led = distance(uv, led_center);
+                var led_glow = vec3<f32>(0.08, 0.08, 0.10);
+                if (d_to_led < 0.02) {
+                    let intensity = smoothstep(0.02, 0.0, d_to_led);
+                    led_glow = led_glow + uniforms.light_color.rgb * intensity * 1.5 * uniforms.light_brightness;
+                }
+                return vec4<f32>(led_glow, 1.0);
+            } else if (uniforms.led_mode == 1u) {
+                // Rainbow Ring Mode: Continuous rotating rainbow ring
+                let angle = atan2(-(uv.y - 0.5), uv.x - 0.5);
+                let hue = fract(angle / (2.0 * PI) - uniforms.time * 0.05);
+                let led_color = hue_to_rgb(hue);
+                return vec4<f32>(led_color * 1.5 * uniforms.light_brightness, 1.0);
+            } else {
+                // Color Cycle Mode: Continuous single color cycling ring
+                let hue = fract(uniforms.time * 0.03);
+                let led_color = hue_to_rgb(hue);
+                return vec4<f32>(led_color * 1.5 * uniforms.light_brightness, 1.0);
+            }
+        } else {
+            // Outer casing
+            return vec4<f32>(0.07, 0.07, 0.08, 1.0);
+        }
+    }
+
+    // 2. Render shiny silver 3D marble sphere
+    let marble_uv = vec2<f32>(
+        uniforms.marble_pos.x * 0.5 + 0.5,
+        -uniforms.marble_pos.y * 0.5 + 0.5
+    );
+    let marble_r_uv = uniforms.marble_radius * 0.5;
+    let d_to_marble = distance(uv, marble_uv);
+
+    if (d_to_marble < marble_r_uv) {
+        let offset = (uv - marble_uv) / marble_r_uv;
+        let r_sq = dot(offset, offset);
+        let nz = sqrt(1.0 - r_sq);
+        let sphere_normal = normalize(vec3<f32>(offset.x, -offset.y, nz));
+        let view_dir = vec3<f32>(0.0, 0.0, 1.0);
+        
+        var sphere_diffuse = vec3<f32>(0.0);
+        var sphere_specular = vec3<f32>(0.0);
+        
+        if (uniforms.led_mode == 0u) {
+            let light_dir = normalize(uniforms.light_dir.xyz);
+            let diff = max(dot(sphere_normal, light_dir), 0.0);
+            sphere_diffuse = vec3<f32>(0.1) * diff * uniforms.light_brightness;
+            
+            let reflect_dir = reflect(-light_dir, sphere_normal);
+            let spec = pow(max(dot(reflect_dir, view_dir), 0.0), 128.0);
+            sphere_specular = uniforms.light_color.rgb * spec * 2.0 * uniforms.light_brightness;
+        } else {
+            // Compute diffuse from the 8 virtual lights
+            let num_leds = 8;
+            for (var i = 0; i < num_leds; i = i + 1) {
+                let angle_led = f32(i) * (2.0 * PI / f32(num_leds)) + uniforms.time * 0.10;
+                let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.20));
+                
+                var led_color = vec3<f32>(0.0);
+                if (uniforms.led_mode == 1u) {
+                    let hue = fract(f32(i) / f32(num_leds) - uniforms.time * 0.05);
+                    led_color = hue_to_rgb(hue);
+                } else {
+                    let hue = fract(uniforms.time * 0.03);
+                    led_color = hue_to_rgb(hue);
+                }
+                
+                let diff = max(dot(sphere_normal, l_dir), 0.0);
+                sphere_diffuse = sphere_diffuse + vec3<f32>(0.08) * diff * led_color;
+            }
+            sphere_diffuse = sphere_diffuse * (uniforms.light_brightness / f32(num_leds));
+            
+            // Compute continuous specular reflection of the LED ring
+            let reflect_dir = reflect(-view_dir, sphere_normal);
+            let r_horizontal_len = length(reflect_dir.xy);
+            
+            if (r_horizontal_len > 0.001) {
+                let ray_slope = reflect_dir.z / r_horizontal_len;
+                let target_slope = 0.21; // angle of elevation to LED ring (Z/R ≈ 0.20/0.936)
+                let slope_diff = abs(ray_slope - target_slope);
+                
+                // Sharp Gaussian-like falloff for specular reflection
+                let ring_spec = pow(max(1.0 - slope_diff * 4.5, 0.0), 40.0);
+                
+                let angle_reflect = atan2(reflect_dir.y, reflect_dir.x);
+                var ring_reflect_color = vec3<f32>(0.0);
+                if (uniforms.led_mode == 1u) {
+                    let hue = fract(angle_reflect / (2.0 * PI) - uniforms.time * 0.05);
+                    ring_reflect_color = hue_to_rgb(hue);
+                } else {
+                    let hue = fract(uniforms.time * 0.03);
+                    ring_reflect_color = hue_to_rgb(hue);
+                }
+                
+                sphere_specular = ring_reflect_color * ring_spec * 3.5 * uniforms.light_brightness;
+            }
+        }
+        
+        let ambient_ref = vec3<f32>(0.4, 0.4, 0.42);
+        let fresnel = pow(1.0 - max(dot(sphere_normal, view_dir), 0.0), 4.0);
+        let rim_light = vec3<f32>(0.8, 0.8, 0.85) * fresnel * 0.8;
+        
+        let base_metal_color = vec3<f32>(0.92, 0.92, 0.94);
+        let final_sphere_color = base_metal_color * (ambient_ref + sphere_diffuse) + sphere_specular + rim_light;
+        
+        return vec4<f32>(final_sphere_color, 1.0);
     }
     
     // 1. Compute finite difference normal from neighbor heightmap pixels
@@ -78,7 +195,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     let depth_factor = 28.0;
     var normal = normalize(vec3<f32>(
         (h_left - h_right) * depth_factor,
-        (h_up - h_down) * depth_factor,
+        (h_down - h_up) * depth_factor,
         1.0
     ));
 
@@ -111,7 +228,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             let step_count = 32;
             let z_scale = 0.06;
             let step_size = 0.0022;
-            let uv_step = light_dir.xy * step_size;
+            let uv_step = vec2<f32>(light_dir.x, -light_dir.y) * step_size;
             let h_step = light_dir.z * step_size * z_scale;
             
             var curr_uv = uv;
@@ -133,6 +250,14 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             }
         }
         
+        // Add soft circular shadow from the marble sphere
+        let light_offset = vec2<f32>(light_dir.x, -light_dir.y) * 0.022;
+        let d_to_marble_shadow = distance(uv, marble_uv - light_offset);
+        if (d_to_marble_shadow < marble_r_uv * 1.5) {
+            let m_shadow = smoothstep(marble_r_uv * 0.8, marble_r_uv * 1.5, d_to_marble_shadow);
+            shadow_factor = shadow_factor * (0.35 + 0.65 * m_shadow);
+        }
+        
         diffuse = diff_color * shadow_factor;
         specular = spec_color * shadow_factor;
     } else {
@@ -149,8 +274,14 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             let angle_led = f32(i) * (2.0 * PI / f32(num_leds)) + uniforms.time * 0.10;
             let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.20));
             
-            let hue = fract(f32(i) / f32(num_leds) - uniforms.time * 0.05);
-            let led_color = hue_to_rgb(hue);
+            var led_color = vec3<f32>(0.0);
+            if (uniforms.led_mode == 1u) {
+                let hue = fract(f32(i) / f32(num_leds) - uniforms.time * 0.05);
+                led_color = hue_to_rgb(hue);
+            } else {
+                let hue = fract(uniforms.time * 0.03);
+                led_color = hue_to_rgb(hue);
+            }
             
             let diff_strength = max(dot(normal, l_dir), 0.0);
             
@@ -158,7 +289,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
             
             var shadow_factor = 1.0;
             if (uniforms.shadow_enabled == 1u) {
-                let uv_step = l_dir.xy * step_size;
+                let uv_step = vec2<f32>(l_dir.x, -l_dir.y) * step_size;
                 let h_step = l_dir.z * step_size * z_scale;
                 
                 var curr_uv = uv;
@@ -178,6 +309,14 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
                         break;
                     }
                 }
+            }
+            
+            // Add soft circular shadow from the marble for this LED
+            let led_offset = vec2<f32>(l_dir.x, -l_dir.y) * 0.018;
+            let d_to_marble_shadow = distance(uv, marble_uv - led_offset);
+            if (d_to_marble_shadow < marble_r_uv * 1.5) {
+                let m_shadow = smoothstep(marble_r_uv * 0.8, marble_r_uv * 1.5, d_to_marble_shadow);
+                shadow_factor = shadow_factor * (0.35 + 0.65 * m_shadow);
             }
             
             diffuse_accum = diffuse_accum + led_color * diff_strength * shadow_factor;

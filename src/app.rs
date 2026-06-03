@@ -322,6 +322,7 @@ impl eframe::App for SandArtApp {
                         .selected_text(match self.config.led_mode {
                             crate::config::LedMode::Single => "Single Direction",
                             crate::config::LedMode::RainbowRing => "Rainbow Ring",
+                            crate::config::LedMode::ColorCycle => "Color Cycle Ring",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -333,6 +334,11 @@ impl eframe::App for SandArtApp {
                                 &mut self.config.led_mode,
                                 crate::config::LedMode::RainbowRing,
                                 "Rainbow Ring",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.led_mode,
+                                crate::config::LedMode::ColorCycle,
+                                "Color Cycle Ring",
                             );
                         });
 
@@ -427,8 +433,12 @@ impl eframe::App for SandArtApp {
                 led_mode: match self.config.led_mode {
                     crate::config::LedMode::Single => 0,
                     crate::config::LedMode::RainbowRing => 1,
+                    crate::config::LedMode::ColorCycle => 2,
                 },
                 time: self.elapsed_time % (2.0 * std::f32::consts::PI * 100.0),
+                marble_pos: [self.sim.marble_pos.x, self.sim.marble_pos.y],
+                marble_radius: self.config.marble_size,
+                _padding2: 0,
             };
 
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering

@@ -12,6 +12,9 @@ pub struct LightingUniforms {
     pub shadow_enabled: u32,   // 1 = enabled, 0 = disabled
     pub led_mode: u32,         // 0 = Single, 1 = RainbowRing
     pub time: f32,             // elapsed animation time
+    pub marble_pos: [f32; 2],  // x, y coordinate
+    pub marble_radius: f32,    // radius in normalized coordinates
+    pub _padding2: u32,        // padding to align to 16 bytes
 }
 
 pub struct SandArtRenderResources {
@@ -360,6 +363,9 @@ mod tests {
                 shadow_enabled: 1,
                 led_mode: 1,
                 time: 0.0,
+                marble_pos: [0.0, 0.0],
+                marble_radius: 0.025,
+                _padding2: 0,
             };
             resources.update_uniforms(&queue, &uniforms);
 
