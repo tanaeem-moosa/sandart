@@ -1,5 +1,5 @@
-use egui;
 use crate::config::AppConfig;
+use egui;
 
 pub struct SandArtApp {
     /// Active configuration parameters.
@@ -8,6 +8,8 @@ pub struct SandArtApp {
     pub frame_counter: u64,
     /// Delta time since the last frame.
     pub dt: f32,
+    /// Cumulative elapsed time in seconds.
+    pub elapsed_time: f32,
     /// The physics simulation engine.
     pub sim: crate::sim::Simulation,
     /// Shared heightmap data for zero-allocation rendering transfer.
@@ -27,7 +29,11 @@ impl SandArtApp {
             let device = &wgpu_state.device;
             let target_format = wgpu_state.target_format;
             let resources = crate::renderer::SandArtRenderResources::new(device, target_format);
-            wgpu_state.renderer.write().callback_resources.insert(resources);
+            wgpu_state
+                .renderer
+                .write()
+                .callback_resources
+                .insert(resources);
         }
 
         // Scan patterns directory on startup
@@ -50,6 +56,7 @@ impl SandArtApp {
             config: AppConfig::default(),
             frame_counter: 0,
             dt: 0.0,
+            elapsed_time: 0.0,
             sim: crate::sim::Simulation::new(),
             shared_heightmap: std::sync::Arc::new(std::sync::Mutex::new(vec![0.8; 512 * 512])),
             playback: crate::pattern::PlaybackController::new(),
@@ -72,7 +79,7 @@ impl SandArtApp {
                 } else {
                     crate::pattern::parse_thr(&content)
                 };
-                
+
                 match res {
                     Ok(waypoints) => {
                         self.playback.waypoints = waypoints;
@@ -95,9 +102,10 @@ impl SandArtApp {
 impl eframe::App for SandArtApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_counter += 1;
-        
+
         // Track frame delta time for frame-rate-independent physics calculations
         self.dt = ctx.input(|i| i.stable_dt).min(0.1);
+        self.elapsed_time += self.dt;
 
         // Copy simulation heights to the shared rendering buffer (non-allocating copy)
         if let Ok(mut shared) = self.shared_heightmap.lock() {
@@ -109,7 +117,10 @@ impl eframe::App for SandArtApp {
             ui.horizontal(|ui| {
                 ui.heading("Sands of Time: Kinetic Sand Simulator");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("Frames: {} | dt: {:.4}s", self.frame_counter, self.dt));
+                    ui.label(format!(
+                        "Frames: {} | dt: {:.4}s",
+                        self.frame_counter, self.dt
+                    ));
                 });
             });
         });
@@ -127,24 +138,46 @@ impl eframe::App for SandArtApp {
                     ui.add_space(8.0);
 
                     ui.label("Marble Controls");
-                    ui.add(egui::Slider::new(&mut self.config.speed, 0.01..=2.0)
-                        .text("Speed (R/s)")
-                        .show_value(true));
-                    ui.add(egui::Slider::new(&mut self.config.marble_size, 0.005..=0.1)
-                        .text("Radius (R)")
-                        .show_value(true));
+                    ui.add(
+                        egui::Slider::new(&mut self.config.speed, 0.01..=2.0)
+                            .text("Speed (R/s)")
+                            .show_value(true),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut self.config.marble_size, 0.005..=0.1)
+                            .text("Radius (R)")
+                            .show_value(true),
+                    );
 
                     ui.add_space(12.0);
                     ui.label("Pattern Settings");
-                    
+
                     // Pattern Mode selection dropdown
                     egui::ComboBox::from_label("Mode")
                         .selected_text(format!("{:?}", self.config.pattern_mode))
                         .show_ui(ui, |ui| {
                             let mut changed = false;
-                            changed |= ui.selectable_value(&mut self.config.pattern_mode, crate::config::PatternMode::Manual, "Manual (Mouse)").changed();
-                            changed |= ui.selectable_value(&mut self.config.pattern_mode, crate::config::PatternMode::Spiral, "Archimedean Spiral").changed();
-                            changed |= ui.selectable_value(&mut self.config.pattern_mode, crate::config::PatternMode::CustomFile, "Custom File (.thr/.gcode)").changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Manual,
+                                    "Manual (Mouse)",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Spiral,
+                                    "Archimedean Spiral",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::CustomFile,
+                                    "Custom File (.thr/.gcode)",
+                                )
+                                .changed();
                             if changed {
                                 self.playback.state = crate::pattern::PlaybackState::Stopped;
                                 self.playback.waypoints.clear();
@@ -155,12 +188,15 @@ impl eframe::App for SandArtApp {
 
                     if self.config.pattern_mode == crate::config::PatternMode::Spiral {
                         ui.add_space(8.0);
-                        ui.add(egui::Slider::new(&mut self.config.spiral_spacing, 0.005..=0.2)
-                            .text("Spiral Spacing (R)")
-                            .show_value(true));
-                        
+                        ui.add(
+                            egui::Slider::new(&mut self.config.spiral_spacing, 0.005..=0.2)
+                                .text("Spiral Spacing (R)")
+                                .show_value(true),
+                        );
+
                         if ui.button("Load Spiral Pattern").clicked() {
-                            let waypoints = crate::pattern::generate_spiral(self.config.spiral_spacing);
+                            let waypoints =
+                                crate::pattern::generate_spiral(self.config.spiral_spacing);
                             self.playback.waypoints = waypoints;
                             self.playback.current_idx = 0;
                             self.playback.state = crate::pattern::PlaybackState::Playing;
@@ -180,13 +216,23 @@ impl eframe::App for SandArtApp {
                                         std::path::Path::new(&self.config.custom_file_path)
                                             .file_name()
                                             .and_then(|f| f.to_str())
-                                            .unwrap_or("Select a sample...")
+                                            .unwrap_or("Select a sample..."),
                                     )
                                     .show_ui(ui, |ui| {
                                         let mut selected_path = None;
                                         for path in &self.sample_patterns {
-                                            let filename = path.file_name().and_then(|f| f.to_str()).unwrap_or("");
-                                            if ui.selectable_label(self.config.custom_file_path == path.display().to_string(), filename).clicked() {
+                                            let filename = path
+                                                .file_name()
+                                                .and_then(|f| f.to_str())
+                                                .unwrap_or("");
+                                            if ui
+                                                .selectable_label(
+                                                    self.config.custom_file_path
+                                                        == path.display().to_string(),
+                                                    filename,
+                                                )
+                                                .clicked()
+                                            {
                                                 selected_path = Some(path.display().to_string());
                                             }
                                         }
@@ -202,17 +248,21 @@ impl eframe::App for SandArtApp {
                         ui.horizontal(|ui| {
                             ui.label("File Path:");
                             ui.text_edit_singleline(&mut self.config.custom_file_path);
-                            
+
                             if ui.button("Browse...").clicked() {
                                 if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("Pattern Files (*.thr, *.gcode, *.nc)", &["thr", "gcode", "nc"])
-                                    .pick_file() {
-                                        self.config.custom_file_path = path.display().to_string();
-                                        self.load_custom_pattern();
-                                    }
+                                    .add_filter(
+                                        "Pattern Files (*.thr, *.gcode, *.nc)",
+                                        &["thr", "gcode", "nc"],
+                                    )
+                                    .pick_file()
+                                {
+                                    self.config.custom_file_path = path.display().to_string();
+                                    self.load_custom_pattern();
+                                }
                             }
                         });
-                        
+
                         if ui.button("Load Pattern File").clicked() {
                             self.load_custom_pattern();
                         }
@@ -236,8 +286,13 @@ impl eframe::App for SandArtApp {
                                     self.playback.state = crate::pattern::PlaybackState::Paused;
                                 } else {
                                     if self.playback.waypoints.is_empty() {
-                                        if self.config.pattern_mode == crate::config::PatternMode::Spiral {
-                                            self.playback.waypoints = crate::pattern::generate_spiral(self.config.spiral_spacing);
+                                        if self.config.pattern_mode
+                                            == crate::config::PatternMode::Spiral
+                                        {
+                                            self.playback.waypoints =
+                                                crate::pattern::generate_spiral(
+                                                    self.config.spiral_spacing,
+                                                );
                                         }
                                     }
                                     self.playback.state = crate::pattern::PlaybackState::Playing;
@@ -249,31 +304,68 @@ impl eframe::App for SandArtApp {
                             }
                             ui.checkbox(&mut self.playback.loop_pattern, "Loop");
                         });
-                        
+
                         if !self.playback.waypoints.is_empty() {
-                            ui.label(format!("Progress: {} / {}", self.playback.current_idx, self.playback.waypoints.len()));
+                            ui.label(format!(
+                                "Progress: {} / {}",
+                                self.playback.current_idx,
+                                self.playback.waypoints.len()
+                            ));
                         }
                     }
 
                     ui.add_space(12.0);
                     ui.label("Lighting Settings");
-                    ui.add(egui::Slider::new(&mut self.config.light_brightness, 0.0..=2.0).text("Brightness"));
-                    
-                    ui.horizontal(|ui| {
-                        ui.label("LED Color:");
-                        ui.color_edit_button_rgb(&mut self.config.light_color);
-                    });
+
+                    // LED Mode selection
+                    egui::ComboBox::from_label("LED Mode")
+                        .selected_text(match self.config.led_mode {
+                            crate::config::LedMode::Single => "Single Direction",
+                            crate::config::LedMode::RainbowRing => "Rainbow Ring",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.led_mode,
+                                crate::config::LedMode::Single,
+                                "Single Direction",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.led_mode,
+                                crate::config::LedMode::RainbowRing,
+                                "Rainbow Ring",
+                            );
+                        });
+
+                    ui.add(
+                        egui::Slider::new(&mut self.config.light_brightness, 0.0..=3.0)
+                            .text("Brightness"),
+                    );
 
                     ui.horizontal(|ui| {
                         ui.label("Sand Color:");
                         ui.color_edit_button_rgb(&mut self.config.sand_color);
                     });
 
-                    ui.add(egui::Slider::new(&mut self.config.light_angle, 0.0..=std::f32::consts::TAU)
-                        .text("LED Angle")
-                        .show_value(false));
+                    if self.config.led_mode == crate::config::LedMode::Single {
+                        ui.horizontal(|ui| {
+                            ui.label("LED Color:");
+                            ui.color_edit_button_rgb(&mut self.config.light_color);
+                        });
 
-                    ui.checkbox(&mut self.config.shadows_enabled, "Enable Raymarched Shadows");
+                        ui.add(
+                            egui::Slider::new(
+                                &mut self.config.light_angle,
+                                0.0..=std::f32::consts::TAU,
+                            )
+                            .text("LED Angle")
+                            .show_value(false),
+                        );
+                    }
+
+                    ui.checkbox(
+                        &mut self.config.shadows_enabled,
+                        "Enable Raymarched Shadows",
+                    );
 
                     ui.add_space(20.0);
                     ui.horizontal(|ui| {
@@ -295,11 +387,14 @@ impl eframe::App for SandArtApp {
             let available_rect = ui.available_rect_before_wrap();
             let square_side = available_rect.width().min(available_rect.height()).max(0.0);
             let radius = square_side / 2.0;
-            
+
             let offset_x = (available_rect.width() - square_side) / 2.0;
             let offset_y = (available_rect.height() - square_side) / 2.0;
             let centered_rect = egui::Rect::from_min_size(
-                egui::pos2(available_rect.min.x + offset_x, available_rect.min.y + offset_y),
+                egui::pos2(
+                    available_rect.min.x + offset_x,
+                    available_rect.min.y + offset_y,
+                ),
                 egui::vec2(square_side, square_side),
             );
 
@@ -329,7 +424,11 @@ impl eframe::App for SandArtApp {
                 ],
                 light_brightness: self.config.light_brightness,
                 shadow_enabled: if self.config.shadows_enabled { 1 } else { 0 },
-                _padding: [0.0; 2],
+                led_mode: match self.config.led_mode {
+                    crate::config::LedMode::Single => 0,
+                    crate::config::LedMode::RainbowRing => 1,
+                },
+                time: self.elapsed_time % (2.0 * std::f32::consts::PI * 100.0),
             };
 
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering
@@ -343,7 +442,7 @@ impl eframe::App for SandArtApp {
 
             // 4. Capture target position from mouse or playback controller
             let mut target_pos = None;
-            
+
             if self.config.pattern_mode == crate::config::PatternMode::Manual {
                 if (response.dragged() || response.clicked()) && radius > 1e-4 {
                     if let Some(pointer_pos) = response.interact_pointer_pos() {
@@ -351,30 +450,30 @@ impl eframe::App for SandArtApp {
                         let rel_x = (pointer_pos.x - centered_rect.center().x) / radius;
                         // Flip y for standard cartesian coordinate mapping (positive y is up)
                         let rel_y = -(pointer_pos.y - centered_rect.center().y) / radius;
-                        
+
                         let pos = egui::vec2(rel_x, rel_y);
                         let len = pos.length();
                         // Constrain marble center to visual sand circle bounds (0.92 radius in Cartesian)
                         let max_r = (0.92 - self.config.marble_size).max(0.0);
-                        let clamped_pos = if len > max_r {
-                            pos / len * max_r
-                        } else {
-                            pos
-                        };
+                        let clamped_pos = if len > max_r { pos / len * max_r } else { pos };
                         target_pos = Some(glam::Vec2::new(clamped_pos.x, clamped_pos.y));
                     }
                 }
             } else {
                 // Feed coordinates from PlaybackController when playing
                 if self.playback.state == crate::pattern::PlaybackState::Playing {
-                    if let Some(next_pos) = self.playback.step_playback(self.sim.marble_pos, self.config.speed, self.dt) {
+                    if let Some(next_pos) =
+                        self.playback
+                            .step_playback(self.sim.marble_pos, self.config.speed, self.dt)
+                    {
                         target_pos = Some(next_pos);
                     }
                 }
             }
 
             // Run simulation tick
-            self.sim.update(self.dt, target_pos, self.config.marble_size);
+            self.sim
+                .update(self.dt, target_pos, self.config.marble_size);
         });
 
         // Keep requesting frames for continuous physics simulation/render

@@ -1,16 +1,17 @@
-use wgpu;
 use egui;
 use egui_wgpu;
+use wgpu;
 
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightingUniforms {
-    pub light_dir: [f32; 4],         // xyz direction + padding
-    pub light_color: [f32; 4],       // rgb color + padding
-    pub sand_color: [f32; 4],        // rgb color + padding
-    pub light_brightness: f32,       // intensity
-    pub shadow_enabled: u32,         // 1 = enabled, 0 = disabled
-    pub _padding: [f32; 2],          // 16-byte alignment padding
+    pub light_dir: [f32; 4],   // xyz direction + padding
+    pub light_color: [f32; 4], // rgb color + padding
+    pub sand_color: [f32; 4],  // rgb color + padding
+    pub light_brightness: f32, // intensity
+    pub shadow_enabled: u32,   // 1 = enabled, 0 = disabled
+    pub led_mode: u32,         // 0 = Single, 1 = RainbowRing
+    pub time: f32,             // elapsed animation time
 }
 
 pub struct SandArtRenderResources {
@@ -25,7 +26,9 @@ impl SandArtRenderResources {
     pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sand_art_shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shader.wgsl"))),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shader.wgsl"
+            ))),
         });
 
         // 1. Create heightmap texture (512x512 R8Unorm)
@@ -34,7 +37,7 @@ impl SandArtRenderResources {
             height: 512,
             depth_or_array_layers: 1,
         };
-        
+
         let heightmap_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("heightmap_texture"),
             size: texture_size,
@@ -45,8 +48,9 @@ impl SandArtRenderResources {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        
-        let heightmap_texture_view = heightmap_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let heightmap_texture_view =
+            heightmap_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // 2. Create heightmap sampler
         let heightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -248,7 +252,8 @@ impl egui_wgpu::CallbackTrait for SandArtCallback {
             let physical_x = (rect.min.x * pixels_per_point).clamp(0.0, target_width);
             let physical_y = (rect.min.y * pixels_per_point).clamp(0.0, target_height);
             let physical_width = (rect.width() * pixels_per_point).min(target_width - physical_x);
-            let physical_height = (rect.height() * pixels_per_point).min(target_height - physical_y);
+            let physical_height =
+                (rect.height() * pixels_per_point).min(target_height - physical_y);
 
             if physical_width > 0.0 && physical_height > 0.0 {
                 render_pass.set_viewport(
@@ -274,25 +279,30 @@ mod tests {
 
     async fn get_device_and_queue() -> Option<(wgpu::Device, wgpu::Queue)> {
         let instance = wgpu::Instance::default();
-        let adapter = match instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        }).await {
+        let adapter = match instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+        {
             Some(a) => a,
             None => {
-                instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::default(),
-                    compatible_surface: None,
-                    force_fallback_adapter: true,
-                }).await?
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::default(),
+                        compatible_surface: None,
+                        force_fallback_adapter: true,
+                    })
+                    .await?
             }
         };
 
-        let (device, queue) = adapter.request_device(
-            &wgpu::DeviceDescriptor::default(),
-            None,
-        ).await.ok()?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .await
+            .ok()?;
 
         Some((device, queue))
     }
@@ -306,12 +316,16 @@ mod tests {
             };
 
             device.push_error_scope(wgpu::ErrorFilter::Validation);
-            
+
             let target_format = wgpu::TextureFormat::Rgba8Unorm;
             let _resources = SandArtRenderResources::new(&device, target_format);
 
             let error = device.pop_error_scope().await;
-            assert!(error.is_none(), "Validation error during pipeline creation: {:?}", error);
+            assert!(
+                error.is_none(),
+                "Validation error during pipeline creation: {:?}",
+                error
+            );
         });
     }
 
@@ -344,7 +358,8 @@ mod tests {
                 sand_color: [0.92, 0.89, 0.82, 1.0],
                 light_brightness: 1.0,
                 shadow_enabled: 1,
-                _padding: [0.0; 2],
+                led_mode: 1,
+                time: 0.0,
             };
             resources.update_uniforms(&queue, &uniforms);
 
@@ -433,7 +448,7 @@ mod tests {
             rx.recv().unwrap().expect("Failed to map readback buffer");
 
             let data = buffer_slice.get_mapped_range();
-            
+
             // Verify render has run (RGBA values are populated)
             let top_offset = ((64 * width + 128) * 4) as usize;
             let a_top = data[top_offset + 3];

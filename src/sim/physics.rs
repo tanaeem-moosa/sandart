@@ -1,5 +1,5 @@
-use glam::Vec2;
 use crate::sim::grid::Heightmap;
+use glam::Vec2;
 
 /// Bounding coordinates to optimize Cellular Automata settling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,10 +59,18 @@ pub fn displace_line(
     }
 
     // Safe bounding box calculations in float space before casting to usize
-    let min_x_float = (min_center_x - total_radius_clamped).clamp(0.0, w as f32).floor();
-    let max_x_float = (max_center_x + total_radius_clamped).clamp(0.0, w as f32).ceil();
-    let min_y_float = (min_center_y - total_radius_clamped).clamp(0.0, h as f32).floor();
-    let max_y_float = (max_center_y + total_radius_clamped).clamp(0.0, h as f32).ceil();
+    let min_x_float = (min_center_x - total_radius_clamped)
+        .clamp(0.0, w as f32)
+        .floor();
+    let max_x_float = (max_center_x + total_radius_clamped)
+        .clamp(0.0, w as f32)
+        .ceil();
+    let min_y_float = (min_center_y - total_radius_clamped)
+        .clamp(0.0, h as f32)
+        .floor();
+    let max_y_float = (max_center_y + total_radius_clamped)
+        .clamp(0.0, h as f32)
+        .ceil();
 
     let min_x = min_x_float as usize;
     let max_x = (max_x_float as usize).min(w - 1);
@@ -72,9 +80,9 @@ pub fn displace_line(
     // Update settling active bounding box
     let padding = 15;
     let pad_min_x = min_x.saturating_sub(padding);
-    let pad_max_x = (max_x + padding).min(w - 1);
+    let pad_max_x = max_x.saturating_add(padding).min(w - 1);
     let pad_min_y = min_y.saturating_sub(padding);
-    let pad_max_y = (max_y + padding).min(h - 1);
+    let pad_max_y = max_y.saturating_add(padding).min(h - 1);
 
     if active_bounds.active {
         active_bounds.min_x = active_bounds.min_x.min(pad_min_x);
@@ -103,12 +111,6 @@ pub fn displace_line(
     let d2 = r_grid_clamped + w_grid * 0.50;
     let d3 = r_grid_clamped + w_grid * 0.75;
 
-    let samples = [
-        (d1, 0.5),
-        (d2, 1.0 / 3.0),
-        (d3, 1.0 / 6.0),
-    ];
-
     // Scan bounding box to carve the groove and displace sand radially/perpendicularly
     for y in min_y..=max_y {
         let py = y as f32 + 0.5;
@@ -134,12 +136,17 @@ pub fn displace_line(
                 let h_target = r_grid_clamped - (r_groove_sq - dist_sq).max(0.0).sqrt();
                 // Scale this target height to flat sand height (0.8)
                 let h_target_norm = (h_target / r_grid_clamped) * 0.8;
-                
+
+                // Add a tiny micro-texture noise to the groove base
+                let seed = (x * 73856093) ^ (y * 19349663);
+                let noise = (((seed & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.05; // Range [-0.025, 0.025]
+                let h_target_noisy = (h_target_norm + noise).clamp(0.0, 1.0);
+
                 let current_idx = row_offset + x;
                 let current_h = heightmap.data[current_idx];
-                if current_h > h_target_norm {
-                    let diff = current_h - h_target_norm;
-                    heightmap.data[current_idx] = h_target_norm;
+                if current_h > h_target_noisy {
+                    let diff = current_h - h_target_noisy;
+                    heightmap.data[current_idx] = h_target_noisy;
 
                     // Projection on the infinite line (used for perpendicular displacement origin/direction)
                     let (closest_line_x, closest_line_y) = if len_sq < 1e-6 {
@@ -170,15 +177,68 @@ pub fn displace_line(
                         }
                     };
 
-                    for &(d_sample, weight) in &samples {
-                        let rx = (closest_line_x + dir_x * d_sample).floor() as isize;
-                        let ry = (closest_line_y + dir_y * d_sample).floor() as isize;
+                    // Perturb sample distances with coordinate-locked noise to simulate clumped deposition
+                    let seed_d1 = (x * 73856093) ^ (y * 19349663) ^ 12345;
+                    let noise_d1 = (((seed_d1 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.3 * w_grid;
+                    let d1_p = (d1 + noise_d1).clamp(r_grid_clamped, total_radius_clamped);
 
-                        if rx >= 0 && rx < w as isize && ry >= 0 && ry < h as isize {
-                            let ridx = (ry * w as isize + rx) as usize;
-                            heightmap.data[ridx] += diff * weight;
-                        }
+                    let seed_d2 = (x * 73856093) ^ (y * 19349663) ^ 67890;
+                    let noise_d2 = (((seed_d2 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.3 * w_grid;
+                    let d2_p = (d2 + noise_d2).clamp(r_grid_clamped, total_radius_clamped);
+
+                    let seed_d3 = (x * 73856093) ^ (y * 19349663) ^ 54321;
+                    let noise_d3 = (((seed_d3 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.3 * w_grid;
+                    let d3_p = (d3 + noise_d3).clamp(r_grid_clamped, total_radius_clamped);
+
+                    // Calculate target coordinates
+                    let rx1 = (closest_line_x + dir_x * d1_p).floor() as isize;
+                    let ry1 = (closest_line_y + dir_y * d1_p).floor() as isize;
+
+                    let rx2 = (closest_line_x + dir_x * d2_p).floor() as isize;
+                    let ry2 = (closest_line_y + dir_y * d2_p).floor() as isize;
+
+                    let rx3 = (closest_line_x + dir_x * d3_p).floor() as isize;
+                    let ry3 = (closest_line_y + dir_y * d3_p).floor() as isize;
+
+                    // Perturb weights based on the destination cell coordinates (rx, ry)
+                    let seed_w1 =
+                        (rx1.max(0) as usize * 1299689) ^ (ry1.max(0) as usize * 314159) ^ 9991;
+                    let seed_w2 =
+                        (rx2.max(0) as usize * 1299689) ^ (ry2.max(0) as usize * 314159) ^ 9992;
+                    let seed_w3 =
+                        (rx3.max(0) as usize * 1299689) ^ (ry3.max(0) as usize * 314159) ^ 9993;
+
+                    let nf1 = 1.0 + (((seed_w1 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.6; // +/- 30% variation
+                    let nf2 = 1.0 + (((seed_w2 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.6;
+                    let nf3 = 1.0 + (((seed_w3 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.6;
+
+                    let mut w1 = 0.5 * nf1;
+                    let mut w2 = (1.0 / 3.0) * nf2;
+                    let mut w3 = (1.0 / 6.0) * nf3;
+
+                    let sum_w = w1 + w2 + w3;
+                    if sum_w > 0.0 {
+                        let inv_sum = 1.0 / sum_w;
+                        w1 *= inv_sum;
+                        w2 *= inv_sum;
+                        w3 *= inv_sum;
+                    } else {
+                        w1 = 0.5;
+                        w2 = 1.0 / 3.0;
+                        w3 = 1.0 / 6.0;
                     }
+
+                    let rx1_clamped = rx1.clamp(0, w as isize - 1) as usize;
+                    let ry1_clamped = ry1.clamp(0, h as isize - 1) as usize;
+                    heightmap.data[ry1_clamped * w + rx1_clamped] += diff * w1;
+
+                    let rx2_clamped = rx2.clamp(0, w as isize - 1) as usize;
+                    let ry2_clamped = ry2.clamp(0, h as isize - 1) as usize;
+                    heightmap.data[ry2_clamped * w + rx2_clamped] += diff * w2;
+
+                    let rx3_clamped = rx3.clamp(0, w as isize - 1) as usize;
+                    let ry3_clamped = ry3.clamp(0, h as isize - 1) as usize;
+                    heightmap.data[ry3_clamped * w + rx3_clamped] += diff * w3;
                 }
             }
         }
@@ -192,6 +252,7 @@ pub fn settle_tick(
     active_bounds: &mut ActiveBounds,
     threshold: f32,
     alpha: f32,
+    time_seed: u32,
 ) -> f32 {
     if !active_bounds.active {
         return 0.0;
@@ -237,23 +298,35 @@ pub fn settle_tick(
             let center_idx = row_offset + x;
             let h_center = heightmap.data[center_idx];
 
+            // Local friction variation (stick-slip repose angle) - larger variation with time seed for dynamic avalanches
+            let seed = (x * 1299689) ^ (y * 314159) ^ (time_seed as usize * 7213);
+            let local_threshold =
+                (threshold + (((seed & 0xFF) as f32 / 255.0) - 0.5) * 0.055).max(0.005);
+
             // Left neighbor
             if x > 0 {
                 let nx = x - 1;
                 let neighbor_idx = center_idx - 1;
                 let h_neighbor = heightmap.data[neighbor_idx];
-                if h_center - h_neighbor > threshold {
-                    let flow = alpha * (h_center - h_neighbor - threshold);
-                    if flow > 0.0 {
-                        temp_heights[center_idx] -= flow;
-                        temp_heights[neighbor_idx] += flow;
-                        total_flow += flow;
-                        if flow > 1e-5 {
-                            next_min_x = next_min_x.min(nx);
-                            next_max_x = next_max_x.max(x);
-                            next_min_y = next_min_y.min(y);
-                            next_max_y = next_max_y.max(y);
-                            flow_occurred = true;
+                if h_center - h_neighbor > local_threshold {
+                    let flow_seed = (seed ^ (neighbor_idx * 997)) & 0xFFFF;
+                    // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
+                    if (flow_seed % 5) != 0 {
+                        let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
+                        let flow =
+                            (alpha * (h_center - h_neighbor - local_threshold) * alpha_noise)
+                                .max(0.0);
+                        if flow > 0.0 {
+                            temp_heights[center_idx] -= flow;
+                            temp_heights[neighbor_idx] += flow;
+                            total_flow += flow;
+                            if flow > 1e-5 {
+                                next_min_x = next_min_x.min(nx);
+                                next_max_x = next_max_x.max(x);
+                                next_min_y = next_min_y.min(y);
+                                next_max_y = next_max_y.max(y);
+                                flow_occurred = true;
+                            }
                         }
                     }
                 }
@@ -264,62 +337,83 @@ pub fn settle_tick(
                 let nx = x + 1;
                 let neighbor_idx = center_idx + 1;
                 let h_neighbor = heightmap.data[neighbor_idx];
-                if h_center - h_neighbor > threshold {
-                    let flow = alpha * (h_center - h_neighbor - threshold);
-                    if flow > 0.0 {
-                        temp_heights[center_idx] -= flow;
-                        temp_heights[neighbor_idx] += flow;
-                        total_flow += flow;
-                        if flow > 1e-5 {
-                            next_min_x = next_min_x.min(x);
-                            next_max_x = next_max_x.max(nx);
-                            next_min_y = next_min_y.min(y);
-                            next_max_y = next_max_y.max(y);
-                            flow_occurred = true;
-                        }
-                    }
-                }
-            }
-
-            // Top neighbor
-            if y > 0 {
-                let ny = y - 1;
-                let neighbor_idx = center_idx - w;
-                let h_neighbor = heightmap.data[neighbor_idx];
-                if h_center - h_neighbor > threshold {
-                    let flow = alpha * (h_center - h_neighbor - threshold);
-                    if flow > 0.0 {
-                        temp_heights[center_idx] -= flow;
-                        temp_heights[neighbor_idx] += flow;
-                        total_flow += flow;
-                        if flow > 1e-5 {
-                            next_min_x = next_min_x.min(x);
-                            next_max_x = next_max_x.max(x);
-                            next_min_y = next_min_y.min(ny);
-                            next_max_y = next_max_y.max(y);
-                            flow_occurred = true;
+                if h_center - h_neighbor > local_threshold {
+                    let flow_seed = (seed ^ (neighbor_idx * 997)) & 0xFFFF;
+                    // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
+                    if (flow_seed % 5) != 0 {
+                        let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
+                        let flow =
+                            (alpha * (h_center - h_neighbor - local_threshold) * alpha_noise)
+                                .max(0.0);
+                        if flow > 0.0 {
+                            temp_heights[center_idx] -= flow;
+                            temp_heights[neighbor_idx] += flow;
+                            total_flow += flow;
+                            if flow > 1e-5 {
+                                next_min_x = next_min_x.min(x);
+                                next_max_x = next_max_x.max(nx);
+                                next_min_y = next_min_y.min(y);
+                                next_max_y = next_max_y.max(y);
+                                flow_occurred = true;
+                            }
                         }
                     }
                 }
             }
 
             // Bottom neighbor
+            if y > 0 {
+                let ny = y - 1;
+                let neighbor_idx = center_idx - w;
+                let h_neighbor = heightmap.data[neighbor_idx];
+                if h_center - h_neighbor > local_threshold {
+                    let flow_seed = (seed ^ (neighbor_idx * 997)) & 0xFFFF;
+                    // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
+                    if (flow_seed % 5) != 0 {
+                        let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
+                        let flow =
+                            (alpha * (h_center - h_neighbor - local_threshold) * alpha_noise)
+                                .max(0.0);
+                        if flow > 0.0 {
+                            temp_heights[center_idx] -= flow;
+                            temp_heights[neighbor_idx] += flow;
+                            total_flow += flow;
+                            if flow > 1e-5 {
+                                next_min_x = next_min_x.min(x);
+                                next_max_x = next_max_x.max(x);
+                                next_min_y = next_min_y.min(ny);
+                                next_max_y = next_max_y.max(y);
+                                flow_occurred = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Top neighbor (Note: top neighbor was y > 0 earlier, but in loop it says bottom neighbor y+1 < h. Keeping original flow directions)
             if y + 1 < h {
                 let ny = y + 1;
                 let neighbor_idx = center_idx + w;
                 let h_neighbor = heightmap.data[neighbor_idx];
-                if h_center - h_neighbor > threshold {
-                    let flow = alpha * (h_center - h_neighbor - threshold);
-                    if flow > 0.0 {
-                        temp_heights[center_idx] -= flow;
-                        temp_heights[neighbor_idx] += flow;
-                        total_flow += flow;
-                        if flow > 1e-5 {
-                            next_min_x = next_min_x.min(x);
-                            next_max_x = next_max_x.max(x);
-                            next_min_y = next_min_y.min(y);
-                            next_max_y = next_max_y.max(ny);
-                            flow_occurred = true;
+                if h_center - h_neighbor > local_threshold {
+                    let flow_seed = (seed ^ (neighbor_idx * 997)) & 0xFFFF;
+                    // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
+                    if (flow_seed % 5) != 0 {
+                        let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
+                        let flow =
+                            (alpha * (h_center - h_neighbor - local_threshold) * alpha_noise)
+                                .max(0.0);
+                        if flow > 0.0 {
+                            temp_heights[center_idx] -= flow;
+                            temp_heights[neighbor_idx] += flow;
+                            total_flow += flow;
+                            if flow > 1e-5 {
+                                next_min_x = next_min_x.min(x);
+                                next_max_x = next_max_x.max(x);
+                                next_min_y = next_min_y.min(y);
+                                next_max_y = next_max_y.max(ny);
+                                flow_occurred = true;
+                            }
                         }
                     }
                 }
@@ -356,11 +450,23 @@ mod tests {
     #[test]
     fn test_draw_point_out_of_bounds() {
         let mut hm = Heightmap::new(512, 512, 0.8);
-        let mut bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
-        
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            active: false,
+        };
+
         // Drawing completely offscreen should not panic or modify the heightmap
-        displace_line(&mut hm, Vec2::new(5.0, 5.0), Vec2::new(5.0, 5.0), 0.1, &mut bounds);
-        
+        displace_line(
+            &mut hm,
+            Vec2::new(5.0, 5.0),
+            Vec2::new(5.0, 5.0),
+            0.1,
+            &mut bounds,
+        );
+
         // Assert that heightmap data is unchanged
         for &val in hm.as_slice() {
             assert_eq!(val, 0.8);
@@ -370,11 +476,23 @@ mod tests {
     #[test]
     fn test_draw_point_partial_overlap() {
         let mut hm = Heightmap::new(512, 512, 0.8);
-        let mut bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
-        
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            active: false,
+        };
+
         // Position marble so it sits on the left boundary
-        displace_line(&mut hm, Vec2::new(-1.0, 0.0), Vec2::new(-1.0, 0.0), 0.05, &mut bounds);
-        
+        displace_line(
+            &mut hm,
+            Vec2::new(-1.0, 0.0),
+            Vec2::new(-1.0, 0.0),
+            0.05,
+            &mut bounds,
+        );
+
         // Check that some points are carved below 0.1, and bounds are respected
         let mut modified_count = 0;
         for &val in hm.as_slice() {
@@ -389,34 +507,58 @@ mod tests {
     #[test]
     fn test_draw_line_interpolation() {
         let mut hm = Heightmap::new(512, 512, 0.8);
-        let mut bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
-        
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            active: false,
+        };
+
         // Draw a line from (-0.5, 0.0) to (0.5, 0.0)
-        displace_line(&mut hm, Vec2::new(-0.5, 0.0), Vec2::new(0.5, 0.0), 0.05, &mut bounds);
-        
+        displace_line(
+            &mut hm,
+            Vec2::new(-0.5, 0.0),
+            Vec2::new(0.5, 0.0),
+            0.05,
+            &mut bounds,
+        );
+
         // Helper to convert pos to grid index
         let norm_to_grid = |pos: Vec2| {
             let x = ((pos.x + 1.0) * 0.5 * 512.0).clamp(0.0, 511.0) as usize;
             let y = ((1.0 - pos.y) * 0.5 * 512.0).clamp(0.0, 511.0) as usize;
             (x, y)
         };
-        
+
         // Verify that the path is continuous by checking that the center points are drawn
         let (cx1, cy1) = norm_to_grid(Vec2::new(-0.5, 0.0));
         let (cx2, cy2) = norm_to_grid(Vec2::new(0.0, 0.0));
         let (cx3, cy3) = norm_to_grid(Vec2::new(0.5, 0.0));
-        
-        assert!(hm.get(cx1, cy1) < 0.01);
-        assert!(hm.get(cx2, cy2) < 0.01);
-        assert!(hm.get(cx3, cy3) < 0.01);
+
+        assert!(hm.get(cx1, cy1) < 0.03);
+        assert!(hm.get(cx2, cy2) < 0.03);
+        assert!(hm.get(cx3, cy3) < 0.03);
     }
 
     #[test]
     fn test_draw_point_extreme_coordinates_overflow() {
         let mut hm = Heightmap::new(512, 512, 0.8);
-        let mut bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
-        
-        displace_line(&mut hm, Vec2::new(1e18, 1e18), Vec2::new(1e18, 1e18), 0.1, &mut bounds);
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            active: false,
+        };
+
+        displace_line(
+            &mut hm,
+            Vec2::new(1e18, 1e18),
+            Vec2::new(1e18, 1e18),
+            0.1,
+            &mut bounds,
+        );
         for &val in hm.as_slice() {
             assert_eq!(val, 0.8);
         }
@@ -425,11 +567,23 @@ mod tests {
     #[test]
     fn test_volume_conservation() {
         let mut hm = Heightmap::new(512, 512, 0.4);
-        let mut bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            active: false,
+        };
         let initial_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
 
         // Perform displacement along a path
-        displace_line(&mut hm, Vec2::new(-0.2, 0.2), Vec2::new(0.2, -0.2), 0.03, &mut bounds);
+        displace_line(
+            &mut hm,
+            Vec2::new(-0.2, 0.2),
+            Vec2::new(0.2, -0.2),
+            0.03,
+            &mut bounds,
+        );
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
         let diff = (final_sum - initial_sum).abs();
@@ -439,14 +593,32 @@ mod tests {
     #[test]
     fn test_draw_line_extreme_coordinates_overflow() {
         let mut hm = Heightmap::new(512, 512, 0.8);
-        let mut bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
-        displace_line(&mut hm, Vec2::new(-1e18, 0.0), Vec2::new(1e18, 0.0), 0.1, &mut bounds);
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            active: false,
+        };
+        displace_line(
+            &mut hm,
+            Vec2::new(-1e18, 0.0),
+            Vec2::new(1e18, 0.0),
+            0.1,
+            &mut bounds,
+        );
     }
 
     #[test]
     fn test_volume_conservation_with_saturation() {
         let mut hm = Heightmap::new(512, 512, 0.70);
-        let mut bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            active: false,
+        };
         let initial_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
 
         // Perform displacement at a single point to trigger local saturation in the inner ridge
@@ -461,7 +633,7 @@ mod tests {
     fn test_settling_flow_and_volume_conservation() {
         let mut hm = Heightmap::new(512, 512, 0.5);
         let mut temp_heights = vec![0.5; 512 * 512];
-        
+
         let center_idx = 256 * 512 + 256;
         hm.data[center_idx] = 0.8;
 
@@ -477,7 +649,7 @@ mod tests {
 
         let mut flow_occurred = false;
         for _ in 0..10 {
-            let flow = settle_tick(&mut hm, &mut temp_heights, &mut bounds, 0.04, 0.15);
+            let flow = settle_tick(&mut hm, &mut temp_heights, &mut bounds, 0.04, 0.15, 12345);
             if flow > 0.0 {
                 flow_occurred = true;
             }
@@ -487,15 +659,22 @@ mod tests {
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
         let diff = (final_sum - initial_sum).abs();
-        assert!(diff < 1e-5, "Settling did not conserve volume! diff = {}", diff);
-        assert!(hm.data[center_idx] < 0.8, "Peak should be lower after flowing");
+        assert!(
+            diff < 1e-5,
+            "Settling did not conserve volume! diff = {}",
+            diff
+        );
+        assert!(
+            hm.data[center_idx] < 0.8,
+            "Peak should be lower after flowing"
+        );
     }
 
     #[test]
     fn test_settling_deactivation() {
         let mut hm = Heightmap::new(512, 512, 0.5);
         let mut temp_heights = vec![0.5; 512 * 512];
-        
+
         let mut bounds = ActiveBounds {
             min_x: 250,
             max_x: 262,
@@ -504,7 +683,7 @@ mod tests {
             active: true,
         };
 
-        let flow = settle_tick(&mut hm, &mut temp_heights, &mut bounds, 0.04, 0.15);
+        let flow = settle_tick(&mut hm, &mut temp_heights, &mut bounds, 0.04, 0.15, 12345);
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
     }

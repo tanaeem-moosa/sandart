@@ -55,7 +55,7 @@ mod tests {
         assert_eq!(hm.get(5, 5), 0.5);
         hm.set(5, 5, 0.8);
         assert_eq!(hm.get(5, 5), 0.8);
-        
+
         // Out of bounds get/set should not panic
         assert_eq!(hm.get(10, 10), 0.0);
         hm.set(10, 10, 0.9);

@@ -12,9 +12,9 @@ A beautiful, high-performance simulation of a kinetic sand art table (like the S
    - **Settle/Slide Effect**: Simulate gravity pulling sand back down if slopes exceed the natural angle of repose.
    
 2. **Stunning Visuals & Lighting**:
-   - **Height-Based Shading**: Real-time phong shading or normal mapping of the sand surface to render realistic shadows, specular highlights on sand grains, and ambient occlusion.
-   - **Dynamic RGB LED Ring**: Customize a multi-point LED lighting system around the circular rim (simulating the color gradients seen in physical kinetic tables).
-   - **Customizable Styles**: Choose sand color, grain texture, LED brightness, and shadow softness.
+   - **Height-Based Shading**: Real-time normal mapping of the sand surface to render realistic 32-step raymarched soft shadows, tactile normal sparkles, and ambient occlusion.
+   - **Dynamic & Rotating RGB LED Ring**: An 8-LED ring that gently rotates around the perimeter, casting sweeping chromatic shadows (with dynamic 8-step raymarching per light) for a premium kinetic art table effect.
+   - **Customizable Styles & Colors**: Integrated a real-time sand color picker widget, customizable LED brightness up to 3.0, and a toggle for soft raymarched shadows.
 
 3. **Intricate Pattern Generation**:
    - **Mathematical Patterns**: Built-in generators for Spirographs, Lissajous curves, Rose curves, Trochoids, and Fourier-series-based art.
@@ -106,6 +106,10 @@ The project will be built in incremental, testable blocks:
 - [x] **Block 5A: Marble Path Interpolation & Volume-conserving Displacement**: Prevent "dotted line" trails at high speeds by interpolating paths. Displace sand volume by pushing it into surrounding side-ridges instead of erasing it, keeping exact volume conservation.
 - [x] **Block 5B: CPU Heightmap Settling (Cellular Automata)**: Implement gravity settling using local slopes (angle of repose threshold = 0.04, alpha = 0.15) inside an active bounding box, with a double-buffered flow to prevent rendering flicker and reduce CPU overhead to 0% when sand is stable.
 - [x] **Refactoring Block: Codebase Restructuring & Health Prep**: Decouple the codebase into modular, single-responsibility files (`config.rs`, `sim/grid.rs`, `sim/physics.rs`, `pattern.rs`, `renderer.rs`, `app.rs`) with zero compiler warnings and all tests fully passing.
-- [ ] **Block 5C & 6: Playback & Trajectory Patterns (Spirals, G-code, Theta-Rho)**: Implement Archimedean spiral trajectory generators and G-code/Theta-Rho file parsers in `pattern.rs`, and build the path follower playback controller with UI controls.
-- [ ] **Block 7: GPU 3D Normal Shading & Raymarched Shadows**: Update the fragment shader to calculate surface normals dynamically on the GPU (sampling neighbor pixels) and render realistic 3D Phong shadows and specular sand highlights.
+- [x] **Block 5C & 6: Playback & Trajectory Patterns (Spirals, G-code, Theta-Rho)**: Implement Archimedean spiral trajectory generators and G-code/Theta-Rho file parsers in `pattern.rs`, and build the path follower playback controller with UI controls.
+- [x] **Block 7: GPU 3D Normal Shading & Raymarched Shadows**: Update the fragment shader to calculate surface normals dynamically on the GPU (sampling neighbor pixels) and render realistic 3D Phong shadows and specular sand highlights.
+- [x] **Block 8: Advanced Visuals & Physics Customization**:
+  - **Granular Noise & Tactility**: Integrated realistic micro-texture carving noise, space-locked randomized clumped ridge deposition, and stochastic grain locking/jamming to break up fluid settling.
+  - **Rotating Rainbow LED Ring**: Simulated an 8-LED rim ring with smooth time-based color cycling and shadow sweep rotation.
+  - **Subtle Marble Drift**: Added magnetic pull lag and sideways slipping to mimic marble movement over physical sand grains.
 

@@ -4,7 +4,6 @@ mod pattern;
 mod renderer;
 mod sim;
 
-
 use app::SandArtApp;
 
 fn main() -> eframe::Result {

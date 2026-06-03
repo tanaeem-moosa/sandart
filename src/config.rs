@@ -15,6 +15,18 @@ impl Default for PatternMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LedMode {
+    Single,
+    RainbowRing,
+}
+
+impl Default for LedMode {
+    fn default() -> Self {
+        Self::RainbowRing
+    }
+}
+
 /// Application configuration and simulation parameters in normalized space.
 /// Normalized space scales from 0.0 to 1.0 relative to the sand table radius.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -39,6 +51,8 @@ pub struct AppConfig {
     pub light_color: [f32; 3],
     /// Sand RGB base color components.
     pub sand_color: [f32; 3],
+    /// LED configuration mode.
+    pub led_mode: LedMode,
     /// Flag to enable GPU raymarched shadows.
     pub shadows_enabled: bool,
 }
@@ -53,14 +67,14 @@ impl Default for AppConfig {
             light_brightness: 0.8,
             pattern_mode: PatternMode::Manual,
             custom_file_path: String::new(),
-            light_angle: 0.7853982, // ~45 degrees in radians
+            light_angle: 0.7853982,         // ~45 degrees in radians
             light_color: [1.0, 0.95, 0.82], // Warm golden white
             sand_color: [0.92, 0.89, 0.82], // Warm sandy beige
+            led_mode: LedMode::RainbowRing,
             shadows_enabled: true,
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -79,6 +93,7 @@ mod tests {
         assert_eq!(config.light_angle, 0.7853982);
         assert_eq!(config.light_color, [1.0, 0.95, 0.82]);
         assert_eq!(config.sand_color, [0.92, 0.89, 0.82]);
+        assert_eq!(config.led_mode, LedMode::RainbowRing);
         assert!(config.shadows_enabled);
     }
 
@@ -92,7 +107,7 @@ mod tests {
 
     #[test]
     fn test_json_schema_stability() {
-        let json_str = r#"{"speed":0.15,"marble_size":0.025,"spiral_spacing":0.03,"auto_play":false,"light_brightness":0.8,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.92,0.89,0.82],"shadows_enabled":true}"#;
+        let json_str = r#"{"speed":0.15,"marble_size":0.025,"spiral_spacing":0.03,"auto_play":false,"light_brightness":0.8,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.92,0.89,0.82],"led_mode":"RainbowRing","shadows_enabled":true}"#;
         let deserialized: AppConfig = serde_json::from_str(json_str).unwrap();
         assert_eq!(deserialized, AppConfig::default());
     }

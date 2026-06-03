@@ -84,7 +84,7 @@ pub fn generate_spiral(spacing: f32) -> Vec<Vec2> {
     if spacing <= 0.005 {
         return Vec::new();
     }
-    
+
     let mut path = Vec::new();
     let max_r = 0.92;
     let a = spacing / (2.0 * std::f32::consts::PI);
@@ -130,8 +130,9 @@ fn strip_comments(line: &str) -> String {
 /// which supports both spaced (X 10) and spaceless (X10) formatting.
 fn parse_coordinate(line: &str, prefix: char) -> Option<f32> {
     if let Some(pos) = line.find(prefix) {
-        let remainder = line[pos + 1..].trim_start();
-        let num_str: String = remainder.chars()
+        let remainder = line[pos + prefix.len_utf8()..].trim_start();
+        let num_str: String = remainder
+            .chars()
             .take_while(|&c| c.is_digit(10) || c == '.' || c == '-' || c == '+')
             .collect();
         num_str.parse::<f32>().ok()
@@ -146,20 +147,34 @@ pub fn parse_thr(content: &str) -> Result<Vec<Vec2>, String> {
     let mut waypoints = Vec::new();
     for (line_idx, line) in content.lines().enumerate() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() {
+            continue;
+        }
+        // Strip inline comments starting with '#'
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
             continue;
         }
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 2 {
-            return Err(format!("Malformed polar waypoint on line {}: '{}'", line_idx + 1, line));
+            return Err(format!(
+                "Malformed polar waypoint on line {}: '{}'",
+                line_idx + 1,
+                line
+            ));
         }
         let theta = parts[0].parse::<f32>().map_err(|e| {
-            format!("Invalid theta '{}' on line {}: {}", parts[0], line_idx + 1, e)
+            format!(
+                "Invalid theta '{}' on line {}: {}",
+                parts[0],
+                line_idx + 1,
+                e
+            )
         })?;
-        let rho = parts[1].parse::<f32>().map_err(|e| {
-            format!("Invalid rho '{}' on line {}: {}", parts[1], line_idx + 1, e)
-        })?;
-        
+        let rho = parts[1]
+            .parse::<f32>()
+            .map_err(|e| format!("Invalid rho '{}' on line {}: {}", parts[1], line_idx + 1, e))?;
+
         // Scale rho to 95% of our sand bed boundary (0.92 * 0.95 = 0.874) to leave space for sand ridges
         let max_r = 0.874f32;
         let r = (rho * max_r).clamp(-max_r, max_r);
@@ -176,6 +191,7 @@ pub fn parse_gcode(content: &str) -> Result<Vec<Vec2>, String> {
     let mut last_y = 0.0f32;
     let mut has_x = false;
     let mut has_y = false;
+    let mut relative_mode = false;
 
     for line in content.lines() {
         let clean_line = strip_comments(line);
@@ -183,16 +199,23 @@ pub fn parse_gcode(content: &str) -> Result<Vec<Vec2>, String> {
             continue;
         }
 
+        // Handle absolute (G90) and relative (G91) positioning modes
+        if clean_line.contains("G90") {
+            relative_mode = false;
+        } else if clean_line.contains("G91") {
+            relative_mode = true;
+        }
+
         let x_val = parse_coordinate(&clean_line, 'X');
         let y_val = parse_coordinate(&clean_line, 'Y');
 
         if x_val.is_some() || y_val.is_some() {
             if let Some(x) = x_val {
-                last_x = x;
+                last_x = if relative_mode { last_x + x } else { x };
                 has_x = true;
             }
             if let Some(y) = y_val {
-                last_y = y;
+                last_y = if relative_mode { last_y + y } else { y };
                 has_y = true;
             }
             if has_x && has_y {
@@ -221,7 +244,7 @@ pub fn parse_gcode(content: &str) -> Result<Vec<Vec2>, String> {
     if min_x < max_x || min_y < max_y {
         let cx = (min_x + max_x) * 0.5;
         let cy = (min_y + max_y) * 0.5;
-        
+
         let mut max_r = 0.0f32;
         for p in &raw_points {
             let px = p.x - cx;
@@ -274,7 +297,7 @@ mod tests {
         ";
         let parsed = parse_thr(content).unwrap();
         assert_eq!(parsed.len(), 3);
-        
+
         assert!(parsed[0].length() < 1e-4);
         // Checking polar conversions (scaled to 0.874 instead of 0.92)
         let expected1 = Vec2::new(0.437 * 1.57079f32.cos(), 0.437 * 1.57079f32.sin());
@@ -304,22 +327,25 @@ mod tests {
     #[test]
     fn test_playback_controller() {
         let mut controller = PlaybackController::new();
-        controller.waypoints = vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(0.5, 0.0),
-        ];
+        controller.waypoints = vec![Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.0)];
         controller.state = PlaybackState::Playing;
 
-        let pos = controller.step_playback(Vec2::new(0.0, 0.0), 0.1, 0.1).unwrap();
+        let pos = controller
+            .step_playback(Vec2::new(0.0, 0.0), 0.1, 0.1)
+            .unwrap();
         assert_eq!(pos, Vec2::new(0.0, 0.0));
         assert_eq!(controller.current_idx, 1);
 
-        let pos = controller.step_playback(Vec2::new(0.0, 0.0), 0.5, 0.1).unwrap();
+        let pos = controller
+            .step_playback(Vec2::new(0.0, 0.0), 0.5, 0.1)
+            .unwrap();
         assert!((pos.x - 0.05).abs() < 1e-4);
         assert_eq!(pos.y, 0.0);
         assert_eq!(controller.current_idx, 1);
 
-        let pos = controller.step_playback(Vec2::new(0.0, 0.0), 10.0, 0.1).unwrap();
+        let pos = controller
+            .step_playback(Vec2::new(0.0, 0.0), 10.0, 0.1)
+            .unwrap();
         assert_eq!(pos, Vec2::new(0.5, 0.0));
         assert_eq!(controller.current_idx, 0);
     }
@@ -332,5 +358,34 @@ mod tests {
         ";
         let parsed = parse_gcode(content).unwrap();
         assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_thr_inline_comments() {
+        let content = "
+        0.00000 0.00000#nospacecomment
+        1.57079 0.50000 # spacecomment
+        ";
+        let parsed = parse_thr(content).unwrap();
+        assert_eq!(parsed.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_gcode_relative_mode() {
+        let content = "
+        G90 (Absolute)
+        G1 X10 Y20
+        G91 (Relative)
+        G1 X5 Y-5
+        ";
+        let parsed = parse_gcode(content).unwrap();
+        assert_eq!(parsed.len(), 2);
+        // Second point should be last_x + 5 = 15, last_y - 5 = 15
+        // Let's verify by computing the raw unscaled points ratio
+        // Min/max of raw points: X: [10, 15], Y: [15, 20]
+        // Center: X = 12.5, Y = 17.5
+        // Raw offsets from center for p1 (15, 15) is (2.5, -2.5)
+        // Ratio should match
+        assert!((parsed[1].x - parsed[0].x).signum() == (parsed[0].y - parsed[1].y).signum());
     }
 }
