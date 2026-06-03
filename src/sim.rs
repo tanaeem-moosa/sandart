@@ -50,12 +50,22 @@ impl Heightmap {
 pub struct Simulation {
     /// The sand heightmap grid.
     pub heightmap: Heightmap,
+    /// Pre-allocated temp buffer for double-buffering settling flows
+    pub temp_heights: Vec<f32>,
     /// Current position of the marble in normalized coordinates (range [-1.0, 1.0]).
     pub marble_pos: Vec2,
     /// Previous position of the marble (used for path interpolation).
     pub prev_marble_pos: Vec2,
     /// Track whether the simulation has an active drawing stroke.
     pub was_active: bool,
+    
+    // Active bounding box for settling updates
+    pub active_min_x: usize,
+    pub active_max_x: usize,
+    pub active_min_y: usize,
+    pub active_max_y: usize,
+    /// Track if the settling physics is currently active (sand is flowing)
+    pub settling_active: bool,
 }
 
 impl Simulation {
@@ -63,18 +73,30 @@ impl Simulation {
         Self {
             // Initializing a 512x512 grid to a default flat sand level of 0.8
             heightmap: Heightmap::new(512, 512, 0.8),
+            temp_heights: vec![0.8; 512 * 512],
             marble_pos: Vec2::ZERO,
             prev_marble_pos: Vec2::ZERO,
             was_active: false,
+            active_min_x: 0,
+            active_max_x: 0,
+            active_min_y: 0,
+            active_max_y: 0,
+            settling_active: false,
         }
     }
 
     /// Reset the simulation state.
     pub fn reset(&mut self) {
         self.heightmap.reset(0.8);
+        self.temp_heights.fill(0.8);
         self.marble_pos = Vec2::ZERO;
         self.prev_marble_pos = Vec2::ZERO;
         self.was_active = false;
+        self.active_min_x = 0;
+        self.active_max_x = 0;
+        self.active_min_y = 0;
+        self.active_max_y = 0;
+        self.settling_active = false;
     }
 
     /// Convert normalized Cartesian coordinates ([-1.0, 1.0]) to grid index coordinates.
@@ -147,6 +169,26 @@ impl Simulation {
         let max_x = (max_x_float as usize).min(w - 1);
         let min_y = min_y_float as usize;
         let max_y = (max_y_float as usize).min(h - 1);
+
+        // Update settling active bounding box
+        let padding = 15;
+        let pad_min_x = min_x.saturating_sub(padding);
+        let pad_max_x = (max_x + padding).min(w - 1);
+        let pad_min_y = min_y.saturating_sub(padding);
+        let pad_max_y = (max_y + padding).min(h - 1);
+
+        if self.settling_active {
+            self.active_min_x = self.active_min_x.min(pad_min_x);
+            self.active_max_x = self.active_max_x.max(pad_max_x);
+            self.active_min_y = self.active_min_y.min(pad_min_y);
+            self.active_max_y = self.active_max_y.max(pad_max_y);
+        } else {
+            self.active_min_x = pad_min_x;
+            self.active_max_x = pad_max_x;
+            self.active_min_y = pad_min_y;
+            self.active_max_y = pad_max_y;
+            self.settling_active = true;
+        }
 
         // Segment vector
         let vx = bx - ax;
@@ -266,6 +308,166 @@ impl Simulation {
         } else {
             self.was_active = false;
         }
+
+        // Run the gravity-driven settling cellular automata tick
+        self.settle_tick();
+    }
+
+    /// Perform a single gravity flow/settling iteration inside the active bounding box.
+    pub fn settle_tick(&mut self) -> f32 {
+        if !self.settling_active {
+            return 0.0;
+        }
+
+        let w = self.heightmap.width;
+        let h = self.heightmap.height;
+
+        // Safety check to prevent panics if heightmap is resized
+        if self.temp_heights.len() != self.heightmap.data.len() {
+            self.temp_heights.resize(self.heightmap.data.len(), 0.8);
+        }
+
+        // 1. Determine copy boundaries (expanded by 1 to include neighbors)
+        let copy_min_x = self.active_min_x.saturating_sub(1);
+        let copy_max_x = (self.active_max_x + 1).min(w - 1);
+        let copy_min_y = self.active_min_y.saturating_sub(1);
+        let copy_max_y = (self.active_max_y + 1).min(h - 1);
+
+        // Copy heightmap to temp buffer inside the expanded bounding box
+        for y in copy_min_y..=copy_max_y {
+            let offset = y * w;
+            self.temp_heights[offset + copy_min_x..=offset + copy_max_x]
+                .copy_from_slice(&self.heightmap.data[offset + copy_min_x..=offset + copy_max_x]);
+        }
+
+        let threshold = 0.04f32; // Slope threshold (angle of repose)
+        let alpha = 0.15f32;     // Flow rate factor
+        let mut total_flow = 0.0f32;
+
+        // Dynamic active box tracking for the next frame
+        let mut next_min_x = w;
+        let mut next_max_x = 0;
+        let mut next_min_y = h;
+        let mut next_max_y = 0;
+        let mut flow_occurred = false;
+
+        // 2. Cellular automata slope settling update (loop over core active box)
+        for y in self.active_min_y..=self.active_max_y {
+            let row_offset = y * w;
+            for x in self.active_min_x..=self.active_max_x {
+                let center_idx = row_offset + x;
+                let h_center = self.heightmap.data[center_idx];
+
+                // Left neighbor
+                if x > 0 {
+                    let nx = x - 1;
+                    let neighbor_idx = center_idx - 1;
+                    let h_neighbor = self.heightmap.data[neighbor_idx];
+                    if h_center - h_neighbor > threshold {
+                        let flow = alpha * (h_center - h_neighbor - threshold);
+                        if flow > 0.0 {
+                            self.temp_heights[center_idx] -= flow;
+                            self.temp_heights[neighbor_idx] += flow;
+                            total_flow += flow;
+                            if flow > 1e-5 {
+                                next_min_x = next_min_x.min(nx);
+                                next_max_x = next_max_x.max(x);
+                                next_min_y = next_min_y.min(y);
+                                next_max_y = next_max_y.max(y);
+                                flow_occurred = true;
+                            }
+                        }
+                    }
+                }
+
+                // Right neighbor
+                if x + 1 < w {
+                    let nx = x + 1;
+                    let neighbor_idx = center_idx + 1;
+                    let h_neighbor = self.heightmap.data[neighbor_idx];
+                    if h_center - h_neighbor > threshold {
+                        let flow = alpha * (h_center - h_neighbor - threshold);
+                        if flow > 0.0 {
+                            self.temp_heights[center_idx] -= flow;
+                            self.temp_heights[neighbor_idx] += flow;
+                            total_flow += flow;
+                            if flow > 1e-5 {
+                                next_min_x = next_min_x.min(x);
+                                next_max_x = next_max_x.max(nx);
+                                next_min_y = next_min_y.min(y);
+                                next_max_y = next_max_y.max(y);
+                                flow_occurred = true;
+                            }
+                        }
+                    }
+                }
+
+                // Top neighbor
+                if y > 0 {
+                    let ny = y - 1;
+                    let neighbor_idx = center_idx - w;
+                    let h_neighbor = self.heightmap.data[neighbor_idx];
+                    if h_center - h_neighbor > threshold {
+                        let flow = alpha * (h_center - h_neighbor - threshold);
+                        if flow > 0.0 {
+                            self.temp_heights[center_idx] -= flow;
+                            self.temp_heights[neighbor_idx] += flow;
+                            total_flow += flow;
+                            if flow > 1e-5 {
+                                next_min_x = next_min_x.min(x);
+                                next_max_x = next_max_x.max(x);
+                                next_min_y = next_min_y.min(ny);
+                                next_max_y = next_max_y.max(y);
+                                flow_occurred = true;
+                            }
+                        }
+                    }
+                }
+
+                // Bottom neighbor
+                if y + 1 < h {
+                    let ny = y + 1;
+                    let neighbor_idx = center_idx + w;
+                    let h_neighbor = self.heightmap.data[neighbor_idx];
+                    if h_center - h_neighbor > threshold {
+                        let flow = alpha * (h_center - h_neighbor - threshold);
+                        if flow > 0.0 {
+                            self.temp_heights[center_idx] -= flow;
+                            self.temp_heights[neighbor_idx] += flow;
+                            total_flow += flow;
+                            if flow > 1e-5 {
+                                next_min_x = next_min_x.min(x);
+                                next_max_x = next_max_x.max(x);
+                                next_min_y = next_min_y.min(y);
+                                next_max_y = next_max_y.max(ny);
+                                flow_occurred = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Copy back the updated heights from the expanded bounding box
+        for y in copy_min_y..=copy_max_y {
+            let offset = y * w;
+            self.heightmap.data[offset + copy_min_x..=offset + copy_max_x]
+                .copy_from_slice(&self.temp_heights[offset + copy_min_x..=offset + copy_max_x]);
+        }
+
+        // 4. Update the active bounding box based on dynamic flow tracking
+        if flow_occurred {
+            let padding = 1;
+            self.active_min_x = next_min_x.saturating_sub(padding);
+            self.active_max_x = (next_max_x + padding).min(w - 1);
+            self.active_min_y = next_min_y.saturating_sub(padding);
+            self.active_max_y = (next_max_y + padding).min(h - 1);
+            self.settling_active = true;
+        } else {
+            self.settling_active = false;
+        }
+
+        total_flow
     }
 }
 
@@ -416,9 +618,15 @@ mod tests {
         let hm = Heightmap::new(0, 0, 0.8);
         let mut sim = Simulation {
             heightmap: hm,
+            temp_heights: Vec::new(),
             marble_pos: Vec2::ZERO,
             prev_marble_pos: Vec2::ZERO,
             was_active: false,
+            active_min_x: 0,
+            active_max_x: 0,
+            active_min_y: 0,
+            active_max_y: 0,
+            settling_active: false,
         };
         // Drawing on a 0x0 heightmap should not panic or loop infinitely.
         sim.draw_line(Vec2::ZERO, Vec2::ZERO, 0.1);
@@ -438,5 +646,60 @@ mod tests {
         let diff = (final_sum - initial_sum).abs();
         // Strict conservation check under saturation conditions
         assert!(diff < 1e-2, "Volume not conserved! diff = {}", diff);
+    }
+
+    #[test]
+    fn test_settling_flow_and_volume_conservation() {
+        let mut sim = Simulation::new();
+        sim.heightmap.reset(0.5);
+
+        // Put a pile of height 0.8 at (256, 256)
+        let center_idx = 256 * 512 + 256;
+        sim.heightmap.data[center_idx] = 0.8;
+
+        // Set active box around the pile manually for testing
+        sim.active_min_x = 250;
+        sim.active_max_x = 262;
+        sim.active_min_y = 250;
+        sim.active_max_y = 262;
+        sim.settling_active = true;
+
+        let initial_sum: f64 = sim.heightmap.as_slice().iter().map(|&x| x as f64).sum();
+
+        // Run multiple settle ticks and assert flow occurred
+        let mut flow_occurred = false;
+        for _ in 0..10 {
+            let flow = sim.settle_tick();
+            if flow > 0.0 {
+                flow_occurred = true;
+            }
+        }
+
+        assert!(flow_occurred, "Sand should flow down from the peak");
+
+        let final_sum: f64 = sim.heightmap.as_slice().iter().map(|&x| x as f64).sum();
+        let diff = (final_sum - initial_sum).abs();
+        assert!(diff < 1e-5, "Settling did not conserve volume! diff = {}", diff);
+
+        // Verify the peak height decreased as sand flowed to neighbors
+        assert!(sim.heightmap.data[center_idx] < 0.8, "Peak should be lower after flowing");
+    }
+
+    #[test]
+    fn test_settling_deactivation() {
+        let mut sim = Simulation::new();
+        sim.heightmap.reset(0.5);
+        
+        // Setup flat heightmap (no slope exceeding threshold)
+        sim.active_min_x = 250;
+        sim.active_max_x = 262;
+        sim.active_min_y = 250;
+        sim.active_max_y = 262;
+        sim.settling_active = true;
+
+        // Single tick on flat ground should deactivate settling
+        let flow = sim.settle_tick();
+        assert_eq!(flow, 0.0);
+        assert!(!sim.settling_active, "Settling should deactivate when stable");
     }
 }
