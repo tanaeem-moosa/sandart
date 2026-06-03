@@ -1,6 +1,9 @@
 mod app;
+mod config;
+mod pattern;
 mod renderer;
 mod sim;
+
 
 use app::SandArtApp;
 
