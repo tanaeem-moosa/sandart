@@ -22,6 +22,12 @@ pub struct SandArtApp {
     pub sample_patterns: Vec<std::path::PathBuf>,
     /// Toggle state for collapsible side panel UI.
     pub settings_open: bool,
+    /// Camera azimuth (yaw) angle in radians.
+    pub camera_azimuth: f32,
+    /// Camera elevation (pitch) angle in radians.
+    pub camera_elevation: f32,
+    /// Camera zoom (distance from origin).
+    pub camera_zoom: f32,
 }
 
 impl SandArtApp {
@@ -68,6 +74,9 @@ impl SandArtApp {
             pattern_error: None,
             sample_patterns,
             settings_open: true,
+            camera_azimuth: 0.0,
+            camera_elevation: 0.8, // ~45 degrees
+            camera_zoom: 2.8,
         }
     }
 
@@ -158,7 +167,7 @@ impl eframe::App for SandArtApp {
                             .show_value(true),
                     );
                     ui.add(
-                        egui::Slider::new(&mut self.config.marble_size, 0.005..=0.1)
+                        egui::Slider::new(&mut self.config.marble_size, 0.015..=0.045)
                             .text("Radius (R)")
                             .show_value(true),
                     );
@@ -485,6 +494,11 @@ impl eframe::App for SandArtApp {
 
         // Draw the central canvas
         egui::CentralPanel::default().show(ctx, |ui| {
+            // Add a small helper text at the top of the canvas
+            ui.vertical_centered(|ui| {
+                ui.label(egui::RichText::new("💡 Drag to rotate camera • Scroll to zoom • Shift + Drag to move marble").small());
+            });
+
             // 1. Calculate centered square rect based on available space BEFORE allocating
             let available_rect = ui.available_rect_before_wrap();
             let square_side = available_rect.width().min(available_rect.height()).max(0.0);
@@ -502,6 +516,38 @@ impl eframe::App for SandArtApp {
 
             // 2. Allocate the exact centered rect to align mouse interaction with the visuals
             let response = ui.allocate_rect(centered_rect, egui::Sense::drag());
+
+            // 2.5. Camera Controller updates (scrolling zooms, dragging orbits)
+            let scroll_delta = ctx.input(|i| i.smooth_scroll_delta.y);
+            if scroll_delta.abs() > 0.0 {
+                self.camera_zoom = (self.camera_zoom - scroll_delta * 0.005).clamp(1.2, 5.0);
+            }
+
+            if response.dragged() && !ctx.input(|i| i.modifiers.shift) {
+                let delta = response.drag_delta();
+                self.camera_azimuth += delta.x * 0.005;
+                self.camera_elevation += delta.y * 0.005;
+                self.camera_elevation = self.camera_elevation.clamp(0.05, std::f32::consts::FRAC_PI_2 - 0.05);
+            }
+
+            let cos_elev = self.camera_elevation.cos();
+            let sin_elev = self.camera_elevation.sin();
+            let cos_az = self.camera_azimuth.cos();
+            let sin_az = self.camera_azimuth.sin();
+
+            let eye_x = self.camera_zoom * cos_elev * cos_az;
+            let eye_y = self.camera_zoom * cos_elev * sin_az;
+            let eye_z = self.camera_zoom * sin_elev;
+            let eye = glam::Vec3::new(eye_x, eye_y, eye_z);
+
+            let view = glam::Mat4::look_at_lh(eye, glam::Vec3::ZERO, glam::Vec3::Z);
+            let proj = glam::Mat4::perspective_lh(45.0f32.to_radians(), 1.0, 0.01, 100.0);
+            let view_proj = proj * view;
+
+            let camera_uniforms = crate::renderer::CameraUniforms {
+                view_proj: view_proj.to_cols_array(),
+                camera_pos: [eye.x, eye.y, eye.z, 0.0],
+            };
 
             // Calculate current lighting uniforms
             let angle = self.config.light_angle;
@@ -537,23 +583,13 @@ impl eframe::App for SandArtApp {
                 material_mode: self.config.material_mode as u32,
             };
 
-            let dummy_camera = crate::renderer::CameraUniforms {
-                view_proj: [
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
-                ],
-                camera_pos: [0.0, 0.0, 2.0, 0.0],
-            };
-
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 centered_rect,
                 crate::renderer::SandArtCallback {
                     heightmap_data: self.shared_heightmap.clone(),
                     uniforms: current_uniforms,
-                    camera_uniforms: dummy_camera,
+                    camera_uniforms,
                 },
             ));
 
@@ -561,19 +597,43 @@ impl eframe::App for SandArtApp {
             let mut target_pos = None;
 
             if self.config.pattern_mode == crate::config::PatternMode::Manual {
-                if (response.dragged() || response.clicked()) && radius > 1e-4 {
+                if (response.dragged() || response.clicked()) && ctx.input(|i| i.modifiers.shift) && radius > 1e-4 {
                     if let Some(pointer_pos) = response.interact_pointer_pos() {
-                        // Normalize relative pointer pos to [-1.0, 1.0] from center of table
-                        let rel_x = (pointer_pos.x - centered_rect.center().x) / radius;
-                        // Flip y for standard cartesian coordinate mapping (positive y is up)
-                        let rel_y = -(pointer_pos.y - centered_rect.center().y) / radius;
+                        // Project screen space mouse coordinate to XY plane
+                        let ndc_x = (pointer_pos.x - centered_rect.center().x) / radius;
+                        let ndc_y = -(pointer_pos.y - centered_rect.center().y) / radius;
 
-                        let pos = egui::vec2(rel_x, rel_y);
-                        let len = pos.length();
-                        // Constrain marble center to visual sand circle bounds (0.92 radius in Cartesian)
-                        let max_r = (0.92 - self.config.marble_size).max(0.0);
-                        let clamped_pos = if len > max_r { pos / len * max_r } else { pos };
-                        target_pos = Some(glam::Vec2::new(clamped_pos.x, clamped_pos.y));
+                        let ndc_near = glam::Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+                        let ndc_far = glam::Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+
+                        let view_proj_inv = view_proj.inverse();
+                        let w_near_h = view_proj_inv * ndc_near;
+                        let w_far_h = view_proj_inv * ndc_far;
+
+                        let w_near = glam::Vec3::new(
+                            w_near_h.x / w_near_h.w,
+                            w_near_h.y / w_near_h.w,
+                            w_near_h.z / w_near_h.w,
+                        );
+                        let w_far = glam::Vec3::new(
+                            w_far_h.x / w_far_h.w,
+                            w_far_h.y / w_far_h.w,
+                            w_far_h.z / w_far_h.w,
+                        );
+
+                        let ray_dir = (w_far - w_near).normalize();
+
+                        if ray_dir.z.abs() > 1e-6 {
+                            let t = -w_near.z / ray_dir.z;
+                            let intersect = w_near + t * ray_dir;
+
+                            let pos = egui::vec2(intersect.x, intersect.y);
+                            let len = pos.length();
+                            // Constrain marble center to visual sand circle bounds (0.92 radius in Cartesian)
+                            let max_r = (0.92 - self.config.marble_size).max(0.0);
+                            let clamped_pos = if len > max_r { pos / len * max_r } else { pos };
+                            target_pos = Some(glam::Vec2::new(clamped_pos.x, clamped_pos.y));
+                        }
                     }
                 }
             } else {

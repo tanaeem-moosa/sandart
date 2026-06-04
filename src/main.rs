@@ -13,6 +13,7 @@ fn main() -> eframe::Result {
             .with_inner_size([900.0, 700.0])
             .with_min_inner_size([500.0, 400.0])
             .with_title("Sands of Time: Kinetic Sand Art Simulator"),
+        depth_buffer: 24,
         ..Default::default()
     };
 

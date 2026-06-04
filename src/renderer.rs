@@ -2,6 +2,29 @@ use egui;
 use egui_wgpu;
 use wgpu;
 
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Vertex {
+    pub pos: [f32; 2],
+}
+
+impl Vertex {
+    pub fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+            ],
+        }
+    }
+}
+
+
 #[repr(C, align(16))]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightingUniforms {
@@ -30,6 +53,9 @@ pub struct SandArtRenderResources {
     pub bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
     pub camera_buffer: wgpu::Buffer,
+    pub vertex_buffer: wgpu::Buffer,
+    pub index_buffer: wgpu::Buffer,
+    pub num_indices: u32,
     pub scratch_buffer: Vec<u8>,
 }
 
@@ -41,6 +67,50 @@ impl SandArtRenderResources {
                 "shader.wgsl"
             ))),
         });
+
+        // Generate 1024x1024 vertex grid and index buffer
+        let resolution = 1024;
+        let mut vertices = Vec::with_capacity(resolution * resolution);
+        for y in 0..resolution {
+            let fy = (y as f32 / (resolution - 1) as f32) * 2.0 - 1.0;
+            for x in 0..resolution {
+                let fx = (x as f32 / (resolution - 1) as f32) * 2.0 - 1.0;
+                vertices.push(Vertex { pos: [fx, fy] });
+            }
+        }
+
+        let mut indices = Vec::with_capacity((resolution - 1) * (resolution - 1) * 6);
+        for y in 0..resolution - 1 {
+            for x in 0..resolution - 1 {
+                let idx0 = y * resolution + x;
+                let idx1 = idx0 + 1;
+                let idx2 = (y + 1) * resolution + x;
+                let idx3 = idx2 + 1;
+
+                indices.push(idx0 as u32);
+                indices.push(idx1 as u32);
+                indices.push(idx2 as u32);
+
+                indices.push(idx1 as u32);
+                indices.push(idx3 as u32);
+                indices.push(idx2 as u32);
+            }
+        }
+
+        use wgpu::util::DeviceExt;
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("grid_vertex_buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("grid_index_buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let num_indices = indices.len() as u32;
 
         // 1. Create heightmap texture (GRID_SIZE x GRID_SIZE R8Unorm)
         let texture_size = wgpu::Extent3d {
@@ -97,7 +167,7 @@ impl SandArtRenderResources {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
@@ -107,7 +177,7 @@ impl SandArtRenderResources {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
@@ -172,7 +242,7 @@ impl SandArtRenderResources {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[],
+                buffers: &[Vertex::desc()],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -194,7 +264,13 @@ impl SandArtRenderResources {
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth24Plus,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -206,6 +282,9 @@ impl SandArtRenderResources {
             bind_group,
             uniform_buffer,
             camera_buffer,
+            vertex_buffer,
+            index_buffer,
+            num_indices,
             scratch_buffer: vec![0u8; crate::sim::GRID_SIZE * crate::sim::GRID_SIZE],
         }
     }
@@ -308,7 +387,9 @@ impl egui_wgpu::CallbackTrait for SandArtCallback {
 
                 render_pass.set_pipeline(&res.pipeline);
                 render_pass.set_bind_group(0, &res.bind_group, &[]);
-                render_pass.draw(0..6, 0..1);
+                render_pass.set_vertex_buffer(0, res.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(res.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..res.num_indices, 0, 0..1);
             }
         }
     }
@@ -436,6 +517,23 @@ mod tests {
             let texture = device.create_texture(&texture_desc);
             let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+            let depth_texture_desc = wgpu::TextureDescriptor {
+                label: Some("test_depth_texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth24Plus,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            };
+            let depth_texture = device.create_texture(&depth_texture_desc);
+            let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
             let buffer_desc = wgpu::BufferDescriptor {
                 label: Some("test_readback_buffer"),
                 size: (width * height * 4) as u64,
@@ -459,7 +557,14 @@ mod tests {
                             store: wgpu::StoreOp::Store,
                         },
                     })],
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
                 });
@@ -467,7 +572,9 @@ mod tests {
                 render_pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
                 render_pass.set_pipeline(&resources.pipeline);
                 render_pass.set_bind_group(0, &resources.bind_group, &[]);
-                render_pass.draw(0..6, 0..1);
+                render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
+                render_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                render_pass.draw_indexed(0..resources.num_indices, 0, 0..1);
             }
 
             encoder.copy_texture_to_buffer(

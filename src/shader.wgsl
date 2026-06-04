@@ -24,30 +24,38 @@ struct CameraUniforms {
 @group(0) @binding(2) var<uniform> uniforms: LightingUniforms;
 @group(0) @binding(3) var<uniform> camera: CameraUniforms;
 
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+};
+
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) world_pos: vec3<f32>,
 };
 
 @vertex
-fn vs_main(@builtin(vertex_index) in_vertex_index: u32) -> VertexOutput {
+fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     
-    // Map vertex_index to a quad (-1.0 to 1.0)
-    var positions = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(-1.0, 1.0),
-        vec2<f32>(1.0, -1.0),
-        vec2<f32>(1.0, 1.0)
+    // Convert pos to UV matching original mapping:
+    out.uv = vec2<f32>(
+        in.position.x * 0.5 + 0.5,
+        -in.position.y * 0.5 + 0.5
     );
     
-    out.position = vec4<f32>(positions[in_vertex_index], 0.0, 1.0);
-    out.uv = vec2<f32>(
-        positions[in_vertex_index].x * 0.5 + 0.5,
-        -positions[in_vertex_index].y * 0.5 + 0.5
-    );
+    // Sample heightmap texture
+    let height = textureSampleLevel(heightmap_tex, heightmap_sampler, out.uv, 0.0).r;
+    
+    // Z displacement amplitude
+    let z_scale = 0.018;
+    
+    // Construct 3D world position
+    out.world_pos = vec3<f32>(in.position.x, in.position.y, height * z_scale);
+    
+    // Project position
+    out.position = camera.view_proj * vec4<f32>(out.world_pos, 1.0);
+    
     return out;
 }
 
@@ -66,7 +74,10 @@ fn hue_to_rgb(h: f32) -> vec3<f32> {
 }
 
 @fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+fn fs_main(
+    @location(0) uv: vec2<f32>,
+    @location(1) world_pos: vec3<f32>
+) -> @location(0) vec4<f32> {
     let center = vec2<f32>(0.5, 0.5);
     let dist = distance(uv, center);
     
@@ -107,20 +118,41 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     }
 
     // 2. Render shiny silver 3D marble sphere
+    let C = camera.camera_pos.xyz;
+    let P = world_pos;
+    let D = normalize(P - C);
+    
+    // Sample height at marble position to find sphere Z center
     let marble_uv = vec2<f32>(
         uniforms.marble_pos.x * 0.5 + 0.5,
         -uniforms.marble_pos.y * 0.5 + 0.5
     );
-    let marble_r_uv = uniforms.marble_radius * 0.5;
-    let d_to_marble = distance(uv, marble_uv);
+    let h_marble = textureSampleLevel(heightmap_tex, heightmap_sampler, marble_uv, 0.0).r;
+    let S = vec3<f32>(uniforms.marble_pos.x, uniforms.marble_pos.y, h_marble * 0.018);
+    let R = uniforms.marble_radius;
+    let marble_r_uv = uniforms.marble_radius * 0.5; // for shadow math compat
+    
+    let V = C - S;
+    let b = dot(V, D);
+    let c = dot(V, V) - R * R;
+    let disc = b * b - c;
+    
+    var hit_marble = false;
+    var sphere_normal = vec3<f32>(0.0, 0.0, 1.0);
+    var view_dir = vec3<f32>(0.0, 0.0, 1.0);
+    
+    if (disc >= 0.0) {
+        let t = -b - sqrt(disc);
+        let dist_to_sand = distance(C, P);
+        if (t > 0.0 && t < dist_to_sand) {
+            hit_marble = true;
+            let I = C + t * D;
+            sphere_normal = normalize(I - S);
+            view_dir = -D;
+        }
+    }
 
-    if (d_to_marble < marble_r_uv) {
-        let offset = (uv - marble_uv) / marble_r_uv;
-        let r_sq = dot(offset, offset);
-        let nz = sqrt(1.0 - r_sq);
-        let sphere_normal = normalize(vec3<f32>(offset.x, -offset.y, nz));
-        let view_dir = vec3<f32>(0.0, 0.0, 1.0);
-        
+    if (hit_marble) {
         var sphere_diffuse = vec3<f32>(0.0);
         var sphere_specular = vec3<f32>(0.0);
         
@@ -222,7 +254,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     if (uniforms.led_mode == 0u) {
         // Single Directional Light mode
         let light_dir = normalize(uniforms.light_dir.xyz);
-        let view_dir = vec3<f32>(0.0, 0.0, 1.0);
+        let view_dir = normalize(camera.camera_pos.xyz - world_pos);
         
         let diff_strength = max(dot(normal, light_dir), 0.0);
         let diff_color = uniforms.light_color.rgb * diff_strength * uniforms.light_brightness;
@@ -232,7 +264,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         var shadow_factor = 1.0;
         if (uniforms.shadow_enabled == 1u) {
             let step_count = 32;
-            let z_scale = 0.06;
+            let z_scale = 0.015;
             let step_size = 0.0022;
             let uv_step = vec2<f32>(light_dir.x, -light_dir.y) * step_size;
             let h_step = light_dir.z * step_size * z_scale;
@@ -268,9 +300,9 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
         specular = spec_color * shadow_factor;
     } else {
         // Rainbow LED Ring Mode
-        let view_dir = vec3<f32>(0.0, 0.0, 1.0);
+        let view_dir = normalize(camera.camera_pos.xyz - world_pos);
         let num_leds = 8;
-        let z_scale = 0.06;
+        let z_scale = 0.015;
         let step_size = 0.004;
         let step_count = 8;
         

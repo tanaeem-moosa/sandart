@@ -138,7 +138,7 @@ pub fn displace_line(
                 let h_target_norm = (h_target / r_grid_clamped) * 0.8;
 
                 // Add a tiny micro-texture noise to the groove base
-                let seed = (x * 73856093) ^ (y * 19349663);
+                let seed = (x as u32).wrapping_mul(73856093) ^ (y as u32).wrapping_mul(19349663);
                 let noise = (((seed & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.05; // Range [-0.025, 0.025]
                 let h_target_noisy = (h_target_norm + noise).clamp(0.0, 1.0);
 
@@ -178,15 +178,16 @@ pub fn displace_line(
                     };
 
                     // Perturb sample distances with coordinate-locked noise to simulate clumped deposition
-                    let seed_d1 = (x * 73856093) ^ (y * 19349663) ^ 12345;
+                    let base_seed = (x as u32).wrapping_mul(73856093) ^ (y as u32).wrapping_mul(19349663);
+                    let seed_d1 = base_seed ^ 12345;
                     let noise_d1 = (((seed_d1 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.3 * w_grid;
                     let d1_p = (d1 + noise_d1).clamp(r_grid_clamped, total_radius_clamped);
 
-                    let seed_d2 = (x * 73856093) ^ (y * 19349663) ^ 67890;
+                    let seed_d2 = base_seed ^ 67890;
                     let noise_d2 = (((seed_d2 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.3 * w_grid;
                     let d2_p = (d2 + noise_d2).clamp(r_grid_clamped, total_radius_clamped);
 
-                    let seed_d3 = (x * 73856093) ^ (y * 19349663) ^ 54321;
+                    let seed_d3 = base_seed ^ 54321;
                     let noise_d3 = (((seed_d3 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.3 * w_grid;
                     let d3_p = (d3 + noise_d3).clamp(r_grid_clamped, total_radius_clamped);
 
@@ -202,11 +203,11 @@ pub fn displace_line(
 
                     // Perturb weights based on the destination cell coordinates (rx, ry)
                     let seed_w1 =
-                        (rx1.max(0) as usize * 1299689) ^ (ry1.max(0) as usize * 314159) ^ 9991;
+                        (rx1.max(0) as u32).wrapping_mul(1299689) ^ (ry1.max(0) as u32).wrapping_mul(314159) ^ 9991;
                     let seed_w2 =
-                        (rx2.max(0) as usize * 1299689) ^ (ry2.max(0) as usize * 314159) ^ 9992;
+                        (rx2.max(0) as u32).wrapping_mul(1299689) ^ (ry2.max(0) as u32).wrapping_mul(314159) ^ 9992;
                     let seed_w3 =
-                        (rx3.max(0) as usize * 1299689) ^ (ry3.max(0) as usize * 314159) ^ 9993;
+                        (rx3.max(0) as u32).wrapping_mul(1299689) ^ (ry3.max(0) as u32).wrapping_mul(314159) ^ 9993;
 
                     let nf1 = 1.0 + (((seed_w1 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.6; // +/- 30% variation
                     let nf2 = 1.0 + (((seed_w2 & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.6;
@@ -299,7 +300,7 @@ pub fn settle_tick(
             let h_center = heightmap.data[center_idx];
 
             // Local friction variation (stick-slip repose angle) - larger variation with time seed for dynamic avalanches
-            let seed = (x * 1299689) ^ (y * 314159) ^ (time_seed as usize * 7213);
+            let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
             let local_threshold =
                 (threshold + (((seed & 0xFF) as f32 / 255.0) - 0.5) * 0.055).max(0.005);
 
@@ -309,7 +310,7 @@ pub fn settle_tick(
                 let neighbor_idx = center_idx - 1;
                 let h_neighbor = heightmap.data[neighbor_idx];
                 if h_center - h_neighbor > local_threshold {
-                    let flow_seed = (seed ^ (neighbor_idx * 997)) & 0xFFFF;
+                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
                     // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
                     if (flow_seed % 5) != 0 {
                         let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
@@ -338,7 +339,7 @@ pub fn settle_tick(
                 let neighbor_idx = center_idx + 1;
                 let h_neighbor = heightmap.data[neighbor_idx];
                 if h_center - h_neighbor > local_threshold {
-                    let flow_seed = (seed ^ (neighbor_idx * 997)) & 0xFFFF;
+                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
                     // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
                     if (flow_seed % 5) != 0 {
                         let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
@@ -367,7 +368,7 @@ pub fn settle_tick(
                 let neighbor_idx = center_idx - w;
                 let h_neighbor = heightmap.data[neighbor_idx];
                 if h_center - h_neighbor > local_threshold {
-                    let flow_seed = (seed ^ (neighbor_idx * 997)) & 0xFFFF;
+                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
                     // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
                     if (flow_seed % 5) != 0 {
                         let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
@@ -396,7 +397,7 @@ pub fn settle_tick(
                 let neighbor_idx = center_idx + w;
                 let h_neighbor = heightmap.data[neighbor_idx];
                 if h_center - h_neighbor > local_threshold {
-                    let flow_seed = (seed ^ (neighbor_idx * 997)) & 0xFFFF;
+                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
                     // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
                     if (flow_seed % 5) != 0 {
                         let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
