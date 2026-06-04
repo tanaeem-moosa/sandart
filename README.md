@@ -95,21 +95,23 @@ Once compiled, you can copy the binary from `target/release/sandart` directly to
 
 ---
 
-## Development Roadmap (Reviewed & Refined)
+## Development Roadmap
 
-The project will be built in incremental, testable blocks:
+The project is built in incremental, testable blocks:
 
-- [x] **Block 1: Basic Scaffolding & Windowing**: Set up the `egui` layout, menus, panel widgets, and a placeholder canvas utilizing `egui::Painter` to verify layout resizing and responsiveness.
-- [x] **Block 2: WGPU Render Pipeline Hook**: Integrate `egui_wgpu` with custom paint callbacks. Compile and run a basic vertex/fragment shader rendering a flat, colored circle to prove GPU synchronization.
-- [x] **Block 3: Heightmap Texture & CPU Buffer Transfer**: Create a $512 \times 512$ float grid on the CPU. Map it to a dynamic WGPU texture, upload it each frame, and display it as a grayscale canvas.
-- [x] **Block 4: Coordinate Mapping & Path Drawing**: Map GUI coordinate space to heightmap coordinate space. Track mouse click-and-drag and draw simple trails in the sand.
-- [x] **Block 5A: Marble Path Interpolation & Volume-conserving Displacement**: Prevent "dotted line" trails at high speeds by interpolating paths. Displace sand volume by pushing it into surrounding side-ridges instead of erasing it, keeping exact volume conservation.
-- [x] **Block 5B: CPU Heightmap Settling (Cellular Automata)**: Implement gravity settling using local slopes (angle of repose threshold = 0.04, alpha = 0.15) inside an active bounding box, with a double-buffered flow to prevent rendering flicker and reduce CPU overhead to 0% when sand is stable.
-- [x] **Refactoring Block: Codebase Restructuring & Health Prep**: Decouple the codebase into modular, single-responsibility files (`config.rs`, `sim/grid.rs`, `sim/physics.rs`, `pattern.rs`, `renderer.rs`, `app.rs`) with zero compiler warnings and all tests fully passing.
-- [x] **Block 5C & 6: Playback & Trajectory Patterns (Spirals, G-code, Theta-Rho)**: Implement Archimedean spiral trajectory generators and G-code/Theta-Rho file parsers in `pattern.rs`, and build the path follower playback controller with UI controls.
-- [x] **Block 7: GPU 3D Normal Shading & Raymarched Shadows**: Update the fragment shader to calculate surface normals dynamically on the GPU (sampling neighbor pixels) and render realistic 3D Phong shadows and specular sand highlights.
-- [x] **Block 8: Advanced Visuals & Physics Customization**:
-  - **Granular Noise & Tactility**: Integrated realistic micro-texture carving noise, space-locked randomized clumped ridge deposition, and stochastic grain locking/jamming to break up fluid settling.
-  - **Rotating Rainbow LED Ring**: Simulated an 8-LED rim ring with smooth time-based color cycling and shadow sweep rotation.
-  - **Subtle Marble Drift**: Added magnetic pull lag and sideways slipping to mimic marble movement over physical sand grains.
+- [x] **Block 1: Basic Scaffolding & Windowing**: Set up the `egui` layout, menus, panel widgets, and a placeholder canvas.
+- [x] **Block 2: WGPU Render Pipeline Hook**: Integrate `egui_wgpu` with custom paint callbacks.
+- [x] **Block 3: Heightmap Texture & CPU Buffer Transfer**: Create a float grid on the CPU. Map it to a dynamic WGPU texture.
+- [x] **Block 4: Coordinate Mapping & Path Drawing**: Map GUI coordinate space to heightmap coordinate space and draw trails.
+- [x] **Block 5A: Marble Path Interpolation & Volume-conserving Displacement**: Prevent "dotted line" trails and conserve volume.
+- [x] **Block 5B: CPU Heightmap Settling (Cellular Automata)**: Implement gravity settling using local slopes.
+- [x] **Refactoring Block: Codebase Restructuring & Health Prep**: Decouple the codebase into modular, single-responsibility files.
+- [x] **Block 5C & 6: Playback & Trajectory Patterns (Spirals, G-code, Theta-Rho)**: Implement trajectory generators and G-code/Theta-Rho file parsers.
+- [x] **Block 7: GPU 3D Normal Shading & Raymarched Shadows**: Update shader to calculate surface normals and render 3D Phong shadows.
+- [x] **Block 8: Advanced Visuals & Physics Customization**: Integrate granular noise, rotating LED ring, and marble drift.
+- [x] **v1.2: 3D Perspective Camera & Mesh**: Mesh generation, depth buffer configuration, orbit/zoom camera controller, shift-drag raycast drawing, and safe PRNG hashing.
+- [x] **v1.3: Journey-Style Shading & Performance**: Zero-allocation raw float heightmap upload using `R32Float` with `Nearest` sampling, manual bilinear filtering in WGSL to support all hardware platforms, Half-Lambert diffuse wrapping, Fresnel rim lighting, coordinate-locked microfacet sparkles, and dynamic marble shadow offsets.
+- [ ] **v1.4: Pattern Generators (Step 4)**: Implement mathematical formulas for Lissajous, Rose curves, Spirograph, Fermat spirals, and Multi-marble paths.
+- [ ] **v1.5: Material Physics Presets (Step 5)**: Map materials like Dry Sand, Snow, and Fine Powder to specific cohesion, static repose, and flow models in the cellular automata engine.
+
 

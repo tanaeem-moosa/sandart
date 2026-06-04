@@ -56,7 +56,6 @@ pub struct SandArtRenderResources {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
-    pub scratch_buffer: Vec<u8>,
 }
 
 impl SandArtRenderResources {
@@ -125,7 +124,7 @@ impl SandArtRenderResources {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::R32Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -133,14 +132,14 @@ impl SandArtRenderResources {
         let heightmap_texture_view =
             heightmap_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 2. Create heightmap sampler
+        // 2. Create heightmap sampler (using Nearest filtering for portable R32Float manual bilinear interpolation in shader)
         let heightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("heightmap_sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
@@ -169,7 +168,7 @@ impl SandArtRenderResources {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -178,7 +177,7 @@ impl SandArtRenderResources {
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -285,20 +284,11 @@ impl SandArtRenderResources {
             vertex_buffer,
             index_buffer,
             num_indices,
-            scratch_buffer: vec![0u8; crate::sim::GRID_SIZE * crate::sim::GRID_SIZE],
         }
     }
 
     /// Upload CPU float heightmap data directly to the WGPU texture.
     pub fn update_heightmap(&mut self, queue: &wgpu::Queue, data: &[f32]) {
-        if self.scratch_buffer.len() != data.len() {
-            self.scratch_buffer.resize(data.len(), 0);
-        }
-
-        for (src, dst) in data.iter().zip(self.scratch_buffer.iter_mut()) {
-            *dst = (src * 255.0).clamp(0.0, 255.0) as u8;
-        }
-
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.heightmap_texture,
@@ -306,10 +296,10 @@ impl SandArtRenderResources {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &self.scratch_buffer,
+            bytemuck::cast_slice(data),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(crate::sim::GRID_SIZE as u32),
+                bytes_per_row: Some((crate::sim::GRID_SIZE * 4) as u32),
                 rows_per_image: Some(crate::sim::GRID_SIZE as u32),
             },
             wgpu::Extent3d {
@@ -612,10 +602,14 @@ mod tests {
 
             let data = buffer_slice.get_mapped_range();
 
-            // Verify render has run (RGBA values are populated)
+            // Verify render has run (RGBA values are populated and RGB contains rendered color, not cleared black)
             let top_offset = ((64 * width + 128) * 4) as usize;
+            let r_top = data[top_offset];
+            let g_top = data[top_offset + 1];
+            let b_top = data[top_offset + 2];
             let a_top = data[top_offset + 3];
             assert_eq!(a_top, 255);
+            assert!(r_top > 0 || g_top > 0 || b_top > 0, "Rendered pixel color is pure black; rasterization may have failed!");
 
             drop(data);
             read_buffer.unmap();

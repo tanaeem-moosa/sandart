@@ -2,6 +2,7 @@
 @group(0) @binding(1) var heightmap_sampler: sampler;
 
 const PI: f32 = 3.14159265359;
+const Z_SCALE: f32 = 0.018; // Unified heightmap displacement scale
 
 struct LightingUniforms {
     light_dir: vec4<f32>,
@@ -34,31 +35,6 @@ struct VertexOutput {
     @location(1) world_pos: vec3<f32>,
 };
 
-@vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
-    var out: VertexOutput;
-    
-    // Convert pos to UV matching original mapping:
-    out.uv = vec2<f32>(
-        in.position.x * 0.5 + 0.5,
-        -in.position.y * 0.5 + 0.5
-    );
-    
-    // Sample heightmap texture
-    let height = textureSampleLevel(heightmap_tex, heightmap_sampler, out.uv, 0.0).r;
-    
-    // Z displacement amplitude
-    let z_scale = 0.018;
-    
-    // Construct 3D world position
-    out.world_pos = vec3<f32>(in.position.x, in.position.y, height * z_scale);
-    
-    // Project position
-    out.position = camera.view_proj * vec4<f32>(out.world_pos, 1.0);
-    
-    return out;
-}
-
 // Pseudo-random hash for sand grain highlights
 fn hash(p: vec2<f32>) -> f32 {
     let h = dot(p, vec2<f32>(127.1, 311.7));
@@ -71,6 +47,51 @@ fn hue_to_rgb(h: f32) -> vec3<f32> {
     let g = 2.0 - abs(h * 6.0 - 2.0);
     let b = 2.0 - abs(h * 6.0 - 4.0);
     return clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Manual Bilinear Texture Filtering to support linear height interpolation
+// on platforms without float32_filterable extension support
+fn sample_height_bilinear(uv: vec2<f32>) -> f32 {
+    let tex_size = 1024.0;
+    let texel_coords = uv * tex_size - 0.5;
+    let f = fract(texel_coords);
+    let index = floor(texel_coords);
+    
+    let u0 = (index.x + 0.5) / tex_size;
+    let v0 = (index.y + 0.5) / tex_size;
+    let u1 = (index.x + 1.5) / tex_size;
+    let v1 = (index.y + 1.5) / tex_size;
+    
+    let h00 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v0), 0.0).r;
+    let h10 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v0), 0.0).r;
+    let h01 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v1), 0.0).r;
+    let h11 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v1), 0.0).r;
+    
+    let h0 = mix(h00, h10, f.x);
+    let h1 = mix(h01, h11, f.x);
+    return mix(h0, h1, f.y);
+}
+
+@vertex
+fn vs_main(in: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    
+    // Convert pos to UV matching original mapping:
+    out.uv = vec2<f32>(
+        in.position.x * 0.5 + 0.5,
+        -in.position.y * 0.5 + 0.5
+    );
+    
+    // Sample heightmap texture using manual bilinear sampling
+    let height = sample_height_bilinear(out.uv);
+    
+    // Construct 3D world position
+    out.world_pos = vec3<f32>(in.position.x, in.position.y, height * Z_SCALE);
+    
+    // Project position
+    out.position = camera.view_proj * vec4<f32>(out.world_pos, 1.0);
+    
+    return out;
 }
 
 @fragment
@@ -121,14 +142,15 @@ fn fs_main(
     let C = camera.camera_pos.xyz;
     let P = world_pos;
     let D = normalize(P - C);
+    let view_dir = -D;
     
     // Sample height at marble position to find sphere Z center
     let marble_uv = vec2<f32>(
         uniforms.marble_pos.x * 0.5 + 0.5,
         -uniforms.marble_pos.y * 0.5 + 0.5
     );
-    let h_marble = textureSampleLevel(heightmap_tex, heightmap_sampler, marble_uv, 0.0).r;
-    let S = vec3<f32>(uniforms.marble_pos.x, uniforms.marble_pos.y, h_marble * 0.018);
+    let h_marble = sample_height_bilinear(marble_uv);
+    let S = vec3<f32>(uniforms.marble_pos.x, uniforms.marble_pos.y, h_marble * Z_SCALE);
     let R = uniforms.marble_radius;
     let marble_r_uv = uniforms.marble_radius * 0.5; // for shadow math compat
     
@@ -139,7 +161,6 @@ fn fs_main(
     
     var hit_marble = false;
     var sphere_normal = vec3<f32>(0.0, 0.0, 1.0);
-    var view_dir = vec3<f32>(0.0, 0.0, 1.0);
     
     if (disc >= 0.0) {
         let t = -b - sqrt(disc);
@@ -148,7 +169,6 @@ fn fs_main(
             hit_marble = true;
             let I = C + t * D;
             sphere_normal = normalize(I - S);
-            view_dir = -D;
         }
     }
 
@@ -223,11 +243,11 @@ fn fs_main(
     
     // 1. Compute finite difference normal from neighbor heightmap pixels
     let texel_size = 1.0 / 1024.0;
-    let h_center = textureSampleLevel(heightmap_tex, heightmap_sampler, uv, 0.0).r;
-    let h_left   = textureSampleLevel(heightmap_tex, heightmap_sampler, uv + vec2<f32>(-texel_size, 0.0), 0.0).r;
-    let h_right  = textureSampleLevel(heightmap_tex, heightmap_sampler, uv + vec2<f32>(texel_size, 0.0), 0.0).r;
-    let h_up     = textureSampleLevel(heightmap_tex, heightmap_sampler, uv + vec2<f32>(0.0, -texel_size), 0.0).r;
-    let h_down   = textureSampleLevel(heightmap_tex, heightmap_sampler, uv + vec2<f32>(0.0, texel_size), 0.0).r;
+    let h_center = sample_height_bilinear(uv);
+    let h_left   = sample_height_bilinear(uv + vec2<f32>(-texel_size, 0.0));
+    let h_right  = sample_height_bilinear(uv + vec2<f32>(texel_size, 0.0));
+    let h_up     = sample_height_bilinear(uv + vec2<f32>(0.0, -texel_size));
+    let h_down   = sample_height_bilinear(uv + vec2<f32>(0.0, texel_size));
 
     // Normal tilting scale (high factor creates visual depth)
     let depth_factor = 28.0;
@@ -250,24 +270,31 @@ fn fs_main(
     // 3. Lighting Mode evaluation
     var diffuse = vec3<f32>(0.0);
     var specular = vec3<f32>(0.0);
+    var directional_sparkle = 0.0;
 
     if (uniforms.led_mode == 0u) {
         // Single Directional Light mode
         let light_dir = normalize(uniforms.light_dir.xyz);
-        let view_dir = normalize(camera.camera_pos.xyz - world_pos);
         
-        let diff_strength = max(dot(normal, light_dir), 0.0);
+        // Half-Lambert Diffuse to simulate subsurface scattering wrapping
+        let diff_strength = dot(normal, light_dir) * 0.5 + 0.5;
         let diff_color = uniforms.light_color.rgb * diff_strength * uniforms.light_brightness;
         
-        let spec_color = vec3<f32>(0.0);
-        
+        // Microfacet Sparkles for quartz highlights
+        let half_vec = normalize(light_dir + view_dir);
+        let sparkle_noise = hash(uv * 4000.0);
+        if (sparkle_noise > 0.985) {
+            let dot_nh = max(dot(normal, half_vec), 0.0);
+            let sparkle_intensity = pow(dot_nh, 300.0) * 15.0;
+            directional_sparkle = step(0.8, sparkle_intensity) * (sparkle_noise - 0.985) * 50.0;
+        }
+
         var shadow_factor = 1.0;
         if (uniforms.shadow_enabled == 1u) {
             let step_count = 32;
-            let z_scale = 0.015;
             let step_size = 0.0022;
             let uv_step = vec2<f32>(light_dir.x, -light_dir.y) * step_size;
-            let h_step = light_dir.z * step_size * z_scale;
+            let h_step = light_dir.z * step_size * Z_SCALE;
             
             var curr_uv = uv;
             var curr_h = h_center + 0.0035;
@@ -280,7 +307,7 @@ fn fs_main(
                     break;
                 }
                 
-                let sample_h = textureSampleLevel(heightmap_tex, heightmap_sampler, curr_uv, 0.0).r;
+                let sample_h = sample_height_bilinear(curr_uv);
                 if (curr_h < sample_h) {
                     shadow_factor = 0.28;
                     break;
@@ -288,21 +315,18 @@ fn fs_main(
             }
         }
         
-        // Add soft circular shadow from the marble sphere
-        let light_offset = vec2<f32>(light_dir.x, -light_dir.y) * 0.022;
-        let d_to_marble_shadow = distance(uv, marble_uv - light_offset);
+        // Dynamic soft circular shadow from the marble sphere based on height and light dir
+        let shadow_offset = select(vec2<f32>(0.0), (S.z / max(light_dir.z, 0.001)) * vec2<f32>(light_dir.x, -light_dir.y), light_dir.z > 0.001);
+        let d_to_marble_shadow = distance(uv, marble_uv - shadow_offset);
         if (d_to_marble_shadow < marble_r_uv * 1.5) {
             let m_shadow = smoothstep(marble_r_uv * 0.8, marble_r_uv * 1.5, d_to_marble_shadow);
             shadow_factor = shadow_factor * (0.35 + 0.65 * m_shadow);
         }
         
         diffuse = diff_color * shadow_factor;
-        specular = spec_color * shadow_factor;
     } else {
         // Rainbow LED Ring Mode
-        let view_dir = normalize(camera.camera_pos.xyz - world_pos);
         let num_leds = 8;
-        let z_scale = 0.015;
         let step_size = 0.004;
         let step_count = 8;
         
@@ -321,14 +345,23 @@ fn fs_main(
                 led_color = hue_to_rgb(hue);
             }
             
-            let diff_strength = max(dot(normal, l_dir), 0.0);
+            // Half-Lambert Diffuse
+            let diff_strength = dot(normal, l_dir) * 0.5 + 0.5;
             
-
+            // Microfacet Sparkles under this LED light
+            let half_vec = normalize(l_dir + view_dir);
+            let sparkle_noise = hash(uv * 4000.0);
+            var sp = 0.0;
+            if (sparkle_noise > 0.988) {
+                let dot_nh = max(dot(normal, half_vec), 0.0);
+                let sparkle_intensity = pow(dot_nh, 300.0) * 12.0;
+                sp = step(0.85, sparkle_intensity) * (sparkle_noise - 0.988) * 40.0;
+            }
             
             var shadow_factor = 1.0;
             if (uniforms.shadow_enabled == 1u) {
                 let uv_step = vec2<f32>(l_dir.x, -l_dir.y) * step_size;
-                let h_step = l_dir.z * step_size * z_scale;
+                let h_step = l_dir.z * step_size * Z_SCALE;
                 
                 var curr_uv = uv;
                 var curr_h = h_center + 0.0035;
@@ -341,7 +374,7 @@ fn fs_main(
                         break;
                     }
                     
-                    let sample_h = textureSampleLevel(heightmap_tex, heightmap_sampler, curr_uv, 0.0).r;
+                    let sample_h = sample_height_bilinear(curr_uv);
                     if (curr_h < sample_h) {
                         shadow_factor = 0.25;
                         break;
@@ -349,30 +382,33 @@ fn fs_main(
                 }
             }
             
-            // Add soft circular shadow from the marble for this LED
-            let led_offset = vec2<f32>(l_dir.x, -l_dir.y) * 0.018;
+            // Dynamic soft circular shadow from the marble for this LED
+            let led_offset = select(vec2<f32>(0.0), (S.z / max(l_dir.z, 0.001)) * vec2<f32>(l_dir.x, -l_dir.y), l_dir.z > 0.001);
             let d_to_marble_shadow = distance(uv, marble_uv - led_offset);
             if (d_to_marble_shadow < marble_r_uv * 1.5) {
                 let m_shadow = smoothstep(marble_r_uv * 0.8, marble_r_uv * 1.5, d_to_marble_shadow);
                 shadow_factor = shadow_factor * (0.35 + 0.65 * m_shadow);
             }
             
-            diffuse_accum = diffuse_accum + led_color * diff_strength * shadow_factor;
+            diffuse_accum = diffuse_accum + led_color * (diff_strength + sp * 2.0) * shadow_factor;
         }
         
         diffuse = diffuse_accum * (uniforms.light_brightness / f32(num_leds));
-        specular = vec3<f32>(0.0);
     }
 
-    // Base sand color from uniforms with subtle grain color variation (creates realistic sand texture even when flat)
+    // Base sand color from uniforms with subtle grain color variation
     let color_grain = hash(uv * 1800.0);
     let sand_base_color = uniforms.sand_color.rgb * (1.0 + (color_grain - 0.5) * 0.08);
 
-    // Brighter, warmer ambient reflection to make sand look soft, diffuse and matte (less metallic)
+    // Warm ambient reflection for soft sand look
     let ambient = vec3<f32>(0.45, 0.45, 0.48);
     
-    // Combine shading: ambient + diffuse + specular
-    let final_lighting = ambient + diffuse + specular;
+    // Fresnel Rim Light to simulate soft rim scattering
+    let fresnel = pow(1.0 - max(dot(normal, view_dir), 0.0), 5.0);
+    let rim_color = vec3<f32>(1.0, 0.95, 0.85) * fresnel * 0.45 * uniforms.light_brightness;
+    
+    // Combine shading: ambient + diffuse + specular + rim light + sparkles
+    let final_lighting = ambient + diffuse + specular + rim_color + vec3<f32>(directional_sparkle * uniforms.light_brightness);
     let final_color = sand_base_color * final_lighting;
 
     return vec4<f32>(final_color, 1.0);
