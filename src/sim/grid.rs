@@ -16,6 +16,7 @@ impl Heightmap {
     }
 
     /// Reset the heightmap back to a uniform flat value.
+    #[allow(dead_code)]
     pub fn reset(&mut self, value: f32) {
         self.data.fill(value);
     }

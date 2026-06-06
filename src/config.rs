@@ -12,6 +12,8 @@ pub enum PatternMode {
     Hypotrochoid,
     FermatSpiral,
     HilbertCurve,
+    GosperCurve,
+    SierpinskiCurve,
     RandomWalk,
     Lemniscate,
     MultiMarble,

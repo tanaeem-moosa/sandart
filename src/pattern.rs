@@ -257,6 +257,138 @@ pub fn generate_hilbert_curve(order: u32) -> Vec<Vec2> {
     let start_x = -side / 2.0;
     let start_y = -side / 2.0;
     hilbert_recursive(start_x, start_y, side, 0.0, 0.0, side, order, &mut path);
+    center_and_scale_path(&mut path, 0.874);
+    path
+}
+
+fn center_and_scale_path(path: &mut [Vec2], max_limit: f32) {
+    if path.is_empty() {
+        return;
+    }
+    let mut min_x = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for p in path.iter() {
+        min_x = min_x.min(p.x);
+        max_x = max_x.max(p.x);
+        min_y = min_y.min(p.y);
+        max_y = max_y.max(p.y);
+    }
+    let cx = (min_x + max_x) * 0.5;
+    let cy = (min_y + max_y) * 0.5;
+
+    let mut max_r = 0.0f32;
+    for p in path.iter_mut() {
+        p.x -= cx;
+        p.y -= cy;
+        let r = p.length();
+        max_r = max_r.max(r);
+    }
+
+    let scale = if max_r > 1e-4 { max_limit / max_r } else { 1.0 };
+    for p in path.iter_mut() {
+        *p *= scale;
+    }
+}
+
+fn gosper_a(level: u32, angle: &mut f32, path: &mut Vec<Vec2>, step_len: f32) {
+    if level == 0 {
+        let last_pos = path.last().copied().unwrap_or(Vec2::ZERO);
+        let next_pos = last_pos + Vec2::new(angle.cos(), angle.sin()) * step_len;
+        path.push(next_pos);
+    } else {
+        gosper_a(level - 1, angle, path, step_len);
+        *angle -= std::f32::consts::FRAC_PI_3; // -60 deg
+        gosper_b(level - 1, angle, path, step_len);
+        *angle -= 2.0 * std::f32::consts::FRAC_PI_3; // -120 deg
+        gosper_b(level - 1, angle, path, step_len);
+        *angle += std::f32::consts::FRAC_PI_3; // +60 deg
+        gosper_a(level - 1, angle, path, step_len);
+        *angle += 2.0 * std::f32::consts::FRAC_PI_3; // +120 deg
+        gosper_a(level - 1, angle, path, step_len);
+        gosper_a(level - 1, angle, path, step_len);
+        *angle += std::f32::consts::FRAC_PI_3; // +60 deg
+        gosper_b(level - 1, angle, path, step_len);
+        *angle -= std::f32::consts::FRAC_PI_3; // -60 deg
+    }
+}
+
+fn gosper_b(level: u32, angle: &mut f32, path: &mut Vec<Vec2>, step_len: f32) {
+    if level == 0 {
+        let last_pos = path.last().copied().unwrap_or(Vec2::ZERO);
+        let next_pos = last_pos + Vec2::new(angle.cos(), angle.sin()) * step_len;
+        path.push(next_pos);
+    } else {
+        *angle += std::f32::consts::FRAC_PI_3; // +60 deg
+        gosper_a(level - 1, angle, path, step_len);
+        *angle -= std::f32::consts::FRAC_PI_3; // -60 deg
+        gosper_b(level - 1, angle, path, step_len);
+        gosper_b(level - 1, angle, path, step_len);
+        *angle -= 2.0 * std::f32::consts::FRAC_PI_3; // -120 deg
+        gosper_b(level - 1, angle, path, step_len);
+        *angle -= std::f32::consts::FRAC_PI_3; // -60 deg
+        gosper_a(level - 1, angle, path, step_len);
+        *angle += 2.0 * std::f32::consts::FRAC_PI_3; // +120 deg
+        gosper_a(level - 1, angle, path, step_len);
+        *angle += std::f32::consts::FRAC_PI_3; // +60 deg
+        gosper_b(level - 1, angle, path, step_len);
+    }
+}
+
+/// Generates a recursive space-filling Gosper curve (hexagonal)
+pub fn generate_gosper_curve(order: u32) -> Vec<Vec2> {
+    let order = order.clamp(1, 5);
+    let mut path = Vec::new();
+    path.push(Vec2::ZERO);
+    let mut angle = 0.0f32;
+    let step_len = 1.0f32;
+    gosper_a(order, &mut angle, &mut path, step_len);
+    center_and_scale_path(&mut path, 0.874);
+    path
+}
+
+fn sierpinski_a(level: u32, angle: &mut f32, path: &mut Vec<Vec2>, step_len: f32) {
+    if level == 0 {
+        let last_pos = path.last().copied().unwrap_or(Vec2::ZERO);
+        let next_pos = last_pos + Vec2::new(angle.cos(), angle.sin()) * step_len;
+        path.push(next_pos);
+    } else {
+        sierpinski_b(level - 1, angle, path, step_len);
+        *angle += std::f32::consts::FRAC_PI_3; // +60 deg
+        sierpinski_a(level - 1, angle, path, step_len);
+        *angle += std::f32::consts::FRAC_PI_3; // +60 deg
+        sierpinski_b(level - 1, angle, path, step_len);
+    }
+}
+
+fn sierpinski_b(level: u32, angle: &mut f32, path: &mut Vec<Vec2>, step_len: f32) {
+    if level == 0 {
+        let last_pos = path.last().copied().unwrap_or(Vec2::ZERO);
+        let next_pos = last_pos + Vec2::new(angle.cos(), angle.sin()) * step_len;
+        path.push(next_pos);
+    } else {
+        sierpinski_a(level - 1, angle, path, step_len);
+        *angle -= std::f32::consts::FRAC_PI_3; // -60 deg
+        sierpinski_b(level - 1, angle, path, step_len);
+        *angle -= std::f32::consts::FRAC_PI_3; // -60 deg
+        sierpinski_a(level - 1, angle, path, step_len);
+    }
+}
+
+/// Generates a recursive space-filling Sierpinski arrowhead curve
+pub fn generate_sierpinski_curve(order: u32) -> Vec<Vec2> {
+    let order = order.clamp(1, 7);
+    let mut path = Vec::new();
+    path.push(Vec2::ZERO);
+    let mut angle = 0.0f32;
+    let step_len = 1.0f32;
+    if order % 2 == 0 {
+        sierpinski_a(order, &mut angle, &mut path, step_len);
+    } else {
+        sierpinski_b(order, &mut angle, &mut path, step_len);
+    }
+    center_and_scale_path(&mut path, 0.874);
     path
 }
 
@@ -667,6 +799,20 @@ mod tests {
         assert!(!hilbert.is_empty());
         for p in &hilbert {
             assert!(p.x.abs() <= 0.875 && p.y.abs() <= 0.875, "Hilbert point {:?} out of bounds", p);
+        }
+
+        // Gosper
+        let gosper = generate_gosper_curve(3);
+        assert!(!gosper.is_empty());
+        for p in &gosper {
+            assert!(p.length() <= 0.92, "Gosper point {:?} out of bounds", p);
+        }
+
+        // Sierpinski
+        let sierp = generate_sierpinski_curve(4);
+        assert!(!sierp.is_empty());
+        for p in &sierp {
+            assert!(p.length() <= 0.92, "Sierpinski point {:?} out of bounds", p);
         }
 
         // Lemniscate

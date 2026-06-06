@@ -311,16 +311,112 @@ fn fs_main(
     let noise_scale = 1500.0;
     let grain_noise = hash(uv * noise_scale);
     let grain_noise_y = hash(uv * noise_scale + vec2<f32>(17.0, 43.0));
-    normal = normalize(normal + vec3<f32>(
+    var perturb = vec3<f32>(
         (grain_noise - 0.5) * 0.12,
         (grain_noise_y - 0.5) * 0.12,
         0.0
-    ));
+    );
+
+    // Apply procedural magnetic spike deformation for Iron Filings
+    if (uniforms.material_mode == 8u) {
+        var mag_offset = vec2<f32>(0.0, 0.0);
+        for (var j = 0u; j < uniforms.marble_count; j = j + 1u) {
+            let m_pos = uniforms.marbles[j].pos;
+            let m_uv = vec2<f32>(m_pos.x * 0.5 + 0.5, -m_pos.y * 0.5 + 0.5);
+            let to_m = uv - m_uv;
+            let dist = length(to_m);
+            if (dist < 0.22) {
+                let weight = clamp((0.22 - dist) / 0.22, 0.0, 1.0);
+                let w_steep = weight * weight * weight;
+                
+                // Concentric magnetic ripples
+                let conc = cos(dist * 2.0 * PI / 0.015);
+                
+                // Radial spike needles
+                let angle = atan2(to_m.y, to_m.x);
+                let rad = cos(angle * 28.0);
+                
+                let dir = to_m / (dist + 0.0001);
+                let perp = vec2<f32>(-dir.y, dir.x);
+                
+                // Perturb normal along radial field lines and transverse spikes
+                mag_offset = mag_offset + dir * conc * w_steep * 0.55 + perp * rad * conc * w_steep * 0.40;
+            }
+        }
+        perturb = perturb + vec3<f32>(mag_offset.x, mag_offset.y, 0.0);
+    }
+
+    normal = normalize(normal + perturb);
 
     // 3. Lighting Mode evaluation
     var diffuse = vec3<f32>(0.0);
     var specular = vec3<f32>(0.0);
     var directional_sparkle = 0.0;
+
+    // A. Define material presets
+    var mat_base_color = uniforms.sand_color.rgb;
+    var sparkles_threshold = 0.996;
+    var sparkles_intensity = 8.0;
+    var sparkles_power = 500.0;
+    var rim_mult = 0.45;
+    var roughness = 0.9;
+    var is_metallic = 0.0;
+    var is_moon_dust = 0.0;
+
+    if (uniforms.material_mode == 0u) { // ButterCream
+        mat_base_color = vec3<f32>(0.95, 0.93, 0.88);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.10;
+        roughness = 0.8;
+    } else if (uniforms.material_mode == 2u) { // Snow
+        mat_base_color = vec3<f32>(0.98, 0.98, 1.0);
+        sparkles_threshold = 0.990;
+        sparkles_intensity = 20.0;
+        sparkles_power = 400.0;
+        rim_mult = 0.90;
+        roughness = 0.6;
+    } else if (uniforms.material_mode == 3u) { // KineticSand
+        mat_base_color = vec3<f32>(0.85, 0.82, 0.77);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.20;
+        roughness = 1.0;
+    } else if (uniforms.material_mode == 4u) { // WetSand
+        mat_base_color = vec3<f32>(0.68, 0.62, 0.53);
+        sparkles_threshold = 0.999;
+        sparkles_intensity = 1.0;
+        rim_mult = 0.10;
+        roughness = 0.3;
+    } else if (uniforms.material_mode == 5u) { // FinePowder
+        mat_base_color = vec3<f32>(0.96, 0.96, 0.96);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.15;
+        roughness = 1.0;
+    } else if (uniforms.material_mode == 6u) { // Oobleck
+        mat_base_color = vec3<f32>(0.75, 0.90, 0.30);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.60;
+        roughness = 0.15;
+    } else if (uniforms.material_mode == 7u) { // MoonDust
+        mat_base_color = vec3<f32>(0.35, 0.35, 0.35);
+        sparkles_threshold = 0.997;
+        sparkles_intensity = 4.0;
+        sparkles_power = 450.0;
+        rim_mult = 0.05;
+        roughness = 0.95;
+        is_moon_dust = 1.0;
+    } else if (uniforms.material_mode == 8u) { // IronFilings
+        mat_base_color = vec3<f32>(0.20, 0.20, 0.22);
+        sparkles_threshold = 0.992;
+        sparkles_intensity = 12.0;
+        sparkles_power = 450.0;
+        rim_mult = 0.20;
+        roughness = 0.4;
+        is_metallic = 1.0;
+    }
 
     if (uniforms.led_mode == 0u) {
         // Single Directional Light mode
@@ -333,10 +429,10 @@ fn fs_main(
         // Microfacet Sparkles for quartz highlights
         let half_vec = normalize(light_dir + view_dir);
         let sparkle_noise = hash(uv * 4000.0);
-        if (sparkle_noise > 0.985) {
+        if (sparkle_noise > sparkles_threshold) {
             let dot_nh = max(dot(normal, half_vec), 0.0);
-            let sparkle_intensity = pow(dot_nh, 300.0) * 15.0;
-            directional_sparkle = step(0.8, sparkle_intensity) * (sparkle_noise - 0.985) * 50.0;
+            let sparkle_intensity = pow(dot_nh, sparkles_power) * sparkles_intensity;
+            directional_sparkle = step(0.8, sparkle_intensity) * (sparkle_noise - sparkles_threshold) * 50.0;
         }
 
         var shadow_factor = 1.0;
@@ -410,10 +506,11 @@ fn fs_main(
             let half_vec = normalize(l_dir + view_dir);
             let sparkle_noise = hash(uv * 4000.0);
             var sp = 0.0;
-            if (sparkle_noise > 0.988) {
+            let led_sparkles_threshold = sparkles_threshold + 0.003;
+            if (sparkle_noise > led_sparkles_threshold) {
                 let dot_nh = max(dot(normal, half_vec), 0.0);
-                let sparkle_intensity = pow(dot_nh, 300.0) * 12.0;
-                sp = step(0.85, sparkle_intensity) * (sparkle_noise - 0.988) * 40.0;
+                let sparkle_intensity = pow(dot_nh, sparkles_power) * sparkles_intensity;
+                sp = step(0.85, sparkle_intensity) * (sparkle_noise - led_sparkles_threshold) * 40.0;
             }
             
             var shadow_factor = 1.0;
@@ -462,20 +559,66 @@ fn fs_main(
         diffuse = diffuse_accum * (uniforms.light_brightness / f32(num_leds));
     }
 
-    // Base sand color from uniforms with subtle grain color variation
-    let color_grain = hash(uv * 1800.0);
-    let sand_base_color = uniforms.sand_color.rgb * (1.0 + (color_grain - 0.5) * 0.08);
+    // B. Glossy Specular Reflection for wet/liquid/metallic materials
+    var specular_reflect = vec3<f32>(0.0);
+    if (roughness < 0.5) {
+        let spec_power = mix(256.0, 16.0, (roughness - 0.1) / 0.4);
+        let spec_int = mix(2.5, 0.5, (roughness - 0.1) / 0.4);
+        
+        if (uniforms.led_mode == 0u) {
+            let light_dir = normalize(uniforms.light_dir.xyz);
+            let half_vec = normalize(light_dir + view_dir);
+            let dot_nh = max(dot(normal, half_vec), 0.0);
+            specular_reflect = uniforms.light_color.rgb * pow(dot_nh, spec_power) * spec_int * uniforms.light_brightness;
+        } else {
+            let num_leds = 8;
+            var spec_accum = vec3<f32>(0.0);
+            for (var i = 0; i < num_leds; i = i + 1) {
+                let angle_led = f32(i) * (2.0 * PI / f32(num_leds)) + uniforms.time * 0.10;
+                let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.20));
+                let half_vec = normalize(l_dir + view_dir);
+                let dot_nh = max(dot(normal, half_vec), 0.0);
+                
+                var led_color = vec3<f32>(0.0);
+                if (uniforms.led_mode == 1u) {
+                    let hue = fract(f32(i) / f32(num_leds) - uniforms.time * 0.05);
+                    led_color = hue_to_rgb(hue);
+                } else {
+                    let hue = fract(uniforms.time * 0.03);
+                    led_color = hue_to_rgb(hue);
+                }
+                spec_accum = spec_accum + led_color * pow(dot_nh, spec_power) * spec_int;
+            }
+            specular_reflect = spec_accum * (uniforms.light_brightness / f32(num_leds));
+        }
+    }
 
-    // Warm ambient reflection for soft sand look
-    let ambient = vec3<f32>(0.45, 0.45, 0.48);
+    // Base sand color from presets with grain color variation locked to texel resolution (1024)
+    let color_grain = hash(floor(uv * 1024.0));
+    let sand_base_color = mat_base_color * (1.0 + (color_grain - 0.5) * 0.025);
+
+    // Warm ambient reflection for soft sand look (darker charcoal for Moon Dust)
+    let ambient_base = mix(vec3<f32>(0.15, 0.15, 0.16), vec3<f32>(0.02, 0.02, 0.025), is_moon_dust);
+    
+    // Procedural Ambient Occlusion based on local height depth relative to the flat bed (0.8)
+    let ao = clamp(1.0 - max(0.8 - h_center, 0.0) * 3.5, 0.15, 1.0);
+    let ambient = ambient_base * ao;
     
     // Fresnel Rim Light to simulate soft rim scattering
     let fresnel = pow(1.0 - max(dot(normal, view_dir), 0.0), 5.0);
-    let rim_color = vec3<f32>(1.0, 0.95, 0.85) * fresnel * 0.45 * uniforms.light_brightness;
+    let rim_color = vec3<f32>(1.0, 0.95, 0.85) * fresnel * rim_mult * uniforms.light_brightness;
     
-    // Combine shading: ambient + diffuse + specular + rim light + sparkles
-    let final_lighting = ambient + diffuse + specular + rim_color + vec3<f32>(directional_sparkle * uniforms.light_brightness);
-    let final_color = sand_base_color * final_lighting;
+    // Combine shading: ambient + diffuse + rim light + sparkles
+    let final_lighting = ambient + diffuse + rim_color + vec3<f32>(directional_sparkle * uniforms.light_brightness);
+    
+    var final_color = vec3<f32>(0.0);
+    if (is_metallic > 0.5) {
+        // Metallic reflection: multiply reflect by base color
+        final_color = sand_base_color * final_lighting + specular_reflect * mat_base_color;
+    } else {
+        // Dielectric reflection: additive specular
+        final_color = sand_base_color * final_lighting + specular_reflect;
+    }
 
     return vec4<f32>(final_color, 1.0);
 }

@@ -112,6 +112,11 @@ The project is built in incremental, testable blocks:
 - [x] **v1.2: 3D Perspective Camera & Mesh**: Mesh generation, depth buffer configuration, orbit/zoom camera controller, shift-drag raycast drawing, and safe PRNG hashing.
 - [x] **v1.3: Journey-Style Shading & Performance**: Zero-allocation raw float heightmap upload using `R32Float` with `Nearest` sampling, manual bilinear filtering in WGSL to support all hardware platforms, Half-Lambert diffuse wrapping, Fresnel rim lighting, coordinate-locked microfacet sparkles, and dynamic marble shadow offsets.
 - [x] **v1.4: Pattern Generators (Step 4)**: Implement mathematical formulas for Lissajous, Rose curves, Spirograph, Fermat spirals, and Multi-marble paths supporting up to 5 marbles with Chase/Multi-Marble modes.
-- [ ] **v1.5: Material Physics Presets (Step 5)**: Map materials like Dry Sand, Snow, and Fine Powder to specific cohesion, static repose, and flow models in the cellular automata engine.
+- [x] **v1.5: Material Physics Presets (Step 5)**: Implement 9 physical material presets (Butter-Cream, Dry Sand, Snow, Kinetic Sand, Wet Sand, Fine Powder, Oobleck, Moon Dust, and Iron Filings) across the cellular automata engine, app simulation controller, and the WGSL fragment shading system with perfect volume conservation.
+- [x] **v1.5+: Space-Filling Curves & Stable Physics (Step 6)**:
+  - Added **Gosper Curve** (hexagonal) and **Sierpinski Curve** (arrowhead/triangular) space-filling patterns.
+  - Implemented **Magnetic Pull** for Iron Filings, causing filings to be stochastically attracted toward any active marble/magnet (including uphill flow).
+  - Added a **Glass Cover Limit** (`1.5`) in `displace_line` that caps sand height and dynamically distributes excess volume to neighboring cells.
+  - Fixed the gravity-avalanche collapse flow rate to a stable `0.10` and added dynamic conservation clamps to prevent numerical blowups.
 
 

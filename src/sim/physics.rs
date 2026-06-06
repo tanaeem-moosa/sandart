@@ -11,6 +11,85 @@ pub struct ActiveBounds {
     pub active: bool,
 }
 
+/// Helper function to add sand to a cell, clamping it at max_height (glass top)
+/// and distributing any excess volume to its available 4-way neighbors.
+fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize, amount: f32, max_height: f32) {
+    if amount <= 0.0 {
+        return;
+    }
+    let current_h = heightmap.data[idx];
+    if current_h + amount <= max_height {
+        heightmap.data[idx] = current_h + amount;
+    } else {
+        let allowed = (max_height - current_h).max(0.0);
+        heightmap.data[idx] = max_height;
+        let mut excess = amount - allowed;
+        if excess <= 1e-6 {
+            return;
+        }
+
+        // Distribute excess to 4 neighbors that are below the max_height
+        let x = idx % w;
+        let y = idx / w;
+        let mut neighbors = Vec::with_capacity(4);
+        if x > 0 { neighbors.push(idx - 1); }
+        if x + 1 < w { neighbors.push(idx + 1); }
+        if y > 0 { neighbors.push(idx - w); }
+        if y + 1 < h { neighbors.push(idx + w); }
+
+        // Filter neighbors that have room (height < max_height)
+        let mut room_neighbors = Vec::with_capacity(4);
+        for &n_idx in &neighbors {
+            let nh = heightmap.data[n_idx];
+            if nh < max_height {
+                room_neighbors.push((n_idx, max_height - nh));
+            }
+        }
+
+        if room_neighbors.is_empty() {
+            // If all neighbors are full, distribute to all neighbors equally (overflowing slightly)
+            let num = neighbors.len() as f32;
+            let share = excess / num;
+            for &n_idx in &neighbors {
+                heightmap.data[n_idx] += share;
+            }
+        } else {
+            // Distribute to room_neighbors proportional to their room
+            // Let's do up to 3 passes to distribute everything
+            let mut room_neighbors = room_neighbors;
+            let mut distributed = false;
+            for _ in 0..3 {
+                let count = room_neighbors.len();
+                if count == 0 || excess <= 1e-6 {
+                    distributed = true;
+                    break;
+                }
+                let share = excess / count as f32;
+                let mut next_room = Vec::with_capacity(4);
+                for (n_idx, room) in room_neighbors {
+                    if room > 0.0 {
+                        let to_add = share.min(room);
+                        heightmap.data[n_idx] += to_add;
+                        excess -= to_add;
+                        let new_room = room - to_add;
+                        if new_room > 0.0 {
+                            next_room.push((n_idx, new_room));
+                        }
+                    }
+                }
+                room_neighbors = next_room;
+            }
+            if !distributed && excess > 1e-6 {
+                let num = neighbors.len() as f32;
+                let share = excess / num;
+                for &n_idx in &neighbors {
+                    heightmap.data[n_idx] += share;
+                }
+            }
+        }
+    }
+}
+
 /// Displace sand along a line segment from start to end, carving a groove
 /// and depositing the displaced volume into the surrounding ridge area.
 pub fn displace_line(
@@ -231,15 +310,38 @@ pub fn displace_line(
 
                     let rx1_clamped = rx1.clamp(0, w as isize - 1) as usize;
                     let ry1_clamped = ry1.clamp(0, h as isize - 1) as usize;
-                    heightmap.data[ry1_clamped * w + rx1_clamped] += diff * w1;
+                    let dest1_idx = ry1_clamped * w + rx1_clamped;
+                    let h_above1 = (heightmap.data[dest1_idx] - 0.8).max(0.0);
 
                     let rx2_clamped = rx2.clamp(0, w as isize - 1) as usize;
                     let ry2_clamped = ry2.clamp(0, h as isize - 1) as usize;
-                    heightmap.data[ry2_clamped * w + rx2_clamped] += diff * w2;
+                    let dest2_idx = ry2_clamped * w + rx2_clamped;
+                    let h_above2 = (heightmap.data[dest2_idx] - 0.8).max(0.0);
 
                     let rx3_clamped = rx3.clamp(0, w as isize - 1) as usize;
                     let ry3_clamped = ry3.clamp(0, h as isize - 1) as usize;
-                    heightmap.data[ry3_clamped * w + rx3_clamped] += diff * w3;
+                    let dest3_idx = ry3_clamped * w + rx3_clamped;
+                    let h_above3 = (heightmap.data[dest3_idx] - 0.8).max(0.0);
+
+                    // Scale factor for asymptotic decay based on marble diameter/height in heightmap units
+                    let scale = 2.0 * (radius / 0.018).max(0.1);
+                    
+                    let x1 = h_above1 / scale;
+                    let m1 = 1.0 / (1.0 + x1 * x1 * x1 * x1);
+
+                    let x2 = h_above2 / scale;
+                    let m2 = 1.0 / (1.0 + x2 * x2 * x2 * x2);
+
+                    let x3 = h_above3 / scale;
+                    let m3 = 1.0 / (1.0 + x3 * x3 * x3 * x3);
+
+                    let deposited_volume = diff * (w1 * m1 + w2 * m2 + w3 * m3);
+                    if deposited_volume > 1e-6 {
+                        heightmap.data[current_idx] = current_h - deposited_volume;
+                        add_sand_with_limit(heightmap, dest1_idx, w, h, diff * w1 * m1, 1.5);
+                        add_sand_with_limit(heightmap, dest2_idx, w, h, diff * w2 * m2, 1.5);
+                        add_sand_with_limit(heightmap, dest3_idx, w, h, diff * w3 * m3, 1.5);
+                    }
                 }
             }
         }
@@ -250,9 +352,11 @@ pub fn displace_line(
 pub fn settle_tick(
     heightmap: &mut Heightmap,
     temp_heights: &mut Vec<f32>,
+    sliding: &mut Vec<bool>,
     active_bounds: &mut ActiveBounds,
-    threshold: f32,
-    alpha: f32,
+    material: crate::config::MaterialMode,
+    active_marbles: &[Vec2],
+    marble_vel: f32,
     time_seed: u32,
 ) -> f32 {
     if !active_bounds.active {
@@ -265,9 +369,12 @@ pub fn settle_tick(
         return 0.0;
     }
 
-    // Safety check to prevent panics if heightmap is resized
+    // Safety checks to prevent panics if heights or sliding buffer are resized
     if temp_heights.len() != heightmap.data.len() {
         temp_heights.resize(heightmap.data.len(), 0.8);
+    }
+    if sliding.len() != heightmap.data.len() {
+        sliding.resize(heightmap.data.len(), false);
     }
 
     // 1. Determine copy boundaries (expanded by 1 to include neighbors)
@@ -299,33 +406,191 @@ pub fn settle_tick(
             let center_idx = row_offset + x;
             let h_center = heightmap.data[center_idx];
 
-            // Local friction variation (stick-slip repose angle) - larger variation with time seed for dynamic avalanches
             let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
-            let local_threshold =
-                (threshold + (((seed & 0xFF) as f32 / 255.0) - 0.5) * 0.055).max(0.005);
+            
+            // Loop over 4 neighbors
+            let neighbors = [
+                (x > 0, x.wrapping_sub(1), y, center_idx.wrapping_sub(1)),
+                (x + 1 < w, x + 1, y, center_idx + 1),
+                (y > 0, x, y.wrapping_sub(1), center_idx.wrapping_sub(w)),
+                (y + 1 < h, x, y + 1, center_idx + w),
+            ];
 
-            // Left neighbor
-            if x > 0 {
-                let nx = x - 1;
-                let neighbor_idx = center_idx - 1;
+            let mut cell_flowed = false;
+
+            for &(cond, nx, ny, neighbor_idx) in &neighbors {
+                if !cond {
+                    continue;
+                }
+
                 let h_neighbor = heightmap.data[neighbor_idx];
-                if h_center - h_neighbor > local_threshold {
+                let geom_slope = h_center - h_neighbor;
+
+                // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
+                if geom_slope > 0.20 {
+                    let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
+                    if flow > 0.0 {
+                        let current_temp_center = temp_heights[center_idx];
+                        let current_temp_neighbor = temp_heights[neighbor_idx];
+                        let temp_diff = current_temp_center - current_temp_neighbor;
+                        let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                        if clamped_flow > 0.0 {
+                            temp_heights[center_idx] -= clamped_flow;
+                            temp_heights[neighbor_idx] += clamped_flow;
+                            total_flow += clamped_flow;
+                            cell_flowed = true;
+                            
+                            next_min_x = next_min_x.min(nx).min(x);
+                            next_max_x = next_max_x.max(nx).max(x);
+                            next_min_y = next_min_y.min(ny).min(y);
+                            next_max_y = next_max_y.max(ny).max(y);
+                            flow_occurred = true;
+                        }
+                    }
+                    continue;
+                }
+
+                // B. Material-specific parameters
+                let mut threshold;
+                let alpha;
+                let lock_chance;
+                let mut quantize_size = None;
+                let mut magnetic_bias = 0.0;
+
+                match material {
+                    crate::config::MaterialMode::ButterCream => {
+                        threshold = 0.04;
+                        alpha = 0.15;
+                        lock_chance = 0.20;
+                    }
+                    crate::config::MaterialMode::DrySand => {
+                        threshold = if sliding[center_idx] { 0.04 } else { 0.08 };
+                        alpha = 0.25;
+                        quantize_size = Some(0.01);
+                        
+                        // Friction Jamming: if center has >= 3 higher neighbors, lock it with 80% prob
+                        let mut higher_neighbors = 0;
+                        for &(_, _, _, n_idx) in &neighbors {
+                            if heightmap.data[n_idx] >= h_center - 1e-4 {
+                                higher_neighbors += 1;
+                            }
+                        }
+                        if higher_neighbors >= 3 {
+                            lock_chance = 0.80;
+                        } else {
+                            lock_chance = 0.10;
+                        }
+                    }
+                    crate::config::MaterialMode::Snow => {
+                        threshold = 0.15;
+                        alpha = 0.04;
+                        lock_chance = 0.30;
+                    }
+                    crate::config::MaterialMode::KineticSand => {
+                        threshold = 0.12;
+                        alpha = 0.12;
+                        lock_chance = 0.75;
+                        quantize_size = Some(0.015);
+                    }
+                    crate::config::MaterialMode::WetSand => {
+                        threshold = 0.10;
+                        alpha = 0.06;
+                        lock_chance = 0.15;
+                    }
+                    crate::config::MaterialMode::FinePowder => {
+                        threshold = 0.01;
+                        alpha = 0.35;
+                        lock_chance = 0.02;
+                    }
+                    crate::config::MaterialMode::Oobleck => {
+                        let t = ((marble_vel - 0.03) / 0.12).clamp(0.0, 1.0);
+                        let t_steep = t * t;
+                        threshold = 0.005 + (0.32 - 0.005) * t_steep;
+                        alpha = 0.40 + (0.005 - 0.40) * t_steep;
+                        lock_chance = 0.02 + (0.98 - 0.02) * t_steep;
+                    }
+                    crate::config::MaterialMode::MoonDust => {
+                        threshold = 0.22;
+                        alpha = 0.02;
+                        lock_chance = 0.40;
+                        quantize_size = Some(0.015);
+                    }
+                    crate::config::MaterialMode::IronFilings => {
+                        threshold = 0.08;
+                        alpha = 0.35;
+                        lock_chance = 0.05;
+                        
+                        if !active_marbles.is_empty() {
+                            let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
+                            let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
+                            let cell_pos = Vec2::new(cell_x, cell_y);
+
+                            // Find the closest active marble
+                            let mut closest_marble = active_marbles[0];
+                            let mut min_dist_to_marble = (cell_pos - closest_marble).length();
+                            for &m in &active_marbles[1..] {
+                                let dist = (cell_pos - m).length();
+                                if dist < min_dist_to_marble {
+                                    min_dist_to_marble = dist;
+                                    closest_marble = m;
+                                }
+                            }
+
+                            if min_dist_to_marble < 0.22 {
+                                let ripple = (min_dist_to_marble * 2.0 * std::f32::consts::PI / 0.025).cos();
+                                threshold = (0.08 + ripple * 0.05).max(0.01);
+                                
+                                // Magnetic pull towards the closest magnet/marble
+                                if min_dist_to_marble > 1e-4 {
+                                    let neighbor_x = (nx as f32 / w as f32) * 2.0 - 1.0;
+                                    let neighbor_y = 1.0 - (ny as f32 / h as f32) * 2.0;
+                                    let neighbor_pos = Vec2::new(neighbor_x, neighbor_y);
+                                    let to_neighbor = neighbor_pos - cell_pos;
+                                    let to_magnet = closest_marble - cell_pos;
+                                    
+                                    if to_neighbor.length_squared() > 1e-8 {
+                                        let dot_prod = to_magnet.normalize().dot(to_neighbor.normalize());
+                                        let pull_strength = 0.24 * (1.0 - min_dist_to_marble / 0.22).max(0.0);
+                                        magnetic_bias = pull_strength * dot_prod;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let slope = geom_slope + magnetic_bias;
+
+                if slope <= 1e-6 {
+                    continue;
+                }
+
+                // C. Stochastic locking and sliding condition
+                if slope > threshold {
                     let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
-                    // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
-                    if (flow_seed % 5) != 0 {
-                        let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
-                        let flow =
-                            (alpha * (h_center - h_neighbor - local_threshold) * alpha_noise)
-                                .max(0.0);
+                    let rand_val = flow_seed as f32 / 65535.0;
+                    
+                    if rand_val >= lock_chance {
+                        let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
+                        let mut flow = (alpha * (slope - threshold) * alpha_noise).max(0.0);
+                        
+                        if let Some(q) = quantize_size {
+                            flow = (flow / q).round() * q;
+                        }
+
                         if flow > 0.0 {
-                            temp_heights[center_idx] -= flow;
-                            temp_heights[neighbor_idx] += flow;
-                            total_flow += flow;
-                            if flow > 1e-5 {
-                                next_min_x = next_min_x.min(nx);
-                                next_max_x = next_max_x.max(x);
-                                next_min_y = next_min_y.min(y);
-                                next_max_y = next_max_y.max(y);
+                            let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
+                            let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                            if clamped_flow > 0.0 {
+                                temp_heights[center_idx] -= clamped_flow;
+                                temp_heights[neighbor_idx] += clamped_flow;
+                                total_flow += clamped_flow;
+                                cell_flowed = true;
+                                
+                                next_min_x = next_min_x.min(nx).min(x);
+                                next_max_x = next_max_x.max(nx).max(x);
+                                next_min_y = next_min_y.min(ny).min(y);
+                                next_max_y = next_max_y.max(ny).max(y);
                                 flow_occurred = true;
                             }
                         }
@@ -333,92 +598,7 @@ pub fn settle_tick(
                 }
             }
 
-            // Right neighbor
-            if x + 1 < w {
-                let nx = x + 1;
-                let neighbor_idx = center_idx + 1;
-                let h_neighbor = heightmap.data[neighbor_idx];
-                if h_center - h_neighbor > local_threshold {
-                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
-                    // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
-                    if (flow_seed % 5) != 0 {
-                        let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
-                        let flow =
-                            (alpha * (h_center - h_neighbor - local_threshold) * alpha_noise)
-                                .max(0.0);
-                        if flow > 0.0 {
-                            temp_heights[center_idx] -= flow;
-                            temp_heights[neighbor_idx] += flow;
-                            total_flow += flow;
-                            if flow > 1e-5 {
-                                next_min_x = next_min_x.min(x);
-                                next_max_x = next_max_x.max(nx);
-                                next_min_y = next_min_y.min(y);
-                                next_max_y = next_max_y.max(y);
-                                flow_occurred = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Bottom neighbor
-            if y > 0 {
-                let ny = y - 1;
-                let neighbor_idx = center_idx - w;
-                let h_neighbor = heightmap.data[neighbor_idx];
-                if h_center - h_neighbor > local_threshold {
-                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
-                    // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
-                    if (flow_seed % 5) != 0 {
-                        let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
-                        let flow =
-                            (alpha * (h_center - h_neighbor - local_threshold) * alpha_noise)
-                                .max(0.0);
-                        if flow > 0.0 {
-                            temp_heights[center_idx] -= flow;
-                            temp_heights[neighbor_idx] += flow;
-                            total_flow += flow;
-                            if flow > 1e-5 {
-                                next_min_x = next_min_x.min(x);
-                                next_max_x = next_max_x.max(x);
-                                next_min_y = next_min_y.min(ny);
-                                next_max_y = next_max_y.max(y);
-                                flow_occurred = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Top neighbor (Note: top neighbor was y > 0 earlier, but in loop it says bottom neighbor y+1 < h. Keeping original flow directions)
-            if y + 1 < h {
-                let ny = y + 1;
-                let neighbor_idx = center_idx + w;
-                let h_neighbor = heightmap.data[neighbor_idx];
-                if h_center - h_neighbor > local_threshold {
-                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
-                    // Stochastic grain locking: 20% probability that the grains lock/jam for this tick
-                    if (flow_seed % 5) != 0 {
-                        let alpha_noise = 1.0 + ((flow_seed as f32 / 65535.0) - 0.5) * 0.8; // +/- 40% variation in flow rate
-                        let flow =
-                            (alpha * (h_center - h_neighbor - local_threshold) * alpha_noise)
-                                .max(0.0);
-                        if flow > 0.0 {
-                            temp_heights[center_idx] -= flow;
-                            temp_heights[neighbor_idx] += flow;
-                            total_flow += flow;
-                            if flow > 1e-5 {
-                                next_min_x = next_min_x.min(x);
-                                next_max_x = next_max_x.max(x);
-                                next_min_y = next_min_y.min(y);
-                                next_max_y = next_max_y.max(ny);
-                                flow_occurred = true;
-                            }
-                        }
-                    }
-                }
-            }
+            sliding[center_idx] = cell_flowed;
         }
     }
 
@@ -650,7 +830,16 @@ mod tests {
 
         let mut flow_occurred = false;
         for _ in 0..10 {
-            let flow = settle_tick(&mut hm, &mut temp_heights, &mut bounds, 0.04, 0.15, 12345);
+            let flow = settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut vec![false; 512 * 512],
+                &mut bounds,
+                crate::config::MaterialMode::ButterCream,
+                &[],
+                0.0,
+                12345,
+            );
             if flow > 0.0 {
                 flow_occurred = true;
             }
@@ -684,8 +873,66 @@ mod tests {
             active: true,
         };
 
-        let flow = settle_tick(&mut hm, &mut temp_heights, &mut bounds, 0.04, 0.15, 12345);
+        let flow = settle_tick(
+            &mut hm,
+            &mut temp_heights,
+            &mut vec![false; 512 * 512],
+            &mut bounds,
+            crate::config::MaterialMode::ButterCream,
+            &[],
+            0.0,
+            12345,
+        );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
+    }
+
+    #[test]
+    fn test_material_presets_and_avalanche() {
+        use crate::config::MaterialMode;
+        
+        let materials = [
+            MaterialMode::ButterCream,
+            MaterialMode::DrySand,
+            MaterialMode::Snow,
+            MaterialMode::KineticSand,
+            MaterialMode::WetSand,
+            MaterialMode::FinePowder,
+            MaterialMode::Oobleck,
+            MaterialMode::MoonDust,
+            MaterialMode::IronFilings,
+        ];
+
+        for &mat in &materials {
+            let mut hm = Heightmap::new(64, 64, 0.5);
+            let mut temp_heights = vec![0.5; 64 * 64];
+            let mut sliding = vec![false; 64 * 64];
+            let mut bounds = ActiveBounds {
+                min_x: 10,
+                max_x: 54,
+                min_y: 10,
+                max_y: 54,
+                active: true,
+            };
+
+            // Set a steep spike at center that exceeds the avalanche threshold (0.20 slope)
+            let center_idx = 32 * 64 + 32;
+            hm.data[center_idx] = 1.0;
+            hm.data[center_idx - 1] = 0.5; // slope = 0.5 > 0.20
+
+            // Settle should trigger avalanche flow for all materials
+            let flow = settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut sliding,
+                &mut bounds,
+                mat,
+                &[Vec2::ZERO],
+                0.1,
+                9999,
+            );
+
+            assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
+        }
     }
 }

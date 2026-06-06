@@ -102,8 +102,23 @@ impl SandArtApp {
                         for j in 0..5 {
                             if j < count {
                                 self.playback.waypoints[j] = waypoints.clone();
-                                self.playback.current_indices[j] = (j * waypoints.len() / count) % waypoints.len();
+                                let start_idx = (j * waypoints.len() / count) % waypoints.len();
+                                self.playback.current_indices[j] = start_idx;
+                                
+                                // Snap simulation marble to its starting waypoint position
+                                self.sim.marbles[j].pos = waypoints[start_idx];
+                                self.sim.marbles[j].prev_pos = waypoints[start_idx];
+                                self.sim.marbles[j].vel = glam::Vec2::ZERO;
+                                self.sim.marbles[j].was_active = true;
+                            } else {
+                                self.sim.marbles[j].was_active = false;
                             }
+                        }
+                        if count > 0 {
+                            self.sim.marble_pos = self.sim.marbles[0].pos;
+                            self.sim.prev_marble_pos = self.sim.marbles[0].prev_pos;
+                            self.sim.marble_vel = self.sim.marbles[0].vel;
+                            self.sim.was_active = self.sim.marbles[0].was_active;
                         }
                         self.playback.randomize_speeds(count, self.sim.seed);
                         self.playback.state = crate::pattern::PlaybackState::Playing;
@@ -151,6 +166,12 @@ impl SandArtApp {
             crate::config::PatternMode::HilbertCurve => {
                 crate::pattern::generate_hilbert_curve(self.config.hilbert_order)
             }
+            crate::config::PatternMode::GosperCurve => {
+                crate::pattern::generate_gosper_curve(self.config.hilbert_order)
+            }
+            crate::config::PatternMode::SierpinskiCurve => {
+                crate::pattern::generate_sierpinski_curve(self.config.hilbert_order)
+            }
             crate::config::PatternMode::RandomWalk => {
                 crate::pattern::generate_random_walk(
                     self.config.random_walk_steps as usize,
@@ -169,7 +190,21 @@ impl SandArtApp {
                     if j < paths.len() {
                         self.playback.waypoints[j] = paths[j].clone();
                         self.playback.current_indices[j] = 0;
+
+                        // Snap simulation marble to its starting waypoint position
+                        self.sim.marbles[j].pos = paths[j][0];
+                        self.sim.marbles[j].prev_pos = paths[j][0];
+                        self.sim.marbles[j].vel = glam::Vec2::ZERO;
+                        self.sim.marbles[j].was_active = true;
+                    } else {
+                        self.sim.marbles[j].was_active = false;
                     }
+                }
+                if !paths.is_empty() {
+                    self.sim.marble_pos = self.sim.marbles[0].pos;
+                    self.sim.prev_marble_pos = self.sim.marbles[0].prev_pos;
+                    self.sim.marble_vel = self.sim.marbles[0].vel;
+                    self.sim.was_active = self.sim.marbles[0].was_active;
                 }
                 self.playback.randomize_speeds(paths.len(), self.sim.seed);
                 self.playback.state = crate::pattern::PlaybackState::Playing;
@@ -191,8 +226,23 @@ impl SandArtApp {
         for j in 0..5 {
             if j < count {
                 self.playback.waypoints[j] = base_waypoints.clone();
-                self.playback.current_indices[j] = (j * base_waypoints.len() / count) % base_waypoints.len();
+                let start_idx = (j * base_waypoints.len() / count) % base_waypoints.len();
+                self.playback.current_indices[j] = start_idx;
+
+                // Snap simulation marble to its starting waypoint position
+                self.sim.marbles[j].pos = base_waypoints[start_idx];
+                self.sim.marbles[j].prev_pos = base_waypoints[start_idx];
+                self.sim.marbles[j].vel = glam::Vec2::ZERO;
+                self.sim.marbles[j].was_active = true;
+            } else {
+                self.sim.marbles[j].was_active = false;
             }
+        }
+        if count > 0 {
+            self.sim.marble_pos = self.sim.marbles[0].pos;
+            self.sim.prev_marble_pos = self.sim.marbles[0].prev_pos;
+            self.sim.marble_vel = self.sim.marbles[0].vel;
+            self.sim.was_active = self.sim.marbles[0].was_active;
         }
         self.playback.randomize_speeds(count, self.sim.seed);
         self.playback.state = crate::pattern::PlaybackState::Playing;
@@ -324,6 +374,20 @@ impl eframe::App for SandArtApp {
                             changed |= ui
                                 .selectable_value(
                                     &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::GosperCurve,
+                                    "Gosper Curve (Hexagonal)",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::SierpinskiCurve,
+                                    "Sierpinski Curve (Arrowhead)",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
                                     crate::config::PatternMode::RandomWalk,
                                     "Random Walk (Brownian)",
                                 )
@@ -412,6 +476,22 @@ impl eframe::App for SandArtApp {
                                 ui.add_space(8.0);
                                 ui.add(
                                     egui::Slider::new(&mut self.config.hilbert_order, 1..=6)
+                                        .text("Recursion Order")
+                                        .show_value(true),
+                                );
+                            }
+                            crate::config::PatternMode::GosperCurve => {
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::Slider::new(&mut self.config.hilbert_order, 1..=5)
+                                        .text("Recursion Order")
+                                        .show_value(true),
+                                );
+                            }
+                            crate::config::PatternMode::SierpinskiCurve => {
+                                ui.add_space(8.0);
+                                ui.add(
+                                    egui::Slider::new(&mut self.config.hilbert_order, 1..=7)
                                         .text("Recursion Order")
                                         .show_value(true),
                                 );
@@ -826,7 +906,7 @@ impl eframe::App for SandArtApp {
             }
 
             // Run simulation tick
-            self.sim.update(self.dt, &targets, self.config.marble_size);
+            self.sim.update(self.dt, &targets, self.config.marble_size, self.config.material_mode);
         });
 
         // Keep requesting frames for continuous physics simulation/render

@@ -44,23 +44,81 @@ pub struct Simulation {
     pub marbles: [MarbleState; 5],
     /// Active bounding box for settling updates.
     pub active_bounds: ActiveBounds,
+    /// Sliding state tracker for stick-slip shear hysteresis.
+    pub sliding: Vec<bool>,
     /// Seed for marble movement noise.
     pub seed: u32,
 }
 
+fn generate_smooth_noise(seed_val: u32) -> Heightmap {
+    let mut heightmap = Heightmap::new(GRID_SIZE, GRID_SIZE, 0.8);
+    let mut noise = vec![0.0f32; GRID_SIZE * GRID_SIZE];
+    let mut seed = seed_val;
+    for val in noise.iter_mut() {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        *val = (seed as f32 / u32::MAX as f32) - 0.5; // Range [-0.5, 0.5]
+    }
+
+    // Separable box filter for smooth 2D noise (2 passes of a 3x3 filter)
+    let mut temp = noise.clone();
+    let mut buffer = vec![0.0f32; GRID_SIZE * GRID_SIZE];
+
+    for _pass in 0..2 {
+        // Horizontal pass
+        for y in 0..GRID_SIZE {
+            let row_offset = y * GRID_SIZE;
+            for x in 0..GRID_SIZE {
+                let x_min = x.saturating_sub(1);
+                let x_max = (x + 1).min(GRID_SIZE - 1);
+                let mut sum = 0.0;
+                let mut count = 0.0;
+                for nx in x_min..=x_max {
+                    sum += temp[row_offset + nx];
+                    count += 1.0;
+                }
+                buffer[row_offset + x] = sum / count;
+            }
+        }
+
+        // Vertical pass
+        for y in 0..GRID_SIZE {
+            let y_min = y.saturating_sub(1);
+            let y_max = (y + 1).min(GRID_SIZE - 1);
+            let row_offset = y * GRID_SIZE;
+            for x in 0..GRID_SIZE {
+                let mut sum = 0.0;
+                let mut count = 0.0;
+                for ny in y_min..=y_max {
+                    sum += buffer[ny * GRID_SIZE + x];
+                    count += 1.0;
+                }
+                temp[row_offset + x] = sum / count;
+            }
+        }
+    }
+
+    // Find max amplitude to normalize
+    let mut max_abs = 0.0f32;
+    for &val in &temp {
+        max_abs = max_abs.max(val.abs());
+    }
+
+    // Scale so that maximum noise deviation is exactly 0.025, and add to base height 0.8
+    let scale = if max_abs > 1e-5 { 0.025 / max_abs } else { 1.0 };
+    for (i, val) in heightmap.data.iter_mut().enumerate() {
+        *val = (0.8 + temp[i] * scale).clamp(0.0, 1.0);
+    }
+
+    heightmap
+}
+
 impl Simulation {
     pub fn new() -> Self {
-        let mut heightmap = Heightmap::new(GRID_SIZE, GRID_SIZE, 0.8);
-        // Add random noise to the initial sand bed
-        let mut seed = 12345u32;
-        for val in heightmap.data.iter_mut() {
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            let noise = (seed as f32 / u32::MAX as f32 - 0.5) * 0.05; // Range [-0.025, 0.025]
-            *val = (*val + noise).clamp(0.0, 1.0);
-        }
+        let heightmap = generate_smooth_noise(12345u32);
         let temp_heights = heightmap.data.clone();
+        let sliding = vec![false; GRID_SIZE * GRID_SIZE];
 
         Self {
             heightmap,
@@ -77,23 +135,16 @@ impl Simulation {
                 max_y: 0,
                 active: false,
             },
+            sliding,
             seed: 98765u32,
         }
     }
 
     /// Reset the simulation state.
     pub fn reset(&mut self) {
-        self.heightmap.reset(0.8);
-        // Add random noise to the reset sand bed
-        let mut seed = 54321u32;
-        for val in self.heightmap.data.iter_mut() {
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            let noise = (seed as f32 / u32::MAX as f32 - 0.5) * 0.05; // Range [-0.025, 0.025]
-            *val = (*val + noise).clamp(0.0, 1.0);
-        }
+        self.heightmap = generate_smooth_noise(54321u32);
         self.temp_heights.copy_from_slice(&self.heightmap.data);
+        self.sliding.fill(false);
         self.marble_pos = Vec2::ZERO;
         self.prev_marble_pos = Vec2::ZERO;
         self.marble_vel = Vec2::ZERO;
@@ -144,7 +195,7 @@ impl Simulation {
     }
 
     /// Run a physics frame tick.
-    pub fn update(&mut self, _dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32) {
+    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, material: crate::config::MaterialMode) {
         // Prevent seed degeneracy (XORShift stuck state at 0)
         if self.seed == 0 {
             self.seed = 98765u32;
@@ -164,7 +215,12 @@ impl Simulation {
                 let target_sanitized = Vec2::new(tx, ty);
 
                 let max_r = (0.92 - marble_radius).max(0.0);
-                let clamped_target = target_sanitized.clamp(Vec2::splat(-max_r), Vec2::splat(max_r));
+                let target_len = target_sanitized.length();
+                let clamped_target = if target_len > max_r && target_len > 1e-5 {
+                    target_sanitized * (max_r / target_len)
+                } else {
+                    target_sanitized
+                };
 
                 if self.marbles[j].was_active {
                     self.marbles[j].prev_pos = self.marbles[j].pos;
@@ -206,7 +262,10 @@ impl Simulation {
                     }
 
                     let mut next_pos = clamped_target + jitter + drift;
-                    next_pos = next_pos.clamp(Vec2::splat(-max_r), Vec2::splat(max_r));
+                    let next_len = next_pos.length();
+                    if next_len > max_r && next_len > 1e-5 {
+                        next_pos = next_pos * (max_r / next_len);
+                    }
 
                     self.marbles[j].pos = next_pos;
                     self.marbles[j].vel = next_pos - self.marbles[j].prev_pos;
@@ -244,14 +303,52 @@ impl Simulation {
             }
         }
 
+        // If material is IronFilings, expand the active bounds to cover the magnet's reach
+        // around all active marbles so filings can react dynamically as the magnet moves.
+        if material == crate::config::MaterialMode::IronFilings {
+            for j in 0..5 {
+                if self.marbles[j].was_active {
+                    let (mx, my) = Self::norm_to_grid(self.marbles[j].pos, GRID_SIZE, GRID_SIZE);
+                    let r_reach = 225; // ~0.22 radius in grid cells (matches 0.22 magnet reach)
+                    let min_x = mx.saturating_sub(r_reach);
+                    let max_x = (mx + r_reach).min(GRID_SIZE - 1);
+                    let min_y = my.saturating_sub(r_reach);
+                    let max_y = (my + r_reach).min(GRID_SIZE - 1);
+
+                    if self.active_bounds.active {
+                        self.active_bounds.min_x = self.active_bounds.min_x.min(min_x);
+                        self.active_bounds.max_x = self.active_bounds.max_x.max(max_x);
+                        self.active_bounds.min_y = self.active_bounds.min_y.min(min_y);
+                        self.active_bounds.max_y = self.active_bounds.max_y.max(max_y);
+                    } else {
+                        self.active_bounds.min_x = min_x;
+                        self.active_bounds.max_x = max_x;
+                        self.active_bounds.min_y = min_y;
+                        self.active_bounds.max_y = max_y;
+                        self.active_bounds.active = true;
+                    }
+                }
+            }
+        }
+
         // Run the gravity-driven settling cellular automata tick
         if self.active_bounds.active {
+            let mut active_marbles = Vec::new();
+            for j in 0..5 {
+                if self.marbles[j].was_active {
+                    active_marbles.push(self.marbles[j].pos);
+                }
+            }
+            let m_vel = if dt > 1e-5 { self.marbles[0].vel.length() / dt } else { 0.0 };
+
             settle_tick(
                 &mut self.heightmap,
                 &mut self.temp_heights,
+                &mut self.sliding,
                 &mut self.active_bounds,
-                0.04, // default repose angle threshold
-                0.15, // default flow rate alpha
+                material,
+                &active_marbles,
+                m_vel,
                 time_seed,
             );
         }
@@ -326,19 +423,19 @@ mod tests {
         let mut sim = Simulation::new();
         let mut targets = [None; 5];
         // Initially target is None, should not be active
-        sim.update(0.016, &targets, 0.025);
+        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream);
         assert!(!sim.was_active);
 
         // Move to start point (first point is exact target)
         targets[0] = Some(Vec2::new(0.1, 0.2));
-        sim.update(0.016, &targets, 0.025);
+        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream);
         assert!(sim.was_active);
         assert_eq!(sim.marble_pos, Vec2::new(0.1, 0.2));
 
         // Move to next point, introducing noise, drag, and jitter
         let target = Vec2::new(0.3, 0.4);
         targets[0] = Some(target);
-        sim.update(0.016, &targets, 0.025);
+        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream);
 
         // Ensure marble position shifted from start and is not exactly the target due to physics drift/noise
         assert_ne!(sim.marble_pos, Vec2::new(0.1, 0.2));
