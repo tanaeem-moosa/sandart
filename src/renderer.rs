@@ -26,7 +26,15 @@ impl Vertex {
 
 
 #[repr(C, align(16))]
-#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
+pub struct MarbleUniform {
+    pub pos: [f32; 2],     // x, y coordinate
+    pub radius: f32,        // radius in normalized coordinates
+    pub padding: f32,
+}
+
+#[repr(C, align(16))]
+#[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, PartialEq)]
 pub struct LightingUniforms {
     pub light_dir: [f32; 4],   // xyz direction + padding
     pub light_color: [f32; 4], // rgb color + padding
@@ -35,9 +43,10 @@ pub struct LightingUniforms {
     pub shadow_enabled: u32,   // 1 = enabled, 0 = disabled
     pub led_mode: u32,         // 0 = Single, 1 = RainbowRing, 2 = ColorCycle
     pub time: f32,             // elapsed animation time
-    pub marble_pos: [f32; 2],  // x, y coordinate
-    pub marble_radius: f32,    // radius in normalized coordinates
+    pub marble_count: u32,     // active marbles count (1 to 5)
     pub material_mode: u32,    // active material preset (0 to 8)
+    pub _padding: [u32; 2],
+    pub marbles: [MarbleUniform; 5], // array of up to 5 marbles
 }
 
 #[repr(C, align(16))]
@@ -473,9 +482,16 @@ mod tests {
                 shadow_enabled: 1,
                 led_mode: 1,
                 time: 0.0,
-                marble_pos: [0.0, 0.0],
-                marble_radius: 0.025,
+                marble_count: 1,
                 material_mode: 0,
+                _padding: [0, 0],
+                marbles: [
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
+                ],
             };
             resources.update_uniforms(&queue, &uniforms);
 
@@ -618,5 +634,5 @@ mod tests {
 }
 
 // Compile-time layout/size verification assertions for WebGPU uniform alignments
-const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 80);
+const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 160);
 const _: () = assert!(std::mem::size_of::<CameraUniforms>() == 80);

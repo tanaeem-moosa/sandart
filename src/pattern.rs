@@ -11,8 +11,9 @@ pub enum PlaybackState {
 
 pub struct PlaybackController {
     /// Waypoints stored in Cartesian coordinates to eliminate trig computations in frame updates.
-    pub waypoints: Vec<Vec2>,
-    pub current_idx: usize,
+    pub waypoints: [Vec<Vec2>; 5],
+    pub current_indices: [usize; 5],
+    pub speed_multipliers: [f32; 5],
     pub state: PlaybackState,
     pub loop_pattern: bool,
 }
@@ -20,44 +21,100 @@ pub struct PlaybackController {
 impl PlaybackController {
     pub fn new() -> Self {
         Self {
-            waypoints: Vec::new(),
-            current_idx: 0,
+            waypoints: [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            current_indices: [0; 5],
+            speed_multipliers: [1.0; 5],
             state: PlaybackState::Stopped,
             loop_pattern: true,
         }
     }
 
-    /// Advance playback and return the target marble position.
-    pub fn step_playback(&mut self, current_pos: Vec2, speed: f32, dt: f32) -> Option<Vec2> {
-        if self.state != PlaybackState::Playing || self.waypoints.is_empty() {
-            return None;
+    pub fn clear_waypoints(&mut self) {
+        for w in &mut self.waypoints {
+            w.clear();
+        }
+        self.current_indices = [0; 5];
+        self.speed_multipliers = [1.0; 5];
+    }
+
+    /// Randomize speed multipliers for each active marble by up to 10% (range [0.9, 1.1])
+    pub fn randomize_speeds(&mut self, count: usize, base_seed: u32) {
+        let count = count.clamp(1, 5);
+        let mut seed = base_seed;
+        for j in 0..5 {
+            if j < count {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                let rand_val = seed as f32 / u32::MAX as f32; // [0.0, 1.0]
+                let multiplier = 0.9 + rand_val * 0.2;
+                self.speed_multipliers[j] = multiplier;
+            } else {
+                self.speed_multipliers[j] = 1.0;
+            }
+        }
+    }
+
+    /// Advance playback for all active marbles and return their next target positions.
+    pub fn step_playback_all(
+        &mut self,
+        current_positions: &[Vec2; 5],
+        count: usize,
+        speed: f32,
+        dt: f32,
+    ) -> [Option<Vec2>; 5] {
+        let mut targets = [None; 5];
+        if self.state != PlaybackState::Playing {
+            return targets;
         }
 
-        if self.current_idx >= self.waypoints.len() {
-            self.current_idx = 0;
-            self.state = PlaybackState::Stopped;
-            return None;
+        let count = count.clamp(1, 5);
+        let mut all_stopped = true;
+
+        for j in 0..count {
+            let wps = &self.waypoints[j];
+            if wps.is_empty() {
+                continue;
+            }
+
+            let idx = self.current_indices[j];
+            if idx >= wps.len() {
+                continue;
+            }
+
+            all_stopped = false;
+            let target = wps[idx];
+            let to_target = target - current_positions[j];
+            let dist = to_target.length();
+            let max_move = speed * self.speed_multipliers[j] * dt;
+
+            // Safe threshold guard to prevent Nan/Inf division when distance is subnormal
+            if dist <= max_move || dist < 1e-5 {
+                self.current_indices[j] += 1;
+                if self.current_indices[j] >= wps.len() {
+                    if self.loop_pattern {
+                        self.current_indices[j] = 0;
+                    }
+                }
+                targets[j] = Some(target);
+            } else {
+                targets[j] = Some(current_positions[j] + to_target * (max_move / dist));
+            }
         }
 
-        let target = self.waypoints[self.current_idx];
-        let to_target = target - current_pos;
-        let dist = to_target.length();
-        let max_move = speed * dt;
-
-        // Safe threshold guard to prevent Nan/Inf division when distance is subnormal
-        if dist <= max_move || dist < 1e-5 {
-            self.current_idx += 1;
-            if self.current_idx >= self.waypoints.len() {
-                if self.loop_pattern {
-                    self.current_idx = 0;
-                } else {
-                    self.state = PlaybackState::Stopped;
+        // Check if all active paths are finished (when looping is disabled)
+        if !self.loop_pattern {
+            let mut finished = true;
+            for j in 0..count {
+                if !self.waypoints[j].is_empty() && self.current_indices[j] < self.waypoints[j].len() {
+                    finished = false;
+                    break;
                 }
             }
-            Some(target)
-        } else {
-            Some(current_pos + to_target * (max_move / dist))
+            if finished || all_stopped {
+                self.state = PlaybackState::Stopped;
+            }
         }
+
+        targets
     }
 }
 
@@ -101,6 +158,180 @@ pub fn generate_spiral(spacing: f32) -> Vec<Vec2> {
         }
     }
     path
+}
+
+/// Generates a Lissajous curve path: x = sin(a*t + delta), y = sin(b*t)
+pub fn generate_lissajous(a: f32, b: f32, delta: f32) -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let max_r = 0.874f32;
+    let steps = 1500;
+    // 10 cycles is enough to draw complex overlapping figures
+    let t_max = 2.0 * std::f32::consts::PI * 10.0;
+    let mut max_len = 0.0f32;
+    for i in 0..=steps {
+        let t = (i as f32 / steps as f32) * t_max;
+        let x = (a * t + delta).sin();
+        let y = (b * t).sin();
+        let p = Vec2::new(x, y);
+        max_len = max_len.max(p.length());
+        path.push(p);
+    }
+    if max_len > 1e-5 {
+        let scale = max_r / max_len;
+        for p in &mut path {
+            *p *= scale;
+        }
+    }
+    path
+}
+
+/// Generates a Rose curve path in polar coordinates: r = cos(k * theta)
+pub fn generate_rose(k: f32) -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let max_r = 0.874f32;
+    let steps = 1500;
+    // theta ranges to cover multiple petals cleanly
+    let theta_max = 2.0 * std::f32::consts::PI * 8.0;
+    for i in 0..=steps {
+        let theta = (i as f32 / steps as f32) * theta_max;
+        let r = (k * theta).cos() * max_r;
+        let x = r * theta.cos();
+        let y = r * theta.sin();
+        path.push(Vec2::new(x, y));
+    }
+    path
+}
+
+/// Generates a Hypotrochoid (Spirograph) path rolled inside a unit circle
+pub fn generate_hypotrochoid(r_inner: f32, d: f32) -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let r_inner = r_inner.clamp(0.01, 0.99);
+    let r_outer = 1.0f32; // Fixed outer circle radius
+    let term1 = r_outer - r_inner;
+    let max_possible_r = term1.abs() + d;
+    let scale_factor = if max_possible_r > 1e-4 { 0.874 / max_possible_r } else { 1.0 };
+
+    let steps = 2000;
+    let theta_max = 2.0 * std::f32::consts::PI * 16.0;
+    for i in 0..=steps {
+        let theta = (i as f32 / steps as f32) * theta_max;
+        let x = term1 * theta.cos() + d * ((term1 / r_inner) * theta).cos();
+        let y = term1 * theta.sin() - d * ((term1 / r_inner) * theta).sin();
+        path.push(Vec2::new(x * scale_factor, y * scale_factor));
+    }
+    path
+}
+
+/// Generates a Fermat spiral: r = a * sqrt(theta)
+pub fn generate_fermat_spiral(turns: f32) -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let max_r = 0.874f32;
+    let theta_max = 2.0 * std::f32::consts::PI * turns.max(1.0);
+    let a = max_r / theta_max.sqrt();
+    let steps = 1500;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let theta = t * theta_max;
+        let r = a * theta.sqrt();
+        path.push(Vec2::new(r * theta.cos(), r * theta.sin()));
+    }
+    path
+}
+
+fn hilbert_recursive(x: f32, y: f32, xi: f32, xj: f32, yi: f32, yj: f32, n: u32, path: &mut Vec<Vec2>) {
+    if n == 0 {
+        path.push(Vec2::new(x + (xi + yi) / 2.0, y + (xj + yj) / 2.0));
+    } else {
+        hilbert_recursive(x, y, yi / 2.0, yj / 2.0, xi / 2.0, xj / 2.0, n - 1, path);
+        hilbert_recursive(x + xi / 2.0, y + xj / 2.0, xi / 2.0, xj / 2.0, yi / 2.0, yj / 2.0, n - 1, path);
+        hilbert_recursive(x + xi / 2.0 + yi / 2.0, y + xj / 2.0 + yj / 2.0, xi / 2.0, xj / 2.0, yi / 2.0, yj / 2.0, n - 1, path);
+        hilbert_recursive(x + xi / 2.0 + yi, y + xj / 2.0 + yj, -yi / 2.0, -yj / 2.0, -xi / 2.0, -xj / 2.0, n - 1, path);
+    }
+}
+
+/// Generates a recursive space-filling Hilbert curve
+pub fn generate_hilbert_curve(order: u32) -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let order = order.clamp(1, 6);
+    let side = 1.748f32; // Fits inside [-0.874, 0.874]
+    let start_x = -side / 2.0;
+    let start_y = -side / 2.0;
+    hilbert_recursive(start_x, start_y, side, 0.0, 0.0, side, order, &mut path);
+    path
+}
+
+/// Generates a deterministic organic Random Walk (Brownian motion)
+pub fn generate_random_walk(steps: usize, step_size: f32) -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let max_r = 0.874f32;
+    let mut current = Vec2::ZERO;
+    path.push(current);
+
+    let mut state = 12345u32;
+    for _ in 0..steps {
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        let angle = (state as f32 / u32::MAX as f32) * 2.0 * std::f32::consts::PI;
+        let step = Vec2::new(angle.cos(), angle.sin()) * step_size;
+        let mut next = current + step;
+
+        let r = next.length();
+        if r > max_r {
+            let normal = if current.length() > 1e-5 { current.normalize() } else { Vec2::X };
+            let reflected = step - 2.0 * step.dot(normal) * normal;
+            next = current + reflected;
+            if next.length() > max_r {
+                next = if next.length() > 1e-5 { next.normalize() * max_r } else { Vec2::ZERO };
+            }
+        }
+        current = next;
+        path.push(current);
+    }
+    path
+}
+
+/// Generates a Lemniscate of Bernoulli (figure-8 infinity symbol)
+pub fn generate_lemniscate(scale: f32) -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let a = scale.clamp(0.1, 0.874);
+    let steps = 800;
+    for i in 0..=steps {
+        let t = (i as f32 / steps as f32) * 2.0 * std::f32::consts::PI;
+        let sin_t = t.sin();
+        let cos_t = t.cos();
+        let denom = 1.0 + sin_t * sin_t;
+        let x = (a * cos_t) / denom;
+        let y = (a * sin_t * cos_t) / denom;
+        path.push(Vec2::new(x, y));
+    }
+    path
+}
+
+/// Generates count symmetric spiral arms rotated around the center
+pub fn generate_multi_spiral(spacing: f32, count: usize) -> Vec<Vec<Vec2>> {
+    let count = count.clamp(1, 5);
+    let mut paths = vec![Vec::new(); count];
+    if spacing <= 0.005 {
+        return paths;
+    }
+    let max_r = 0.874f32;
+    let a = spacing / (2.0 * std::f32::consts::PI);
+    let total_theta = max_r / a;
+    let turns = total_theta / (2.0 * std::f32::consts::PI);
+    let steps = (turns * 128.0).ceil() as usize;
+
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        let theta = t * total_theta;
+        let r = a * theta;
+        if r <= max_r {
+            for j in 0..count {
+                let angle_offset = (j as f32 / count as f32) * 2.0 * std::f32::consts::PI;
+                let angle = theta + angle_offset;
+                paths[j].push(Vec2::new(r * angle.cos(), r * angle.sin()));
+            }
+        }
+    }
+    paths
 }
 
 /// Helper to strip comments from a G-code line, handling both ';' and nested '( ... )'.
@@ -327,27 +558,45 @@ mod tests {
     #[test]
     fn test_playback_controller() {
         let mut controller = PlaybackController::new();
-        controller.waypoints = vec![Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.0)];
+        controller.waypoints[0] = vec![Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.0)];
         controller.state = PlaybackState::Playing;
 
-        let pos = controller
-            .step_playback(Vec2::new(0.0, 0.0), 0.1, 0.1)
-            .unwrap();
-        assert_eq!(pos, Vec2::new(0.0, 0.0));
-        assert_eq!(controller.current_idx, 1);
+        // Test default multiplier is 1.0
+        assert_eq!(controller.speed_multipliers[0], 1.0);
 
-        let pos = controller
-            .step_playback(Vec2::new(0.0, 0.0), 0.5, 0.1)
-            .unwrap();
+        let cur_positions = [Vec2::new(0.0, 0.0); 5];
+        let targets = controller.step_playback_all(&cur_positions, 1, 0.1, 0.1);
+        let pos = targets[0].unwrap();
+        assert_eq!(pos, Vec2::new(0.0, 0.0));
+        assert_eq!(controller.current_indices[0], 1);
+
+        let cur_positions = [Vec2::new(0.0, 0.0); 5];
+        let targets = controller.step_playback_all(&cur_positions, 1, 0.5, 0.1);
+        let pos = targets[0].unwrap();
         assert!((pos.x - 0.05).abs() < 1e-4);
         assert_eq!(pos.y, 0.0);
-        assert_eq!(controller.current_idx, 1);
+        assert_eq!(controller.current_indices[0], 1);
 
-        let pos = controller
-            .step_playback(Vec2::new(0.0, 0.0), 10.0, 0.1)
-            .unwrap();
+        let targets = controller.step_playback_all(&cur_positions, 1, 10.0, 0.1);
+        let pos = targets[0].unwrap();
         assert_eq!(pos, Vec2::new(0.5, 0.0));
-        assert_eq!(controller.current_idx, 0);
+        assert_eq!(controller.current_indices[0], 0);
+
+        // Test randomize_speeds
+        controller.randomize_speeds(3, 99999);
+        for j in 0..3 {
+            assert!(controller.speed_multipliers[j] >= 0.899);
+            assert!(controller.speed_multipliers[j] <= 1.101);
+        }
+        assert_eq!(controller.speed_multipliers[3], 1.0);
+        assert_eq!(controller.speed_multipliers[4], 1.0);
+
+        // Test multiplier scale on step size
+        controller.current_indices[0] = 1;
+        controller.speed_multipliers[0] = 0.5;
+        let targets = controller.step_playback_all(&cur_positions, 1, 1.0, 0.1); // base speed 1.0, dt 0.1, max_move should be 1.0 * 0.5 * 0.1 = 0.05
+        let pos = targets[0].unwrap();
+        assert!((pos.x - 0.05).abs() < 1e-4);
     }
 
     #[test]
@@ -380,12 +629,61 @@ mod tests {
         ";
         let parsed = parse_gcode(content).unwrap();
         assert_eq!(parsed.len(), 2);
-        // Second point should be last_x + 5 = 15, last_y - 5 = 15
-        // Let's verify by computing the raw unscaled points ratio
-        // Min/max of raw points: X: [10, 15], Y: [15, 20]
-        // Center: X = 12.5, Y = 17.5
-        // Raw offsets from center for p1 (15, 15) is (2.5, -2.5)
-        // Ratio should match
         assert!((parsed[1].x - parsed[0].x).signum() == (parsed[0].y - parsed[1].y).signum());
+    }
+
+    #[test]
+    fn test_parametric_curves_boundaries() {
+        // Lissajous
+        let liss = generate_lissajous(3.0, 4.0, 1.5708);
+        assert!(!liss.is_empty());
+        for p in &liss {
+            assert!(p.length() <= 0.92, "Lissajous point {:?} out of bounds", p);
+        }
+
+        // Rose
+        let rose = generate_rose(5.0);
+        assert!(!rose.is_empty());
+        for p in &rose {
+            assert!(p.length() <= 0.92, "Rose point {:?} out of bounds", p);
+        }
+
+        // Hypotrochoid
+        let hypo = generate_hypotrochoid(0.28, 0.20);
+        assert!(!hypo.is_empty());
+        for p in &hypo {
+            assert!(p.length() <= 0.92, "Hypotrochoid point {:?} out of bounds", p);
+        }
+
+        // Fermat
+        let fermat = generate_fermat_spiral(8.0);
+        assert!(!fermat.is_empty());
+        for p in &fermat {
+            assert!(p.length() <= 0.92, "Fermat point {:?} out of bounds", p);
+        }
+
+        // Hilbert
+        let hilbert = generate_hilbert_curve(4);
+        assert!(!hilbert.is_empty());
+        for p in &hilbert {
+            assert!(p.x.abs() <= 0.875 && p.y.abs() <= 0.875, "Hilbert point {:?} out of bounds", p);
+        }
+
+        // Lemniscate
+        let lemn = generate_lemniscate(0.8);
+        assert!(!lemn.is_empty());
+        for p in &lemn {
+            assert!(p.length() <= 0.92, "Lemniscate point {:?} out of bounds", p);
+        }
+
+        // Multi-spiral
+        let multi = generate_multi_spiral(0.03, 3);
+        assert_eq!(multi.len(), 3);
+        for arm in &multi {
+            assert!(!arm.is_empty());
+            for p in arm {
+                assert!(p.length() <= 0.92, "Multi-spiral point {:?} out of bounds", p);
+            }
+        }
     }
 }

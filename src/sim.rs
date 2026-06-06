@@ -7,20 +7,41 @@ pub use physics::{ActiveBounds, displace_line, settle_tick};
 
 pub const GRID_SIZE: usize = 1024;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MarbleState {
+    pub pos: Vec2,
+    pub prev_pos: Vec2,
+    pub vel: Vec2,
+    pub was_active: bool,
+}
+
+impl Default for MarbleState {
+    fn default() -> Self {
+        Self {
+            pos: Vec2::ZERO,
+            prev_pos: Vec2::ZERO,
+            vel: Vec2::ZERO,
+            was_active: false,
+        }
+    }
+}
+
 /// Coordinates the state of the marble and the sand bed heightmap.
 pub struct Simulation {
     /// The sand heightmap grid.
     pub heightmap: Heightmap,
     /// Pre-allocated temp buffer for double-buffering settling flows.
     pub temp_heights: Vec<f32>,
-    /// Current position of the marble in normalized coordinates (range [-1.0, 1.0]).
+    /// Current position of the primary marble (backward compatibility).
     pub marble_pos: Vec2,
-    /// Previous position of the marble (used for path interpolation).
+    /// Previous position of the primary marble (backward compatibility).
     pub prev_marble_pos: Vec2,
-    /// Last velocity of the marble.
+    /// Last velocity of the primary marble (backward compatibility).
     pub marble_vel: Vec2,
-    /// Track whether the simulation has an active drawing stroke.
+    /// Track whether the primary marble has an active drawing stroke (backward compatibility).
     pub was_active: bool,
+    /// Up to 5 marbles tracked in the simulation
+    pub marbles: [MarbleState; 5],
     /// Active bounding box for settling updates.
     pub active_bounds: ActiveBounds,
     /// Seed for marble movement noise.
@@ -48,6 +69,7 @@ impl Simulation {
             prev_marble_pos: Vec2::ZERO,
             marble_vel: Vec2::ZERO,
             was_active: false,
+            marbles: [MarbleState::default(); 5],
             active_bounds: ActiveBounds {
                 min_x: 0,
                 max_x: 0,
@@ -76,6 +98,7 @@ impl Simulation {
         self.prev_marble_pos = Vec2::ZERO;
         self.marble_vel = Vec2::ZERO;
         self.was_active = false;
+        self.marbles = [MarbleState::default(); 5];
         self.active_bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -121,7 +144,7 @@ impl Simulation {
     }
 
     /// Run a physics frame tick.
-    pub fn update(&mut self, _dt: f32, target_pos: Option<Vec2>, marble_radius: f32) {
+    pub fn update(&mut self, _dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32) {
         // Prevent seed degeneracy (XORShift stuck state at 0)
         if self.seed == 0 {
             self.seed = 98765u32;
@@ -133,79 +156,92 @@ impl Simulation {
         self.seed ^= self.seed << 5;
         let time_seed = self.seed;
 
-        if let Some(target) = target_pos {
-            // Sanitize target coordinate float boundaries against NaNs/Infs
-            let tx = if target.x.is_finite() { target.x } else { 0.0 };
-            let ty = if target.y.is_finite() { target.y } else { 0.0 };
-            let target_sanitized = Vec2::new(tx, ty);
+        for j in 0..5 {
+            if let Some(target) = targets[j] {
+                // Sanitize target coordinate float boundaries against NaNs/Infs
+                let tx = if target.x.is_finite() { target.x } else { 0.0 };
+                let ty = if target.y.is_finite() { target.y } else { 0.0 };
+                let target_sanitized = Vec2::new(tx, ty);
 
-            let max_r = (0.92 - marble_radius).max(0.0);
-            let clamped_target = target_sanitized.clamp(Vec2::splat(-max_r), Vec2::splat(max_r));
+                let max_r = (0.92 - marble_radius).max(0.0);
+                let clamped_target = target_sanitized.clamp(Vec2::splat(-max_r), Vec2::splat(max_r));
 
-            if self.was_active {
-                self.prev_marble_pos = self.marble_pos;
+                if self.marbles[j].was_active {
+                    self.marbles[j].prev_pos = self.marbles[j].pos;
 
-                // Calculate step vector and distance
-                let raw_diff = clamped_target - self.marble_pos;
-                let raw_dist = raw_diff.length();
+                    // Calculate step vector and distance
+                    let raw_diff = clamped_target - self.marbles[j].pos;
+                    let raw_dist = raw_diff.length();
 
-                // 1. Generate pseudo-random numbers
-                let n1 = (self.seed as f32 / u32::MAX as f32 - 0.5) * 2.0; // [-1.0, 1.0]
+                    // 1. Generate pseudo-random numbers
+                    self.seed ^= self.seed << 13;
+                    self.seed ^= self.seed >> 17;
+                    self.seed ^= self.seed << 5;
+                    let n1 = (self.seed as f32 / u32::MAX as f32 - 0.5) * 2.0; // [-1.0, 1.0]
 
-                self.seed ^= self.seed << 13;
-                self.seed ^= self.seed >> 17;
-                self.seed ^= self.seed << 5;
-                let n2 = (self.seed as f32 / u32::MAX as f32 - 0.5) * 2.0; // [-1.0, 1.0]
+                    self.seed ^= self.seed << 13;
+                    self.seed ^= self.seed >> 17;
+                    self.seed ^= self.seed << 5;
+                    let n2 = (self.seed as f32 / u32::MAX as f32 - 0.5) * 2.0; // [-1.0, 1.0]
 
-                let random_offset = Vec2::new(n1, n2);
+                    let random_offset = Vec2::new(n1, n2);
 
-                // 2. Micro-jitter: simulate bumping over discrete sand grains (extremely subtle)
-                let jitter_amplitude = marble_radius * 0.04;
-                let jitter = random_offset * jitter_amplitude;
+                    // 2. Micro-jitter: simulate bumping over discrete sand grains (extremely subtle)
+                    let jitter_amplitude = marble_radius * 0.04;
+                    let jitter = random_offset * jitter_amplitude;
 
-                // 3. Inertia/drag drift: simulate sand resistance lagging and sliding sideways
-                let mut drift = Vec2::ZERO;
-                if raw_dist > 1e-5 {
-                    let dir = raw_diff / raw_dist;
-                    let perp = Vec2::new(-dir.y, dir.x);
+                    // 3. Inertia/drag drift: simulate sand resistance lagging and sliding sideways
+                    let mut drift = Vec2::ZERO;
+                    if raw_dist > 1e-5 {
+                        let dir = raw_diff / raw_dist;
+                        let perp = Vec2::new(-dir.y, dir.x);
 
-                    // Minor drag (lag behind magnet/target)
-                    let lag = -dir * (raw_dist * 0.08);
+                        // Minor drag (lag behind magnet/target)
+                        let lag = -dir * (raw_dist * 0.08);
 
-                    // Minor sideways slip (uneven resistance)
-                    let slip = perp * (raw_dist * 0.05 * n1);
+                        // Minor sideways slip (uneven resistance)
+                        let slip = perp * (raw_dist * 0.05 * n1);
 
-                    drift = lag + slip;
+                        drift = lag + slip;
+                    }
+
+                    let mut next_pos = clamped_target + jitter + drift;
+                    next_pos = next_pos.clamp(Vec2::splat(-max_r), Vec2::splat(max_r));
+
+                    self.marbles[j].pos = next_pos;
+                    self.marbles[j].vel = next_pos - self.marbles[j].prev_pos;
+
+                    displace_line(
+                        &mut self.heightmap,
+                        self.marbles[j].prev_pos,
+                        self.marbles[j].pos,
+                        marble_radius,
+                        &mut self.active_bounds,
+                    );
+                } else {
+                    self.marbles[j].pos = clamped_target;
+                    self.marbles[j].prev_pos = clamped_target;
+                    self.marbles[j].vel = Vec2::ZERO;
+                    displace_line(
+                        &mut self.heightmap,
+                        clamped_target,
+                        clamped_target,
+                        marble_radius,
+                        &mut self.active_bounds,
+                    );
+                    self.marbles[j].was_active = true;
                 }
-
-                let mut next_pos = clamped_target + jitter + drift;
-                next_pos = next_pos.clamp(Vec2::splat(-max_r), Vec2::splat(max_r));
-
-                self.marble_pos = next_pos;
-                self.marble_vel = next_pos - self.prev_marble_pos;
-
-                displace_line(
-                    &mut self.heightmap,
-                    self.prev_marble_pos,
-                    self.marble_pos,
-                    marble_radius,
-                    &mut self.active_bounds,
-                );
             } else {
-                self.marble_pos = clamped_target;
-                self.prev_marble_pos = clamped_target;
-                self.marble_vel = Vec2::ZERO;
-                displace_line(
-                    &mut self.heightmap,
-                    clamped_target,
-                    clamped_target,
-                    marble_radius,
-                    &mut self.active_bounds,
-                );
-                self.was_active = true;
+                self.marbles[j].was_active = false;
             }
-        } else {
-            self.was_active = false;
+
+            // Sync with primary fields for backward compatibility
+            if j == 0 {
+                self.marble_pos = self.marbles[0].pos;
+                self.prev_marble_pos = self.marbles[0].prev_pos;
+                self.marble_vel = self.marbles[0].vel;
+                self.was_active = self.marbles[0].was_active;
+            }
         }
 
         // Run the gravity-driven settling cellular automata tick
@@ -288,18 +324,21 @@ mod tests {
     #[test]
     fn test_marble_movement_noise_and_drift() {
         let mut sim = Simulation::new();
+        let mut targets = [None; 5];
         // Initially target is None, should not be active
-        sim.update(0.016, None, 0.025);
+        sim.update(0.016, &targets, 0.025);
         assert!(!sim.was_active);
 
         // Move to start point (first point is exact target)
-        sim.update(0.016, Some(Vec2::new(0.1, 0.2)), 0.025);
+        targets[0] = Some(Vec2::new(0.1, 0.2));
+        sim.update(0.016, &targets, 0.025);
         assert!(sim.was_active);
         assert_eq!(sim.marble_pos, Vec2::new(0.1, 0.2));
 
         // Move to next point, introducing noise, drag, and jitter
         let target = Vec2::new(0.3, 0.4);
-        sim.update(0.016, Some(target), 0.025);
+        targets[0] = Some(target);
+        sim.update(0.016, &targets, 0.025);
 
         // Ensure marble position shifted from start and is not exactly the target due to physics drift/noise
         assert_ne!(sim.marble_pos, Vec2::new(0.1, 0.2));

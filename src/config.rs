@@ -58,6 +58,7 @@ impl Default for MaterialMode {
 /// Application configuration and simulation parameters in normalized space.
 /// Normalized space scales from 0.0 to 1.0 relative to the sand table radius.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct AppConfig {
     /// Speed of the marble in units of radius per second (0.01 to 2.0).
     pub speed: f32,
@@ -85,6 +86,24 @@ pub struct AppConfig {
     pub shadows_enabled: bool,
     /// Material mode selecting simulation physics & parameters.
     pub material_mode: MaterialMode,
+    /// Active number of marbles (1 to 5)
+    pub marble_count: u32,
+    /// Lissajous frequency parameter a
+    pub lissajous_a: f32,
+    /// Lissajous frequency parameter b
+    pub lissajous_b: f32,
+    /// Rose petal frequency parameter k
+    pub rose_k: f32,
+    /// Hypotrochoid rolling circle radius r
+    pub hypotrochoid_r: f32,
+    /// Hypotrochoid pen distance d
+    pub hypotrochoid_d: f32,
+    /// Random Walk number of steps
+    pub random_walk_steps: u32,
+    /// Random Walk step size
+    pub random_walk_step_size: f32,
+    /// Hilbert curve recursion order
+    pub hilbert_order: u32,
 }
 
 impl Default for AppConfig {
@@ -103,6 +122,15 @@ impl Default for AppConfig {
             led_mode: LedMode::RainbowRing,
             shadows_enabled: true,
             material_mode: MaterialMode::ButterCream,
+            marble_count: 1,
+            lissajous_a: 3.0,
+            lissajous_b: 4.0,
+            rose_k: 5.0,
+            hypotrochoid_r: 0.28,
+            hypotrochoid_d: 0.20,
+            random_walk_steps: 1000,
+            random_walk_step_size: 0.02,
+            hilbert_order: 5,
         }
     }
 }

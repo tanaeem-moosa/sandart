@@ -4,6 +4,12 @@
 const PI: f32 = 3.14159265359;
 const Z_SCALE: f32 = 0.018; // Unified heightmap displacement scale
 
+struct MarbleUniform {
+    pos: vec2<f32>,
+    radius: f32,
+    padding: f32,
+};
+
 struct LightingUniforms {
     light_dir: vec4<f32>,
     light_color: vec4<f32>,
@@ -12,9 +18,11 @@ struct LightingUniforms {
     shadow_enabled: u32,
     led_mode: u32,
     time: f32,
-    marble_pos: vec2<f32>,
-    marble_radius: f32,
+    marble_count: u32,
     material_mode: u32,
+    padding1: u32,
+    padding2: u32,
+    marbles: array<MarbleUniform, 5>,
 };
 
 struct CameraUniforms {
@@ -88,10 +96,58 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     // Construct 3D world position
     out.world_pos = vec3<f32>(in.position.x, in.position.y, height * Z_SCALE);
     
-    // Project position
     out.position = camera.view_proj * vec4<f32>(out.world_pos, 1.0);
-    
     return out;
+}
+
+fn intersect_marble(
+    C: vec3<f32>, D: vec3<f32>, P: vec3<f32>,
+    pos: vec2<f32>, radius: f32,
+    hit_t: ptr<function, f32>,
+    hit_S: ptr<function, vec3<f32>>,
+    hit_R: ptr<function, f32>,
+    sphere_normal: ptr<function, vec3<f32>>,
+    hit_marble: ptr<function, bool>
+) {
+    let marble_uv = vec2<f32>(pos.x * 0.5 + 0.5, -pos.y * 0.5 + 0.5);
+    let h_marble = sample_height_bilinear(marble_uv);
+    let S = vec3<f32>(pos.x, pos.y, h_marble * Z_SCALE);
+    let V = C - S;
+    let b_dot = dot(V, D);
+    let c_val = dot(V, V) - radius * radius;
+    let disc = b_dot * b_dot - c_val;
+    if (disc >= 0.0) {
+        let t = -b_dot - sqrt(disc);
+        let dist_to_sand = distance(C, P);
+        if (t > 0.0 && t < dist_to_sand && t < *hit_t) {
+            *hit_marble = true;
+            *hit_t = t;
+            *hit_S = S;
+            *hit_R = radius;
+            let I = C + t * D;
+            *sphere_normal = normalize(I - S);
+        }
+    }
+}
+
+fn apply_marble_shadow(
+    uv: vec2<f32>,
+    light_dir: vec3<f32>,
+    pos: vec2<f32>,
+    radius: f32,
+    shadow_factor: ptr<function, f32>
+) {
+    let m_uv = vec2<f32>(pos.x * 0.5 + 0.5, -pos.y * 0.5 + 0.5);
+    let h_m = sample_height_bilinear(m_uv);
+    let S_z = h_m * Z_SCALE;
+    let r_uv = radius * 0.5;
+
+    let shadow_offset = select(vec2<f32>(0.0), (S_z / max(light_dir.z, 0.001)) * vec2<f32>(light_dir.x, -light_dir.y), light_dir.z > 0.001);
+    let d_to_shadow = distance(uv, m_uv - shadow_offset);
+    if (d_to_shadow < r_uv * 1.5) {
+        let m_shadow = smoothstep(r_uv * 0.8, r_uv * 1.5, d_to_shadow);
+        *shadow_factor = *shadow_factor * (0.35 + 0.65 * m_shadow);
+    }
 }
 
 @fragment
@@ -144,32 +200,26 @@ fn fs_main(
     let D = normalize(P - C);
     let view_dir = -D;
     
-    // Sample height at marble position to find sphere Z center
-    let marble_uv = vec2<f32>(
-        uniforms.marble_pos.x * 0.5 + 0.5,
-        -uniforms.marble_pos.y * 0.5 + 0.5
-    );
-    let h_marble = sample_height_bilinear(marble_uv);
-    let S = vec3<f32>(uniforms.marble_pos.x, uniforms.marble_pos.y, h_marble * Z_SCALE);
-    let R = uniforms.marble_radius;
-    let marble_r_uv = uniforms.marble_radius * 0.5; // for shadow math compat
-    
-    let V = C - S;
-    let b = dot(V, D);
-    let c = dot(V, V) - R * R;
-    let disc = b * b - c;
-    
     var hit_marble = false;
     var sphere_normal = vec3<f32>(0.0, 0.0, 1.0);
+    var hit_t = 1e9;
+    var hit_S = vec3<f32>(0.0);
+    var hit_R = 0.0;
     
-    if (disc >= 0.0) {
-        let t = -b - sqrt(disc);
-        let dist_to_sand = distance(C, P);
-        if (t > 0.0 && t < dist_to_sand) {
-            hit_marble = true;
-            let I = C + t * D;
-            sphere_normal = normalize(I - S);
-        }
+    if (uniforms.marble_count > 0u) {
+        intersect_marble(C, D, P, uniforms.marbles[0].pos, uniforms.marbles[0].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+    }
+    if (uniforms.marble_count > 1u) {
+        intersect_marble(C, D, P, uniforms.marbles[1].pos, uniforms.marbles[1].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+    }
+    if (uniforms.marble_count > 2u) {
+        intersect_marble(C, D, P, uniforms.marbles[2].pos, uniforms.marbles[2].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+    }
+    if (uniforms.marble_count > 3u) {
+        intersect_marble(C, D, P, uniforms.marbles[3].pos, uniforms.marbles[3].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+    }
+    if (uniforms.marble_count > 4u) {
+        intersect_marble(C, D, P, uniforms.marbles[4].pos, uniforms.marbles[4].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
     }
 
     if (hit_marble) {
@@ -315,12 +365,20 @@ fn fs_main(
             }
         }
         
-        // Dynamic soft circular shadow from the marble sphere based on height and light dir
-        let shadow_offset = select(vec2<f32>(0.0), (S.z / max(light_dir.z, 0.001)) * vec2<f32>(light_dir.x, -light_dir.y), light_dir.z > 0.001);
-        let d_to_marble_shadow = distance(uv, marble_uv - shadow_offset);
-        if (d_to_marble_shadow < marble_r_uv * 1.5) {
-            let m_shadow = smoothstep(marble_r_uv * 0.8, marble_r_uv * 1.5, d_to_marble_shadow);
-            shadow_factor = shadow_factor * (0.35 + 0.65 * m_shadow);
+        if (uniforms.marble_count > 0u) {
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[0].pos, uniforms.marbles[0].radius, &shadow_factor);
+        }
+        if (uniforms.marble_count > 1u) {
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[1].pos, uniforms.marbles[1].radius, &shadow_factor);
+        }
+        if (uniforms.marble_count > 2u) {
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[2].pos, uniforms.marbles[2].radius, &shadow_factor);
+        }
+        if (uniforms.marble_count > 3u) {
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[3].pos, uniforms.marbles[3].radius, &shadow_factor);
+        }
+        if (uniforms.marble_count > 4u) {
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[4].pos, uniforms.marbles[4].radius, &shadow_factor);
         }
         
         diffuse = diff_color * shadow_factor;
@@ -382,12 +440,20 @@ fn fs_main(
                 }
             }
             
-            // Dynamic soft circular shadow from the marble for this LED
-            let led_offset = select(vec2<f32>(0.0), (S.z / max(l_dir.z, 0.001)) * vec2<f32>(l_dir.x, -l_dir.y), l_dir.z > 0.001);
-            let d_to_marble_shadow = distance(uv, marble_uv - led_offset);
-            if (d_to_marble_shadow < marble_r_uv * 1.5) {
-                let m_shadow = smoothstep(marble_r_uv * 0.8, marble_r_uv * 1.5, d_to_marble_shadow);
-                shadow_factor = shadow_factor * (0.35 + 0.65 * m_shadow);
+            if (uniforms.marble_count > 0u) {
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[0].pos, uniforms.marbles[0].radius, &shadow_factor);
+            }
+            if (uniforms.marble_count > 1u) {
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[1].pos, uniforms.marbles[1].radius, &shadow_factor);
+            }
+            if (uniforms.marble_count > 2u) {
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[2].pos, uniforms.marbles[2].radius, &shadow_factor);
+            }
+            if (uniforms.marble_count > 3u) {
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[3].pos, uniforms.marbles[3].radius, &shadow_factor);
+            }
+            if (uniforms.marble_count > 4u) {
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[4].pos, uniforms.marbles[4].radius, &shadow_factor);
             }
             
             diffuse_accum = diffuse_accum + led_color * (diff_strength + sp * 2.0) * shadow_factor;

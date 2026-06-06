@@ -111,7 +111,7 @@ The project is built in incremental, testable blocks:
 - [x] **Block 8: Advanced Visuals & Physics Customization**: Integrate granular noise, rotating LED ring, and marble drift.
 - [x] **v1.2: 3D Perspective Camera & Mesh**: Mesh generation, depth buffer configuration, orbit/zoom camera controller, shift-drag raycast drawing, and safe PRNG hashing.
 - [x] **v1.3: Journey-Style Shading & Performance**: Zero-allocation raw float heightmap upload using `R32Float` with `Nearest` sampling, manual bilinear filtering in WGSL to support all hardware platforms, Half-Lambert diffuse wrapping, Fresnel rim lighting, coordinate-locked microfacet sparkles, and dynamic marble shadow offsets.
-- [ ] **v1.4: Pattern Generators (Step 4)**: Implement mathematical formulas for Lissajous, Rose curves, Spirograph, Fermat spirals, and Multi-marble paths.
+- [x] **v1.4: Pattern Generators (Step 4)**: Implement mathematical formulas for Lissajous, Rose curves, Spirograph, Fermat spirals, and Multi-marble paths supporting up to 5 marbles with Chase/Multi-Marble modes.
 - [ ] **v1.5: Material Physics Presets (Step 5)**: Map materials like Dry Sand, Snow, and Fine Powder to specific cohesion, static repose, and flow models in the cellular automata engine.
 
 
