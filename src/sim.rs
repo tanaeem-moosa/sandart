@@ -336,10 +336,13 @@ impl Simulation {
             let mut active_marbles = Vec::new();
             for j in 0..5 {
                 if self.marbles[j].was_active {
-                    active_marbles.push(self.marbles[j].pos);
+                    let m_vel = if dt > 1e-5 { self.marbles[j].vel.length() / dt } else { 0.0 };
+                    active_marbles.push(crate::sim::physics::ActiveMarbleInfo {
+                        pos: self.marbles[j].pos,
+                        vel: m_vel,
+                    });
                 }
             }
-            let m_vel = if dt > 1e-5 { self.marbles[0].vel.length() / dt } else { 0.0 };
 
             settle_tick(
                 &mut self.heightmap,
@@ -348,7 +351,6 @@ impl Simulation {
                 &mut self.active_bounds,
                 material,
                 &active_marbles,
-                m_vel,
                 time_seed,
             );
         }

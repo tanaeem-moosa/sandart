@@ -75,29 +75,46 @@ impl PlaybackController {
                 continue;
             }
 
-            let idx = self.current_indices[j];
+            let mut idx = self.current_indices[j];
             if idx >= wps.len() {
                 continue;
             }
 
             all_stopped = false;
-            let target = wps[idx];
-            let to_target = target - current_positions[j];
-            let dist = to_target.length();
-            let max_move = speed * self.speed_multipliers[j] * dt;
+            targets[j] = Some(current_positions[j]);
 
-            // Safe threshold guard to prevent Nan/Inf division when distance is subnormal
-            if dist <= max_move || dist < 1e-5 {
-                self.current_indices[j] += 1;
-                if self.current_indices[j] >= wps.len() {
-                    if self.loop_pattern {
-                        self.current_indices[j] = 0;
+            let mut curr_pos = current_positions[j];
+            let mut remaining_move = speed * self.speed_multipliers[j] * dt;
+            let max_iterations = wps.len() * 4;
+            let mut loop_count = 0;
+
+            while remaining_move > 0.0 && idx < wps.len() && loop_count < max_iterations {
+                loop_count += 1;
+                let target = wps[idx];
+                let to_target = target - curr_pos;
+                let dist = to_target.length();
+
+                if dist <= remaining_move || dist < 1e-5 {
+                    curr_pos = target;
+                    remaining_move -= dist;
+                    idx += 1;
+                    if idx >= wps.len() {
+                        if self.loop_pattern {
+                            idx = 0;
+                        } else {
+                            targets[j] = Some(target);
+                            break;
+                        }
                     }
+                    targets[j] = Some(target);
+                } else {
+                    let step = to_target * (remaining_move / dist);
+                    curr_pos += step;
+                    targets[j] = Some(curr_pos);
+                    remaining_move = 0.0;
                 }
-                targets[j] = Some(target);
-            } else {
-                targets[j] = Some(current_positions[j] + to_target * (max_move / dist));
             }
+            self.current_indices[j] = idx;
         }
 
         // Check if all active paths are finished (when looping is disabled)
@@ -552,8 +569,8 @@ pub fn parse_gcode(content: &str) -> Result<Vec<Vec2>, String> {
     let mut raw_points = Vec::new();
     let mut last_x = 0.0f32;
     let mut last_y = 0.0f32;
-    let mut has_x = false;
-    let mut has_y = false;
+    let mut has_x = true;
+    let mut has_y = true;
     let mut relative_mode = false;
 
     for line in content.lines() {
@@ -690,29 +707,46 @@ mod tests {
     #[test]
     fn test_playback_controller() {
         let mut controller = PlaybackController::new();
-        controller.waypoints[0] = vec![Vec2::new(0.0, 0.0), Vec2::new(0.5, 0.0)];
+        // Use coordinates starting away from 0.0 to make movement math clean
+        controller.waypoints[0] = vec![Vec2::new(0.1, 0.0), Vec2::new(0.5, 0.0)];
         controller.state = PlaybackState::Playing;
 
         // Test default multiplier is 1.0
         assert_eq!(controller.speed_multipliers[0], 1.0);
 
-        let cur_positions = [Vec2::new(0.0, 0.0); 5];
-        let targets = controller.step_playback_all(&cur_positions, 1, 0.1, 0.1);
-        let pos = targets[0].unwrap();
-        assert_eq!(pos, Vec2::new(0.0, 0.0));
-        assert_eq!(controller.current_indices[0], 1);
-
+        // Case 1: Low speed movement. Move towards first waypoint.
+        // cur_positions = (0.0, 0.0), speed = 0.5, dt = 0.1 => remaining_move = 0.05
+        // Waypoint 0 is at 0.1, which is > 0.05.
+        // It should move to (0.05, 0.0) and idx should remain 0.
         let cur_positions = [Vec2::new(0.0, 0.0); 5];
         let targets = controller.step_playback_all(&cur_positions, 1, 0.5, 0.1);
         let pos = targets[0].unwrap();
         assert!((pos.x - 0.05).abs() < 1e-4);
         assert_eq!(pos.y, 0.0);
+        assert_eq!(controller.current_indices[0], 0);
+
+        // Case 2: Multi-waypoint movement.
+        // cur_positions = (0.0, 0.0), speed = 2.0, dt = 0.1 => remaining_move = 0.2
+        // Waypoint 0 is at 0.1 (distance 0.1). Consumed. remaining_move = 0.1. idx becomes 1.
+        // Waypoint 1 is at 0.5 (distance 0.4). Move towards it by 0.1 => final pos (0.2, 0.0). idx remains 1.
+        let targets = controller.step_playback_all(&cur_positions, 1, 2.0, 0.1);
+        let pos = targets[0].unwrap();
+        assert!((pos.x - 0.2).abs() < 1e-4);
+        assert_eq!(pos.y, 0.0);
         assert_eq!(controller.current_indices[0], 1);
 
+        // Case 3: Fast movement consuming multiple waypoints and wrapping.
+        // cur_positions = (0.0, 0.0), speed = 10.0, dt = 0.1 => remaining_move = 1.0
+        // Waypoint 0 is at 0.1 (distance 0.1). Consumed. remaining_move = 0.9. idx becomes 1.
+        // Waypoint 1 is at 0.5 (distance 0.4). Consumed. remaining_move = 0.5. idx becomes 2.
+        // Since loop_pattern is true, wraps to 0.
+        // Waypoint 0 is at 0.1 (distance 0.4). Consumed. remaining_move = 0.1. idx becomes 1.
+        // Waypoint 1 is at 0.5 (distance 0.4). Move towards it by 0.1 => final pos (0.2, 0.0). idx remains 1.
         let targets = controller.step_playback_all(&cur_positions, 1, 10.0, 0.1);
         let pos = targets[0].unwrap();
-        assert_eq!(pos, Vec2::new(0.5, 0.0));
-        assert_eq!(controller.current_indices[0], 0);
+        assert!((pos.x - 0.2).abs() < 1e-4);
+        assert_eq!(pos.y, 0.0);
+        assert_eq!(controller.current_indices[0], 1);
 
         // Test randomize_speeds
         controller.randomize_speeds(3, 99999);
@@ -724,9 +758,11 @@ mod tests {
         assert_eq!(controller.speed_multipliers[4], 1.0);
 
         // Test multiplier scale on step size
-        controller.current_indices[0] = 1;
+        controller.current_indices[0] = 0;
         controller.speed_multipliers[0] = 0.5;
-        let targets = controller.step_playback_all(&cur_positions, 1, 1.0, 0.1); // base speed 1.0, dt 0.1, max_move should be 1.0 * 0.5 * 0.1 = 0.05
+        // speed = 1.0, dt = 0.1, speed_multiplier = 0.5 => remaining_move = 0.05.
+        // Moves from (0.0, 0.0) to (0.05, 0.0).
+        let targets = controller.step_playback_all(&cur_positions, 1, 1.0, 0.1);
         let pos = targets[0].unwrap();
         assert!((pos.x - 0.05).abs() < 1e-4);
     }

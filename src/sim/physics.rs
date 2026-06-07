@@ -11,6 +11,13 @@ pub struct ActiveBounds {
     pub active: bool,
 }
 
+/// Active marble state passed to the physics CA simulation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActiveMarbleInfo {
+    pub pos: Vec2,
+    pub vel: f32,
+}
+
 /// Helper function to add sand to a cell, clamping it at max_height (glass top)
 /// and distributing any excess volume to its available 4-way neighbors.
 fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize, amount: f32, max_height: f32) {
@@ -28,62 +35,69 @@ fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize
             return;
         }
 
-        // Distribute excess to 4 neighbors that are below the max_height
+        // Distribute excess to neighbors that are below the max_height
         let x = idx % w;
         let y = idx / w;
-        let mut neighbors = Vec::with_capacity(4);
-        if x > 0 { neighbors.push(idx - 1); }
-        if x + 1 < w { neighbors.push(idx + 1); }
-        if y > 0 { neighbors.push(idx - w); }
-        if y + 1 < h { neighbors.push(idx + w); }
+        
+        let mut neighbors = [0usize; 4];
+        let mut num_neighbors = 0;
+        if x > 0 { neighbors[num_neighbors] = idx - 1; num_neighbors += 1; }
+        if x + 1 < w { neighbors[num_neighbors] = idx + 1; num_neighbors += 1; }
+        if y > 0 { neighbors[num_neighbors] = idx - w; num_neighbors += 1; }
+        if y + 1 < h { neighbors[num_neighbors] = idx + w; num_neighbors += 1; }
 
         // Filter neighbors that have room (height < max_height)
-        let mut room_neighbors = Vec::with_capacity(4);
-        for &n_idx in &neighbors {
+        let mut room_neighbors = [(0usize, 0.0f32); 4];
+        let mut num_room_neighbors = 0;
+        for i in 0..num_neighbors {
+            let n_idx = neighbors[i];
             let nh = heightmap.data[n_idx];
             if nh < max_height {
-                room_neighbors.push((n_idx, max_height - nh));
+                room_neighbors[num_room_neighbors] = (n_idx, max_height - nh);
+                num_room_neighbors += 1;
             }
         }
 
-        if room_neighbors.is_empty() {
+        if num_room_neighbors == 0 {
             // If all neighbors are full, distribute to all neighbors equally (overflowing slightly)
-            let num = neighbors.len() as f32;
+            let num = num_neighbors as f32;
             let share = excess / num;
-            for &n_idx in &neighbors {
-                heightmap.data[n_idx] += share;
+            for i in 0..num_neighbors {
+                heightmap.data[neighbors[i]] += share;
             }
         } else {
             // Distribute to room_neighbors proportional to their room
             // Let's do up to 3 passes to distribute everything
-            let mut room_neighbors = room_neighbors;
             let mut distributed = false;
             for _ in 0..3 {
-                let count = room_neighbors.len();
-                if count == 0 || excess <= 1e-6 {
+                if num_room_neighbors == 0 || excess <= 1e-6 {
                     distributed = true;
                     break;
                 }
-                let share = excess / count as f32;
-                let mut next_room = Vec::with_capacity(4);
-                for (n_idx, room) in room_neighbors {
+                let share = excess / num_room_neighbors as f32;
+                let mut next_room = [(0usize, 0.0f32); 4];
+                let mut next_num_room = 0;
+                for i in 0..num_room_neighbors {
+                    let (n_idx, room) = room_neighbors[i];
                     if room > 0.0 {
                         let to_add = share.min(room);
                         heightmap.data[n_idx] += to_add;
                         excess -= to_add;
                         let new_room = room - to_add;
                         if new_room > 0.0 {
-                            next_room.push((n_idx, new_room));
+                            next_room[next_num_room] = (n_idx, new_room);
+                            next_num_room += 1;
                         }
                     }
                 }
                 room_neighbors = next_room;
+                num_room_neighbors = next_num_room;
             }
             if !distributed && excess > 1e-6 {
-                let num = neighbors.len() as f32;
+                let num = num_neighbors as f32;
                 let share = excess / num;
-                for &n_idx in &neighbors {
-                    heightmap.data[n_idx] += share;
+                for i in 0..num_neighbors {
+                    heightmap.data[neighbors[i]] += share;
                 }
             }
         }
@@ -355,8 +369,7 @@ pub fn settle_tick(
     sliding: &mut Vec<bool>,
     active_bounds: &mut ActiveBounds,
     material: crate::config::MaterialMode,
-    active_marbles: &[Vec2],
-    marble_vel: f32,
+    active_marbles: &[ActiveMarbleInfo],
     time_seed: u32,
 ) -> f32 {
     if !active_bounds.active {
@@ -418,6 +431,8 @@ pub fn settle_tick(
 
             let mut cell_flowed = false;
 
+            // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
+            let mut avalanche_checked = false;
             for &(cond, nx, ny, neighbor_idx) in &neighbors {
                 if !cond {
                     continue;
@@ -426,7 +441,6 @@ pub fn settle_tick(
                 let h_neighbor = heightmap.data[neighbor_idx];
                 let geom_slope = h_center - h_neighbor;
 
-                // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
                 if geom_slope > 0.20 {
                     let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
                     if flow > 0.0 {
@@ -447,11 +461,87 @@ pub fn settle_tick(
                             flow_occurred = true;
                         }
                     }
+                    avalanche_checked = true;
+                }
+            }
+            if avalanche_checked {
+                sliding[center_idx] = cell_flowed;
+                continue;
+            }
+
+            // Cell-invariant properties (calculated once per cell before neighbor loop)
+            let mut higher_neighbors = 0;
+            if material == crate::config::MaterialMode::DrySand {
+                for &(cond, _, _, n_idx) in &neighbors {
+                    if cond && heightmap.data[n_idx] >= h_center - 1e-4 {
+                        higher_neighbors += 1;
+                    }
+                }
+            }
+
+            let mut closest_marble_idx = None;
+            let mut min_dist_to_marble = f32::MAX;
+            if (material == crate::config::MaterialMode::Oobleck || material == crate::config::MaterialMode::IronFilings) && !active_marbles.is_empty() {
+                let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
+                let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
+                let cell_pos = Vec2::new(cell_x, cell_y);
+
+                for (idx, m) in active_marbles.iter().enumerate() {
+                    let dist = (cell_pos - m.pos).length();
+                    if dist < min_dist_to_marble {
+                        min_dist_to_marble = dist;
+                        closest_marble_idx = Some(idx);
+                    }
+                }
+            }
+
+            let oobleck_params = if material == crate::config::MaterialMode::Oobleck {
+                let local_vel = if let Some(idx) = closest_marble_idx {
+                    active_marbles[idx].vel
+                } else {
+                    0.0
+                };
+                let t = ((local_vel - 0.03) / 0.12).clamp(0.0, 1.0);
+                let t_steep = t * t;
+                Some((
+                    0.005 + (0.32 - 0.005) * t_steep,
+                    0.40 + (0.005 - 0.40) * t_steep,
+                    0.02 + (0.98 - 0.02) * t_steep,
+                ))
+            } else {
+                None
+            };
+
+            let iron_filings_threshold = if material == crate::config::MaterialMode::IronFilings && min_dist_to_marble < 0.22 {
+                let ripple = (min_dist_to_marble * 2.0 * std::f32::consts::PI / 0.025).cos();
+                (0.08 + ripple * 0.05).max(0.01)
+            } else {
+                0.08
+            };
+
+            let to_magnet_norm = if material == crate::config::MaterialMode::IronFilings && min_dist_to_marble > 1e-4 {
+                if let Some(idx) = closest_marble_idx {
+                    let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
+                    let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
+                    let cell_pos = Vec2::new(cell_x, cell_y);
+                    Some((active_marbles[idx].pos - cell_pos).normalize())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            for (dir_idx, &(cond, nx, ny, neighbor_idx)) in neighbors.iter().enumerate() {
+                if !cond {
                     continue;
                 }
 
+                let h_neighbor = heightmap.data[neighbor_idx];
+                let geom_slope = h_center - h_neighbor;
+
                 // B. Material-specific parameters
-                let mut threshold;
+                let threshold;
                 let alpha;
                 let lock_chance;
                 let mut quantize_size = None;
@@ -467,19 +557,7 @@ pub fn settle_tick(
                         threshold = if sliding[center_idx] { 0.04 } else { 0.08 };
                         alpha = 0.25;
                         quantize_size = Some(0.01);
-                        
-                        // Friction Jamming: if center has >= 3 higher neighbors, lock it with 80% prob
-                        let mut higher_neighbors = 0;
-                        for &(_, _, _, n_idx) in &neighbors {
-                            if heightmap.data[n_idx] >= h_center - 1e-4 {
-                                higher_neighbors += 1;
-                            }
-                        }
-                        if higher_neighbors >= 3 {
-                            lock_chance = 0.80;
-                        } else {
-                            lock_chance = 0.10;
-                        }
+                        lock_chance = if higher_neighbors >= 3 { 0.80 } else { 0.10 };
                     }
                     crate::config::MaterialMode::Snow => {
                         threshold = 0.15;
@@ -503,11 +581,10 @@ pub fn settle_tick(
                         lock_chance = 0.02;
                     }
                     crate::config::MaterialMode::Oobleck => {
-                        let t = ((marble_vel - 0.03) / 0.12).clamp(0.0, 1.0);
-                        let t_steep = t * t;
-                        threshold = 0.005 + (0.32 - 0.005) * t_steep;
-                        alpha = 0.40 + (0.005 - 0.40) * t_steep;
-                        lock_chance = 0.02 + (0.98 - 0.02) * t_steep;
+                        let (th, al, lc) = oobleck_params.unwrap();
+                        threshold = th;
+                        alpha = al;
+                        lock_chance = lc;
                     }
                     crate::config::MaterialMode::MoonDust => {
                         threshold = 0.22;
@@ -516,44 +593,21 @@ pub fn settle_tick(
                         quantize_size = Some(0.015);
                     }
                     crate::config::MaterialMode::IronFilings => {
-                        threshold = 0.08;
+                        threshold = iron_filings_threshold;
                         alpha = 0.35;
                         lock_chance = 0.05;
                         
-                        if !active_marbles.is_empty() {
-                            let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
-                            let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
-                            let cell_pos = Vec2::new(cell_x, cell_y);
-
-                            // Find the closest active marble
-                            let mut closest_marble = active_marbles[0];
-                            let mut min_dist_to_marble = (cell_pos - closest_marble).length();
-                            for &m in &active_marbles[1..] {
-                                let dist = (cell_pos - m).length();
-                                if dist < min_dist_to_marble {
-                                    min_dist_to_marble = dist;
-                                    closest_marble = m;
-                                }
-                            }
-
-                            if min_dist_to_marble < 0.22 {
-                                let ripple = (min_dist_to_marble * 2.0 * std::f32::consts::PI / 0.025).cos();
-                                threshold = (0.08 + ripple * 0.05).max(0.01);
-                                
-                                // Magnetic pull towards the closest magnet/marble
-                                if min_dist_to_marble > 1e-4 {
-                                    let neighbor_x = (nx as f32 / w as f32) * 2.0 - 1.0;
-                                    let neighbor_y = 1.0 - (ny as f32 / h as f32) * 2.0;
-                                    let neighbor_pos = Vec2::new(neighbor_x, neighbor_y);
-                                    let to_neighbor = neighbor_pos - cell_pos;
-                                    let to_magnet = closest_marble - cell_pos;
-                                    
-                                    if to_neighbor.length_squared() > 1e-8 {
-                                        let dot_prod = to_magnet.normalize().dot(to_neighbor.normalize());
-                                        let pull_strength = 0.24 * (1.0 - min_dist_to_marble / 0.22).max(0.0);
-                                        magnetic_bias = pull_strength * dot_prod;
-                                    }
-                                }
+                        if min_dist_to_marble < 0.22 {
+                            if let Some(to_mag_norm) = to_magnet_norm {
+                                let dot_prod = match dir_idx {
+                                    0 => -to_mag_norm.x,
+                                    1 => to_mag_norm.x,
+                                    2 => to_mag_norm.y,
+                                    3 => -to_mag_norm.y,
+                                    _ => 0.0,
+                                };
+                                let pull_strength = 0.24 * (1.0 - min_dist_to_marble / 0.22).max(0.0);
+                                magnetic_bias = pull_strength * dot_prod;
                             }
                         }
                     }
@@ -837,7 +891,6 @@ mod tests {
                 &mut bounds,
                 crate::config::MaterialMode::ButterCream,
                 &[],
-                0.0,
                 12345,
             );
             if flow > 0.0 {
@@ -880,7 +933,6 @@ mod tests {
             &mut bounds,
             crate::config::MaterialMode::ButterCream,
             &[],
-            0.0,
             12345,
         );
         assert_eq!(flow, 0.0);
@@ -927,8 +979,7 @@ mod tests {
                 &mut sliding,
                 &mut bounds,
                 mat,
-                &[Vec2::ZERO],
-                0.1,
+                &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1 }],
                 9999,
             );
 

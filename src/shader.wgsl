@@ -7,7 +7,7 @@ const Z_SCALE: f32 = 0.018; // Unified heightmap displacement scale
 struct MarbleUniform {
     pos: vec2<f32>,
     radius: f32,
-    padding: f32,
+    z_pos: f32,
 };
 
 struct LightingUniforms {
@@ -102,16 +102,14 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 fn intersect_marble(
     C: vec3<f32>, D: vec3<f32>, P: vec3<f32>,
-    pos: vec2<f32>, radius: f32,
+    pos: vec2<f32>, radius: f32, z_pos: f32,
     hit_t: ptr<function, f32>,
     hit_S: ptr<function, vec3<f32>>,
     hit_R: ptr<function, f32>,
     sphere_normal: ptr<function, vec3<f32>>,
     hit_marble: ptr<function, bool>
 ) {
-    let marble_uv = vec2<f32>(pos.x * 0.5 + 0.5, -pos.y * 0.5 + 0.5);
-    let h_marble = sample_height_bilinear(marble_uv);
-    let S = vec3<f32>(pos.x, pos.y, h_marble * Z_SCALE);
+    let S = vec3<f32>(pos.x, pos.y, z_pos * Z_SCALE);
     let V = C - S;
     let b_dot = dot(V, D);
     let c_val = dot(V, V) - radius * radius;
@@ -135,11 +133,11 @@ fn apply_marble_shadow(
     light_dir: vec3<f32>,
     pos: vec2<f32>,
     radius: f32,
+    z_pos: f32,
     shadow_factor: ptr<function, f32>
 ) {
     let m_uv = vec2<f32>(pos.x * 0.5 + 0.5, -pos.y * 0.5 + 0.5);
-    let h_m = sample_height_bilinear(m_uv);
-    let S_z = h_m * Z_SCALE;
+    let S_z = z_pos * Z_SCALE;
     let r_uv = radius * 0.5;
 
     let shadow_offset = select(vec2<f32>(0.0), (S_z / max(light_dir.z, 0.001)) * vec2<f32>(light_dir.x, -light_dir.y), light_dir.z > 0.001);
@@ -207,19 +205,19 @@ fn fs_main(
     var hit_R = 0.0;
     
     if (uniforms.marble_count > 0u) {
-        intersect_marble(C, D, P, uniforms.marbles[0].pos, uniforms.marbles[0].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+        intersect_marble(C, D, P, uniforms.marbles[0].pos, uniforms.marbles[0].radius, uniforms.marbles[0].z_pos, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
     }
     if (uniforms.marble_count > 1u) {
-        intersect_marble(C, D, P, uniforms.marbles[1].pos, uniforms.marbles[1].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+        intersect_marble(C, D, P, uniforms.marbles[1].pos, uniforms.marbles[1].radius, uniforms.marbles[1].z_pos, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
     }
     if (uniforms.marble_count > 2u) {
-        intersect_marble(C, D, P, uniforms.marbles[2].pos, uniforms.marbles[2].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+        intersect_marble(C, D, P, uniforms.marbles[2].pos, uniforms.marbles[2].radius, uniforms.marbles[2].z_pos, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
     }
     if (uniforms.marble_count > 3u) {
-        intersect_marble(C, D, P, uniforms.marbles[3].pos, uniforms.marbles[3].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+        intersect_marble(C, D, P, uniforms.marbles[3].pos, uniforms.marbles[3].radius, uniforms.marbles[3].z_pos, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
     }
     if (uniforms.marble_count > 4u) {
-        intersect_marble(C, D, P, uniforms.marbles[4].pos, uniforms.marbles[4].radius, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
+        intersect_marble(C, D, P, uniforms.marbles[4].pos, uniforms.marbles[4].radius, uniforms.marbles[4].z_pos, &hit_t, &hit_S, &hit_R, &sphere_normal, &hit_marble);
     }
 
     if (hit_marble) {
@@ -292,18 +290,30 @@ fn fs_main(
     }
     
     // 1. Compute finite difference normal from neighbor heightmap pixels
-    let texel_size = 1.0 / 1024.0;
-    let h_center = sample_height_bilinear(uv);
-    let h_left   = sample_height_bilinear(uv + vec2<f32>(-texel_size, 0.0));
-    let h_right  = sample_height_bilinear(uv + vec2<f32>(texel_size, 0.0));
-    let h_up     = sample_height_bilinear(uv + vec2<f32>(0.0, -texel_size));
-    let h_down   = sample_height_bilinear(uv + vec2<f32>(0.0, texel_size));
-
     // Normal tilting scale (high factor creates visual depth)
     let depth_factor = 28.0;
+    let tex_size = 1024.0;
+    let texel_coords = uv * tex_size - 0.5;
+    let index = floor(texel_coords);
+    let f = fract(texel_coords);
+
+    let u0 = clamp((index.x + 0.5) / tex_size, 0.0, 1.0);
+    let v0 = clamp((index.y + 0.5) / tex_size, 0.0, 1.0);
+    let u1 = clamp((index.x + 1.5) / tex_size, 0.0, 1.0);
+    let v1 = clamp((index.y + 1.5) / tex_size, 0.0, 1.0);
+
+    let h00 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v0), 0.0).r;
+    let h10 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v0), 0.0).r;
+    let h01 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v1), 0.0).r;
+    let h11 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v1), 0.0).r;
+
+    let h_center = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    let dh_dx = mix(h10 - h00, h11 - h01, f.y);
+    let dh_dy = mix(h01 - h00, h11 - h10, f.x);
+
     var normal = normalize(vec3<f32>(
-        (h_left - h_right) * depth_factor,
-        (h_down - h_up) * depth_factor,
+        -dh_dx * depth_factor,
+        dh_dy * depth_factor,
         1.0
     ));
 
@@ -428,7 +438,7 @@ fn fs_main(
         
         // Microfacet Sparkles for quartz highlights
         let half_vec = normalize(light_dir + view_dir);
-        let sparkle_noise = hash(uv * 4000.0);
+        let sparkle_noise = hash(floor(uv * 4000.0));
         if (sparkle_noise > sparkles_threshold) {
             let dot_nh = max(dot(normal, half_vec), 0.0);
             let sparkle_intensity = pow(dot_nh, sparkles_power) * sparkles_intensity;
@@ -453,7 +463,7 @@ fn fs_main(
                     break;
                 }
                 
-                let sample_h = sample_height_bilinear(curr_uv);
+                let sample_h = textureSampleLevel(heightmap_tex, heightmap_sampler, curr_uv, 0.0).r;
                 if (curr_h < sample_h) {
                     shadow_factor = 0.28;
                     break;
@@ -462,19 +472,19 @@ fn fs_main(
         }
         
         if (uniforms.marble_count > 0u) {
-            apply_marble_shadow(uv, light_dir, uniforms.marbles[0].pos, uniforms.marbles[0].radius, &shadow_factor);
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[0].pos, uniforms.marbles[0].radius, uniforms.marbles[0].z_pos, &shadow_factor);
         }
         if (uniforms.marble_count > 1u) {
-            apply_marble_shadow(uv, light_dir, uniforms.marbles[1].pos, uniforms.marbles[1].radius, &shadow_factor);
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[1].pos, uniforms.marbles[1].radius, uniforms.marbles[1].z_pos, &shadow_factor);
         }
         if (uniforms.marble_count > 2u) {
-            apply_marble_shadow(uv, light_dir, uniforms.marbles[2].pos, uniforms.marbles[2].radius, &shadow_factor);
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[2].pos, uniforms.marbles[2].radius, uniforms.marbles[2].z_pos, &shadow_factor);
         }
         if (uniforms.marble_count > 3u) {
-            apply_marble_shadow(uv, light_dir, uniforms.marbles[3].pos, uniforms.marbles[3].radius, &shadow_factor);
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[3].pos, uniforms.marbles[3].radius, uniforms.marbles[3].z_pos, &shadow_factor);
         }
         if (uniforms.marble_count > 4u) {
-            apply_marble_shadow(uv, light_dir, uniforms.marbles[4].pos, uniforms.marbles[4].radius, &shadow_factor);
+            apply_marble_shadow(uv, light_dir, uniforms.marbles[4].pos, uniforms.marbles[4].radius, uniforms.marbles[4].z_pos, &shadow_factor);
         }
         
         diffuse = diff_color * shadow_factor;
@@ -504,7 +514,7 @@ fn fs_main(
             
             // Microfacet Sparkles under this LED light
             let half_vec = normalize(l_dir + view_dir);
-            let sparkle_noise = hash(uv * 4000.0);
+            let sparkle_noise = hash(floor(uv * 4000.0));
             var sp = 0.0;
             let led_sparkles_threshold = sparkles_threshold + 0.003;
             if (sparkle_noise > led_sparkles_threshold) {
@@ -529,7 +539,7 @@ fn fs_main(
                         break;
                     }
                     
-                    let sample_h = sample_height_bilinear(curr_uv);
+                    let sample_h = textureSampleLevel(heightmap_tex, heightmap_sampler, curr_uv, 0.0).r;
                     if (curr_h < sample_h) {
                         shadow_factor = 0.25;
                         break;
@@ -538,19 +548,19 @@ fn fs_main(
             }
             
             if (uniforms.marble_count > 0u) {
-                apply_marble_shadow(uv, l_dir, uniforms.marbles[0].pos, uniforms.marbles[0].radius, &shadow_factor);
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[0].pos, uniforms.marbles[0].radius, uniforms.marbles[0].z_pos, &shadow_factor);
             }
             if (uniforms.marble_count > 1u) {
-                apply_marble_shadow(uv, l_dir, uniforms.marbles[1].pos, uniforms.marbles[1].radius, &shadow_factor);
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[1].pos, uniforms.marbles[1].radius, uniforms.marbles[1].z_pos, &shadow_factor);
             }
             if (uniforms.marble_count > 2u) {
-                apply_marble_shadow(uv, l_dir, uniforms.marbles[2].pos, uniforms.marbles[2].radius, &shadow_factor);
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[2].pos, uniforms.marbles[2].radius, uniforms.marbles[2].z_pos, &shadow_factor);
             }
             if (uniforms.marble_count > 3u) {
-                apply_marble_shadow(uv, l_dir, uniforms.marbles[3].pos, uniforms.marbles[3].radius, &shadow_factor);
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[3].pos, uniforms.marbles[3].radius, uniforms.marbles[3].z_pos, &shadow_factor);
             }
             if (uniforms.marble_count > 4u) {
-                apply_marble_shadow(uv, l_dir, uniforms.marbles[4].pos, uniforms.marbles[4].radius, &shadow_factor);
+                apply_marble_shadow(uv, l_dir, uniforms.marbles[4].pos, uniforms.marbles[4].radius, uniforms.marbles[4].z_pos, &shadow_factor);
             }
             
             diffuse_accum = diffuse_accum + led_color * (diff_strength + sp * 2.0) * shadow_factor;

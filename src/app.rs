@@ -97,6 +97,10 @@ impl SandArtApp {
 
                 match res {
                     Ok(waypoints) => {
+                        if waypoints.is_empty() {
+                            self.pattern_error = Some("Parsed pattern contains no waypoints".to_string());
+                            return;
+                        }
                         self.playback.clear_waypoints();
                         let count = self.config.marble_count.clamp(1, 5) as usize;
                         for j in 0..5 {
@@ -806,27 +810,62 @@ impl eframe::App for SandArtApp {
                     crate::renderer::MarbleUniform {
                         pos: [self.sim.marbles[0].pos.x, self.sim.marbles[0].pos.y],
                         radius: self.config.marble_size,
-                        padding: 0.0,
+                        z_pos: {
+                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                                self.sim.marbles[0].pos,
+                                self.sim.heightmap.width,
+                                self.sim.heightmap.height,
+                            );
+                            self.sim.heightmap.get(gx, gy)
+                        },
                     },
                     crate::renderer::MarbleUniform {
                         pos: [self.sim.marbles[1].pos.x, self.sim.marbles[1].pos.y],
                         radius: self.config.marble_size,
-                        padding: 0.0,
+                        z_pos: {
+                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                                self.sim.marbles[1].pos,
+                                self.sim.heightmap.width,
+                                self.sim.heightmap.height,
+                            );
+                            self.sim.heightmap.get(gx, gy)
+                        },
                     },
                     crate::renderer::MarbleUniform {
                         pos: [self.sim.marbles[2].pos.x, self.sim.marbles[2].pos.y],
                         radius: self.config.marble_size,
-                        padding: 0.0,
+                        z_pos: {
+                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                                self.sim.marbles[2].pos,
+                                self.sim.heightmap.width,
+                                self.sim.heightmap.height,
+                            );
+                            self.sim.heightmap.get(gx, gy)
+                        },
                     },
                     crate::renderer::MarbleUniform {
                         pos: [self.sim.marbles[3].pos.x, self.sim.marbles[3].pos.y],
                         radius: self.config.marble_size,
-                        padding: 0.0,
+                        z_pos: {
+                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                                self.sim.marbles[3].pos,
+                                self.sim.heightmap.width,
+                                self.sim.heightmap.height,
+                            );
+                            self.sim.heightmap.get(gx, gy)
+                        },
                     },
                     crate::renderer::MarbleUniform {
                         pos: [self.sim.marbles[4].pos.x, self.sim.marbles[4].pos.y],
                         radius: self.config.marble_size,
-                        padding: 0.0,
+                        z_pos: {
+                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                                self.sim.marbles[4].pos,
+                                self.sim.heightmap.width,
+                                self.sim.heightmap.height,
+                            );
+                            self.sim.heightmap.get(gx, gy)
+                        },
                     },
                 ],
             };

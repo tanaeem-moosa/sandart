@@ -30,7 +30,7 @@ impl Vertex {
 pub struct MarbleUniform {
     pub pos: [f32; 2],     // x, y coordinate
     pub radius: f32,        // radius in normalized coordinates
-    pub padding: f32,
+    pub z_pos: f32,         // z height from heightmap
 }
 
 #[repr(C, align(16))]
@@ -486,11 +486,11 @@ mod tests {
                 material_mode: 0,
                 _padding: [0, 0],
                 marbles: [
-                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
-                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
-                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
-                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
-                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, padding: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
+                    MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                 ],
             };
             resources.update_uniforms(&queue, &uniforms);
