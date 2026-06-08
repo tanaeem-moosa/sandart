@@ -135,6 +135,29 @@ impl PlaybackController {
     }
 }
 
+/// Helper to automatically close open paths by traversing them in reverse back to the start.
+pub fn close_loop_path(mut path: Vec<Vec2>) -> Vec<Vec2> {
+    if path.len() < 2 {
+        return path;
+    }
+    let first = path[0];
+    let last = path[path.len() - 1];
+    
+    // Check if the path is open (first and last points are far apart)
+    if first.distance(last) > 0.05 {
+        // Create the return path: traverse back along the same waypoints in reverse order.
+        // We omit the first and last elements during the reverse sweep to prevent duplicate adjacent waypoints.
+        let mut return_path = path.clone();
+        return_path.pop(); // remove last element (which is already the end of path)
+        return_path.reverse();
+        if !return_path.is_empty() {
+            return_path.pop(); // remove the first element (which would be duplicate with start when wrapping)
+        }
+        path.extend(return_path);
+    }
+    path
+}
+
 /// Generate a concentric ripple pattern on a heightmap.
 pub fn generate_ripples(heightmap: &mut crate::sim::Heightmap) {
     let w = heightmap.width;

@@ -50,69 +50,73 @@ pub struct Simulation {
     pub seed: u32,
 }
 
+pub const DEFAULT_SAND_HEIGHT: f32 = 0.35;
+
 fn generate_smooth_noise(seed_val: u32) -> Heightmap {
-    let mut heightmap = Heightmap::new(GRID_SIZE, GRID_SIZE, 0.8);
-    let mut noise = vec![0.0f32; GRID_SIZE * GRID_SIZE];
+    let mut heightmap = Heightmap::new(GRID_SIZE, GRID_SIZE, DEFAULT_SAND_HEIGHT);
     let mut seed = seed_val;
-    for val in noise.iter_mut() {
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        *val = (seed as f32 / u32::MAX as f32) - 0.5; // Range [-0.5, 0.5]
-    }
 
-    // Separable box filter for smooth 2D noise (2 passes of a 3x3 filter)
-    let mut temp = noise.clone();
-    let mut buffer = vec![0.0f32; GRID_SIZE * GRID_SIZE];
-
-    for _pass in 0..2 {
-        // Horizontal pass
-        for y in 0..GRID_SIZE {
-            let row_offset = y * GRID_SIZE;
-            for x in 0..GRID_SIZE {
-                let x_min = x.saturating_sub(1);
-                let x_max = (x + 1).min(GRID_SIZE - 1);
-                let mut sum = 0.0;
-                let mut count = 0.0;
-                for nx in x_min..=x_max {
-                    sum += temp[row_offset + nx];
-                    count += 1.0;
-                }
-                buffer[row_offset + x] = sum / count;
-            }
+    // Helper to generate a low-res random grid via XORShift
+    let mut gen_grid = |size: usize| -> Vec<f32> {
+        let mut grid = vec![0.0f32; size * size];
+        for val in grid.iter_mut() {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *val = (seed as f32 / u32::MAX as f32) - 0.5; // Range [-0.5, 0.5]
         }
+        grid
+    };
 
-        // Vertical pass
-        for y in 0..GRID_SIZE {
-            let y_min = y.saturating_sub(1);
-            let y_max = (y + 1).min(GRID_SIZE - 1);
-            let row_offset = y * GRID_SIZE;
-            for x in 0..GRID_SIZE {
-                let mut sum = 0.0;
-                let mut count = 0.0;
-                for ny in y_min..=y_max {
-                    sum += buffer[ny * GRID_SIZE + x];
-                    count += 1.0;
-                }
-                temp[row_offset + x] = sum / count;
-            }
+    // Generate two noise grids at different resolutions (octaves)
+    let grid_size1 = 8;
+    let grid1 = gen_grid(grid_size1);
+
+    let grid_size2 = 16;
+    let grid2 = gen_grid(grid_size2);
+
+    // Bilinear interpolation helper with smoothstep
+    let sample_octave = |grid: &[f32], size: usize, x: usize, y: usize| -> f32 {
+        let fx = (x as f32 / (GRID_SIZE - 1) as f32) * (size - 1) as f32;
+        let fy = (y as f32 / (GRID_SIZE - 1) as f32) * (size - 1) as f32;
+
+        let x0 = fx.floor() as usize;
+        let x1 = (x0 + 1).min(size - 1);
+        let y0 = fy.floor() as usize;
+        let y1 = (y0 + 1).min(size - 1);
+
+        let tx = fx - x0 as f32;
+        let ty = fy - y0 as f32;
+
+        // Smoothstep interpolation
+        let sx = tx * tx * (3.0 - 2.0 * tx);
+        let sy = ty * ty * (3.0 - 2.0 * ty);
+
+        let v00 = grid[y0 * size + x0];
+        let v10 = grid[y0 * size + x1];
+        let v01 = grid[y1 * size + x0];
+        let v11 = grid[y1 * size + x1];
+
+        let h0 = v00 * (1.0 - sx) + v10 * sx;
+        let h1 = v01 * (1.0 - sx) + v11 * sx;
+        h0 * (1.0 - sy) + h1 * sy
+    };
+
+    for y in 0..GRID_SIZE {
+        let row_offset = y * GRID_SIZE;
+        for x in 0..GRID_SIZE {
+            // Combine octaves: 8x8 primary (amp 0.025), 16x16 secondary (amp 0.008)
+            let val1 = sample_octave(&grid1, grid_size1, x, y) * 0.025;
+            let val2 = sample_octave(&grid2, grid_size2, x, y) * 0.008;
+
+            let combined = val1 + val2;
+            heightmap.data[row_offset + x] = (DEFAULT_SAND_HEIGHT + combined).clamp(0.0, 1.0);
         }
-    }
-
-    // Find max amplitude to normalize
-    let mut max_abs = 0.0f32;
-    for &val in &temp {
-        max_abs = max_abs.max(val.abs());
-    }
-
-    // Scale so that maximum noise deviation is exactly 0.025, and add to base height 0.8
-    let scale = if max_abs > 1e-5 { 0.025 / max_abs } else { 1.0 };
-    for (i, val) in heightmap.data.iter_mut().enumerate() {
-        *val = (0.8 + temp[i] * scale).clamp(0.0, 1.0);
     }
 
     heightmap
 }
+
 
 impl Simulation {
     pub fn new() -> Self {
@@ -369,7 +373,7 @@ mod tests {
         sim.reset();
         assert_eq!(sim.marble_pos, Vec2::ZERO);
         let val = sim.heightmap.get(100, 100);
-        assert!((val - 0.8).abs() < 0.03);
+        assert!((val - DEFAULT_SAND_HEIGHT).abs() < 0.035);
     }
 
     #[test]

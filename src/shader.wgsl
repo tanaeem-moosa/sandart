@@ -2,7 +2,7 @@
 @group(0) @binding(1) var heightmap_sampler: sampler;
 
 const PI: f32 = 3.14159265359;
-const Z_SCALE: f32 = 0.018; // Unified heightmap displacement scale
+const Z_SCALE: f32 = 0.009; // Unified heightmap displacement scale
 
 struct MarbleUniform {
     pos: vec2<f32>,
@@ -237,7 +237,7 @@ fn fs_main(
             let num_leds = 8;
             for (var i = 0; i < num_leds; i = i + 1) {
                 let angle_led = f32(i) * (2.0 * PI / f32(num_leds)) + uniforms.time * 0.10;
-                let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.20));
+                let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.06));
                 
                 var led_color = vec3<f32>(0.0);
                 if (uniforms.led_mode == 1u) {
@@ -322,8 +322,8 @@ fn fs_main(
     let grain_noise = hash(uv * noise_scale);
     let grain_noise_y = hash(uv * noise_scale + vec2<f32>(17.0, 43.0));
     var perturb = vec3<f32>(
-        (grain_noise - 0.5) * 0.12,
-        (grain_noise_y - 0.5) * 0.12,
+        (grain_noise - 0.5) * 0.28,
+        (grain_noise_y - 0.5) * 0.28,
         0.0
     );
 
@@ -359,6 +359,23 @@ fn fs_main(
     normal = normalize(normal + perturb);
 
     // 3. Lighting Mode evaluation
+    let r_norm = clamp(dist / 0.46, 0.0, 1.0);
+    let edge_factor = smoothstep(0.5, 1.0, r_norm);
+    let radial_boost = 1.0 + 0.3 * edge_factor;
+
+    // Determine the local light color based on LED mode and pixel angle
+    var local_light_color = vec3<f32>(1.0, 0.95, 0.85); // Default warm white
+    if (uniforms.led_mode == 0u) {
+        local_light_color = uniforms.light_color.rgb;
+    } else if (uniforms.led_mode == 1u) {
+        let angle = atan2(-(uv.y - 0.5), uv.x - 0.5);
+        let hue = fract(angle / (2.0 * PI) - uniforms.time * 0.05);
+        local_light_color = hue_to_rgb(hue);
+    } else if (uniforms.led_mode == 2u) {
+        let hue = fract(uniforms.time * 0.03);
+        local_light_color = hue_to_rgb(hue);
+    }
+
     var diffuse = vec3<f32>(0.0);
     var specular = vec3<f32>(0.0);
     var directional_sparkle = 0.0;
@@ -432,9 +449,9 @@ fn fs_main(
         // Single Directional Light mode
         let light_dir = normalize(uniforms.light_dir.xyz);
         
-        // Half-Lambert Diffuse to simulate subsurface scattering wrapping
-        let diff_strength = dot(normal, light_dir) * 0.5 + 0.5;
-        let diff_color = uniforms.light_color.rgb * diff_strength * uniforms.light_brightness;
+        // Power-wrapped diffuse to simulate multiple scattering of sand grains
+        let diff_strength = pow(dot(normal, light_dir) * 0.5 + 0.5, 1.5);
+        let diff_color = local_light_color * diff_strength * uniforms.light_brightness;
         
         // Microfacet Sparkles for quartz highlights
         let half_vec = normalize(light_dir + view_dir);
@@ -450,10 +467,10 @@ fn fs_main(
             let step_count = 32;
             let step_size = 0.0022;
             let uv_step = vec2<f32>(light_dir.x, -light_dir.y) * step_size;
-            let h_step = light_dir.z * step_size * Z_SCALE;
+            let h_step = (2.0 * light_dir.z * step_size) / Z_SCALE;
             
             var curr_uv = uv;
-            var curr_h = h_center + 0.0035;
+            var curr_h = h_center + 0.0010;
             
             for (var i = 0; i < step_count; i = i + 1) {
                 curr_uv = curr_uv + uv_step;
@@ -464,9 +481,13 @@ fn fs_main(
                 }
                 
                 let sample_h = textureSampleLevel(heightmap_tex, heightmap_sampler, curr_uv, 0.0).r;
-                if (curr_h < sample_h) {
-                    shadow_factor = 0.28;
-                    break;
+                let depth = sample_h - curr_h;
+                if (depth > 0.0) {
+                    let inst_shadow = clamp(1.0 - depth * 45.0, 0.25, 1.0);
+                    shadow_factor = min(shadow_factor, inst_shadow);
+                    if (shadow_factor <= 0.25) {
+                        break;
+                    }
                 }
             }
         }
@@ -487,7 +508,7 @@ fn fs_main(
             apply_marble_shadow(uv, light_dir, uniforms.marbles[4].pos, uniforms.marbles[4].radius, uniforms.marbles[4].z_pos, &shadow_factor);
         }
         
-        diffuse = diff_color * shadow_factor;
+        diffuse = diff_color * shadow_factor * radial_boost;
     } else {
         // Rainbow LED Ring Mode
         let num_leds = 8;
@@ -498,7 +519,7 @@ fn fs_main(
         
         for (var i = 0; i < num_leds; i = i + 1) {
             let angle_led = f32(i) * (2.0 * PI / f32(num_leds)) + uniforms.time * 0.10;
-            let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.20));
+            let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.06));
             
             var led_color = vec3<f32>(0.0);
             if (uniforms.led_mode == 1u) {
@@ -509,8 +530,8 @@ fn fs_main(
                 led_color = hue_to_rgb(hue);
             }
             
-            // Half-Lambert Diffuse
-            let diff_strength = dot(normal, l_dir) * 0.5 + 0.5;
+            // Power-wrapped diffuse to simulate multiple scattering of sand grains
+            let diff_strength = pow(dot(normal, l_dir) * 0.5 + 0.5, 1.5);
             
             // Microfacet Sparkles under this LED light
             let half_vec = normalize(l_dir + view_dir);
@@ -526,10 +547,10 @@ fn fs_main(
             var shadow_factor = 1.0;
             if (uniforms.shadow_enabled == 1u) {
                 let uv_step = vec2<f32>(l_dir.x, -l_dir.y) * step_size;
-                let h_step = l_dir.z * step_size * Z_SCALE;
+                let h_step = (2.0 * l_dir.z * step_size) / Z_SCALE;
                 
                 var curr_uv = uv;
-                var curr_h = h_center + 0.0035;
+                var curr_h = h_center + 0.0010;
                 
                 for (var s = 0; s < step_count; s = s + 1) {
                     curr_uv = curr_uv + uv_step;
@@ -540,9 +561,13 @@ fn fs_main(
                     }
                     
                     let sample_h = textureSampleLevel(heightmap_tex, heightmap_sampler, curr_uv, 0.0).r;
-                    if (curr_h < sample_h) {
-                        shadow_factor = 0.25;
-                        break;
+                    let depth = sample_h - curr_h;
+                    if (depth > 0.0) {
+                        let inst_shadow = clamp(1.0 - depth * 45.0, 0.25, 1.0);
+                        shadow_factor = min(shadow_factor, inst_shadow);
+                        if (shadow_factor <= 0.25) {
+                            break;
+                        }
                     }
                 }
             }
@@ -566,7 +591,7 @@ fn fs_main(
             diffuse_accum = diffuse_accum + led_color * (diff_strength + sp * 2.0) * shadow_factor;
         }
         
-        diffuse = diffuse_accum * (uniforms.light_brightness / f32(num_leds));
+        diffuse = diffuse_accum * (uniforms.light_brightness / f32(num_leds)) * radial_boost;
     }
 
     // B. Glossy Specular Reflection for wet/liquid/metallic materials
@@ -579,7 +604,7 @@ fn fs_main(
             let light_dir = normalize(uniforms.light_dir.xyz);
             let half_vec = normalize(light_dir + view_dir);
             let dot_nh = max(dot(normal, half_vec), 0.0);
-            specular_reflect = uniforms.light_color.rgb * pow(dot_nh, spec_power) * spec_int * uniforms.light_brightness;
+            specular_reflect = local_light_color * pow(dot_nh, spec_power) * spec_int * uniforms.light_brightness;
         } else {
             let num_leds = 8;
             var spec_accum = vec3<f32>(0.0);
@@ -608,15 +633,21 @@ fn fs_main(
     let sand_base_color = mat_base_color * (1.0 + (color_grain - 0.5) * 0.025);
 
     // Warm ambient reflection for soft sand look (darker charcoal for Moon Dust)
-    let ambient_base = mix(vec3<f32>(0.15, 0.15, 0.16), vec3<f32>(0.02, 0.02, 0.025), is_moon_dust);
+    let ambient_base = mix(vec3<f32>(0.52, 0.52, 0.55), vec3<f32>(0.02, 0.02, 0.025), is_moon_dust);
     
-    // Procedural Ambient Occlusion based on local height depth relative to the flat bed (0.8)
-    let ao = clamp(1.0 - max(0.8 - h_center, 0.0) * 3.5, 0.15, 1.0);
-    let ambient = ambient_base * ao;
+    // Tint ambient light with local light color, increasing towards the edges
+    // This simulates indirect light bounce from the nearby LED ring.
+    let edge_tint_strength = edge_factor * 0.35; // up to 35% tinting near the edges
+    let ambient_tint = mix(vec3<f32>(1.0), local_light_color, edge_tint_strength);
+    let ambient_tinted = ambient_base * ambient_tint;
+    
+    // Procedural Ambient Occlusion based on local height depth relative to the flat bed (0.35)
+    let ao = clamp(1.0 - max(0.35 - h_center, 0.0) * 7.5, 0.05, 1.0);
+    let ambient = ambient_tinted * ao;
     
     // Fresnel Rim Light to simulate soft rim scattering
     let fresnel = pow(1.0 - max(dot(normal, view_dir), 0.0), 5.0);
-    let rim_color = vec3<f32>(1.0, 0.95, 0.85) * fresnel * rim_mult * uniforms.light_brightness;
+    let rim_color = local_light_color * fresnel * rim_mult * uniforms.light_brightness * radial_boost;
     
     // Combine shading: ambient + diffuse + rim light + sparkles
     let final_lighting = ambient + diffuse + rim_color + vec3<f32>(directional_sparkle * uniforms.light_brightness);

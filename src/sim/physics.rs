@@ -227,8 +227,8 @@ pub fn displace_line(
                 let dist = dist_sq.sqrt();
                 // Spherical groove profile: z_groove = R - sqrt(R^2 - d^2)
                 let h_target = r_grid_clamped - (r_groove_sq - dist_sq).max(0.0).sqrt();
-                // Scale this target height to flat sand height (0.8)
-                let h_target_norm = (h_target / r_grid_clamped) * 0.8;
+                // Scale this target height to flat sand height (DEFAULT_SAND_HEIGHT)
+                let h_target_norm = (h_target / r_grid_clamped) * crate::sim::DEFAULT_SAND_HEIGHT;
 
                 // Add a tiny micro-texture noise to the groove base
                 let seed = (x as u32).wrapping_mul(73856093) ^ (y as u32).wrapping_mul(19349663);
@@ -325,17 +325,17 @@ pub fn displace_line(
                     let rx1_clamped = rx1.clamp(0, w as isize - 1) as usize;
                     let ry1_clamped = ry1.clamp(0, h as isize - 1) as usize;
                     let dest1_idx = ry1_clamped * w + rx1_clamped;
-                    let h_above1 = (heightmap.data[dest1_idx] - 0.8).max(0.0);
+                    let h_above1 = (heightmap.data[dest1_idx] - crate::sim::DEFAULT_SAND_HEIGHT).max(0.0);
 
                     let rx2_clamped = rx2.clamp(0, w as isize - 1) as usize;
                     let ry2_clamped = ry2.clamp(0, h as isize - 1) as usize;
                     let dest2_idx = ry2_clamped * w + rx2_clamped;
-                    let h_above2 = (heightmap.data[dest2_idx] - 0.8).max(0.0);
+                    let h_above2 = (heightmap.data[dest2_idx] - crate::sim::DEFAULT_SAND_HEIGHT).max(0.0);
 
                     let rx3_clamped = rx3.clamp(0, w as isize - 1) as usize;
                     let ry3_clamped = ry3.clamp(0, h as isize - 1) as usize;
                     let dest3_idx = ry3_clamped * w + rx3_clamped;
-                    let h_above3 = (heightmap.data[dest3_idx] - 0.8).max(0.0);
+                    let h_above3 = (heightmap.data[dest3_idx] - crate::sim::DEFAULT_SAND_HEIGHT).max(0.0);
 
                     // Scale factor for asymptotic decay based on marble diameter/height in heightmap units
                     let scale = 2.0 * (radius / 0.018).max(0.1);
@@ -384,7 +384,7 @@ pub fn settle_tick(
 
     // Safety checks to prevent panics if heights or sliding buffer are resized
     if temp_heights.len() != heightmap.data.len() {
-        temp_heights.resize(heightmap.data.len(), 0.8);
+        temp_heights.resize(heightmap.data.len(), crate::sim::DEFAULT_SAND_HEIGHT);
     }
     if sliding.len() != heightmap.data.len() {
         sliding.resize(heightmap.data.len(), false);
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_draw_point_out_of_bounds() {
-        let mut hm = Heightmap::new(512, 512, 0.8);
+        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -704,13 +704,13 @@ mod tests {
 
         // Assert that heightmap data is unchanged
         for &val in hm.as_slice() {
-            assert_eq!(val, 0.8);
+            assert_eq!(val, crate::sim::DEFAULT_SAND_HEIGHT);
         }
     }
 
     #[test]
     fn test_draw_point_partial_overlap() {
-        let mut hm = Heightmap::new(512, 512, 0.8);
+        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -741,7 +741,7 @@ mod tests {
 
     #[test]
     fn test_draw_line_interpolation() {
-        let mut hm = Heightmap::new(512, 512, 0.8);
+        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_draw_point_extreme_coordinates_overflow() {
-        let mut hm = Heightmap::new(512, 512, 0.8);
+        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -795,7 +795,7 @@ mod tests {
             &mut bounds,
         );
         for &val in hm.as_slice() {
-            assert_eq!(val, 0.8);
+            assert_eq!(val, crate::sim::DEFAULT_SAND_HEIGHT);
         }
     }
 
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn test_draw_line_extreme_coordinates_overflow() {
-        let mut hm = Heightmap::new(512, 512, 0.8);
+        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,

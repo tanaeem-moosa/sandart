@@ -67,7 +67,7 @@ impl SandArtApp {
             elapsed_time: 0.0,
             sim: crate::sim::Simulation::new(),
             shared_heightmap: std::sync::Arc::new(std::sync::Mutex::new(vec![
-                0.8;
+                crate::sim::DEFAULT_SAND_HEIGHT;
                 crate::sim::GRID_SIZE * crate::sim::GRID_SIZE
             ])),
             playback: crate::pattern::PlaybackController::new(),
@@ -97,6 +97,7 @@ impl SandArtApp {
 
                 match res {
                     Ok(waypoints) => {
+                        let waypoints = crate::pattern::close_loop_path(waypoints);
                         if waypoints.is_empty() {
                             self.pattern_error = Some("Parsed pattern contains no waypoints".to_string());
                             return;
@@ -192,7 +193,7 @@ impl SandArtApp {
                 );
                 for j in 0..5 {
                     if j < paths.len() {
-                        self.playback.waypoints[j] = paths[j].clone();
+                        self.playback.waypoints[j] = crate::pattern::close_loop_path(paths[j].clone());
                         self.playback.current_indices[j] = 0;
 
                         // Snap simulation marble to its starting waypoint position
@@ -221,6 +222,7 @@ impl SandArtApp {
             _ => return,
         };
 
+        let base_waypoints = crate::pattern::close_loop_path(base_waypoints);
         if base_waypoints.is_empty() {
             self.pattern_error = Some("Failed to generate pattern waypoints".to_string());
             return;
@@ -778,7 +780,7 @@ impl eframe::App for SandArtApp {
             let angle = self.config.light_angle;
             let x = angle.cos();
             let y = angle.sin();
-            let z = 0.25; // low height angle for long shadows
+            let z = 0.08; // very low grazing angle for realistic long shadows
             let light_dir_vec = glam::Vec3::new(x, y, z).normalize();
 
             let current_uniforms = crate::renderer::LightingUniforms {

@@ -120,7 +120,7 @@ impl Default for AppConfig {
             custom_file_path: String::new(),
             light_angle: 0.7853982,         // ~45 degrees in radians
             light_color: [1.0, 0.95, 0.82], // Warm golden white
-            sand_color: [0.92, 0.89, 0.82], // Warm sandy beige
+            sand_color: [0.94, 0.94, 0.92], // Clean white quartz
             led_mode: LedMode::RainbowRing,
             shadows_enabled: true,
             material_mode: MaterialMode::ButterCream,
@@ -153,7 +153,7 @@ mod tests {
         assert_eq!(config.custom_file_path, "");
         assert_eq!(config.light_angle, 0.7853982);
         assert_eq!(config.light_color, [1.0, 0.95, 0.82]);
-        assert_eq!(config.sand_color, [0.92, 0.89, 0.82]);
+        assert_eq!(config.sand_color, [0.94, 0.94, 0.92]);
         assert_eq!(config.led_mode, LedMode::RainbowRing);
         assert!(config.shadows_enabled);
         assert_eq!(config.material_mode, MaterialMode::ButterCream);
@@ -169,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_json_schema_stability() {
-        let json_str = r#"{"speed":0.3,"marble_size":0.018,"spiral_spacing":0.03,"auto_play":false,"light_brightness":1.3,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.92,0.89,0.82],"led_mode":"RainbowRing","shadows_enabled":true,"material_mode":"ButterCream"}"#;
+        let json_str = r#"{"speed":0.3,"marble_size":0.018,"spiral_spacing":0.03,"auto_play":false,"light_brightness":1.3,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.94,0.94,0.92],"led_mode":"RainbowRing","shadows_enabled":true,"material_mode":"ButterCream"}"#;
         let deserialized: AppConfig = serde_json::from_str(json_str).unwrap();
         assert_eq!(deserialized, AppConfig::default());
     }
