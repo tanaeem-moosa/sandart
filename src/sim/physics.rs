@@ -16,6 +16,7 @@ pub struct ActiveBounds {
 pub struct ActiveMarbleInfo {
     pub pos: Vec2,
     pub vel: f32,
+    pub vel_vec: Vec2,
 }
 
 /// Helper function to add sand to a cell, clamping it at max_height (glass top)
@@ -598,16 +599,40 @@ pub fn settle_tick(
                         lock_chance = 0.05;
                         
                         if min_dist_to_marble < 0.22 {
-                            if let Some(to_mag_norm) = to_magnet_norm {
-                                let dot_prod = match dir_idx {
-                                    0 => -to_mag_norm.x,
-                                    1 => to_mag_norm.x,
-                                    2 => to_mag_norm.y,
-                                    3 => -to_mag_norm.y,
-                                    _ => 0.0,
-                                };
-                                let pull_strength = 0.24 * (1.0 - min_dist_to_marble / 0.22).max(0.0);
-                                magnetic_bias = pull_strength * dot_prod;
+                            if let Some(idx) = closest_marble_idx {
+                                // 1. Static radial pull towards the magnet center
+                                let mut pull_bias = 0.0;
+                                if let Some(to_mag_norm) = to_magnet_norm {
+                                    let dot_prod = match dir_idx {
+                                        0 => -to_mag_norm.x,
+                                        1 => to_mag_norm.x,
+                                        2 => to_mag_norm.y,
+                                        3 => -to_mag_norm.y,
+                                        _ => 0.0,
+                                    };
+                                    let pull_strength = 0.24 * (1.0 - min_dist_to_marble / 0.22).max(0.0);
+                                    pull_bias = pull_strength * dot_prod;
+                                }
+
+                                // 2. Dynamic drag along the magnet's velocity vector
+                                let mut drag_bias = 0.0;
+                                let m_vel_vec = active_marbles[idx].vel_vec;
+                                let speed = active_marbles[idx].vel;
+                                if speed > 1e-4 {
+                                    let drag_dir = m_vel_vec.normalize();
+                                    let dot_prod_drag = match dir_idx {
+                                        0 => -drag_dir.x,
+                                        1 => drag_dir.x,
+                                        2 => drag_dir.y,
+                                        3 => -drag_dir.y,
+                                        _ => 0.0,
+                                    };
+                                    // Drag is stronger closer to the magnet and scales with speed
+                                    let drag_strength = 0.35 * speed.min(0.8) * (1.0 - min_dist_to_marble / 0.22).max(0.0);
+                                    drag_bias = drag_strength * dot_prod_drag;
+                                }
+
+                                magnetic_bias = pull_bias + drag_bias;
                             }
                         }
                     }
@@ -979,7 +1004,7 @@ mod tests {
                 &mut sliding,
                 &mut bounds,
                 mat,
-                &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1 }],
+                &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1, vel_vec: Vec2::new(0.1, 0.0) }],
                 9999,
             );
 

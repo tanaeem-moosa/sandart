@@ -340,10 +340,11 @@ impl Simulation {
             let mut active_marbles = Vec::new();
             for j in 0..5 {
                 if self.marbles[j].was_active {
-                    let m_vel = if dt > 1e-5 { self.marbles[j].vel.length() / dt } else { 0.0 };
+                    let m_vel_vec = if dt > 1e-5 { self.marbles[j].vel / dt } else { Vec2::ZERO };
                     active_marbles.push(crate::sim::physics::ActiveMarbleInfo {
                         pos: self.marbles[j].pos,
-                        vel: m_vel,
+                        vel: m_vel_vec.length(),
+                        vel_vec: m_vel_vec,
                     });
                 }
             }
