@@ -317,13 +317,95 @@ fn fs_main(
         1.0
     ));
 
-    // 2. Perturb normal with micro-surface grain noise (larger perturbation for stronger sparkling glimmers)
-    let noise_scale = 1500.0;
-    let grain_noise = hash(uv * noise_scale);
-    let grain_noise_y = hash(uv * noise_scale + vec2<f32>(17.0, 43.0));
+    // 2. Define material presets and grain configurations
+    var mat_base_color = uniforms.sand_color.rgb;
+    var sparkles_threshold = 0.996;
+    var sparkles_intensity = 8.0;
+    var sparkles_power = 500.0;
+    var rim_mult = 0.45;
+    var roughness = 0.9;
+    var is_metallic = 0.0;
+    var is_moon_dust = 0.0;
+    var grain_scale = 1500.0;
+    var grain_strength = 0.28;
+
+    if (uniforms.material_mode == 0u) { // ButterCream
+        mat_base_color = vec3<f32>(0.95, 0.93, 0.88);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.10;
+        roughness = 0.8;
+        grain_scale = 2200.0;
+        grain_strength = 0.08;
+    } else if (uniforms.material_mode == 2u) { // Snow
+        mat_base_color = vec3<f32>(0.98, 0.98, 1.0);
+        sparkles_threshold = 0.990;
+        sparkles_intensity = 20.0;
+        sparkles_power = 400.0;
+        rim_mult = 0.90;
+        roughness = 0.6;
+        grain_scale = 1200.0;
+        grain_strength = 0.38;
+    } else if (uniforms.material_mode == 3u) { // KineticSand
+        mat_base_color = vec3<f32>(0.85, 0.82, 0.77);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.20;
+        roughness = 1.0;
+        grain_scale = 900.0;
+        grain_strength = 0.42;
+    } else if (uniforms.material_mode == 4u) { // WetSand
+        mat_base_color = vec3<f32>(0.68, 0.62, 0.53);
+        sparkles_threshold = 0.999;
+        sparkles_intensity = 1.0;
+        rim_mult = 0.10;
+        roughness = 0.3;
+        grain_scale = 1600.0;
+        grain_strength = 0.15;
+    } else if (uniforms.material_mode == 5u) { // FinePowder
+        mat_base_color = vec3<f32>(0.96, 0.96, 0.96);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.15;
+        roughness = 1.0;
+        grain_scale = 3000.0;
+        grain_strength = 0.05;
+    } else if (uniforms.material_mode == 6u) { // Oobleck
+        mat_base_color = vec3<f32>(0.75, 0.90, 0.30);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.60;
+        roughness = 0.15;
+        grain_scale = 1.0;
+        grain_strength = 0.00;
+    } else if (uniforms.material_mode == 7u) { // MoonDust
+        mat_base_color = vec3<f32>(0.35, 0.35, 0.35);
+        sparkles_threshold = 0.997;
+        sparkles_intensity = 4.0;
+        sparkles_power = 450.0;
+        rim_mult = 0.05;
+        roughness = 0.95;
+        is_moon_dust = 1.0;
+        grain_scale = 1400.0;
+        grain_strength = 0.32;
+    } else if (uniforms.material_mode == 8u) { // IronFilings
+        mat_base_color = vec3<f32>(0.20, 0.20, 0.22);
+        sparkles_threshold = 0.992;
+        sparkles_intensity = 12.0;
+        sparkles_power = 450.0;
+        rim_mult = 0.20;
+        roughness = 0.4;
+        is_metallic = 1.0;
+        grain_scale = 1000.0;
+        grain_strength = 0.35;
+    }
+
+    // 3. Perturb normal with micro-surface grain noise
+    let grain_noise = hash(uv * grain_scale);
+    let grain_noise_y = hash(uv * grain_scale + vec2<f32>(17.0, 43.0));
     var perturb = vec3<f32>(
-        (grain_noise - 0.5) * 0.28,
-        (grain_noise_y - 0.5) * 0.28,
+        (grain_noise - 0.5) * grain_strength,
+        (grain_noise_y - 0.5) * grain_strength,
         0.0
     );
 
@@ -358,7 +440,7 @@ fn fs_main(
 
     normal = normalize(normal + perturb);
 
-    // 3. Lighting Mode evaluation
+    // 4. Lighting Mode evaluation
     let r_norm = clamp(dist / 0.46, 0.0, 1.0);
     let edge_factor = smoothstep(0.5, 1.0, r_norm);
     let radial_boost = 1.0 + 0.3 * edge_factor;
@@ -379,71 +461,6 @@ fn fs_main(
     var diffuse = vec3<f32>(0.0);
     var specular = vec3<f32>(0.0);
     var directional_sparkle = 0.0;
-
-    // A. Define material presets
-    var mat_base_color = uniforms.sand_color.rgb;
-    var sparkles_threshold = 0.996;
-    var sparkles_intensity = 8.0;
-    var sparkles_power = 500.0;
-    var rim_mult = 0.45;
-    var roughness = 0.9;
-    var is_metallic = 0.0;
-    var is_moon_dust = 0.0;
-
-    if (uniforms.material_mode == 0u) { // ButterCream
-        mat_base_color = vec3<f32>(0.95, 0.93, 0.88);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.10;
-        roughness = 0.8;
-    } else if (uniforms.material_mode == 2u) { // Snow
-        mat_base_color = vec3<f32>(0.98, 0.98, 1.0);
-        sparkles_threshold = 0.990;
-        sparkles_intensity = 20.0;
-        sparkles_power = 400.0;
-        rim_mult = 0.90;
-        roughness = 0.6;
-    } else if (uniforms.material_mode == 3u) { // KineticSand
-        mat_base_color = vec3<f32>(0.85, 0.82, 0.77);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.20;
-        roughness = 1.0;
-    } else if (uniforms.material_mode == 4u) { // WetSand
-        mat_base_color = vec3<f32>(0.68, 0.62, 0.53);
-        sparkles_threshold = 0.999;
-        sparkles_intensity = 1.0;
-        rim_mult = 0.10;
-        roughness = 0.3;
-    } else if (uniforms.material_mode == 5u) { // FinePowder
-        mat_base_color = vec3<f32>(0.96, 0.96, 0.96);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.15;
-        roughness = 1.0;
-    } else if (uniforms.material_mode == 6u) { // Oobleck
-        mat_base_color = vec3<f32>(0.75, 0.90, 0.30);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.60;
-        roughness = 0.15;
-    } else if (uniforms.material_mode == 7u) { // MoonDust
-        mat_base_color = vec3<f32>(0.35, 0.35, 0.35);
-        sparkles_threshold = 0.997;
-        sparkles_intensity = 4.0;
-        sparkles_power = 450.0;
-        rim_mult = 0.05;
-        roughness = 0.95;
-        is_moon_dust = 1.0;
-    } else if (uniforms.material_mode == 8u) { // IronFilings
-        mat_base_color = vec3<f32>(0.20, 0.20, 0.22);
-        sparkles_threshold = 0.992;
-        sparkles_intensity = 12.0;
-        sparkles_power = 450.0;
-        rim_mult = 0.20;
-        roughness = 0.4;
-        is_metallic = 1.0;
-    }
 
     if (uniforms.led_mode == 0u) {
         // Single Directional Light mode
