@@ -143,7 +143,7 @@ Follow these steps incrementally, running tests and launching the native desktop
 
 ---
 
-### Step 5: Adapt Desktop App UI Crate (`sandart`)
+### Step 5: Adapt Desktop App UI Crate (`sandart`) [Complete]
 *   **Action:**
     1. Move the remaining desktop files `src/main.rs`, `src/app.rs`, and `src/config.rs` into the `sandart/src/` subdirectory.
     2. Delete the old root `src/` directory.

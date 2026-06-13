@@ -4,7 +4,6 @@ use egui_wgpu;
 use wgpu;
 
 pub struct SandArtCallback {
-    pub heightmap_data: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
     pub uniforms: crate::renderer::LightingUniforms,
     pub camera_uniforms: crate::renderer::CameraUniforms,
 }
@@ -19,9 +18,6 @@ impl egui_wgpu::CallbackTrait for SandArtCallback {
         resources: &mut egui_wgpu::CallbackResources,
     ) -> Vec<wgpu::CommandBuffer> {
         if let Some(res) = resources.get_mut::<crate::renderer::HeightmapRenderer>() {
-            if let Ok(data) = self.heightmap_data.lock() {
-                res.update_heightmap(queue, &data);
-            }
             res.update_uniforms(queue, &self.uniforms);
             res.update_camera(queue, &self.camera_uniforms);
         }
@@ -75,8 +71,8 @@ pub struct SandArtApp {
     pub elapsed_time: f32,
     /// The physics simulation engine.
     pub sim: crate::sim::DrawingSimulation,
-    /// Shared heightmap data for zero-allocation rendering transfer.
-    pub shared_heightmap: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+    /// Flag indicating that a full heightmap upload is required (e.g. startup or reset).
+    pub full_upload_needed: bool,
     /// Playback controller for custom files and mathematical paths.
     pub playback: crate::pattern::PlaybackController,
     /// Error message for pattern loading issues.
@@ -129,10 +125,7 @@ impl SandArtApp {
             dt: 0.0,
             elapsed_time: 0.0,
             sim: crate::sim::DrawingSimulation::new(),
-            shared_heightmap: std::sync::Arc::new(std::sync::Mutex::new(vec![
-                crate::sim::DEFAULT_SAND_HEIGHT;
-                crate::sim::GRID_SIZE * crate::sim::GRID_SIZE
-            ])),
+            full_upload_needed: true,
             playback: crate::pattern::PlaybackController::new(),
             pattern_error: None,
             sample_patterns,
@@ -352,10 +345,6 @@ impl eframe::App for SandArtApp {
         self.dt = ctx.input(|i| i.stable_dt).min(0.1);
         self.elapsed_time += self.dt;
 
-        // Copy simulation heights to the shared rendering buffer (non-allocating copy)
-        if let Ok(mut shared) = self.shared_heightmap.lock() {
-            shared.copy_from_slice(self.sim.heightmap.as_slice());
-        }
 
         // Draw the top panel for basic info
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
@@ -833,15 +822,16 @@ impl eframe::App for SandArtApp {
                         "Enable Raymarched Shadows",
                     );
 
-                    ui.add_space(20.0);
                     ui.horizontal(|ui| {
                         if ui.button("Reset Sand").clicked() {
                             self.sim.reset();
+                            self.full_upload_needed = true;
                             self.playback.state = crate::pattern::PlaybackState::Stopped;
                             self.playback.current_indices = [0; 5];
                         }
                         if ui.button("Draw Ripples").clicked() {
                             self.sim.heightmap.generate_ripples();
+                            self.full_upload_needed = true;
                         }
                     });
                 });
@@ -1008,7 +998,6 @@ impl eframe::App for SandArtApp {
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 centered_rect,
                 SandArtCallback {
-                    heightmap_data: self.shared_heightmap.clone(),
                     uniforms: current_uniforms,
                     camera_uniforms,
                 },
@@ -1080,6 +1069,31 @@ impl eframe::App for SandArtApp {
 
             // Run simulation tick
             self.sim.update(self.dt, &targets, self.config.marble_size, self.config.material_mode, self.config.sandbox_shape);
+
+            // Direct GPU update (zero-mutex, zero-CPU-to-CPU copies)
+            if let Some(wgpu_state) = _frame.wgpu_render_state() {
+                let mut renderer = wgpu_state.renderer.write();
+                if let Some(res) = renderer.callback_resources.get_mut::<crate::renderer::HeightmapRenderer>() {
+                    if self.full_upload_needed {
+                        res.update_heightmap(&wgpu_state.queue, self.sim.heightmap.as_slice());
+                        self.full_upload_needed = false;
+                    } else {
+                        let bounds = self.sim.active_bounds;
+                        let render_bounds = crate::renderer::ActiveBounds {
+                            min_x: bounds.min_x,
+                            max_x: bounds.max_x,
+                            min_y: bounds.min_y,
+                            max_y: bounds.max_y,
+                            active: bounds.active,
+                        };
+                        res.update_heightmap_partial(
+                            &wgpu_state.queue,
+                            self.sim.heightmap.as_slice(),
+                            render_bounds,
+                        );
+                    }
+                }
+            }
         });
 
         if self.config.sandbox_shape != old_shape && self.config.pattern_mode != crate::config::PatternMode::Manual {
