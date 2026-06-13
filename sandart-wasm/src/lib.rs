@@ -63,19 +63,41 @@ impl WasmSimulationState {
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .map_err(|_| JsValue::from_str("Element is not a canvas"))?;
 
-        let instance = wgpu::Instance::default();
-        let surface = instance
-            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+        let mut instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let mut surface = instance
+            .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
             .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
 
-        let adapter = instance
+        let mut adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
-            .await
-            .ok_or_else(|| JsValue::from_str("No compatible adapter found"))?;
+            .await;
+
+        if adapter.is_none() {
+            // Explicitly fall back to WebGL2 (Backends::GL) if WebGPU/all failed
+            instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::GL,
+                ..Default::default()
+            });
+            surface = instance
+                .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+                .map_err(|e| JsValue::from_str(&format!("Failed to create surface (WebGL2 fallback): {:?}", e)))?;
+            adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::default(),
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                })
+                .await;
+        }
+
+        let adapter = adapter.ok_or_else(|| JsValue::from_str("No compatible adapter found"))?;
 
         let (device, queue) = adapter
             .request_device(
