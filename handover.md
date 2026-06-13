@@ -42,6 +42,12 @@ We have refactored and implemented the following solutions:
 
 ## 3. Current Workspace Status
 
-- **v1 Completion**: The v1 milestones have been 100% completed, closed, and marked as such in [v1_plan.md](file:///home/deck/projects/sandart/v1_plan.md).
-- **Build & Tests**: The project compiles successfully inside the `sandart-dev` Distrobox container, and all 34 unit tests pass cleanly.
-- **Working Copy**: Changes are implemented and tested across `src/shader.wgsl`, `src/sim/physics.rs`, `src/sim.rs`, `src/config.rs`, `src/app.rs`, and `src/renderer.rs`.
+- **v2 Completion**: The v2 modular refactoring milestones have been 100% completed, verified, and committed.
+- **Workspace Architecture**:
+  - `sandart`: Binary desktop runner (Egui/Eframe frontend).
+  - `sandart-sim`: Standalone simulation library (CA grid, physics presets).
+  - `sandart-render`: Standalone WGPU renderer (heightmap rendering, shaders).
+  - `sandart-pattern`: Mathematical pattern generators and text parsers.
+  - `sandart-wasm`: WASM bindgen bindings for web targets.
+- **Build & Tests**: The workspace compiles and runs successfully inside the `sandart-dev` Distrobox container, and all unit tests pass cleanly.
+- **WASM Support**: Web bindings can be compiled via `wasm-pack build sandart-wasm --target web`. A self-contained demo page is provided at `sandart-wasm/web/index.html` and `sandart-wasm/web/demo.js` implementing a fully interactive, zero-copy, responsive browser-based sand art simulator.

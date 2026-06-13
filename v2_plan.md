@@ -169,7 +169,7 @@ Follow these steps incrementally, running tests and launching the native desktop
 
 ---
 
-### Step 7: Update Documentation
+### Step 7: Update Documentation [Complete]
 *   **Action:**
     Update `v1_plan.md` and `handover.md` in the root folder to map all old module/file references to their new paths in the workspace crates.
 *   **Verification Checkpoint:** Compile, test, and perform a final check.
