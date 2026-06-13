@@ -2750,7 +2750,15 @@ dependencies = [
 name = "sandart-wasm"
 version = "0.1.0"
 dependencies = [
+ "glam",
+ "js-sys",
+ "sandart-pattern",
+ "sandart-render",
+ "sandart-sim",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
 ]
 
 [[package]]

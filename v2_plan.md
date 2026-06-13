@@ -155,7 +155,7 @@ Follow these steps incrementally, running tests and launching the native desktop
 
 ---
 
-### Step 6: Create WASM Bindings Crate (`sandart-wasm`)
+### Step 6: Create WASM Bindings Crate (`sandart-wasm`) [Complete]
 *   **Action:**
     1. Write `wasm-bindgen` bindings in `sandart-wasm/src/lib.rs` wrapping `sandart-sim`, `sandart-pattern`, and `sandart-render`.
     2. **WASM Compatibility Checkpoint (Non-Blocking async):** Ensure WGPU device creation in WASM is asynchronous (`async fn init_wgpu`), returning a Promise to JavaScript, as blocking on threads (`pollster::block_on`) panics in web environments.
