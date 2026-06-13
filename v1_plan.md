@@ -14,9 +14,9 @@ This document captures the research, proposed features, and implementation roadm
 Replace the flat fullscreen quad with a true 3D vertex-displaced mesh. The vertex shader samples the heightmap and pushes each vertex up by its height value. A user-controlled camera (orbit azimuth + elevation via mouse drag, zoom via scroll wheel) rotates around the table with a perspective projection.
 
 **Key implementation steps:**
-- `src/renderer.rs`: Create a static `N×N` vertex grid buffer and index buffer (triangle strip). Vertices store only `(u, v)` — position is derived from UV and displaced height.
-- `src/shader.wgsl`: Add a vertex shader stage that reads the heightmap and outputs `ViewProj × (x, y, h × amplitude)`.
-- `src/app.rs`: Track `(azimuth, elevation, zoom)` camera state; compute `glam::Mat4::look_at_lh` + `perspective_lh`; upload as a new uniform.
+- `sandart-render/src/lib.rs`: Create a static `N×N` vertex grid buffer and index buffer (triangle strip). Vertices store only `(u, v)` — position is derived from UV and displaced height.
+- `sandart-render/src/shader.wgsl`: Add a vertex shader stage that reads the heightmap and outputs `ViewProj × (x, y, h × amplitude)`.
+- `sandart/src/app.rs`: Track `(azimuth, elevation, zoom)` camera state; compute `glam::Mat4::look_at_lh` + `perspective_lh`; upload as a new uniform.
 - Enable WGPU depth stencil buffer for correct self-occlusion at oblique angles.
 
 ---

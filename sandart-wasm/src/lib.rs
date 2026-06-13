@@ -78,7 +78,15 @@ impl WasmSimulationState {
             .ok_or_else(|| JsValue::from_str("No compatible adapter found"))?;
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: None,
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults(),
+                    memory_hints: Default::default(),
+                },
+                None,
+            )
             .await
             .map_err(|e| JsValue::from_str(&format!("Failed to request device: {:?}", e)))?;
 
