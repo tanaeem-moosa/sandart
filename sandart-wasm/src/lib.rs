@@ -63,41 +63,48 @@ impl WasmSimulationState {
             .dyn_into::<web_sys::HtmlCanvasElement>()
             .map_err(|_| JsValue::from_str("Element is not a canvas"))?;
 
-        let mut instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+        // 1. Try to request a WebGPU adapter first *without* creating a surface
+        // to avoid locking/polluting the HTML Canvas with a WebGPU context.
+        let webgpu_instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::BROWSER_WEBGPU,
             ..Default::default()
         });
-        let mut surface = instance
-            .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
-            .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
 
-        let mut adapter = instance
+        let webgpu_adapter = webgpu_instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
+                compatible_surface: None,
                 force_fallback_adapter: false,
             })
             .await;
 
-        if adapter.is_none() {
-            // Explicitly fall back to WebGL2 (Backends::GL) if WebGPU/all failed
-            instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let (_instance, surface, adapter) = if let Some(adapter) = webgpu_adapter {
+            // WebGPU adapter is available and working!
+            // Now we can safely associate the canvas with a WebGPU surface.
+            let surface = webgpu_instance
+                .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+                .map_err(|e| JsValue::from_str(&format!("Failed to create WebGPU surface: {:?}", e)))?;
+            (webgpu_instance, surface, adapter)
+        } else {
+            // WebGPU is not supported/blocked.
+            // Fall back to WebGL2 completely before touching the canvas.
+            let gl_instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::GL,
                 ..Default::default()
             });
-            surface = instance
+            let surface = gl_instance
                 .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-                .map_err(|e| JsValue::from_str(&format!("Failed to create surface (WebGL2 fallback): {:?}", e)))?;
-            adapter = instance
+                .map_err(|e| JsValue::from_str(&format!("Failed to create WebGL2 surface: {:?}", e)))?;
+            let adapter = gl_instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     power_preference: wgpu::PowerPreference::default(),
                     compatible_surface: Some(&surface),
                     force_fallback_adapter: false,
                 })
-                .await;
-        }
-
-        let adapter = adapter.ok_or_else(|| JsValue::from_str("No compatible adapter found"))?;
+                .await
+                .ok_or_else(|| JsValue::from_str("No compatible WebGL2 adapter found"))?;
+            (gl_instance, surface, adapter)
+        };
 
         let (device, queue) = adapter
             .request_device(
