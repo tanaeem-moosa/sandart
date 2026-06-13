@@ -659,7 +659,7 @@ fn fs_main(
     let ambient_tinted = ambient_base * ambient_tint;
     
     // Procedural Ambient Occlusion based on local height depth relative to the flat bed (0.35)
-    let ao = clamp(1.0 - max(0.35 - h_center, 0.0) * 2.4, 0.15, 1.0);
+    let ao = clamp(1.0 - max(0.35 - h_center, 0.0) * 1.8, 0.30, 1.0);
     let ambient = ambient_tinted * ao;
     
     // Fresnel Rim Light to simulate soft rim scattering
@@ -669,14 +669,20 @@ fn fs_main(
     // Combine shading: ambient + diffuse + rim light + sparkles
     let final_lighting = ambient + diffuse + rim_color + vec3<f32>(directional_sparkle * uniforms.light_brightness);
     
-    var final_color = vec3<f32>(0.0);
+    var sand_shaded = vec3<f32>(0.0);
     if (is_metallic > 0.5) {
         // Metallic reflection: multiply reflect by base color
-        final_color = sand_base_color * final_lighting + specular_reflect * mat_base_color;
+        sand_shaded = sand_base_color * final_lighting + specular_reflect * mat_base_color;
     } else {
         // Dielectric reflection: additive specular
-        final_color = sand_base_color * final_lighting + specular_reflect;
+        sand_shaded = sand_base_color * final_lighting + specular_reflect;
     }
+
+    // Blend with dark table floor based on sand thickness (height)
+    // Opacity rises quickly so a thin sand layer (>= 0.05 height) is fully opaque sand.
+    let sand_opacity = smoothstep(0.0, 0.05, h_center);
+    let table_color = vec3<f32>(0.02, 0.02, 0.03);
+    let final_color = mix(table_color, sand_shaded, sand_opacity);
 
     return vec4<f32>(final_color, 1.0);
 }
