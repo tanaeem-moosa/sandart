@@ -183,6 +183,7 @@ impl Simulation {
             pos,
             radius,
             &mut self.active_bounds,
+            crate::config::MaterialMode::DrySand,
         );
     }
 
@@ -195,6 +196,7 @@ impl Simulation {
             end,
             radius,
             &mut self.active_bounds,
+            crate::config::MaterialMode::DrySand,
         );
     }
 
@@ -280,6 +282,7 @@ impl Simulation {
                         self.marbles[j].pos,
                         marble_radius,
                         &mut self.active_bounds,
+                        material,
                     );
                 } else {
                     self.marbles[j].pos = clamped_target;
@@ -291,6 +294,7 @@ impl Simulation {
                         clamped_target,
                         marble_radius,
                         &mut self.active_bounds,
+                        material,
                     );
                     self.marbles[j].was_active = true;
                 }

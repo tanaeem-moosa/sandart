@@ -113,10 +113,24 @@ pub fn displace_line(
     end: Vec2,
     radius: f32,
     active_bounds: &mut ActiveBounds,
+    material: crate::config::MaterialMode,
 ) {
     if !start.is_finite() || !end.is_finite() || !radius.is_finite() || radius <= 0.0 {
         return;
     }
+
+    let residual_factor = match material {
+        crate::config::MaterialMode::ButterCream => 0.00,
+        crate::config::MaterialMode::Oobleck => 0.00,
+        crate::config::MaterialMode::FinePowder => 0.02,
+        crate::config::MaterialMode::KineticSand => 0.04,
+        crate::config::MaterialMode::DrySand => 0.06,
+        crate::config::MaterialMode::MoonDust => 0.06,
+        crate::config::MaterialMode::IronFilings => 0.08,
+        crate::config::MaterialMode::Snow => 0.12,
+        crate::config::MaterialMode::WetSand => 0.22,
+    };
+    let residual_h = residual_factor * crate::sim::DEFAULT_SAND_HEIGHT;
 
     let w = heightmap.width;
     let h = heightmap.height;
@@ -228,8 +242,8 @@ pub fn displace_line(
                 let dist = dist_sq.sqrt();
                 // Spherical groove profile: z_groove = R - sqrt(R^2 - d^2)
                 let h_target = r_grid_clamped - (r_groove_sq - dist_sq).max(0.0).sqrt();
-                // Scale this target height to flat sand height (DEFAULT_SAND_HEIGHT)
-                let h_target_norm = (h_target / r_grid_clamped) * crate::sim::DEFAULT_SAND_HEIGHT;
+                // Scale this target height to flat sand height (DEFAULT_SAND_HEIGHT) with material-specific residual floor
+                let h_target_norm = residual_h + (1.0 - residual_factor) * (h_target / r_grid_clamped) * crate::sim::DEFAULT_SAND_HEIGHT;
 
                 // Add a tiny micro-texture noise to the groove base
                 let seed = (x as u32).wrapping_mul(73856093) ^ (y as u32).wrapping_mul(19349663);
@@ -725,6 +739,7 @@ mod tests {
             Vec2::new(5.0, 5.0),
             0.1,
             &mut bounds,
+            crate::config::MaterialMode::ButterCream,
         );
 
         // Assert that heightmap data is unchanged
@@ -751,6 +766,7 @@ mod tests {
             Vec2::new(-1.0, 0.0),
             0.05,
             &mut bounds,
+            crate::config::MaterialMode::ButterCream,
         );
 
         // Check that some points are carved below 0.1, and bounds are respected
@@ -782,6 +798,7 @@ mod tests {
             Vec2::new(0.5, 0.0),
             0.05,
             &mut bounds,
+            crate::config::MaterialMode::ButterCream,
         );
 
         // Helper to convert pos to grid index
@@ -818,6 +835,7 @@ mod tests {
             Vec2::new(1e18, 1e18),
             0.1,
             &mut bounds,
+            crate::config::MaterialMode::ButterCream,
         );
         for &val in hm.as_slice() {
             assert_eq!(val, crate::sim::DEFAULT_SAND_HEIGHT);
@@ -843,6 +861,7 @@ mod tests {
             Vec2::new(0.2, -0.2),
             0.03,
             &mut bounds,
+            crate::config::MaterialMode::ButterCream,
         );
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
@@ -866,6 +885,7 @@ mod tests {
             Vec2::new(1e18, 0.0),
             0.1,
             &mut bounds,
+            crate::config::MaterialMode::ButterCream,
         );
     }
 
@@ -882,7 +902,7 @@ mod tests {
         let initial_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
 
         // Perform displacement at a single point to trigger local saturation in the inner ridge
-        displace_line(&mut hm, Vec2::ZERO, Vec2::ZERO, 0.02, &mut bounds);
+        displace_line(&mut hm, Vec2::ZERO, Vec2::ZERO, 0.02, &mut bounds, crate::config::MaterialMode::ButterCream);
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
         let diff = (final_sum - initial_sum).abs();
