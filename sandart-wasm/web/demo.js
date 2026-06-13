@@ -31,8 +31,13 @@ async function start() {
     canvas.width = rect.width * dpr;
     canvas.height = rect.height * dpr;
 
+    // Check if WebGL is forced via URL query parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    const forceWebGL = urlParams.has('webgl') || urlParams.has('webgl2') || urlParams.get('backend') === 'webgl';
+    console.log("Initializing WasmSimulationState. Force WebGL:", forceWebGL);
+
     // Create simulator state
-    state = await WasmSimulationState.create('sand-canvas', canvas.width, canvas.height);
+    state = await WasmSimulationState.create('sand-canvas', canvas.width, canvas.height, forceWebGL);
 
     // Initial config sync
     syncSettings();

@@ -54,7 +54,7 @@ pub struct WasmSimulationState {
 
 #[wasm_bindgen]
 impl WasmSimulationState {
-    pub async fn create(canvas_id: String, width: u32, height: u32) -> Result<WasmSimulationState, JsValue> {
+    pub async fn create(canvas_id: String, width: u32, height: u32, force_webgl: bool) -> Result<WasmSimulationState, JsValue> {
         let window = web_sys::window().ok_or_else(|| JsValue::from_str("No global window"))?;
         let document = window.document().ok_or_else(|| JsValue::from_str("No global document"))?;
         let canvas = document
@@ -70,13 +70,17 @@ impl WasmSimulationState {
             ..Default::default()
         });
 
-        let webgpu_adapter = webgpu_instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: None,
-                force_fallback_adapter: false,
-            })
-            .await;
+        let webgpu_adapter = if force_webgl {
+            None
+        } else {
+            webgpu_instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::default(),
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                })
+                .await
+        };
 
         let (_instance, surface, adapter) = if let Some(adapter) = webgpu_adapter {
             // WebGPU adapter is available and working!
