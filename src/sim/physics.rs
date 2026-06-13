@@ -71,8 +71,11 @@ fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize
             // Let's do up to 3 passes to distribute everything
             let mut distributed = false;
             for _ in 0..3 {
-                if num_room_neighbors == 0 || excess <= 1e-6 {
+                if excess <= 1e-6 {
                     distributed = true;
+                    break;
+                }
+                if num_room_neighbors == 0 {
                     break;
                 }
                 let share = excess / num_room_neighbors as f32;
@@ -384,6 +387,9 @@ pub fn displace_line(
                         add_sand_with_limit(heightmap, dest1_idx, w, h, diff * w1 * m1, 1.5);
                         add_sand_with_limit(heightmap, dest2_idx, w, h, diff * w2 * m2, 1.5);
                         add_sand_with_limit(heightmap, dest3_idx, w, h, diff * w3 * m3, 1.5);
+                    } else {
+                        // Restore height to conserve volume if no deposition can happen
+                        heightmap.data[current_idx] = current_h;
                     }
                 }
             }
@@ -1077,7 +1083,7 @@ mod tests {
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
         let diff = (final_sum - initial_sum).abs();
-        assert!(diff < 1e-2, "Volume not conserved! diff = {}", diff);
+        assert!(diff < 1e-5, "Volume not conserved! diff = {}", diff);
     }
 
     #[test]
@@ -1117,7 +1123,7 @@ mod tests {
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
         let diff = (final_sum - initial_sum).abs();
-        assert!(diff < 1e-2, "Volume not conserved! diff = {}", diff);
+        assert!(diff < 1e-5, "Volume not conserved! diff = {}", diff);
     }
 
     #[test]
