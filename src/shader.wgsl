@@ -500,9 +500,9 @@ fn fs_main(
                 let sample_h = textureSampleLevel(heightmap_tex, heightmap_sampler, curr_uv, 0.0).r;
                 let depth = sample_h - curr_h;
                 if (depth > 0.0) {
-                    let inst_shadow = clamp(1.0 - depth * 45.0, 0.25, 1.0);
+                    let inst_shadow = clamp(1.0 - depth * 20.0, 0.40, 1.0);
                     shadow_factor = min(shadow_factor, inst_shadow);
-                    if (shadow_factor <= 0.25) {
+                    if (shadow_factor <= 0.40) {
                         break;
                     }
                 }
@@ -580,9 +580,9 @@ fn fs_main(
                     let sample_h = textureSampleLevel(heightmap_tex, heightmap_sampler, curr_uv, 0.0).r;
                     let depth = sample_h - curr_h;
                     if (depth > 0.0) {
-                        let inst_shadow = clamp(1.0 - depth * 45.0, 0.25, 1.0);
+                        let inst_shadow = clamp(1.0 - depth * 20.0, 0.40, 1.0);
                         shadow_factor = min(shadow_factor, inst_shadow);
-                        if (shadow_factor <= 0.25) {
+                        if (shadow_factor <= 0.40) {
                             break;
                         }
                     }
@@ -659,7 +659,7 @@ fn fs_main(
     let ambient_tinted = ambient_base * ambient_tint;
     
     // Procedural Ambient Occlusion based on local height depth relative to the flat bed (0.35)
-    let ao = clamp(1.0 - max(0.35 - h_center, 0.0) * 7.5, 0.05, 1.0);
+    let ao = clamp(1.0 - max(0.35 - h_center, 0.0) * 2.2, 0.35, 1.0);
     let ambient = ambient_tinted * ao;
     
     // Fresnel Rim Light to simulate soft rim scattering
