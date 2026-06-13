@@ -127,7 +127,7 @@ Follow these steps incrementally, running tests and launching the native desktop
 
 ---
 
-### Step 4: Migrate Standalone Renderer Crate (`sandart-render`)
+### Step 4: Migrate Standalone Renderer Crate (`sandart-render`) [Complete]
 *   **Action:**
     1. Move `src/renderer.rs` and `src/shader.wgsl` to `sandart-render/src/`.
     2. Remove all `egui` and `eframe` references, converting it into a pure WGPU renderer.

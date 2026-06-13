@@ -16,4 +16,5 @@ serde_json = "1.0.134"
 rfd = "0.15"
 sandart-pattern = { path = "../sandart-pattern" }
 sandart-sim = { path = "../sandart-sim" }
+sandart-render = { path = "../sandart-render" }
 

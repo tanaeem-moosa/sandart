@@ -1,5 +1,68 @@
 use crate::config::AppConfig;
 use egui;
+use egui_wgpu;
+use wgpu;
+
+pub struct SandArtCallback {
+    pub heightmap_data: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
+    pub uniforms: crate::renderer::LightingUniforms,
+    pub camera_uniforms: crate::renderer::CameraUniforms,
+}
+
+impl egui_wgpu::CallbackTrait for SandArtCallback {
+    fn prepare(
+        &self,
+        _device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        _screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        if let Some(res) = resources.get_mut::<crate::renderer::HeightmapRenderer>() {
+            if let Ok(data) = self.heightmap_data.lock() {
+                res.update_heightmap(queue, &data);
+            }
+            res.update_uniforms(queue, &self.uniforms);
+            res.update_camera(queue, &self.camera_uniforms);
+        }
+        vec![]
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        resources: &egui_wgpu::CallbackResources,
+    ) {
+        if let Some(res) = resources.get::<crate::renderer::HeightmapRenderer>() {
+            let pixels_per_point = info.pixels_per_point;
+            let rect = info.viewport;
+
+            let target_width = info.screen_size_px[0] as f32;
+            let target_height = info.screen_size_px[1] as f32;
+
+            let physical_x = (rect.min.x * pixels_per_point).clamp(0.0, target_width);
+            let physical_y = (rect.min.y * pixels_per_point).clamp(0.0, target_height);
+            let physical_width = (rect.width() * pixels_per_point).min(target_width - physical_x);
+            let physical_height =
+                (rect.height() * pixels_per_point).min(target_height - physical_y);
+
+            if physical_width > 0.0 && physical_height > 0.0 {
+                render_pass.set_viewport(
+                    physical_x,
+                    physical_y,
+                    physical_width,
+                    physical_height,
+                    0.0,
+                    1.0,
+                );
+
+                res.draw(render_pass, &self.camera_uniforms, &self.uniforms);
+            }
+        }
+    }
+}
+
 
 pub struct SandArtApp {
     /// Active configuration parameters.
@@ -36,7 +99,7 @@ impl SandArtApp {
         if let Some(wgpu_state) = &cc.wgpu_render_state {
             let device = &wgpu_state.device;
             let target_format = wgpu_state.target_format;
-            let resources = crate::renderer::SandArtRenderResources::new(device, target_format);
+            let resources = crate::renderer::HeightmapRenderer::new(device, target_format);
             wgpu_state
                 .renderer
                 .write()
@@ -944,7 +1007,7 @@ impl eframe::App for SandArtApp {
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 centered_rect,
-                crate::renderer::SandArtCallback {
+                SandArtCallback {
                     heightmap_data: self.shared_heightmap.clone(),
                     uniforms: current_uniforms,
                     camera_uniforms,

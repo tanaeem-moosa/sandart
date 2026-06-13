@@ -2713,6 +2713,7 @@ dependencies = [
  "pollster",
  "rfd",
  "sandart-pattern",
+ "sandart-render",
  "sandart-sim",
  "serde",
  "serde_json",
@@ -2733,6 +2734,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
+ "pollster",
  "wgpu",
 ]
 
