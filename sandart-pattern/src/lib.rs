@@ -347,6 +347,7 @@ fn gosper_b(level: u32, angle: &mut f32, path: &mut Vec<Vec2>, step_len: f32) {
         gosper_a(level - 1, angle, path, step_len);
         *angle -= std::f32::consts::FRAC_PI_3; // -60 deg
         gosper_b(level - 1, angle, path, step_len);
+        gosper_b(level - 1, angle, path, step_len);
         *angle -= 2.0 * std::f32::consts::FRAC_PI_3; // -120 deg
         gosper_b(level - 1, angle, path, step_len);
         *angle -= std::f32::consts::FRAC_PI_3; // -60 deg

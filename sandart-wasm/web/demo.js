@@ -259,7 +259,7 @@ function generatePattern(type) {
         // Simple Gosper L-system generator in JS
         const rules = {
             'A': 'A-B--B+A++AA+B-',
-            'B': '+A-B--B-A++A+B'
+            'B': '+A-BB--B-A++A+B'
         };
         let current = 'A';
         const depth = 3;
