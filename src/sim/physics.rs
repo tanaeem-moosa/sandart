@@ -130,7 +130,6 @@ pub fn displace_line(
         crate::config::MaterialMode::Snow => 0.28,
         crate::config::MaterialMode::WetSand => 0.35,
     };
-    let residual_h = residual_factor * crate::sim::DEFAULT_SAND_HEIGHT;
 
     let w = heightmap.width;
     let h = heightmap.height;
@@ -242,16 +241,19 @@ pub fn displace_line(
                 let dist = dist_sq.sqrt();
                 // Spherical groove profile: z_groove = R - sqrt(R^2 - d^2)
                 let h_target = r_grid_clamped - (r_groove_sq - dist_sq).max(0.0).sqrt();
-                // Scale this target height to flat sand height (DEFAULT_SAND_HEIGHT) with material-specific residual floor
-                let h_target_norm = residual_h + (1.0 - residual_factor) * (h_target / r_grid_clamped) * crate::sim::DEFAULT_SAND_HEIGHT;
+                let h_target_profile = (h_target / r_grid_clamped) * crate::sim::DEFAULT_SAND_HEIGHT;
+
+                let current_idx = row_offset + x;
+                let current_h = heightmap.data[current_idx];
+
+                // Scale target height relative to the current height to support multi-pass clearing
+                let h_target_norm = residual_factor * current_h.max(h_target_profile) + (1.0 - residual_factor) * h_target_profile;
 
                 // Add a tiny micro-texture noise to the groove base
                 let seed = (x as u32).wrapping_mul(73856093) ^ (y as u32).wrapping_mul(19349663);
                 let noise = (((seed & 0xFFFF) as f32 / 65535.0) - 0.5) * 0.05; // Range [-0.025, 0.025]
                 let h_target_noisy = (h_target_norm + noise).clamp(0.0, 1.0);
 
-                let current_idx = row_offset + x;
-                let current_h = heightmap.data[current_idx];
                 if current_h > h_target_noisy {
                     let diff = current_h - h_target_noisy;
                     heightmap.data[current_idx] = h_target_noisy;
@@ -840,6 +842,47 @@ mod tests {
         for &val in hm.as_slice() {
             assert_eq!(val, crate::sim::DEFAULT_SAND_HEIGHT);
         }
+    }
+
+    #[test]
+    fn test_multipass_carving() {
+        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            active: false,
+        };
+
+        // Pass 1: carving at (0.0, 0.0) with DrySand (20% residual factor)
+        displace_line(
+            &mut hm,
+            Vec2::ZERO,
+            Vec2::ZERO,
+            0.05,
+            &mut bounds,
+            crate::config::MaterialMode::DrySand,
+        );
+
+        let center_idx = 256 * 512 + 256;
+        let h1 = hm.data[center_idx];
+        // Expect height to be approximately 20% of 0.35 = 0.07
+        assert!((h1 - 0.07).abs() < 0.035, "First pass height should be ~0.07, got {}", h1);
+
+        // Pass 2: carving again at (0.0, 0.0)
+        displace_line(
+            &mut hm,
+            Vec2::ZERO,
+            Vec2::ZERO,
+            0.05,
+            &mut bounds,
+            crate::config::MaterialMode::DrySand,
+        );
+        let h2 = hm.data[center_idx];
+        // Expect height to be approximately 20% of h1 = 0.20 * 0.07 = 0.014
+        assert!((h2 - 0.014).abs() < 0.035, "Second pass height should be ~0.014, got {}", h2);
+        assert!(h2 < h1, "Second pass should carve deeper than first pass");
     }
 
     #[test]
