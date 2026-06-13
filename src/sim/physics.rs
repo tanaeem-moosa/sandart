@@ -122,13 +122,13 @@ pub fn displace_line(
     let residual_factor = match material {
         crate::config::MaterialMode::ButterCream => 0.00,
         crate::config::MaterialMode::Oobleck => 0.00,
-        crate::config::MaterialMode::FinePowder => 0.02,
-        crate::config::MaterialMode::KineticSand => 0.04,
-        crate::config::MaterialMode::DrySand => 0.06,
-        crate::config::MaterialMode::MoonDust => 0.06,
-        crate::config::MaterialMode::IronFilings => 0.08,
-        crate::config::MaterialMode::Snow => 0.12,
-        crate::config::MaterialMode::WetSand => 0.22,
+        crate::config::MaterialMode::FinePowder => 0.05,
+        crate::config::MaterialMode::KineticSand => 0.10,
+        crate::config::MaterialMode::DrySand => 0.20,
+        crate::config::MaterialMode::MoonDust => 0.20,
+        crate::config::MaterialMode::IronFilings => 0.24,
+        crate::config::MaterialMode::Snow => 0.28,
+        crate::config::MaterialMode::WetSand => 0.35,
     };
     let residual_h = residual_factor * crate::sim::DEFAULT_SAND_HEIGHT;
 
