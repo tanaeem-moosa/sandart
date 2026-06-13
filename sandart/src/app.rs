@@ -778,7 +778,7 @@ impl eframe::App for SandArtApp {
                             self.playback.current_indices = [0; 5];
                         }
                         if ui.button("Draw Ripples").clicked() {
-                            crate::pattern::generate_ripples(&mut self.sim.heightmap);
+                            self.sim.heightmap.generate_ripples();
                         }
                     });
                 });

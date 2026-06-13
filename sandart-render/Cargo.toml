@@ -1,0 +1,9 @@
+[package]
+name = "sandart-render"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "23.0.0"
+glam = "0.29.0"
+bytemuck = { version = "1.19.0", features = ["derive"] }

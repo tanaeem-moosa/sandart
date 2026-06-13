@@ -44,6 +44,21 @@ impl Heightmap {
     pub fn as_slice(&self) -> &[f32] {
         &self.data
     }
+
+    /// Generate a concentric ripple pattern on the heightmap.
+    pub fn generate_ripples(&mut self) {
+        let cx = self.width as f32 / 2.0;
+        let cy = self.height as f32 / 2.0;
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                let dist = (dx * dx + dy * dy).sqrt();
+                let val = (dist * 0.1).sin() * 0.3 + 0.5;
+                self.set(x, y, val);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

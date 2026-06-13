@@ -74,7 +74,7 @@ Update the existing desktop application to act as the main GUI runner, pulling i
 
 Follow these steps incrementally, running tests and launching the native desktop application at each commit verification boundary to guarantee correctness.
 
-### Step 1: Workspace Scaffolding
+### Step 1: Workspace Scaffolding [Complete]
 *   **Action:**
     1. Create subdirectories: `sandart-sim/src`, `sandart-render/src`, `sandart-pattern/src`, `sandart-wasm/src`, and `sandart/src`.
     2. Set up their individual `Cargo.toml` manifests with appropriate library configurations.
@@ -94,7 +94,7 @@ Follow these steps incrementally, running tests and launching the native desktop
 
 ---
 
-### Step 2: Migrate Patterns Crate (`sandart-pattern`)
+### Step 2: Migrate Patterns Crate (`sandart-pattern`) [Complete]
 *   **Action:**
     1. Move `src/pattern.rs` to `sandart-pattern/src/lib.rs`.
     2. Decouple it entirely from UI configurations (`crate::config`) or simulation references.

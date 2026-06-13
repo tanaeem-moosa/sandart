@@ -158,23 +158,6 @@ pub fn close_loop_path(mut path: Vec<Vec2>) -> Vec<Vec2> {
     path
 }
 
-/// Generate a concentric ripple pattern on a heightmap.
-pub fn generate_ripples(heightmap: &mut crate::sim::Heightmap) {
-    let w = heightmap.width;
-    let h = heightmap.height;
-    let cx = w as f32 / 2.0;
-    let cy = h as f32 / 2.0;
-    for y in 0..h {
-        for x in 0..w {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            let dist = (dx * dx + dy * dy).sqrt();
-            let val = (dist * 0.1).sin() * 0.3 + 0.5;
-            heightmap.set(x, y, val);
-        }
-    }
-}
-
 /// Generates an Archimedean spiral trajectory in Cartesian coordinates: r = a * theta
 /// Spacing represents the distance between consecutive turns.
 pub fn generate_spiral(spacing: f32) -> Vec<Vec2> {
@@ -363,7 +346,6 @@ fn gosper_b(level: u32, angle: &mut f32, path: &mut Vec<Vec2>, step_len: f32) {
         *angle += std::f32::consts::FRAC_PI_3; // +60 deg
         gosper_a(level - 1, angle, path, step_len);
         *angle -= std::f32::consts::FRAC_PI_3; // -60 deg
-        gosper_b(level - 1, angle, path, step_len);
         gosper_b(level - 1, angle, path, step_len);
         *angle -= 2.0 * std::f32::consts::FRAC_PI_3; // -120 deg
         gosper_b(level - 1, angle, path, step_len);
@@ -882,7 +864,7 @@ mod tests {
         }
 
         // Multi-spiral
-        let multi = generate_multi_spiral(0.03, 3);
+        let multi = multi_spiral_helper(0.03, 3);
         assert_eq!(multi.len(), 3);
         for arm in &multi {
             assert!(!arm.is_empty());
@@ -891,4 +873,8 @@ mod tests {
             }
         }
     }
+}
+
+fn multi_spiral_helper(spacing: f32, count: usize) -> Vec<Vec<Vec2>> {
+    generate_multi_spiral(spacing, count)
 }

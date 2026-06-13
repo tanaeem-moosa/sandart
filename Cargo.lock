@@ -2712,9 +2712,42 @@ dependencies = [
  "glam",
  "pollster",
  "rfd",
+ "sandart-pattern",
  "serde",
  "serde_json",
  "wgpu",
+]
+
+[[package]]
+name = "sandart-pattern"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "serde",
+]
+
+[[package]]
+name = "sandart-render"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam",
+ "wgpu",
+]
+
+[[package]]
+name = "sandart-sim"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "serde",
+]
+
+[[package]]
+name = "sandart-wasm"
+version = "0.1.0"
+dependencies = [
+ "wasm-bindgen",
 ]
 
 [[package]]

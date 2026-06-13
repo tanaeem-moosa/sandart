@@ -1,8 +1,10 @@
 mod app;
 mod config;
-mod pattern;
 mod renderer;
 mod sim;
+
+use sandart_pattern as pattern;
+
 
 use app::SandArtApp;
 
