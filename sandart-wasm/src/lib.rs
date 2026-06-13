@@ -29,6 +29,17 @@ pub struct WasmSimulationState {
     speed: f32,
     pattern_mode: String, // "Manual" or "Pattern"
 
+    // Pattern config parameters
+    spiral_spacing: f32,
+    lissajous_a: f32,
+    lissajous_b: f32,
+    rose_k: f32,
+    hypotrochoid_r: f32,
+    hypotrochoid_d: f32,
+    random_walk_steps: u32,
+    random_walk_step_size: f32,
+    hilbert_order: u32,
+
     // Lighting/Camera configs
     camera_azimuth: f32,
     camera_elevation: f32,
@@ -109,6 +120,15 @@ impl WasmSimulationState {
             marble_size: 0.018,
             speed: 1.0,
             pattern_mode: "Manual".to_string(),
+            spiral_spacing: 0.030,
+            lissajous_a: 3.0,
+            lissajous_b: 4.0,
+            rose_k: 5.0,
+            hypotrochoid_r: 0.28,
+            hypotrochoid_d: 0.20,
+            random_walk_steps: 1000,
+            random_walk_step_size: 0.02,
+            hilbert_order: 5,
             camera_azimuth: 0.0,
             camera_elevation: 0.8,
             camera_zoom: 2.8,
@@ -225,6 +245,33 @@ impl WasmSimulationState {
         self.pattern_mode = mode;
     }
 
+    pub fn set_spiral_spacing(&mut self, spacing: f32) {
+        self.spiral_spacing = spacing;
+    }
+
+    pub fn set_lissajous_params(&mut self, a: f32, b: f32) {
+        self.lissajous_a = a;
+        self.lissajous_b = b;
+    }
+
+    pub fn set_rose_k(&mut self, k: f32) {
+        self.rose_k = k;
+    }
+
+    pub fn set_hypotrochoid_params(&mut self, r: f32, d: f32) {
+        self.hypotrochoid_r = r;
+        self.hypotrochoid_d = d;
+    }
+
+    pub fn set_random_walk_params(&mut self, steps: u32, step_size: f32) {
+        self.random_walk_steps = steps;
+        self.random_walk_step_size = step_size;
+    }
+
+    pub fn set_hilbert_order(&mut self, order: u32) {
+        self.hilbert_order = order;
+    }
+
     pub fn set_camera(&mut self, azimuth: f32, elevation: f32, zoom: f32) {
         self.camera_azimuth = azimuth;
         self.camera_elevation = elevation;
@@ -303,6 +350,79 @@ impl WasmSimulationState {
         } else {
             false
         }
+    }
+
+    pub fn load_preset_pattern(&mut self, pattern_type: &str) -> bool {
+        self.playback.clear_waypoints();
+
+        let base_waypoints = match pattern_type {
+            "spiral" => {
+                sandart_pattern::generate_spiral(self.spiral_spacing)
+            }
+            "lissajous" => {
+                sandart_pattern::generate_lissajous(
+                    self.lissajous_a,
+                    self.lissajous_b,
+                    1.5707963,
+                )
+            }
+            "rose" => {
+                sandart_pattern::generate_rose(self.rose_k)
+            }
+            "spirograph" | "hypotrochoid" => {
+                sandart_pattern::generate_hypotrochoid(
+                    self.hypotrochoid_r,
+                    self.hypotrochoid_d,
+                )
+            }
+            "fermat" => {
+                sandart_pattern::generate_fermat_spiral(self.rose_k)
+            }
+            "hilbert" => {
+                sandart_pattern::generate_hilbert_curve(self.hilbert_order)
+            }
+            "gosper" => {
+                // Keep order in bounds for web performance
+                let order = self.hilbert_order.clamp(1, 4);
+                sandart_pattern::generate_gosper_curve(order)
+            }
+            "sierpinski" => {
+                let order = self.hilbert_order.clamp(1, 6);
+                sandart_pattern::generate_sierpinski_curve(order)
+            }
+            "random_walk" => {
+                sandart_pattern::generate_random_walk(
+                    self.random_walk_steps as usize,
+                    self.random_walk_step_size,
+                )
+            }
+            "lemniscate" => {
+                sandart_pattern::generate_lemniscate(0.8)
+            }
+            _ => return false,
+        };
+
+        let arms = self.marble_count.clamp(1, 5) as usize;
+        for j in 0..arms {
+            let angle_offset = (j as f32 / arms as f32) * 2.0 * std::f32::consts::PI;
+            let mut rotated = Vec::with_capacity(base_waypoints.len());
+            for p in &base_waypoints {
+                let cos_a = angle_offset.cos();
+                let sin_a = angle_offset.sin();
+                let rx = p.x * cos_a - p.y * sin_a;
+                let ry = p.x * sin_a + p.y * cos_a;
+                let mut p_rot = glam::Vec2::new(rx, ry);
+                if self.sandbox_shape == SandboxShape::Oval {
+                    p_rot.y *= 0.652;
+                }
+                rotated.push(p_rot);
+            }
+            self.playback.waypoints[j] = rotated;
+        }
+
+        self.playback.randomize_speeds(arms, self.sim.seed);
+        self.playback.state = PlaybackState::Playing;
+        true
     }
 
     pub fn render(&mut self) -> Result<(), JsValue> {

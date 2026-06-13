@@ -192,6 +192,10 @@ function syncSettings() {
     // Lighting Angle & Shadows
     state.set_light_angle(parseFloat(document.getElementById('angle-slider').value));
     state.set_shadows_enabled(document.getElementById('check-shadows').checked);
+
+    // Dynamic pattern regeneration on setting sync
+    const patternType = document.getElementById('pattern-select').value;
+    generatePattern(patternType);
 }
 
 function generatePattern(type) {
@@ -203,111 +207,7 @@ function generatePattern(type) {
     }
 
     state.set_pattern_mode('Pattern');
-    
-    let content = '';
-    const arms = parseInt(document.getElementById('marble-count').value);
-
-    if (type === 'spiral') {
-        const spacing = 0.035;
-        const max_r = 0.874;
-        const a = spacing / (2.0 * Math.PI);
-        const total_theta = max_r / a;
-        const turns = total_theta / (2.0 * Math.PI);
-        const steps = Math.ceil(turns * 128);
-        for (let i = 0; i <= steps; i++) {
-            const t = i / steps;
-            const theta = t * total_theta;
-            const rho = (a * theta) / 0.874;
-            content += `${theta.toFixed(5)} ${rho.toFixed(5)}\n`;
-        }
-        state.load_multi_pattern('thr', content, arms);
-    } 
-    else if (type === 'lissajous') {
-        const steps = 1500;
-        for (let i = 0; i <= steps; i++) {
-            const t = (i / steps) * 2 * Math.PI * 10;
-            const x = Math.sin(3 * t);
-            const y = Math.sin(4 * t);
-            content += `G1 X${(x * 10).toFixed(3)} Y${(y * 10).toFixed(3)}\n`;
-        }
-        state.load_multi_pattern('gcode', content, arms);
-    } 
-    else if (type === 'rose') {
-        const steps = 1500;
-        const theta_max = 2 * Math.PI * 8;
-        for (let i = 0; i <= steps; i++) {
-            const theta = (i / steps) * theta_max;
-            const rho = Math.cos(3.5 * theta);
-            content += `${theta.toFixed(5)} ${rho.toFixed(5)}\n`;
-        }
-        state.load_multi_pattern('thr', content, arms);
-    } 
-    else if (type === 'spirograph') {
-        const steps = 2000;
-        const theta_max = 2 * Math.PI * 16;
-        const ri = 0.62;
-        const d = 0.38;
-        for (let i = 0; i <= steps; i++) {
-            const theta = (i / steps) * theta_max;
-            const x = (1.0 - ri) * Math.cos(theta) + d * Math.cos(((1.0 - ri) / ri) * theta);
-            const y = (1.0 - ri) * Math.sin(theta) - d * Math.sin(((1.0 - ri) / ri) * theta);
-            content += `G1 X${(x * 10).toFixed(3)} Y${(y * 10).toFixed(3)}\n`;
-        }
-        state.load_multi_pattern('gcode', content, arms);
-    } 
-    else if (type === 'gosper') {
-        // Simple Gosper L-system generator in JS
-        const rules = {
-            'A': 'A-B--B+A++AA+B-',
-            'B': '+A-BB--B-A++A+B'
-        };
-        let current = 'A';
-        const depth = 3;
-        for (let d = 0; d < depth; d++) {
-            let next = '';
-            for (let char of current) {
-                next += rules[char] || char;
-            }
-            current = next;
-        }
-
-        let x = 0;
-        let y = 0;
-        let angle = 0;
-        const step = 0.2;
-        content += `G1 X${x.toFixed(3)} Y${y.toFixed(3)}\n`;
-        for (let char of current) {
-            if (char === 'A' || char === 'B') {
-                x += Math.cos(angle) * step;
-                y += Math.sin(angle) * step;
-                content += `G1 X${x.toFixed(3)} Y${y.toFixed(3)}\n`;
-            } else if (char === '+') {
-                angle += Math.PI / 3; // +60 deg
-            } else if (char === '-') {
-                angle -= Math.PI / 3; // -60 deg
-            }
-        }
-        state.load_multi_pattern('gcode', content, arms);
-    }
-    else if (type === 'hilbert') {
-        // Recursive Hilbert path generation
-        const path = [];
-        const hilbert = (x, y, xi, xj, yi, yj, n) => {
-            if (n === 0) {
-                path.push({ x: x + (xi + yi) / 2, y: y + (xj + yj) / 2 });
-            } else {
-                hilbert(x, y, yi / 2, yj / 2, xi / 2, xj / 2, n - 1);
-                hilbert(x + xi / 2, y + xj / 2, xi / 2, xj / 2, yi / 2, yj / 2, n - 1);
-                hilbert(x + xi / 2 + yi / 2, y + xj / 2 + yj / 2, xi / 2, xj / 2, yi / 2, yj / 2, n - 1);
-                hilbert(x + xi / 2 + yi, y + xj / 2 + yj, -yi / 2, -yj / 2, -xi / 2, -xj / 2, n - 1);
-            }
-        };
-        hilbert(-5, -5, 10, 0, 0, 10, 4);
-        for (let p of path) {
-            content += `G1 X${p.x.toFixed(3)} Y${p.y.toFixed(3)}\n`;
-        }
-        state.load_multi_pattern('gcode', content, arms);
-    }
+    state.load_preset_pattern(type);
 }
 
 function setupPanelInput() {
