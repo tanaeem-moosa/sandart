@@ -121,7 +121,14 @@ pub fn displace_line(
 
     let residual_factor = match material {
         crate::config::MaterialMode::ButterCream => 0.00,
-        crate::config::MaterialMode::Oobleck => 0.00,
+        crate::config::MaterialMode::Oobleck => {
+            // Calculate displacement segment speed.
+            // Fast marble movement means high shear stress (solid-like), leaving a shallow groove.
+            // Slow movement means low shear stress (liquid-like), carving all the way down.
+            let speed = (end - start).length();
+            let t = (speed / 0.01).clamp(0.0, 1.0);
+            0.50 * t * t
+        }
         crate::config::MaterialMode::FinePowder => 0.05,
         crate::config::MaterialMode::KineticSand => 0.10,
         crate::config::MaterialMode::DrySand => 0.20,
@@ -129,6 +136,11 @@ pub fn displace_line(
         crate::config::MaterialMode::IronFilings => 0.24,
         crate::config::MaterialMode::Snow => 0.28,
         crate::config::MaterialMode::WetSand => 0.35,
+        crate::config::MaterialMode::Water => 0.00,
+        crate::config::MaterialMode::Milk => 0.00,
+        crate::config::MaterialMode::Ferrofluid => 0.00,
+        crate::config::MaterialMode::VegetableOil => 0.00,
+        crate::config::MaterialMode::CalmWater => 0.00,
     };
 
     let w = heightmap.width;
@@ -388,6 +400,8 @@ pub fn settle_tick(
     material: crate::config::MaterialMode,
     active_marbles: &[ActiveMarbleInfo],
     time_seed: u32,
+    wave_vel: &mut Vec<f32>,
+    shape: crate::config::SandboxShape,
 ) -> f32 {
     if !active_bounds.active {
         return 0.0;
@@ -405,6 +419,155 @@ pub fn settle_tick(
     }
     if sliding.len() != heightmap.data.len() {
         sliding.resize(heightmap.data.len(), false);
+    }
+    if wave_vel.len() != heightmap.data.len() {
+        wave_vel.resize(heightmap.data.len(), 0.0);
+    }
+
+    // Sandbox boundary helper scaled to current width and height
+    let is_inside = |cx: usize, cy: usize| -> bool {
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        let dx = cx as f32 - center_x;
+        let dy = cy as f32 - center_y;
+        let r_x = 0.46 * w as f32;
+        let r_y = 0.46 * h as f32;
+        let r_oval_y = 0.30 * h as f32;
+        match shape {
+            crate::config::SandboxShape::Circle => dx * dx + dy * dy < r_x * r_x,
+            crate::config::SandboxShape::Square => dx.abs() < r_x && dy.abs() < r_y,
+            crate::config::SandboxShape::Oval => {
+                (dx * dx) / (r_x * r_x) + (dy * dy) / (r_oval_y * r_oval_y) < 1.0
+            }
+        }
+    };
+
+    // If material is a liquid (Water, Milk, Ferrofluid), run the 2D wave propagation solver instead of CA settling.
+    if material == crate::config::MaterialMode::Water
+        || material == crate::config::MaterialMode::Milk
+        || material == crate::config::MaterialMode::Ferrofluid
+        || material == crate::config::MaterialMode::VegetableOil
+        || material == crate::config::MaterialMode::CalmWater
+    {
+        // 1. Determine copy boundaries (expanded by 1 to include neighbors)
+        let copy_min_x = active_bounds.min_x.saturating_sub(1);
+        let copy_max_x = (active_bounds.max_x + 1).min(w - 1);
+        let copy_min_y = active_bounds.min_y.saturating_sub(1);
+        let copy_max_y = (active_bounds.max_y + 1).min(h - 1);
+
+        // Copy heightmap to temp buffer inside the expanded bounding box
+        for y in copy_min_y..=copy_max_y {
+            let offset = y * w;
+            temp_heights[offset + copy_min_x..=offset + copy_max_x]
+                .copy_from_slice(&heightmap.data[offset + copy_min_x..=offset + copy_max_x]);
+        }
+
+        // Wave propagation parameters
+        let (c_sq, damping) = match material {
+            crate::config::MaterialMode::Water => (0.24f32, 0.98f32),
+            crate::config::MaterialMode::Milk => (0.16f32, 0.86f32),
+            crate::config::MaterialMode::Ferrofluid => (0.12f32, 0.82f32),
+            crate::config::MaterialMode::VegetableOil => (0.18f32, 0.92f32),
+            crate::config::MaterialMode::CalmWater => (0.22f32, 0.88f32),
+            _ => (0.24f32, 0.98f32),
+        };
+
+        let mut next_min_x = w;
+        let mut next_max_x = 0;
+        let mut next_min_y = h;
+        let mut next_max_y = 0;
+        let mut flow_occurred = false;
+        let mut total_flow = 0.0f32;
+
+        // Run wave equation inside active bounds
+        for y in active_bounds.min_y..=active_bounds.max_y {
+            let row_offset = y * w;
+            for x in active_bounds.min_x..=active_bounds.max_x {
+                let center_idx = row_offset + x;
+
+                if !is_inside(x, y) {
+                    continue;
+                }
+
+                let h_center = heightmap.data[center_idx];
+
+                // Neumann boundary reflection conditions
+                let h_left = if x > 0 && is_inside(x - 1, y) { heightmap.data[center_idx - 1] } else { h_center };
+                let h_right = if x + 1 < w && is_inside(x + 1, y) { heightmap.data[center_idx + 1] } else { h_center };
+                let h_top = if y > 0 && is_inside(x, y - 1) { heightmap.data[center_idx - w] } else { h_center };
+                let h_bottom = if y + 1 < h && is_inside(x, y + 1) { heightmap.data[center_idx + w] } else { h_center };
+
+                let laplacian = h_left + h_right + h_top + h_bottom - 4.0 * h_center;
+
+                // Calculate magnetic force for Ferrofluid
+                let mut f_mag = 0.0f32;
+                if material == crate::config::MaterialMode::Ferrofluid && !active_marbles.is_empty() {
+                    let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
+                    let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
+                    let cell_pos = Vec2::new(cell_x, cell_y);
+
+                    let mut max_attraction = 0.0f32;
+                    for marble in active_marbles {
+                        let dist = (cell_pos - marble.pos).length();
+                        if dist < 0.22 {
+                            let weight = (1.0 - dist / 0.22).max(0.0);
+                            let base_pull = weight * 0.25;
+
+                            let angle = (cell_pos.y - marble.pos.y).atan2(cell_pos.x - marble.pos.x);
+                            let radial_spikes = (angle * 24.0).cos();
+                            let concentric_spikes = (dist * 2.0 * std::f32::consts::PI / 0.012).cos();
+                            let spike_pattern = 0.5 + 0.5 * radial_spikes * concentric_spikes;
+
+                            let attraction = base_pull * (0.3 + 0.7 * spike_pattern);
+                            if attraction > max_attraction {
+                                max_attraction = attraction;
+                            }
+                        }
+                    }
+                    if max_attraction > 0.0 {
+                        let target_h = crate::sim::DEFAULT_SAND_HEIGHT + max_attraction;
+                        f_mag = 0.25 * (target_h - h_center);
+                    }
+                }
+
+                let v_new = (wave_vel[center_idx] + c_sq * laplacian + f_mag) * damping;
+                wave_vel[center_idx] = v_new;
+
+                let h_new = (h_center + v_new).clamp(0.0, 1.0);
+                temp_heights[center_idx] = h_new;
+
+                let height_diff = (h_new - h_center).abs();
+                total_flow += height_diff;
+
+                if v_new.abs() > 1e-5 || (h_new - crate::sim::DEFAULT_SAND_HEIGHT).abs() > 1e-4 {
+                    flow_occurred = true;
+                    next_min_x = next_min_x.min(x);
+                    next_max_x = next_max_x.max(x);
+                    next_min_y = next_min_y.min(y);
+                    next_max_y = next_max_y.max(y);
+                }
+            }
+        }
+
+        // Copy back updated heights
+        for y in copy_min_y..=copy_max_y {
+            let offset = y * w;
+            heightmap.data[offset + copy_min_x..=offset + copy_max_x]
+                .copy_from_slice(&temp_heights[offset + copy_min_x..=offset + copy_max_x]);
+        }
+
+        if flow_occurred {
+            let padding = 2;
+            active_bounds.min_x = next_min_x.saturating_sub(padding);
+            active_bounds.max_x = (next_max_x + padding).min(w - 1);
+            active_bounds.min_y = next_min_y.saturating_sub(padding);
+            active_bounds.max_y = (next_max_y + padding).min(h - 1);
+            active_bounds.active = true;
+        } else {
+            active_bounds.active = false;
+        }
+
+        return total_flow;
     }
 
     // 1. Determine copy boundaries (expanded by 1 to include neighbors)
@@ -651,6 +814,11 @@ pub fn settle_tick(
                                 magnetic_bias = pull_bias + drag_bias;
                             }
                         }
+                    }
+                    crate::config::MaterialMode::Water | crate::config::MaterialMode::Milk | crate::config::MaterialMode::Ferrofluid | crate::config::MaterialMode::VegetableOil | crate::config::MaterialMode::CalmWater => {
+                        threshold = 0.0;
+                        alpha = 0.0;
+                        lock_chance = 0.0;
                     }
                 }
 
@@ -970,6 +1138,7 @@ mod tests {
 
         let initial_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
 
+        let mut wave_vel = vec![0.0; 512 * 512];
         let mut flow_occurred = false;
         for _ in 0..10 {
             let flow = settle_tick(
@@ -980,6 +1149,8 @@ mod tests {
                 crate::config::MaterialMode::ButterCream,
                 &[],
                 12345,
+                &mut wave_vel,
+                crate::config::SandboxShape::Circle,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -1014,6 +1185,7 @@ mod tests {
             active: true,
         };
 
+        let mut wave_vel = vec![0.0; 512 * 512];
         let flow = settle_tick(
             &mut hm,
             &mut temp_heights,
@@ -1022,6 +1194,8 @@ mod tests {
             crate::config::MaterialMode::ButterCream,
             &[],
             12345,
+            &mut wave_vel,
+            crate::config::SandboxShape::Circle,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -1041,6 +1215,11 @@ mod tests {
             MaterialMode::Oobleck,
             MaterialMode::MoonDust,
             MaterialMode::IronFilings,
+            MaterialMode::Water,
+            MaterialMode::Milk,
+            MaterialMode::Ferrofluid,
+            MaterialMode::VegetableOil,
+            MaterialMode::CalmWater,
         ];
 
         for &mat in &materials {
@@ -1061,6 +1240,7 @@ mod tests {
             hm.data[center_idx - 1] = 0.5; // slope = 0.5 > 0.20
 
             // Settle should trigger avalanche flow for all materials
+            let mut wave_vel = vec![0.0; 64 * 64];
             let flow = settle_tick(
                 &mut hm,
                 &mut temp_heights,
@@ -1069,6 +1249,8 @@ mod tests {
                 mat,
                 &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1, vel_vec: Vec2::new(0.1, 0.0) }],
                 9999,
+                &mut wave_vel,
+                crate::config::SandboxShape::Circle,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);

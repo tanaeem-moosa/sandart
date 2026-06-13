@@ -97,7 +97,12 @@ impl SandArtApp {
 
                 match res {
                     Ok(waypoints) => {
-                        let waypoints = crate::pattern::close_loop_path(waypoints);
+                        let mut waypoints = crate::pattern::close_loop_path(waypoints);
+                        if self.config.sandbox_shape == crate::config::SandboxShape::Oval {
+                            for pt in waypoints.iter_mut() {
+                                pt.y *= 0.652;
+                            }
+                        }
                         if waypoints.is_empty() {
                             self.pattern_error = Some("Parsed pattern contains no waypoints".to_string());
                             return;
@@ -193,12 +198,26 @@ impl SandArtApp {
                 );
                 for j in 0..5 {
                     if j < paths.len() {
-                        self.playback.waypoints[j] = crate::pattern::close_loop_path(paths[j].clone());
+                        let mut path = paths[j].clone();
+                        if self.config.sandbox_shape == crate::config::SandboxShape::Oval {
+                            for pt in path.iter_mut() {
+                                pt.y *= 0.652;
+                            }
+                        }
+                        self.playback.waypoints[j] = crate::pattern::close_loop_path(path);
                         self.playback.current_indices[j] = 0;
 
                         // Snap simulation marble to its starting waypoint position
-                        self.sim.marbles[j].pos = paths[j][0];
-                        self.sim.marbles[j].prev_pos = paths[j][0];
+                        self.playback.waypoints[j] = crate::pattern::close_loop_path(paths[j].clone());
+                        if self.config.sandbox_shape == crate::config::SandboxShape::Oval {
+                            for pt in self.playback.waypoints[j].iter_mut() {
+                                pt.y *= 0.652;
+                            }
+                        }
+                        
+                        let start_pos = self.playback.waypoints[j][0];
+                        self.sim.marbles[j].pos = start_pos;
+                        self.sim.marbles[j].prev_pos = start_pos;
                         self.sim.marbles[j].vel = glam::Vec2::ZERO;
                         self.sim.marbles[j].was_active = true;
                     } else {
@@ -222,10 +241,16 @@ impl SandArtApp {
             _ => return,
         };
 
-        let base_waypoints = crate::pattern::close_loop_path(base_waypoints);
+        let mut base_waypoints = crate::pattern::close_loop_path(base_waypoints);
         if base_waypoints.is_empty() {
             self.pattern_error = Some("Failed to generate pattern waypoints".to_string());
             return;
+        }
+
+        if self.config.sandbox_shape == crate::config::SandboxShape::Oval {
+            for pt in base_waypoints.iter_mut() {
+                pt.y *= 0.652;
+            }
         }
 
         let count = self.config.marble_count.clamp(1, 5) as usize;
@@ -257,6 +282,7 @@ impl SandArtApp {
 
 impl eframe::App for SandArtApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let old_shape = self.config.sandbox_shape;
         self.frame_counter += 1;
 
         // Track frame delta time for frame-rate-independent physics calculations
@@ -632,6 +658,11 @@ impl eframe::App for SandArtApp {
                             crate::config::MaterialMode::Oobleck => "Oobleck (Non-Newtonian)",
                             crate::config::MaterialMode::MoonDust => "Moon Dust",
                             crate::config::MaterialMode::IronFilings => "Iron Filings",
+                            crate::config::MaterialMode::Water => "Water (Ripples)",
+                            crate::config::MaterialMode::Milk => "Milk (Thick Liquid)",
+                            crate::config::MaterialMode::Ferrofluid => "Ferrofluid (Magnetic Liquid)",
+                            crate::config::MaterialMode::VegetableOil => "Vegetable Oil (Transparent Viscous)",
+                            crate::config::MaterialMode::CalmWater => "Water (Calm/Glassy)",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::ButterCream, "Butter-Cream (Viscous)");
@@ -643,6 +674,25 @@ impl eframe::App for SandArtApp {
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Oobleck, "Oobleck (Non-Newtonian)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::MoonDust, "Moon Dust");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::IronFilings, "Iron Filings");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Water, "Water (Ripples)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Milk, "Milk (Thick Liquid)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Ferrofluid, "Ferrofluid (Magnetic Liquid)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::VegetableOil, "Vegetable Oil (Transparent Viscous)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::CalmWater, "Water (Calm/Glassy)");
+                        });
+
+                    ui.add_space(12.0);
+                    ui.label("Sandbox Shape");
+                    egui::ComboBox::from_label("Shape")
+                        .selected_text(match self.config.sandbox_shape {
+                            crate::config::SandboxShape::Circle => "Circle",
+                            crate::config::SandboxShape::Square => "Square",
+                            crate::config::SandboxShape::Oval => "Oval",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Circle, "Circle");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Square, "Square");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Oval, "Oval");
                         });
 
                     ui.add_space(12.0);
@@ -654,6 +704,8 @@ impl eframe::App for SandArtApp {
                             crate::config::LedMode::Single => "Single Direction",
                             crate::config::LedMode::RainbowRing => "Rainbow Ring",
                             crate::config::LedMode::ColorCycle => "Color Cycle Ring",
+                            crate::config::LedMode::OverheadMoon => "Overhead Moon Light",
+                            crate::config::LedMode::RainbowMoon => "Rainbow Ring + Moon",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -670,6 +722,16 @@ impl eframe::App for SandArtApp {
                                 &mut self.config.led_mode,
                                 crate::config::LedMode::ColorCycle,
                                 "Color Cycle Ring",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.led_mode,
+                                crate::config::LedMode::OverheadMoon,
+                                "Overhead Moon Light",
+                            );
+                            ui.selectable_value(
+                                &mut self.config.led_mode,
+                                crate::config::LedMode::RainbowMoon,
+                                "Rainbow Ring + Moon",
                             );
                         });
 
@@ -803,11 +865,14 @@ impl eframe::App for SandArtApp {
                     crate::config::LedMode::Single => 0,
                     crate::config::LedMode::RainbowRing => 1,
                     crate::config::LedMode::ColorCycle => 2,
+                    crate::config::LedMode::OverheadMoon => 3,
+                    crate::config::LedMode::RainbowMoon => 4,
                 },
                 time: self.elapsed_time % (2.0 * std::f32::consts::PI * 100.0),
                 marble_count: self.config.marble_count,
                 material_mode: self.config.material_mode as u32,
-                _padding: [0, 0],
+                sandbox_shape: self.config.sandbox_shape as u32,
+                _padding: 0,
                 marbles: [
                     crate::renderer::MarbleUniform {
                         pos: [self.sim.marbles[0].pos.x, self.sim.marbles[0].pos.y],
@@ -947,8 +1012,12 @@ impl eframe::App for SandArtApp {
             }
 
             // Run simulation tick
-            self.sim.update(self.dt, &targets, self.config.marble_size, self.config.material_mode);
+            self.sim.update(self.dt, &targets, self.config.marble_size, self.config.material_mode, self.config.sandbox_shape);
         });
+
+        if self.config.sandbox_shape != old_shape && self.config.pattern_mode != crate::config::PatternMode::Manual {
+            self.load_selected_pattern();
+        }
 
         // Keep requesting frames for continuous physics simulation/render
         ctx.request_repaint();

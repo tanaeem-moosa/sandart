@@ -20,7 +20,7 @@ struct LightingUniforms {
     time: f32,
     marble_count: u32,
     material_mode: u32,
-    padding1: u32,
+    sandbox_shape: u32,
     padding2: u32,
     marbles: array<MarbleUniform, 5>,
 };
@@ -155,18 +155,55 @@ fn fs_main(
 ) -> @location(0) vec4<f32> {
     let center = vec2<f32>(0.5, 0.5);
     let dist = distance(uv, center);
+    let m_brightness = select(uniforms.light_brightness, select(uniforms.light_brightness * 0.22, uniforms.light_brightness * 0.05, uniforms.led_mode == 4u), uniforms.led_mode == 3u || uniforms.led_mode == 4u);
     
-    // 1. Draw outer frame and emissive LED ring
-    if (dist >= 0.46) {
-        if (dist >= 0.46 && dist < 0.475) {
-            // Emissive LED strip channel
+    // Determine casing and LED channel based on the shape
+    var in_casing = false;
+    var in_led = false;
+    var led_center = vec2<f32>(0.5, 0.5);
+    
+    let angle_light = atan2(uniforms.light_dir.y, uniforms.light_dir.x);
+    let dir_light = vec2<f32>(cos(angle_light), -sin(angle_light));
+
+    if (uniforms.sandbox_shape == 1u) { // Square
+        let d_max = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
+        if (d_max >= 0.46) {
+            in_casing = true;
+            if (d_max < 0.475) {
+                in_led = true;
+            }
+        }
+        // Project light dir onto square perimeter (half-width 0.468)
+        let scale = 0.468 / max(abs(dir_light.x), abs(dir_light.y));
+        led_center = dir_light * scale + 0.5;
+    } else if (uniforms.sandbox_shape == 2u) { // Oval
+        let u = uv.x - 0.5;
+        let v = uv.y - 0.5;
+        let d_oval = sqrt((u * u) / (0.46 * 0.46) + (v * v) / (0.30 * 0.30));
+        if (d_oval >= 1.0) {
+            in_casing = true;
+            if (d_oval < 1.032) {
+                in_led = true;
+            }
+        }
+        // Project light dir onto ellipse perimeter (a = 0.468, b = 0.305)
+        let scale = 1.0 / sqrt((dir_light.x * dir_light.x) / (0.468 * 0.468) + (dir_light.y * dir_light.y) / (0.305 * 0.305));
+        led_center = dir_light * scale + 0.5;
+    } else { // Circle (0u)
+        let d_circle = distance(uv, vec2<f32>(0.5, 0.5));
+        if (d_circle >= 0.46) {
+            in_casing = true;
+            if (d_circle < 0.475) {
+                in_led = true;
+            }
+        }
+        led_center = dir_light * 0.468 + 0.5;
+    }
+
+    if (in_casing) {
+        if (in_led) {
             if (uniforms.led_mode == 0u) {
-                // Single Light Mode: Draw a single glowing LED spot at the angle of uniforms.light_dir
-                let angle_light = atan2(uniforms.light_dir.y, uniforms.light_dir.x);
-                let led_center = vec2<f32>(
-                    cos(angle_light) * 0.468 + 0.5,
-                    -sin(angle_light) * 0.468 + 0.5
-                );
+                // Single Light Mode: Draw a single glowing LED spot
                 let d_to_led = distance(uv, led_center);
                 var led_glow = vec3<f32>(0.08, 0.08, 0.10);
                 if (d_to_led < 0.02) {
@@ -174,17 +211,21 @@ fn fs_main(
                     led_glow = led_glow + uniforms.light_color.rgb * intensity * 1.5 * uniforms.light_brightness;
                 }
                 return vec4<f32>(led_glow, 1.0);
-            } else if (uniforms.led_mode == 1u) {
+            } else if (uniforms.led_mode == 1u || uniforms.led_mode == 4u) {
                 // Rainbow Ring Mode: Continuous rotating rainbow ring
                 let angle = atan2(-(uv.y - 0.5), uv.x - 0.5);
                 let hue = fract(angle / (2.0 * PI) - uniforms.time * 0.05);
                 let led_color = hue_to_rgb(hue);
                 return vec4<f32>(led_color * 1.5 * uniforms.light_brightness, 1.0);
-            } else {
+            } else if (uniforms.led_mode == 2u) {
                 // Color Cycle Mode: Continuous single color cycling ring
                 let hue = fract(uniforms.time * 0.03);
                 let led_color = hue_to_rgb(hue);
                 return vec4<f32>(led_color * 1.5 * uniforms.light_brightness, 1.0);
+            } else { // led_mode == 3u
+                // Overhead Moon Light Mode: Soft glowing cool white ring
+                let led_color = vec3<f32>(0.85, 0.90, 0.95);
+                return vec4<f32>(led_color * 0.8 * uniforms.light_brightness, 1.0);
             }
         } else {
             // Outer casing
@@ -224,14 +265,32 @@ fn fs_main(
         var sphere_diffuse = vec3<f32>(0.0);
         var sphere_specular = vec3<f32>(0.0);
         
-        if (uniforms.led_mode == 0u) {
-            let light_dir = normalize(uniforms.light_dir.xyz);
+        if (uniforms.led_mode == 0u || uniforms.led_mode == 3u || uniforms.led_mode == 4u) {
+            let light_dir = select(normalize(uniforms.light_dir.xyz), vec3<f32>(0.0, 0.0, 1.0), uniforms.led_mode == 3u || uniforms.led_mode == 4u);
             let diff = max(dot(sphere_normal, light_dir), 0.0);
-            sphere_diffuse = vec3<f32>(0.1) * diff * uniforms.light_brightness;
+            
+            let m_color = select(uniforms.light_color.rgb, vec3<f32>(0.85, 0.90, 0.95), uniforms.led_mode == 3u || uniforms.led_mode == 4u);
+            
+            sphere_diffuse = vec3<f32>(0.1) * diff * m_brightness;
             
             let reflect_dir = reflect(-light_dir, sphere_normal);
             let spec = pow(max(dot(reflect_dir, view_dir), 0.0), 128.0);
-            sphere_specular = uniforms.light_color.rgb * spec * 2.0 * uniforms.light_brightness;
+            sphere_specular = m_color * spec * 2.0 * m_brightness;
+            
+            if (uniforms.led_mode == 4u) {
+                let r_dir = reflect(-view_dir, sphere_normal);
+                let r_horizontal_len = length(r_dir.xy);
+                if (r_horizontal_len > 0.001) {
+                    let ray_slope = r_dir.z / r_horizontal_len;
+                    let target_slope = 0.21;
+                    let slope_diff = abs(ray_slope - target_slope);
+                    let ring_spec = pow(max(1.0 - slope_diff * 4.5, 0.0), 40.0);
+                    let angle_reflect = atan2(r_dir.y, r_dir.x);
+                    let hue = fract(angle_reflect / (2.0 * PI) - uniforms.time * 0.05);
+                    let ring_reflect_color = hue_to_rgb(hue);
+                    sphere_specular = sphere_specular + ring_reflect_color * ring_spec * 1.5 * uniforms.light_brightness;
+                }
+            }
         } else {
             // Compute diffuse from the 8 virtual lights
             let num_leds = 8;
@@ -240,7 +299,7 @@ fn fs_main(
                 let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.06));
                 
                 var led_color = vec3<f32>(0.0);
-                if (uniforms.led_mode == 1u) {
+                if (uniforms.led_mode == 1u || uniforms.led_mode == 4u) {
                     let hue = fract(f32(i) / f32(num_leds) - uniforms.time * 0.05);
                     led_color = hue_to_rgb(hue);
                 } else {
@@ -267,7 +326,7 @@ fn fs_main(
                 
                 let angle_reflect = atan2(reflect_dir.y, reflect_dir.x);
                 var ring_reflect_color = vec3<f32>(0.0);
-                if (uniforms.led_mode == 1u) {
+                if (uniforms.led_mode == 1u || uniforms.led_mode == 4u) {
                     let hue = fract(angle_reflect / (2.0 * PI) - uniforms.time * 0.05);
                     ring_reflect_color = hue_to_rgb(hue);
                 } else {
@@ -398,6 +457,47 @@ fn fs_main(
         is_metallic = 1.0;
         grain_scale = 1000.0;
         grain_strength = 0.35;
+    } else if (uniforms.material_mode == 9u) { // Water
+        mat_base_color = vec3<f32>(0.01, 0.10, 0.14);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.40;
+        roughness = 0.08;
+        grain_scale = 1.0;
+        grain_strength = 0.00;
+    } else if (uniforms.material_mode == 10u) { // Milk
+        mat_base_color = vec3<f32>(0.95, 0.95, 0.93);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.30;
+        roughness = 0.22;
+        grain_scale = 2000.0;
+        grain_strength = 0.03;
+    } else if (uniforms.material_mode == 11u) { // Ferrofluid
+        mat_base_color = vec3<f32>(0.02, 0.02, 0.03);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.50;
+        roughness = 0.08;
+        is_metallic = 0.9;
+        grain_scale = 1.0;
+        grain_strength = 0.00;
+    } else if (uniforms.material_mode == 12u) { // VegetableOil
+        mat_base_color = vec3<f32>(0.50, 0.38, 0.12);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.35;
+        roughness = 0.12;
+        grain_scale = 1.0;
+        grain_strength = 0.00;
+    } else if (uniforms.material_mode == 13u) { // CalmWater
+        mat_base_color = vec3<f32>(0.01, 0.10, 0.14);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.40;
+        roughness = 0.05;
+        grain_scale = 1.0;
+        grain_strength = 0.00;
     }
 
     // 3. Perturb normal with micro-surface grain noise
@@ -438,6 +538,35 @@ fn fs_main(
         perturb = perturb + vec3<f32>(mag_offset.x, mag_offset.y, 0.0);
     }
 
+    // Apply procedural magnetic spike deformation for Ferrofluid
+    if (uniforms.material_mode == 11u) {
+        var mag_offset = vec2<f32>(0.0, 0.0);
+        for (var j = 0u; j < uniforms.marble_count; j = j + 1u) {
+            let m_pos = uniforms.marbles[j].pos;
+            let m_uv = vec2<f32>(m_pos.x * 0.5 + 0.5, -m_pos.y * 0.5 + 0.5);
+            let to_m = uv - m_uv;
+            let dist = length(to_m);
+            if (dist < 0.22) {
+                let weight = clamp((0.22 - dist) / 0.22, 0.0, 1.0);
+                let w_steep = weight * weight * weight;
+                
+                // Concentric magnetic ripples
+                let conc = cos(dist * 2.0 * PI / 0.012);
+                
+                // Radial spike needles
+                let angle = atan2(to_m.y, to_m.x);
+                let rad = cos(angle * 24.0);
+                
+                let dir = to_m / (dist + 0.0001);
+                let perp = vec2<f32>(-dir.y, dir.x);
+                
+                // Perturb normal along radial field lines and transverse spikes
+                mag_offset = mag_offset + (dir * conc * 0.60 + perp * rad * conc * 0.50) * w_steep;
+            }
+        }
+        perturb = perturb + vec3<f32>(mag_offset.x, mag_offset.y, 0.0);
+    }
+
     normal = normalize(normal + perturb);
 
     // 4. Lighting Mode evaluation
@@ -456,27 +585,30 @@ fn fs_main(
     } else if (uniforms.led_mode == 2u) {
         let hue = fract(uniforms.time * 0.03);
         local_light_color = hue_to_rgb(hue);
+    } else if (uniforms.led_mode == 3u || uniforms.led_mode == 4u) {
+        local_light_color = vec3<f32>(0.85, 0.90, 0.95); // Cool moonlight
     }
 
     var diffuse = vec3<f32>(0.0);
-    var specular = vec3<f32>(0.0);
+    var specular_reflect = vec3<f32>(0.0);
     var directional_sparkle = 0.0;
 
-    if (uniforms.led_mode == 0u) {
-        // Single Directional Light mode
-        let light_dir = normalize(uniforms.light_dir.xyz);
+    // A. Directional Light component (Single direction, Overhead Moon, or Rainbow Moon)
+    if (uniforms.led_mode == 0u || uniforms.led_mode == 3u || uniforms.led_mode == 4u) {
+        let light_dir = select(normalize(uniforms.light_dir.xyz), vec3<f32>(0.0, 0.0, 1.0), uniforms.led_mode == 3u || uniforms.led_mode == 4u);
         
         // Power-wrapped diffuse to simulate multiple scattering of sand grains
         let diff_strength = pow(dot(normal, light_dir) * 0.5 + 0.5, 1.5);
-        let diff_color = local_light_color * diff_strength * uniforms.light_brightness;
+        let diff_color = local_light_color * diff_strength * m_brightness;
         
         // Microfacet Sparkles for quartz highlights
         let half_vec = normalize(light_dir + view_dir);
         let sparkle_noise = hash(floor(uv * 4000.0));
-        if (sparkle_noise > sparkles_threshold) {
+        let m_sparkles_threshold = select(sparkles_threshold, 1.0, uniforms.led_mode == 3u || uniforms.led_mode == 4u); // disable sparkles in moon mode
+        if (sparkle_noise > m_sparkles_threshold) {
             let dot_nh = max(dot(normal, half_vec), 0.0);
             let sparkle_intensity = pow(dot_nh, sparkles_power) * sparkles_intensity;
-            directional_sparkle = step(0.8, sparkle_intensity) * (sparkle_noise - sparkles_threshold) * 50.0;
+            directional_sparkle = step(0.8, sparkle_intensity) * (sparkle_noise - m_sparkles_threshold) * 50.0;
         }
 
         var shadow_factor = 1.0;
@@ -525,21 +657,39 @@ fn fs_main(
             apply_marble_shadow(uv, light_dir, uniforms.marbles[4].pos, uniforms.marbles[4].radius, uniforms.marbles[4].z_pos, &shadow_factor);
         }
         
-        diffuse = diff_color * shadow_factor * radial_boost;
-    } else {
-        // Rainbow LED Ring Mode
+        diffuse = diffuse + diff_color * shadow_factor * radial_boost;
+
+        // Glossy Specular component for directional light
+        if (roughness < 0.5) {
+            let spec_factor = clamp((roughness - 0.1) / 0.4, 0.0, 1.0);
+            let spec_power = mix(256.0, 16.0, spec_factor);
+            let spec_int = mix(2.5, 0.5, spec_factor);
+            
+            let half_vec = normalize(light_dir + view_dir);
+            let dot_nh = max(dot(normal, half_vec), 0.0);
+            specular_reflect = specular_reflect + local_light_color * pow(dot_nh, spec_power) * spec_int * m_brightness;
+        }
+    }
+
+    // B. Multi-LED Ring component (Rainbow Ring, Color Cycle, or Rainbow Moon)
+    if (uniforms.led_mode == 1u || uniforms.led_mode == 2u || uniforms.led_mode == 4u) {
         let num_leds = 8;
         let step_size = 0.004;
         let step_count = 8;
         
         var diffuse_accum = vec3<f32>(0.0);
+        var spec_accum = vec3<f32>(0.0);
+
+        let spec_factor = clamp((roughness - 0.1) / 0.4, 0.0, 1.0);
+        let spec_power = mix(256.0, 16.0, spec_factor);
+        let spec_int = mix(2.5, 0.5, spec_factor);
         
         for (var i = 0; i < num_leds; i = i + 1) {
             let angle_led = f32(i) * (2.0 * PI / f32(num_leds)) + uniforms.time * 0.10;
             let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.06));
             
             var led_color = vec3<f32>(0.0);
-            if (uniforms.led_mode == 1u) {
+            if (uniforms.led_mode == 1u || uniforms.led_mode == 4u) {
                 let hue = fract(f32(i) / f32(num_leds) - uniforms.time * 0.05);
                 led_color = hue_to_rgb(hue);
             } else {
@@ -606,42 +756,19 @@ fn fs_main(
             }
             
             diffuse_accum = diffuse_accum + led_color * (diff_strength + sp * 2.0) * shadow_factor;
+
+            // Specular contribution from this LED
+            if (roughness < 0.5) {
+                let spec_l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.20));
+                let spec_half_vec = normalize(spec_l_dir + view_dir);
+                let spec_dot_nh = max(dot(normal, spec_half_vec), 0.0);
+                spec_accum = spec_accum + led_color * pow(spec_dot_nh, spec_power) * spec_int;
+            }
         }
         
-        diffuse = diffuse_accum * (uniforms.light_brightness / f32(num_leds)) * radial_boost;
-    }
-
-    // B. Glossy Specular Reflection for wet/liquid/metallic materials
-    var specular_reflect = vec3<f32>(0.0);
-    if (roughness < 0.5) {
-        let spec_power = mix(256.0, 16.0, (roughness - 0.1) / 0.4);
-        let spec_int = mix(2.5, 0.5, (roughness - 0.1) / 0.4);
-        
-        if (uniforms.led_mode == 0u) {
-            let light_dir = normalize(uniforms.light_dir.xyz);
-            let half_vec = normalize(light_dir + view_dir);
-            let dot_nh = max(dot(normal, half_vec), 0.0);
-            specular_reflect = local_light_color * pow(dot_nh, spec_power) * spec_int * uniforms.light_brightness;
-        } else {
-            let num_leds = 8;
-            var spec_accum = vec3<f32>(0.0);
-            for (var i = 0; i < num_leds; i = i + 1) {
-                let angle_led = f32(i) * (2.0 * PI / f32(num_leds)) + uniforms.time * 0.10;
-                let l_dir = normalize(vec3<f32>(cos(angle_led), sin(angle_led), 0.20));
-                let half_vec = normalize(l_dir + view_dir);
-                let dot_nh = max(dot(normal, half_vec), 0.0);
-                
-                var led_color = vec3<f32>(0.0);
-                if (uniforms.led_mode == 1u) {
-                    let hue = fract(f32(i) / f32(num_leds) - uniforms.time * 0.05);
-                    led_color = hue_to_rgb(hue);
-                } else {
-                    let hue = fract(uniforms.time * 0.03);
-                    led_color = hue_to_rgb(hue);
-                }
-                spec_accum = spec_accum + led_color * pow(dot_nh, spec_power) * spec_int;
-            }
-            specular_reflect = spec_accum * (uniforms.light_brightness / f32(num_leds));
+        diffuse = diffuse + diffuse_accum * (uniforms.light_brightness / f32(num_leds)) * radial_boost;
+        if (roughness < 0.5) {
+            specular_reflect = specular_reflect + spec_accum * (uniforms.light_brightness / f32(num_leds));
         }
     }
 
@@ -664,10 +791,10 @@ fn fs_main(
     
     // Fresnel Rim Light to simulate soft rim scattering
     let fresnel = pow(1.0 - max(dot(normal, view_dir), 0.0), 5.0);
-    let rim_color = local_light_color * fresnel * rim_mult * uniforms.light_brightness * radial_boost;
+    let rim_color = local_light_color * fresnel * rim_mult * m_brightness * radial_boost;
     
     // Combine shading: ambient + diffuse + rim light + sparkles
-    let final_lighting = ambient + diffuse + rim_color + vec3<f32>(directional_sparkle * uniforms.light_brightness);
+    let final_lighting = ambient + diffuse + rim_color + vec3<f32>(directional_sparkle * m_brightness);
     
     var sand_shaded = vec3<f32>(0.0);
     if (is_metallic > 0.5) {
@@ -682,7 +809,43 @@ fn fs_main(
     // Opacity rises quickly so a thin sand layer (>= 0.05 height) is fully opaque sand.
     let sand_opacity = smoothstep(0.0, 0.05, h_center);
     let table_color = vec3<f32>(0.02, 0.02, 0.03);
-    let final_color = mix(table_color, sand_shaded, sand_opacity);
+    var final_color = mix(table_color, sand_shaded, sand_opacity);
+
+    if (uniforms.material_mode == 9u || uniforms.material_mode == 13u) { // Water or CalmWater
+        let water_tint = vec3<f32>(0.02, 0.16, 0.22);
+        let absorption = 1.0 - exp(-h_center * 12.0);
+        let water_refracted = mix(table_color, water_tint, absorption);
+        final_color = water_refracted + specular_reflect;
+    }
+ 
+    if (uniforms.material_mode == 12u) { // VegetableOil
+        let oil_tint = vec3<f32>(0.50, 0.38, 0.12);
+        let absorption = 1.0 - exp(-h_center * 11.0);
+        let oil_refracted = mix(table_color, oil_tint, absorption);
+        final_color = oil_refracted + specular_reflect;
+    }
+ 
+    if (uniforms.material_mode == 11u) { // Ferrofluid in transparent oil
+        let oil_tint = vec3<f32>(0.26, 0.24, 0.18);
+        let absorption = 1.0 - exp(-h_center * 9.0);
+        let oil_refracted = mix(table_color, oil_tint, absorption);
+        
+        let ferro_color = vec3<f32>(0.02, 0.02, 0.03);
+        let ferro_shaded = ferro_color * final_lighting + specular_reflect * ferro_color;
+        
+        var ferro_factor = 0.0;
+        for (var j = 0u; j < uniforms.marble_count; j = j + 1u) {
+            let m_pos = uniforms.marbles[j].pos;
+            let m_uv = vec2<f32>(m_pos.x * 0.5 + 0.5, -m_pos.y * 0.5 + 0.5);
+            let dist_to_m = distance(uv, m_uv);
+            if (dist_to_m < 0.22) {
+                let weight = clamp((0.22 - dist_to_m) / 0.22, 0.0, 1.0);
+                ferro_factor = max(ferro_factor, weight * weight * weight);
+            }
+        }
+        
+        final_color = mix(oil_refracted + specular_reflect, ferro_shaded, ferro_factor);
+    }
 
     return vec4<f32>(final_color, 1.0);
 }

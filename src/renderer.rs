@@ -45,7 +45,8 @@ pub struct LightingUniforms {
     pub time: f32,             // elapsed animation time
     pub marble_count: u32,     // active marbles count (1 to 5)
     pub material_mode: u32,    // active material preset (0 to 8)
-    pub _padding: [u32; 2],
+    pub sandbox_shape: u32,    // active sandbox shape (0 = Circle, 1 = Square, 2 = Oval)
+    pub _padding: u32,
     pub marbles: [MarbleUniform; 5], // array of up to 5 marbles
 }
 
@@ -484,7 +485,8 @@ mod tests {
                 time: 0.0,
                 marble_count: 1,
                 material_mode: 0,
-                _padding: [0, 0],
+                sandbox_shape: 0,
+                _padding: 0,
                 marbles: [
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
@@ -629,6 +631,216 @@ mod tests {
 
             drop(data);
             read_buffer.unmap();
+        });
+    }
+
+    #[test]
+    #[ignore] // Run this test explicitly to save a render to disk
+    fn test_save_render() {
+        pollster::block_on(async {
+            let Some((device, queue)) = get_device_and_queue().await else {
+                eprintln!("Skipping GPU test: No compatible wgpu adapter found.");
+                return;
+            };
+
+            let width = 512;
+            let height = 512;
+            let target_format = wgpu::TextureFormat::Rgba8Unorm;
+
+            let mut resources = SandArtRenderResources::new(&device, target_format);
+
+            let camera_uniforms = CameraUniforms {
+                view_proj: [
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ],
+                camera_pos: [0.0, 0.0, 2.0, 0.0],
+            };
+            resources.update_camera(&queue, &camera_uniforms);
+
+            let texture_desc = wgpu::TextureDescriptor {
+                label: Some("test_target_texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: target_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            };
+
+            let depth_texture_desc = wgpu::TextureDescriptor {
+                label: Some("test_depth_texture"),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth24Plus,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            };
+
+            let buffer_desc = wgpu::BufferDescriptor {
+                label: Some("test_readback_buffer"),
+                size: (width * height * 4) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            };
+
+            let configs = [
+                // (suffix, material_mode, led_mode, marble_count, marble_pos_x, marble_pos_y, marble_z)
+                ("water_moonlight_circle", 9, 3, 1, 0.0, 0.0, 0.35),
+                ("vegetable_oil_moonlight", 12, 3, 1, 0.0, 0.0, 0.35),
+                ("ferrofluid_moonlight", 11, 3, 1, 0.0, 0.0, 0.35),
+                ("water_rainbowmoon", 9, 4, 1, 0.0, 0.0, 0.35),
+                ("calm_water_moonlight", 13, 3, 1, 0.0, 0.0, 0.35),
+            ];
+
+            let grid_size = crate::sim::GRID_SIZE;
+
+            for (suffix, mat_mode, led_mode, marble_count, m_x, m_y, m_z) in configs {
+                let mut heightmap_data = vec![0.35f32; grid_size * grid_size];
+                for y in 0..grid_size {
+                    for x in 0..grid_size {
+                        let dx = (x as f32 - (grid_size / 2) as f32) / (grid_size as f32);
+                        let dy = (y as f32 - (grid_size / 2) as f32) / (grid_size as f32);
+                        let r = (dx * dx + dy * dy).sqrt();
+
+                        if mat_mode == 11 { // Ferrofluid
+                            let mut spike_pattern = 0.0f32;
+                            if r < 0.22 {
+                                let weight = (1.0 - r / 0.22).max(0.0);
+                                let base_pull = weight * 0.25;
+                                let angle = dy.atan2(dx);
+                                let radial_spikes = (angle * 24.0).cos();
+                                let concentric_spikes = (r * 2.0 * std::f32::consts::PI / 0.012).cos();
+                                let pattern = 0.5 + 0.5 * radial_spikes * concentric_spikes;
+                                spike_pattern = base_pull * (0.3 + 0.7 * pattern);
+                            }
+                            heightmap_data[y * grid_size + x] = (0.35 + spike_pattern).clamp(0.0, 1.0);
+                        } else {
+                            let decay = if mat_mode == 13 { 20.0 } else { 6.0 };
+                            let ripple = 0.045 * (r * 75.0).cos() * (-r * decay).exp();
+                            heightmap_data[y * grid_size + x] = (0.35 + ripple).clamp(0.0, 1.0);
+                        }
+                    }
+                }
+                resources.update_heightmap(&queue, &heightmap_data);
+
+                let uniforms = LightingUniforms {
+                    light_dir: [0.0, 0.0, 1.0, 0.0],
+                    light_color: [0.85, 0.90, 0.95, 1.0],
+                    sand_color: [0.92, 0.89, 0.82, 1.0],
+                    light_brightness: 1.4,
+                    shadow_enabled: 1,
+                    led_mode,
+                    time: 0.0,
+                    marble_count,
+                    material_mode: mat_mode,
+                    sandbox_shape: 0, // Circle
+                    _padding: 0,
+                    marbles: [
+                        MarbleUniform { pos: [m_x, m_y], radius: 0.018, z_pos: m_z },
+                        MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
+                        MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
+                        MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
+                        MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
+                    ],
+                };
+                resources.update_uniforms(&queue, &uniforms);
+
+                let texture = device.create_texture(&texture_desc);
+                let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let depth_texture = device.create_texture(&depth_texture_desc);
+                let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let read_buffer = device.create_buffer(&buffer_desc);
+
+                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("test_encoder"),
+                });
+
+                {
+                    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("test_render_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &texture_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+
+                    render_pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
+                    render_pass.set_pipeline(&resources.pipeline);
+                    render_pass.set_bind_group(0, &resources.bind_group, &[]);
+                    render_pass.set_vertex_buffer(0, resources.vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(resources.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.draw_indexed(0..resources.num_indices, 0, 0..1);
+                }
+
+                encoder.copy_texture_to_buffer(
+                    wgpu::ImageCopyTexture {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::ImageCopyBuffer {
+                        buffer: &read_buffer,
+                        layout: wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(width * 4),
+                            rows_per_image: Some(height),
+                        },
+                    },
+                    wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+
+                queue.submit(Some(encoder.finish()));
+
+                let buffer_slice = read_buffer.slice(..);
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer_slice.map_async(wgpu::MapMode::Read, move |res| {
+                    tx.send(res).unwrap();
+                });
+
+                device.poll(wgpu::Maintain::Wait);
+                rx.recv().unwrap().expect("Failed to map readback buffer");
+
+                let data = buffer_slice.get_mapped_range();
+                let raw_data = data.to_vec();
+                drop(data);
+                read_buffer.unmap();
+
+                let filename = format!("target/{}.raw", suffix);
+                std::fs::write(filename, raw_data).unwrap();
+            }
         });
     }
 }

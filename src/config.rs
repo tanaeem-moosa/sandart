@@ -30,11 +30,26 @@ pub enum LedMode {
     Single,
     RainbowRing,
     ColorCycle,
+    OverheadMoon,
+    RainbowMoon,
 }
 
 impl Default for LedMode {
     fn default() -> Self {
         Self::RainbowRing
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SandboxShape {
+    Circle,
+    Square,
+    Oval,
+}
+
+impl Default for SandboxShape {
+    fn default() -> Self {
+        Self::Circle
     }
 }
 
@@ -49,6 +64,11 @@ pub enum MaterialMode {
     Oobleck,
     MoonDust,
     IronFilings,
+    Water,
+    Milk,
+    Ferrofluid,
+    VegetableOil,
+    CalmWater,
 }
 
 impl Default for MaterialMode {
@@ -88,6 +108,8 @@ pub struct AppConfig {
     pub shadows_enabled: bool,
     /// Material mode selecting simulation physics & parameters.
     pub material_mode: MaterialMode,
+    /// Sandbox shape (Circle, Square, Oval)
+    pub sandbox_shape: SandboxShape,
     /// Active number of marbles (1 to 5)
     pub marble_count: u32,
     /// Lissajous frequency parameter a
@@ -124,6 +146,7 @@ impl Default for AppConfig {
             led_mode: LedMode::RainbowRing,
             shadows_enabled: true,
             material_mode: MaterialMode::ButterCream,
+            sandbox_shape: SandboxShape::Circle,
             marble_count: 1,
             lissajous_a: 3.0,
             lissajous_b: 4.0,
@@ -157,6 +180,7 @@ mod tests {
         assert_eq!(config.led_mode, LedMode::RainbowRing);
         assert!(config.shadows_enabled);
         assert_eq!(config.material_mode, MaterialMode::ButterCream);
+        assert_eq!(config.sandbox_shape, SandboxShape::Circle);
     }
 
     #[test]

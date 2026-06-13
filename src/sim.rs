@@ -46,6 +46,8 @@ pub struct Simulation {
     pub active_bounds: ActiveBounds,
     /// Sliding state tracker for stick-slip shear hysteresis.
     pub sliding: Vec<bool>,
+    /// Wave velocity buffer for liquid simulation.
+    pub wave_vel: Vec<f32>,
     /// Seed for marble movement noise.
     pub seed: u32,
 }
@@ -123,6 +125,7 @@ impl Simulation {
         let heightmap = generate_smooth_noise(12345u32);
         let temp_heights = heightmap.data.clone();
         let sliding = vec![false; GRID_SIZE * GRID_SIZE];
+        let wave_vel = vec![0.0f32; GRID_SIZE * GRID_SIZE];
 
         Self {
             heightmap,
@@ -140,6 +143,7 @@ impl Simulation {
                 active: false,
             },
             sliding,
+            wave_vel,
             seed: 98765u32,
         }
     }
@@ -149,6 +153,7 @@ impl Simulation {
         self.heightmap = generate_smooth_noise(54321u32);
         self.temp_heights.copy_from_slice(&self.heightmap.data);
         self.sliding.fill(false);
+        self.wave_vel.fill(0.0);
         self.marble_pos = Vec2::ZERO;
         self.prev_marble_pos = Vec2::ZERO;
         self.marble_vel = Vec2::ZERO;
@@ -200,8 +205,39 @@ impl Simulation {
         );
     }
 
+    fn clamp_to_sandbox(pos: Vec2, shape: crate::config::SandboxShape, marble_radius: f32) -> Vec2 {
+        let max_r = (0.92 - marble_radius).max(0.0);
+        match shape {
+            crate::config::SandboxShape::Circle => {
+                let len = pos.length();
+                if len > max_r && len > 1e-5 {
+                    pos * (max_r / len)
+                } else {
+                    pos
+                }
+            }
+            crate::config::SandboxShape::Square => {
+                Vec2::new(
+                    pos.x.clamp(-max_r, max_r),
+                    pos.y.clamp(-max_r, max_r),
+                )
+            }
+            crate::config::SandboxShape::Oval => {
+                let a = (0.92 - marble_radius).max(0.01);
+                let b = (0.60 - marble_radius).max(0.01);
+                let d_sq = (pos.x * pos.x) / (a * a) + (pos.y * pos.y) / (b * b);
+                if d_sq > 1.0 {
+                    let d = d_sq.sqrt();
+                    pos / d
+                } else {
+                    pos
+                }
+            }
+        }
+    }
+
     /// Run a physics frame tick.
-    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, material: crate::config::MaterialMode) {
+    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, material: crate::config::MaterialMode, shape: crate::config::SandboxShape) {
         // Prevent seed degeneracy (XORShift stuck state at 0)
         if self.seed == 0 {
             self.seed = 98765u32;
@@ -220,13 +256,7 @@ impl Simulation {
                 let ty = if target.y.is_finite() { target.y } else { 0.0 };
                 let target_sanitized = Vec2::new(tx, ty);
 
-                let max_r = (0.92 - marble_radius).max(0.0);
-                let target_len = target_sanitized.length();
-                let clamped_target = if target_len > max_r && target_len > 1e-5 {
-                    target_sanitized * (max_r / target_len)
-                } else {
-                    target_sanitized
-                };
+                let clamped_target = Self::clamp_to_sandbox(target_sanitized, shape, marble_radius);
 
                 if self.marbles[j].was_active {
                     self.marbles[j].prev_pos = self.marbles[j].pos;
@@ -268,10 +298,7 @@ impl Simulation {
                     }
 
                     let mut next_pos = clamped_target + jitter + drift;
-                    let next_len = next_pos.length();
-                    if next_len > max_r && next_len > 1e-5 {
-                        next_pos = next_pos * (max_r / next_len);
-                    }
+                    next_pos = Self::clamp_to_sandbox(next_pos, shape, marble_radius);
 
                     self.marbles[j].pos = next_pos;
                     self.marbles[j].vel = next_pos - self.marbles[j].prev_pos;
@@ -361,6 +388,8 @@ impl Simulation {
                 material,
                 &active_marbles,
                 time_seed,
+                &mut self.wave_vel,
+                shape,
             );
         }
     }
@@ -434,19 +463,19 @@ mod tests {
         let mut sim = Simulation::new();
         let mut targets = [None; 5];
         // Initially target is None, should not be active
-        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream);
+        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream, crate::config::SandboxShape::Circle);
         assert!(!sim.was_active);
 
         // Move to start point (first point is exact target)
         targets[0] = Some(Vec2::new(0.1, 0.2));
-        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream);
+        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream, crate::config::SandboxShape::Circle);
         assert!(sim.was_active);
         assert_eq!(sim.marble_pos, Vec2::new(0.1, 0.2));
 
         // Move to next point, introducing noise, drag, and jitter
         let target = Vec2::new(0.3, 0.4);
         targets[0] = Some(target);
-        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream);
+        sim.update(0.016, &targets, 0.025, crate::config::MaterialMode::ButterCream, crate::config::SandboxShape::Circle);
 
         // Ensure marble position shifted from start and is not exactly the target due to physics drift/noise
         assert_ne!(sim.marble_pos, Vec2::new(0.1, 0.2));
@@ -458,5 +487,25 @@ mod tests {
 
         // Verify marble velocity is populated
         assert_ne!(sim.marble_vel, Vec2::ZERO);
+    }
+
+    #[test]
+    fn test_sandbox_shapes_clamping() {
+        use crate::config::SandboxShape;
+        // Test Circle clamping: length should be clamped to max_r
+        let p_circle = Simulation::clamp_to_sandbox(Vec2::new(1.0, 1.0), SandboxShape::Circle, 0.018);
+        assert!((p_circle.length() - (0.92 - 0.018)).abs() < 1e-5);
+
+        // Test Square clamping: X and Y should be clamped to max_r
+        let p_square = Simulation::clamp_to_sandbox(Vec2::new(1.5, 0.2), SandboxShape::Square, 0.018);
+        assert_eq!(p_square.x, 0.92 - 0.018);
+        assert_eq!(p_square.y, 0.2);
+
+        // Test Oval clamping: should satisfy ellipse equation
+        let p_oval = Simulation::clamp_to_sandbox(Vec2::new(1.0, 1.0), SandboxShape::Oval, 0.018);
+        let a = 0.92 - 0.018;
+        let b = 0.60 - 0.018;
+        let d_sq = (p_oval.x * p_oval.x) / (a * a) + (p_oval.y * p_oval.y) / (b * b);
+        assert!((d_sq - 1.0).abs() < 1e-5);
     }
 }
