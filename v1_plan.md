@@ -1,6 +1,9 @@
-# Sand Art Simulator: Version 1 Plan
+# [COMPLETE] Sand Art Simulator: Version 1 Plan
 
-This document captures the research, proposed features, and implementation roadmap for v1 of the Sand Art Simulator. It is intended to serve as a reference when returning to the project.
+> [!NOTE]
+> All goals, presets, shader upgrades, shapes, materials (including new viscous Yogurt and Coarse Sand presets), and tests outlined in this Version 1 plan have been successfully implemented, verified, and closed.
+
+This document captures the research, proposed features, and implementation roadmap for v1 of the Sand Art Simulator. It is retained for reference.
 
 ---
 

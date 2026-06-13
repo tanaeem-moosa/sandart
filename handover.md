@@ -35,10 +35,13 @@ We have refactored and implemented the following solutions:
 5. **G-code & Empty File Safety**: Initialized G-code coordinate flags to `true` to ensure single-axis movement is immediately recorded, and added guards against empty custom pattern files to prevent crashes.
 6. **Sparkle Grid-Locking**: Adjusted sparkles to use `hash(floor(uv * 4000.0))` to lock glints to discrete sand coordinates, eliminating shimmering.
 7. **Multi-Waypoint Playback**: Implemented a `while` loop in `step_playback_all` to consume multiple waypoints per frame based on remaining time-step movement.
+8. **Volume Conservation Fixes**: Resolved edge-case sand loss bugs in `add_sand_with_limit` (proper neighbor capacity loop fallback) and `displace_line` (correctly restoring height map on saturation). Verified via continuous single-marble (200 steps) and multi-marble/large-radius (150 steps) spiral simulations.
+9. **Premium Material Additions**: Added the requested `Yogurt` (viscous creamy liquid with sluggish wave ripples) and `Coarse Sand` (large quartz grains, high-contrast normal maps, and sparkling glints) material presets.
 
 ---
 
 ## 3. Current Workspace Status
 
-- **Build & Tests**: The project compiles successfully inside the `sandart-dev` Distrobox container, and all 29 unit tests pass.
-- **Working Copy**: The optimizations have been implemented in `src/shader.wgsl`, `src/sim/physics.rs`, and `src/sim.rs`.
+- **v1 Completion**: The v1 milestones have been 100% completed, closed, and marked as such in [v1_plan.md](file:///home/deck/projects/sandart/v1_plan.md).
+- **Build & Tests**: The project compiles successfully inside the `sandart-dev` Distrobox container, and all 34 unit tests pass cleanly.
+- **Working Copy**: Changes are implemented and tested across `src/shader.wgsl`, `src/sim/physics.rs`, `src/sim.rs`, `src/config.rs`, `src/app.rs`, and `src/renderer.rs`.
