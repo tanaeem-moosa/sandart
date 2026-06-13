@@ -1,4 +1,4 @@
-use crate::sim::grid::Heightmap;
+use crate::grid::Heightmap;
 use glam::Vec2;
 
 /// Bounding coordinates to optimize Cellular Automata settling.
@@ -114,15 +114,15 @@ pub fn displace_line(
     end: Vec2,
     radius: f32,
     active_bounds: &mut ActiveBounds,
-    material: crate::config::MaterialMode,
+    material: crate::MaterialMode,
 ) {
     if !start.is_finite() || !end.is_finite() || !radius.is_finite() || radius <= 0.0 {
         return;
     }
 
     let residual_factor = match material {
-        crate::config::MaterialMode::ButterCream => 0.00,
-        crate::config::MaterialMode::Oobleck => {
+        crate::MaterialMode::ButterCream => 0.00,
+        crate::MaterialMode::Oobleck => {
             // Calculate displacement segment speed.
             // Fast marble movement means high shear stress (solid-like), leaving a shallow groove.
             // Slow movement means low shear stress (liquid-like), carving all the way down.
@@ -130,20 +130,20 @@ pub fn displace_line(
             let t = (speed / 0.01).clamp(0.0, 1.0);
             0.50 * t * t
         }
-        crate::config::MaterialMode::FinePowder => 0.05,
-        crate::config::MaterialMode::KineticSand => 0.10,
-        crate::config::MaterialMode::DrySand => 0.20,
-        crate::config::MaterialMode::MoonDust => 0.20,
-        crate::config::MaterialMode::IronFilings => 0.24,
-        crate::config::MaterialMode::Snow => 0.28,
-        crate::config::MaterialMode::WetSand => 0.35,
-        crate::config::MaterialMode::Water => 0.00,
-        crate::config::MaterialMode::Milk => 0.00,
-        crate::config::MaterialMode::Ferrofluid => 0.00,
-        crate::config::MaterialMode::VegetableOil => 0.00,
-        crate::config::MaterialMode::CalmWater => 0.00,
-        crate::config::MaterialMode::Yogurt => 0.00,
-        crate::config::MaterialMode::CoarseSand => 0.18,
+        crate::MaterialMode::FinePowder => 0.05,
+        crate::MaterialMode::KineticSand => 0.10,
+        crate::MaterialMode::DrySand => 0.20,
+        crate::MaterialMode::MoonDust => 0.20,
+        crate::MaterialMode::IronFilings => 0.24,
+        crate::MaterialMode::Snow => 0.28,
+        crate::MaterialMode::WetSand => 0.35,
+        crate::MaterialMode::Water => 0.00,
+        crate::MaterialMode::Milk => 0.00,
+        crate::MaterialMode::Ferrofluid => 0.00,
+        crate::MaterialMode::VegetableOil => 0.00,
+        crate::MaterialMode::CalmWater => 0.00,
+        crate::MaterialMode::Yogurt => 0.00,
+        crate::MaterialMode::CoarseSand => 0.18,
     };
 
     let w = heightmap.width;
@@ -256,7 +256,7 @@ pub fn displace_line(
                 let dist = dist_sq.sqrt();
                 // Spherical groove profile: z_groove = R - sqrt(R^2 - d^2)
                 let h_target = r_grid_clamped - (r_groove_sq - dist_sq).max(0.0).sqrt();
-                let h_target_profile = (h_target / r_grid_clamped) * crate::sim::DEFAULT_SAND_HEIGHT;
+                let h_target_profile = (h_target / r_grid_clamped) * crate::DEFAULT_SAND_HEIGHT;
 
                 let current_idx = row_offset + x;
                 let current_h = heightmap.data[current_idx];
@@ -357,17 +357,17 @@ pub fn displace_line(
                     let rx1_clamped = rx1.clamp(0, w as isize - 1) as usize;
                     let ry1_clamped = ry1.clamp(0, h as isize - 1) as usize;
                     let dest1_idx = ry1_clamped * w + rx1_clamped;
-                    let h_above1 = (heightmap.data[dest1_idx] - crate::sim::DEFAULT_SAND_HEIGHT).max(0.0);
+                    let h_above1 = (heightmap.data[dest1_idx] - crate::DEFAULT_SAND_HEIGHT).max(0.0);
 
                     let rx2_clamped = rx2.clamp(0, w as isize - 1) as usize;
                     let ry2_clamped = ry2.clamp(0, h as isize - 1) as usize;
                     let dest2_idx = ry2_clamped * w + rx2_clamped;
-                    let h_above2 = (heightmap.data[dest2_idx] - crate::sim::DEFAULT_SAND_HEIGHT).max(0.0);
+                    let h_above2 = (heightmap.data[dest2_idx] - crate::DEFAULT_SAND_HEIGHT).max(0.0);
 
                     let rx3_clamped = rx3.clamp(0, w as isize - 1) as usize;
                     let ry3_clamped = ry3.clamp(0, h as isize - 1) as usize;
                     let dest3_idx = ry3_clamped * w + rx3_clamped;
-                    let h_above3 = (heightmap.data[dest3_idx] - crate::sim::DEFAULT_SAND_HEIGHT).max(0.0);
+                    let h_above3 = (heightmap.data[dest3_idx] - crate::DEFAULT_SAND_HEIGHT).max(0.0);
 
                     // Scale factor for asymptotic decay based on marble diameter/height in heightmap units
                     let scale = 2.0 * (radius / 0.018).max(0.1);
@@ -403,11 +403,11 @@ pub fn settle_tick(
     temp_heights: &mut Vec<f32>,
     sliding: &mut Vec<bool>,
     active_bounds: &mut ActiveBounds,
-    material: crate::config::MaterialMode,
+    material: crate::MaterialMode,
     active_marbles: &[ActiveMarbleInfo],
     time_seed: u32,
     wave_vel: &mut Vec<f32>,
-    shape: crate::config::SandboxShape,
+    shape: crate::SandboxShape,
 ) -> f32 {
     if !active_bounds.active {
         return 0.0;
@@ -421,7 +421,7 @@ pub fn settle_tick(
 
     // Safety checks to prevent panics if heights or sliding buffer are resized
     if temp_heights.len() != heightmap.data.len() {
-        temp_heights.resize(heightmap.data.len(), crate::sim::DEFAULT_SAND_HEIGHT);
+        temp_heights.resize(heightmap.data.len(), crate::DEFAULT_SAND_HEIGHT);
     }
     if sliding.len() != heightmap.data.len() {
         sliding.resize(heightmap.data.len(), false);
@@ -440,21 +440,21 @@ pub fn settle_tick(
         let r_y = 0.46 * h as f32;
         let r_oval_y = 0.30 * h as f32;
         match shape {
-            crate::config::SandboxShape::Circle => dx * dx + dy * dy < r_x * r_x,
-            crate::config::SandboxShape::Square => dx.abs() < r_x && dy.abs() < r_y,
-            crate::config::SandboxShape::Oval => {
+            crate::SandboxShape::Circle => dx * dx + dy * dy < r_x * r_x,
+            crate::SandboxShape::Square => dx.abs() < r_x && dy.abs() < r_y,
+            crate::SandboxShape::Oval => {
                 (dx * dx) / (r_x * r_x) + (dy * dy) / (r_oval_y * r_oval_y) < 1.0
             }
         }
     };
 
     // If material is a liquid (Water, Milk, Ferrofluid, Yogurt), run the 2D wave propagation solver instead of CA settling.
-    if material == crate::config::MaterialMode::Water
-        || material == crate::config::MaterialMode::Milk
-        || material == crate::config::MaterialMode::Ferrofluid
-        || material == crate::config::MaterialMode::VegetableOil
-        || material == crate::config::MaterialMode::CalmWater
-        || material == crate::config::MaterialMode::Yogurt
+    if material == crate::MaterialMode::Water
+        || material == crate::MaterialMode::Milk
+        || material == crate::MaterialMode::Ferrofluid
+        || material == crate::MaterialMode::VegetableOil
+        || material == crate::MaterialMode::CalmWater
+        || material == crate::MaterialMode::Yogurt
     {
         // 1. Determine copy boundaries (expanded by 1 to include neighbors)
         let copy_min_x = active_bounds.min_x.saturating_sub(1);
@@ -471,12 +471,12 @@ pub fn settle_tick(
 
         // Wave propagation parameters
         let (c_sq, damping) = match material {
-            crate::config::MaterialMode::Water => (0.24f32, 0.98f32),
-            crate::config::MaterialMode::Milk => (0.16f32, 0.86f32),
-            crate::config::MaterialMode::Ferrofluid => (0.12f32, 0.82f32),
-            crate::config::MaterialMode::VegetableOil => (0.18f32, 0.92f32),
-            crate::config::MaterialMode::CalmWater => (0.22f32, 0.88f32),
-            crate::config::MaterialMode::Yogurt => (0.08f32, 0.76f32),
+            crate::MaterialMode::Water => (0.24f32, 0.98f32),
+            crate::MaterialMode::Milk => (0.16f32, 0.86f32),
+            crate::MaterialMode::Ferrofluid => (0.12f32, 0.82f32),
+            crate::MaterialMode::VegetableOil => (0.18f32, 0.92f32),
+            crate::MaterialMode::CalmWater => (0.22f32, 0.88f32),
+            crate::MaterialMode::Yogurt => (0.08f32, 0.76f32),
             _ => (0.24f32, 0.98f32),
         };
 
@@ -509,7 +509,7 @@ pub fn settle_tick(
 
                 // Calculate magnetic force for Ferrofluid
                 let mut f_mag = 0.0f32;
-                if material == crate::config::MaterialMode::Ferrofluid && !active_marbles.is_empty() {
+                if material == crate::MaterialMode::Ferrofluid && !active_marbles.is_empty() {
                     let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
                     let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
                     let cell_pos = Vec2::new(cell_x, cell_y);
@@ -533,7 +533,7 @@ pub fn settle_tick(
                         }
                     }
                     if max_attraction > 0.0 {
-                        let target_h = crate::sim::DEFAULT_SAND_HEIGHT + max_attraction;
+                        let target_h = crate::DEFAULT_SAND_HEIGHT + max_attraction;
                         f_mag = 0.25 * (target_h - h_center);
                     }
                 }
@@ -547,7 +547,7 @@ pub fn settle_tick(
                 let height_diff = (h_new - h_center).abs();
                 total_flow += height_diff;
 
-                if v_new.abs() > 1e-5 || (h_new - crate::sim::DEFAULT_SAND_HEIGHT).abs() > 1e-4 {
+                if v_new.abs() > 1e-5 || (h_new - crate::DEFAULT_SAND_HEIGHT).abs() > 1e-4 {
                     flow_occurred = true;
                     next_min_x = next_min_x.min(x);
                     next_max_x = next_max_x.max(x);
@@ -659,7 +659,7 @@ pub fn settle_tick(
 
             // Cell-invariant properties (calculated once per cell before neighbor loop)
             let mut higher_neighbors = 0;
-            if material == crate::config::MaterialMode::DrySand {
+            if material == crate::MaterialMode::DrySand {
                 for &(cond, _, _, n_idx) in &neighbors {
                     if cond && heightmap.data[n_idx] >= h_center - 1e-4 {
                         higher_neighbors += 1;
@@ -669,7 +669,7 @@ pub fn settle_tick(
 
             let mut closest_marble_idx = None;
             let mut min_dist_to_marble = f32::MAX;
-            if (material == crate::config::MaterialMode::Oobleck || material == crate::config::MaterialMode::IronFilings) && !active_marbles.is_empty() {
+            if (material == crate::MaterialMode::Oobleck || material == crate::MaterialMode::IronFilings) && !active_marbles.is_empty() {
                 let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
                 let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
                 let cell_pos = Vec2::new(cell_x, cell_y);
@@ -683,7 +683,7 @@ pub fn settle_tick(
                 }
             }
 
-            let oobleck_params = if material == crate::config::MaterialMode::Oobleck {
+            let oobleck_params = if material == crate::MaterialMode::Oobleck {
                 let local_vel = if let Some(idx) = closest_marble_idx {
                     active_marbles[idx].vel
                 } else {
@@ -700,14 +700,14 @@ pub fn settle_tick(
                 None
             };
 
-            let iron_filings_threshold = if material == crate::config::MaterialMode::IronFilings && min_dist_to_marble < 0.22 {
+            let iron_filings_threshold = if material == crate::MaterialMode::IronFilings && min_dist_to_marble < 0.22 {
                 let ripple = (min_dist_to_marble * 2.0 * std::f32::consts::PI / 0.025).cos();
                 (0.08 + ripple * 0.05).max(0.01)
             } else {
                 0.08
             };
 
-            let to_magnet_norm = if material == crate::config::MaterialMode::IronFilings && min_dist_to_marble > 1e-4 {
+            let to_magnet_norm = if material == crate::MaterialMode::IronFilings && min_dist_to_marble > 1e-4 {
                 if let Some(idx) = closest_marble_idx {
                     let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
                     let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
@@ -736,57 +736,57 @@ pub fn settle_tick(
                 let mut magnetic_bias = 0.0;
 
                 match material {
-                    crate::config::MaterialMode::ButterCream => {
+                    crate::MaterialMode::ButterCream => {
                         threshold = 0.04;
                         alpha = 0.15;
                         lock_chance = 0.20;
                     }
-                    crate::config::MaterialMode::DrySand => {
+                    crate::MaterialMode::DrySand => {
                         threshold = if sliding[center_idx] { 0.04 } else { 0.08 };
                         alpha = 0.25;
                         quantize_size = Some(0.01);
                         lock_chance = if higher_neighbors >= 3 { 0.80 } else { 0.10 };
                     }
-                    crate::config::MaterialMode::Snow => {
+                    crate::MaterialMode::Snow => {
                         threshold = 0.15;
                         alpha = 0.04;
                         lock_chance = 0.30;
                     }
-                    crate::config::MaterialMode::KineticSand => {
+                    crate::MaterialMode::KineticSand => {
                         threshold = 0.12;
                         alpha = 0.12;
                         lock_chance = 0.75;
                         quantize_size = Some(0.015);
                     }
-                    crate::config::MaterialMode::WetSand => {
+                    crate::MaterialMode::WetSand => {
                         threshold = 0.10;
                         alpha = 0.06;
                         lock_chance = 0.15;
                     }
-                    crate::config::MaterialMode::FinePowder => {
+                    crate::MaterialMode::FinePowder => {
                         threshold = 0.01;
                         alpha = 0.35;
                         lock_chance = 0.02;
                     }
-                    crate::config::MaterialMode::Oobleck => {
+                    crate::MaterialMode::Oobleck => {
                         let (th, al, lc) = oobleck_params.unwrap();
                         threshold = th;
                         alpha = al;
                         lock_chance = lc;
                     }
-                    crate::config::MaterialMode::MoonDust => {
+                    crate::MaterialMode::MoonDust => {
                         threshold = 0.22;
                         alpha = 0.02;
                         lock_chance = 0.40;
                         quantize_size = Some(0.015);
                     }
-                    crate::config::MaterialMode::CoarseSand => {
+                    crate::MaterialMode::CoarseSand => {
                         threshold = if sliding[center_idx] { 0.06 } else { 0.11 };
                         alpha = 0.22;
                         quantize_size = Some(0.035);
                         lock_chance = if higher_neighbors >= 3 { 0.75 } else { 0.15 };
                     }
-                    crate::config::MaterialMode::IronFilings => {
+                    crate::MaterialMode::IronFilings => {
                         threshold = iron_filings_threshold;
                         alpha = 0.35;
                         lock_chance = 0.05;
@@ -829,7 +829,7 @@ pub fn settle_tick(
                             }
                         }
                     }
-                    crate::config::MaterialMode::Water | crate::config::MaterialMode::Milk | crate::config::MaterialMode::Ferrofluid | crate::config::MaterialMode::VegetableOil | crate::config::MaterialMode::CalmWater | crate::config::MaterialMode::Yogurt => {
+                    crate::MaterialMode::Water | crate::MaterialMode::Milk | crate::MaterialMode::Ferrofluid | crate::MaterialMode::VegetableOil | crate::MaterialMode::CalmWater | crate::MaterialMode::Yogurt => {
                         threshold = 0.0;
                         alpha = 0.0;
                         lock_chance = 0.0;
@@ -907,7 +907,7 @@ mod tests {
 
     #[test]
     fn test_draw_point_out_of_bounds() {
-        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
+        let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -923,18 +923,18 @@ mod tests {
             Vec2::new(5.0, 5.0),
             0.1,
             &mut bounds,
-            crate::config::MaterialMode::ButterCream,
+            crate::MaterialMode::ButterCream,
         );
 
         // Assert that heightmap data is unchanged
         for &val in hm.as_slice() {
-            assert_eq!(val, crate::sim::DEFAULT_SAND_HEIGHT);
+            assert_eq!(val, crate::DEFAULT_SAND_HEIGHT);
         }
     }
 
     #[test]
     fn test_draw_point_partial_overlap() {
-        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
+        let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -950,7 +950,7 @@ mod tests {
             Vec2::new(-1.0, 0.0),
             0.05,
             &mut bounds,
-            crate::config::MaterialMode::ButterCream,
+            crate::MaterialMode::ButterCream,
         );
 
         // Check that some points are carved below 0.1, and bounds are respected
@@ -966,7 +966,7 @@ mod tests {
 
     #[test]
     fn test_draw_line_interpolation() {
-        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
+        let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -982,7 +982,7 @@ mod tests {
             Vec2::new(0.5, 0.0),
             0.05,
             &mut bounds,
-            crate::config::MaterialMode::ButterCream,
+            crate::MaterialMode::ButterCream,
         );
 
         // Helper to convert pos to grid index
@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn test_draw_point_extreme_coordinates_overflow() {
-        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
+        let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1019,16 +1019,16 @@ mod tests {
             Vec2::new(1e18, 1e18),
             0.1,
             &mut bounds,
-            crate::config::MaterialMode::ButterCream,
+            crate::MaterialMode::ButterCream,
         );
         for &val in hm.as_slice() {
-            assert_eq!(val, crate::sim::DEFAULT_SAND_HEIGHT);
+            assert_eq!(val, crate::DEFAULT_SAND_HEIGHT);
         }
     }
 
     #[test]
     fn test_multipass_carving() {
-        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
+        let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1044,7 +1044,7 @@ mod tests {
             Vec2::ZERO,
             0.05,
             &mut bounds,
-            crate::config::MaterialMode::DrySand,
+            crate::MaterialMode::DrySand,
         );
 
         let center_idx = 256 * 512 + 256;
@@ -1059,7 +1059,7 @@ mod tests {
             Vec2::ZERO,
             0.05,
             &mut bounds,
-            crate::config::MaterialMode::DrySand,
+            crate::MaterialMode::DrySand,
         );
         let h2 = hm.data[center_idx];
         // Expect height to be approximately 20% of h1 = 0.20 * 0.07 = 0.014
@@ -1086,7 +1086,7 @@ mod tests {
             Vec2::new(0.2, -0.2),
             0.03,
             &mut bounds,
-            crate::config::MaterialMode::ButterCream,
+            crate::MaterialMode::ButterCream,
         );
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
@@ -1096,7 +1096,7 @@ mod tests {
 
     #[test]
     fn test_draw_line_extreme_coordinates_overflow() {
-        let mut hm = Heightmap::new(512, 512, crate::sim::DEFAULT_SAND_HEIGHT);
+        let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1110,7 +1110,7 @@ mod tests {
             Vec2::new(1e18, 0.0),
             0.1,
             &mut bounds,
-            crate::config::MaterialMode::ButterCream,
+            crate::MaterialMode::ButterCream,
         );
     }
 
@@ -1127,7 +1127,7 @@ mod tests {
         let initial_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
 
         // Perform displacement at a single point to trigger local saturation in the inner ridge
-        displace_line(&mut hm, Vec2::ZERO, Vec2::ZERO, 0.02, &mut bounds, crate::config::MaterialMode::ButterCream);
+        displace_line(&mut hm, Vec2::ZERO, Vec2::ZERO, 0.02, &mut bounds, crate::MaterialMode::ButterCream);
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
         let diff = (final_sum - initial_sum).abs();
@@ -1160,11 +1160,11 @@ mod tests {
                 &mut temp_heights,
                 &mut vec![false; 512 * 512],
                 &mut bounds,
-                crate::config::MaterialMode::ButterCream,
+                crate::MaterialMode::ButterCream,
                 &[],
                 12345,
                 &mut wave_vel,
-                crate::config::SandboxShape::Circle,
+                crate::SandboxShape::Circle,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -1205,11 +1205,11 @@ mod tests {
             &mut temp_heights,
             &mut vec![false; 512 * 512],
             &mut bounds,
-            crate::config::MaterialMode::ButterCream,
+            crate::MaterialMode::ButterCream,
             &[],
             12345,
             &mut wave_vel,
-            crate::config::SandboxShape::Circle,
+            crate::SandboxShape::Circle,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -1217,7 +1217,7 @@ mod tests {
 
     #[test]
     fn test_material_presets_and_avalanche() {
-        use crate::config::MaterialMode;
+        use crate::MaterialMode;
         
         let materials = [
             MaterialMode::ButterCream,
@@ -1266,7 +1266,7 @@ mod tests {
                 &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1, vel_vec: Vec2::new(0.1, 0.0) }],
                 9999,
                 &mut wave_vel,
-                crate::config::SandboxShape::Circle,
+                crate::SandboxShape::Circle,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);

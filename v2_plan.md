@@ -105,7 +105,7 @@ Follow these steps incrementally, running tests and launching the native desktop
 
 ---
 
-### Step 3: Migrate Simulation Crate (`sandart-sim`)
+### Step 3: Migrate Simulation Crate (`sandart-sim`) [Complete]
 *   **Action:**
     1. Move `src/sim.rs` and `src/sim/` folder to `sandart-sim/src/`.
     2. Migrate `MaterialMode` and `SandboxShape` enums into `sandart-sim`.

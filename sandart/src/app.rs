@@ -11,7 +11,7 @@ pub struct SandArtApp {
     /// Cumulative elapsed time in seconds.
     pub elapsed_time: f32,
     /// The physics simulation engine.
-    pub sim: crate::sim::Simulation,
+    pub sim: crate::sim::DrawingSimulation,
     /// Shared heightmap data for zero-allocation rendering transfer.
     pub shared_heightmap: std::sync::Arc<std::sync::Mutex<Vec<f32>>>,
     /// Playback controller for custom files and mathematical paths.
@@ -65,7 +65,7 @@ impl SandArtApp {
             frame_counter: 0,
             dt: 0.0,
             elapsed_time: 0.0,
-            sim: crate::sim::Simulation::new(),
+            sim: crate::sim::DrawingSimulation::new(),
             shared_heightmap: std::sync::Arc::new(std::sync::Mutex::new(vec![
                 crate::sim::DEFAULT_SAND_HEIGHT;
                 crate::sim::GRID_SIZE * crate::sim::GRID_SIZE
@@ -882,7 +882,7 @@ impl eframe::App for SandArtApp {
                         pos: [self.sim.marbles[0].pos.x, self.sim.marbles[0].pos.y],
                         radius: self.config.marble_size,
                         z_pos: {
-                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                            let (gx, gy) = crate::sim::DrawingSimulation::norm_to_grid(
                                 self.sim.marbles[0].pos,
                                 self.sim.heightmap.width,
                                 self.sim.heightmap.height,
@@ -894,7 +894,7 @@ impl eframe::App for SandArtApp {
                         pos: [self.sim.marbles[1].pos.x, self.sim.marbles[1].pos.y],
                         radius: self.config.marble_size,
                         z_pos: {
-                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                            let (gx, gy) = crate::sim::DrawingSimulation::norm_to_grid(
                                 self.sim.marbles[1].pos,
                                 self.sim.heightmap.width,
                                 self.sim.heightmap.height,
@@ -906,7 +906,7 @@ impl eframe::App for SandArtApp {
                         pos: [self.sim.marbles[2].pos.x, self.sim.marbles[2].pos.y],
                         radius: self.config.marble_size,
                         z_pos: {
-                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                            let (gx, gy) = crate::sim::DrawingSimulation::norm_to_grid(
                                 self.sim.marbles[2].pos,
                                 self.sim.heightmap.width,
                                 self.sim.heightmap.height,
@@ -918,7 +918,7 @@ impl eframe::App for SandArtApp {
                         pos: [self.sim.marbles[3].pos.x, self.sim.marbles[3].pos.y],
                         radius: self.config.marble_size,
                         z_pos: {
-                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                            let (gx, gy) = crate::sim::DrawingSimulation::norm_to_grid(
                                 self.sim.marbles[3].pos,
                                 self.sim.heightmap.width,
                                 self.sim.heightmap.height,
@@ -930,7 +930,7 @@ impl eframe::App for SandArtApp {
                         pos: [self.sim.marbles[4].pos.x, self.sim.marbles[4].pos.y],
                         radius: self.config.marble_size,
                         z_pos: {
-                            let (gx, gy) = crate::sim::Simulation::norm_to_grid(
+                            let (gx, gy) = crate::sim::DrawingSimulation::norm_to_grid(
                                 self.sim.marbles[4].pos,
                                 self.sim.heightmap.width,
                                 self.sim.heightmap.height,

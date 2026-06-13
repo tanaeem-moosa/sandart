@@ -1,9 +1,9 @@
 mod app;
 mod config;
 mod renderer;
-mod sim;
 
 use sandart_pattern as pattern;
+use sandart_sim as sim;
 
 
 use app::SandArtApp;

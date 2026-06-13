@@ -40,44 +40,7 @@ impl Default for LedMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum SandboxShape {
-    Circle,
-    Square,
-    Oval,
-}
-
-impl Default for SandboxShape {
-    fn default() -> Self {
-        Self::Circle
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum MaterialMode {
-    ButterCream,
-    DrySand,
-    Snow,
-    KineticSand,
-    WetSand,
-    FinePowder,
-    Oobleck,
-    MoonDust,
-    IronFilings,
-    Water,
-    Milk,
-    Ferrofluid,
-    VegetableOil,
-    CalmWater,
-    Yogurt,
-    CoarseSand,
-}
-
-impl Default for MaterialMode {
-    fn default() -> Self {
-        Self::ButterCream
-    }
-}
+pub use crate::sim::{MaterialMode, SandboxShape};
 
 /// Application configuration and simulation parameters in normalized space.
 /// Normalized space scales from 0.0 to 1.0 relative to the sand table radius.
