@@ -508,4 +508,60 @@ mod tests {
         let d_sq = (p_oval.x * p_oval.x) / (a * a) + (p_oval.y * p_oval.y) / (b * b);
         assert!((d_sq - 1.0).abs() < 1e-5);
     }
+
+    #[test]
+    fn test_simulation_volume_preservation() {
+        let mut sim = Simulation::new();
+        let initial_sum: f64 = sim.heightmap.data.iter().map(|&x| x as f64).sum();
+
+        let mut targets = [None; 5];
+        // Move marble in a spiral over 200 steps
+        for i in 0..200 {
+            let angle = i as f32 * 0.1;
+            let radius = i as f32 * 0.004;
+            targets[0] = Some(Vec2::new(angle.cos() * radius, angle.sin() * radius));
+            sim.update(
+                0.016,
+                &targets,
+                0.018,
+                crate::config::MaterialMode::DrySand,
+                crate::config::SandboxShape::Circle,
+            );
+            
+            let current_sum: f64 = sim.heightmap.data.iter().map(|&x| x as f64).sum();
+            let diff = (current_sum - initial_sum).abs();
+            assert!(diff < 5e-3, "Step {}: Volume leaked! diff = {}, initial = {}, current = {}", i, diff, initial_sum, current_sum);
+        }
+    }
+
+    #[test]
+    fn test_multi_marble_large_spiral_volume_preservation() {
+        let mut sim = Simulation::new();
+        let initial_sum: f64 = sim.heightmap.data.iter().map(|&x| x as f64).sum();
+
+        let mut targets = [None; 5];
+        // Large marble radius
+        let marble_radius = 0.08;
+        
+        // Move 3 marbles in out-of-phase spirals over 150 steps
+        for i in 0..150 {
+            for j in 0..3 {
+                let angle = i as f32 * 0.15 + (j as f32 * 2.0 * std::f32::consts::PI / 3.0);
+                let radius = i as f32 * 0.005;
+                targets[j] = Some(Vec2::new(angle.cos() * radius, angle.sin() * radius));
+            }
+            sim.update(
+                0.016,
+                &targets,
+                marble_radius,
+                crate::config::MaterialMode::DrySand,
+                crate::config::SandboxShape::Circle,
+            );
+            
+            let current_sum: f64 = sim.heightmap.data.iter().map(|&x| x as f64).sum();
+            let diff = (current_sum - initial_sum).abs();
+            // Use 1e-2 threshold for multi-marble large updates, due to larger accumulated float rounding errors.
+            assert!(diff < 1e-2, "Step {}: Multi-marble volume leaked! diff = {}, initial = {}, current = {}", i, diff, initial_sum, current_sum);
+        }
+    }
 }

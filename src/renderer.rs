@@ -704,6 +704,8 @@ mod tests {
                 ("ferrofluid_moonlight", 11, 3, 1, 0.0, 0.0, 0.35),
                 ("water_rainbowmoon", 9, 4, 1, 0.0, 0.0, 0.35),
                 ("calm_water_moonlight", 13, 3, 1, 0.0, 0.0, 0.35),
+                ("yogurt_moonlight", 14, 3, 1, 0.0, 0.0, 0.35),
+                ("coarse_sand_moonlight", 15, 3, 1, 0.0, 0.0, 0.35),
             ];
 
             let grid_size = crate::sim::GRID_SIZE;

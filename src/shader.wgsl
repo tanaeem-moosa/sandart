@@ -498,6 +498,23 @@ fn fs_main(
         roughness = 0.05;
         grain_scale = 1.0;
         grain_strength = 0.00;
+    } else if (uniforms.material_mode == 14u) { // Yogurt
+        mat_base_color = vec3<f32>(0.96, 0.94, 0.88);
+        sparkles_threshold = 1.0;
+        sparkles_intensity = 0.0;
+        rim_mult = 0.25;
+        roughness = 0.35;
+        grain_scale = 1200.0;
+        grain_strength = 0.04;
+    } else if (uniforms.material_mode == 15u) { // CoarseSand
+        mat_base_color = uniforms.sand_color.rgb * 0.95;
+        sparkles_threshold = 0.990;
+        sparkles_intensity = 15.0;
+        sparkles_power = 250.0;
+        rim_mult = 0.40;
+        roughness = 0.85;
+        grain_scale = 400.0;
+        grain_strength = 0.45;
     }
 
     // 3. Perturb normal with micro-surface grain noise

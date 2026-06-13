@@ -663,6 +663,8 @@ impl eframe::App for SandArtApp {
                             crate::config::MaterialMode::Ferrofluid => "Ferrofluid (Magnetic Liquid)",
                             crate::config::MaterialMode::VegetableOil => "Vegetable Oil (Transparent Viscous)",
                             crate::config::MaterialMode::CalmWater => "Water (Calm/Glassy)",
+                            crate::config::MaterialMode::Yogurt => "Yogurt (Thick/Creamy)",
+                            crate::config::MaterialMode::CoarseSand => "Coarse Sand (Large Grain)",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::ButterCream, "Butter-Cream (Viscous)");
@@ -679,6 +681,8 @@ impl eframe::App for SandArtApp {
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Ferrofluid, "Ferrofluid (Magnetic Liquid)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::VegetableOil, "Vegetable Oil (Transparent Viscous)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::CalmWater, "Water (Calm/Glassy)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Yogurt, "Yogurt (Thick/Creamy)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::CoarseSand, "Coarse Sand (Large Grain)");
                         });
 
                     ui.add_space(12.0);

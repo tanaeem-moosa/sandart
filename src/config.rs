@@ -69,6 +69,8 @@ pub enum MaterialMode {
     Ferrofluid,
     VegetableOil,
     CalmWater,
+    Yogurt,
+    CoarseSand,
 }
 
 impl Default for MaterialMode {

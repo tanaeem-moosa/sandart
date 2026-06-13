@@ -30,78 +30,76 @@ fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize
         heightmap.data[idx] = current_h + amount;
     } else {
         let allowed = (max_height - current_h).max(0.0);
-        heightmap.data[idx] = max_height;
+        heightmap.data[idx] = current_h + allowed;
         let mut excess = amount - allowed;
-        if excess <= 1e-6 {
-            return;
-        }
+        if excess > 1e-6 {
+            // Distribute excess to neighbors that are below the max_height
+            let x = idx % w;
+            let y = idx / w;
+            
+            let mut neighbors = [0usize; 4];
+            let mut num_neighbors = 0;
+            if x > 0 { neighbors[num_neighbors] = idx - 1; num_neighbors += 1; }
+            if x + 1 < w { neighbors[num_neighbors] = idx + 1; num_neighbors += 1; }
+            if y > 0 { neighbors[num_neighbors] = idx - w; num_neighbors += 1; }
+            if y + 1 < h { neighbors[num_neighbors] = idx + w; num_neighbors += 1; }
 
-        // Distribute excess to neighbors that are below the max_height
-        let x = idx % w;
-        let y = idx / w;
-        
-        let mut neighbors = [0usize; 4];
-        let mut num_neighbors = 0;
-        if x > 0 { neighbors[num_neighbors] = idx - 1; num_neighbors += 1; }
-        if x + 1 < w { neighbors[num_neighbors] = idx + 1; num_neighbors += 1; }
-        if y > 0 { neighbors[num_neighbors] = idx - w; num_neighbors += 1; }
-        if y + 1 < h { neighbors[num_neighbors] = idx + w; num_neighbors += 1; }
-
-        // Filter neighbors that have room (height < max_height)
-        let mut room_neighbors = [(0usize, 0.0f32); 4];
-        let mut num_room_neighbors = 0;
-        for i in 0..num_neighbors {
-            let n_idx = neighbors[i];
-            let nh = heightmap.data[n_idx];
-            if nh < max_height {
-                room_neighbors[num_room_neighbors] = (n_idx, max_height - nh);
-                num_room_neighbors += 1;
-            }
-        }
-
-        if num_room_neighbors == 0 {
-            // If all neighbors are full, distribute to all neighbors equally (overflowing slightly)
-            let num = num_neighbors as f32;
-            let share = excess / num;
+            // Filter neighbors that have room (height < max_height)
+            let mut room_neighbors = [(0usize, 0.0f32); 4];
+            let mut num_room_neighbors = 0;
             for i in 0..num_neighbors {
-                heightmap.data[neighbors[i]] += share;
+                let n_idx = neighbors[i];
+                let nh = heightmap.data[n_idx];
+                if nh < max_height {
+                    room_neighbors[num_room_neighbors] = (n_idx, max_height - nh);
+                    num_room_neighbors += 1;
+                }
             }
-        } else {
-            // Distribute to room_neighbors proportional to their room
-            // Let's do up to 3 passes to distribute everything
-            let mut distributed = false;
-            for _ in 0..3 {
-                if excess <= 1e-6 {
-                    distributed = true;
-                    break;
-                }
-                if num_room_neighbors == 0 {
-                    break;
-                }
-                let share = excess / num_room_neighbors as f32;
-                let mut next_room = [(0usize, 0.0f32); 4];
-                let mut next_num_room = 0;
-                for i in 0..num_room_neighbors {
-                    let (n_idx, room) = room_neighbors[i];
-                    if room > 0.0 {
-                        let to_add = share.min(room);
-                        heightmap.data[n_idx] += to_add;
-                        excess -= to_add;
-                        let new_room = room - to_add;
-                        if new_room > 0.0 {
-                            next_room[next_num_room] = (n_idx, new_room);
-                            next_num_room += 1;
-                        }
-                    }
-                }
-                room_neighbors = next_room;
-                num_room_neighbors = next_num_room;
-            }
-            if !distributed && excess > 1e-6 {
+
+            if num_room_neighbors == 0 {
+                // If all neighbors are full, distribute to all neighbors equally (overflowing slightly)
                 let num = num_neighbors as f32;
                 let share = excess / num;
                 for i in 0..num_neighbors {
                     heightmap.data[neighbors[i]] += share;
+                }
+            } else {
+                // Distribute to room_neighbors proportional to their room
+                // Let's do up to 3 passes to distribute everything
+                let mut distributed = false;
+                for _ in 0..3 {
+                    if excess <= 1e-6 {
+                        distributed = true;
+                        break;
+                    }
+                    if num_room_neighbors == 0 {
+                        break;
+                    }
+                    let share = excess / num_room_neighbors as f32;
+                    let mut next_room = [(0usize, 0.0f32); 4];
+                    let mut next_num_room = 0;
+                    for i in 0..num_room_neighbors {
+                        let (n_idx, room) = room_neighbors[i];
+                        if room > 0.0 {
+                            let to_add = share.min(room);
+                            heightmap.data[n_idx] += to_add;
+                            excess -= to_add;
+                            let new_room = room - to_add;
+                            if new_room > 0.0 {
+                                next_room[next_num_room] = (n_idx, new_room);
+                                next_num_room += 1;
+                            }
+                        }
+                    }
+                    room_neighbors = next_room;
+                    num_room_neighbors = next_num_room;
+                }
+                if !distributed && excess > 1e-6 {
+                    let num = num_neighbors as f32;
+                    let share = excess / num;
+                    for i in 0..num_neighbors {
+                        heightmap.data[neighbors[i]] += share;
+                    }
                 }
             }
         }
@@ -144,6 +142,8 @@ pub fn displace_line(
         crate::config::MaterialMode::Ferrofluid => 0.00,
         crate::config::MaterialMode::VegetableOil => 0.00,
         crate::config::MaterialMode::CalmWater => 0.00,
+        crate::config::MaterialMode::Yogurt => 0.00,
+        crate::config::MaterialMode::CoarseSand => 0.18,
     };
 
     let w = heightmap.width;
@@ -448,12 +448,13 @@ pub fn settle_tick(
         }
     };
 
-    // If material is a liquid (Water, Milk, Ferrofluid), run the 2D wave propagation solver instead of CA settling.
+    // If material is a liquid (Water, Milk, Ferrofluid, Yogurt), run the 2D wave propagation solver instead of CA settling.
     if material == crate::config::MaterialMode::Water
         || material == crate::config::MaterialMode::Milk
         || material == crate::config::MaterialMode::Ferrofluid
         || material == crate::config::MaterialMode::VegetableOil
         || material == crate::config::MaterialMode::CalmWater
+        || material == crate::config::MaterialMode::Yogurt
     {
         // 1. Determine copy boundaries (expanded by 1 to include neighbors)
         let copy_min_x = active_bounds.min_x.saturating_sub(1);
@@ -475,6 +476,7 @@ pub fn settle_tick(
             crate::config::MaterialMode::Ferrofluid => (0.12f32, 0.82f32),
             crate::config::MaterialMode::VegetableOil => (0.18f32, 0.92f32),
             crate::config::MaterialMode::CalmWater => (0.22f32, 0.88f32),
+            crate::config::MaterialMode::Yogurt => (0.08f32, 0.76f32),
             _ => (0.24f32, 0.98f32),
         };
 
@@ -778,6 +780,12 @@ pub fn settle_tick(
                         lock_chance = 0.40;
                         quantize_size = Some(0.015);
                     }
+                    crate::config::MaterialMode::CoarseSand => {
+                        threshold = if sliding[center_idx] { 0.06 } else { 0.11 };
+                        alpha = 0.22;
+                        quantize_size = Some(0.035);
+                        lock_chance = if higher_neighbors >= 3 { 0.75 } else { 0.15 };
+                    }
                     crate::config::MaterialMode::IronFilings => {
                         threshold = iron_filings_threshold;
                         alpha = 0.35;
@@ -821,7 +829,7 @@ pub fn settle_tick(
                             }
                         }
                     }
-                    crate::config::MaterialMode::Water | crate::config::MaterialMode::Milk | crate::config::MaterialMode::Ferrofluid | crate::config::MaterialMode::VegetableOil | crate::config::MaterialMode::CalmWater => {
+                    crate::config::MaterialMode::Water | crate::config::MaterialMode::Milk | crate::config::MaterialMode::Ferrofluid | crate::config::MaterialMode::VegetableOil | crate::config::MaterialMode::CalmWater | crate::config::MaterialMode::Yogurt => {
                         threshold = 0.0;
                         alpha = 0.0;
                         lock_chance = 0.0;
@@ -1226,6 +1234,8 @@ mod tests {
             MaterialMode::Ferrofluid,
             MaterialMode::VegetableOil,
             MaterialMode::CalmWater,
+            MaterialMode::Yogurt,
+            MaterialMode::CoarseSand,
         ];
 
         for &mat in &materials {
