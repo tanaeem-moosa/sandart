@@ -131,11 +131,15 @@ impl WasmSimulationState {
             .copied()
             .unwrap_or(wgpu::TextureFormat::Rgba8Unorm);
 
+        let max_dim = device.limits().max_texture_dimension_2d;
+        let clamped_width = width.min(max_dim);
+        let clamped_height = height.min(max_dim);
+
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: target_format,
-            width,
-            height,
+            width: clamped_width,
+            height: clamped_height,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
@@ -185,8 +189,9 @@ impl WasmSimulationState {
 
     pub fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            self.surface_config.width = width;
-            self.surface_config.height = height;
+            let max_dim = self.device.limits().max_texture_dimension_2d;
+            self.surface_config.width = width.min(max_dim);
+            self.surface_config.height = height.min(max_dim);
             self.surface.configure(&self.device, &self.surface_config);
         }
     }
