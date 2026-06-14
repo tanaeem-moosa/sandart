@@ -17,6 +17,10 @@ pub enum PatternMode {
     RandomWalk,
     Lemniscate,
     MultiMarble,
+    Butterfly,
+    ZenWaves,
+    ZenMandala,
+    Clock,
 }
 
 impl Default for PatternMode {
@@ -98,7 +102,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            speed: 0.30,
+            speed: 0.5,
             marble_size: 0.018,
             spiral_spacing: 0.030,
             auto_play: false,
@@ -110,7 +114,7 @@ impl Default for AppConfig {
             sand_color: [0.94, 0.94, 0.92], // Clean white quartz
             led_mode: LedMode::RainbowRing,
             shadows_enabled: true,
-            material_mode: MaterialMode::ButterCream,
+            material_mode: MaterialMode::DrySand,
             sandbox_shape: SandboxShape::Circle,
             marble_count: 1,
             lissajous_a: 3.0,
@@ -132,7 +136,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = AppConfig::default();
-        assert_eq!(config.speed, 0.30);
+        assert_eq!(config.speed, 0.5);
         assert_eq!(config.marble_size, 0.018);
         assert_eq!(config.spiral_spacing, 0.030);
         assert_eq!(config.light_brightness, 1.3);
@@ -144,7 +148,7 @@ mod tests {
         assert_eq!(config.sand_color, [0.94, 0.94, 0.92]);
         assert_eq!(config.led_mode, LedMode::RainbowRing);
         assert!(config.shadows_enabled);
-        assert_eq!(config.material_mode, MaterialMode::ButterCream);
+        assert_eq!(config.material_mode, MaterialMode::DrySand);
         assert_eq!(config.sandbox_shape, SandboxShape::Circle);
     }
 
@@ -158,7 +162,7 @@ mod tests {
 
     #[test]
     fn test_json_schema_stability() {
-        let json_str = r#"{"speed":0.3,"marble_size":0.018,"spiral_spacing":0.03,"auto_play":false,"light_brightness":1.3,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.94,0.94,0.92],"led_mode":"RainbowRing","shadows_enabled":true,"material_mode":"ButterCream"}"#;
+        let json_str = r#"{"speed":0.5,"marble_size":0.018,"spiral_spacing":0.03,"auto_play":false,"light_brightness":1.3,"pattern_mode":"Manual","custom_file_path":"","light_angle":0.7853982,"light_color":[1.0,0.95,0.82],"sand_color":[0.94,0.94,0.92],"led_mode":"RainbowRing","shadows_enabled":true,"material_mode":"DrySand"}"#;
         let deserialized: AppConfig = serde_json::from_str(json_str).unwrap();
         assert_eq!(deserialized, AppConfig::default());
     }

@@ -1,0 +1,43 @@
+name: Deploy Web Sandbox
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Compile WebAssembly
+        run: wasm-pack build sandart-wasm --target web
+
+      - name: Restructure Assets for Deployment
+        run: |
+          mkdir dist
+          cp -r sandart-wasm/web/* dist/
+          mkdir dist/pkg
+          cp sandart-wasm/pkg/sandart_wasm.js dist/pkg/
+          cp sandart-wasm/pkg/sandart_wasm_bg.wasm dist/pkg/
+          # Adjust the import path in demo.js to be local
+          sed -i 's|../pkg/|./pkg/|g' dist/demo.js
+
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: dist
+          branch: gh-pages

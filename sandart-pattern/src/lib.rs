@@ -659,6 +659,246 @@ pub fn parse_gcode(content: &str) -> Result<Vec<Vec2>, String> {
     Ok(waypoints)
 }
 
+/// Generates the classic mathematical butterfly curve (intricate Zen butterfly)
+pub fn generate_butterfly_curve() -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let steps = 1200;
+    // Parameter t goes from 0 to 12*PI to capture the full symmetrical density
+    let max_t = 12.0 * std::f32::consts::PI;
+    let mut max_len = 0.0f32;
+    let mut temp_points = Vec::with_capacity(steps + 1);
+
+    for i in 0..=steps {
+        let t = (i as f32 / steps as f32) * max_t;
+        let cos_t = t.cos();
+        let sin_t = t.sin();
+        let sin_t12 = (t / 12.0).sin();
+        let sin_t12_pow5 = sin_t12.powi(5);
+        let cos_4t = (4.0 * t).cos();
+        
+        // r = e^cos(t) - 2*cos(4t) + sin^5(t/12)
+        let r = cos_t.exp() - 2.0 * cos_4t + sin_t12_pow5;
+        let pt = Vec2::new(sin_t * r, cos_t * r);
+        temp_points.push(pt);
+        max_len = max_len.max(pt.length());
+    }
+
+    // Scale to standard sand bed boundaries (0.874)
+    let limit = 0.874f32;
+    let scale = if max_len > 1e-4 { limit / max_len } else { 1.0 };
+    for p in temp_points {
+        path.push(p * scale);
+    }
+    path
+}
+
+/// Generates nested concentric circles connected via smooth serpentine paths
+pub fn generate_zen_waves() -> Vec<Vec2> {
+    let mut path = Vec::new();
+    // 6 concentric circle radii spanning from r=0.15 to r=0.874
+    let radii = [0.15f32, 0.30, 0.45, 0.60, 0.75, 0.874];
+    let steps = 200; // Steps per circle
+
+    // Start at center
+    path.push(Vec2::ZERO);
+
+    for (idx, &r) in radii.iter().enumerate() {
+        let prev_point = *path.last().unwrap_or(&Vec2::ZERO);
+        
+        // 1. Move from the end of the last circle (or center) to the start of this circle
+        // We do a straight line transition
+        let start_angle = if idx % 2 == 0 { 0.0f32 } else { 2.0 * std::f32::consts::PI };
+        let start_pos = Vec2::new(r * start_angle.cos(), r * start_angle.sin());
+        
+        let transition_steps = 20;
+        for i in 1..=transition_steps {
+            let t = i as f32 / transition_steps as f32;
+            path.push(prev_point.lerp(start_pos, t));
+        }
+
+        // 2. Trace the circle. Alternating direction makes it continuous and fluid
+        for i in 0..=steps {
+            let t = i as f32 / steps as f32;
+            let angle = if idx % 2 == 0 {
+                t * 2.0 * std::f32::consts::PI
+            } else {
+                (1.0 - t) * 2.0 * std::f32::consts::PI
+            };
+            path.push(Vec2::new(r * angle.cos(), r * angle.sin()));
+        }
+    }
+    path
+}
+
+/// Generates a swirling floral star mandala using overlapping parametric loops
+pub fn generate_zen_mandala() -> Vec<Vec2> {
+    let mut path = Vec::new();
+    let steps = 1000;
+    let max_t = 2.0 * std::f32::consts::PI;
+    let mut temp_points = Vec::with_capacity(steps + 1);
+    let mut max_len = 0.0f32;
+
+    for i in 0..=steps {
+        let t = (i as f32 / steps as f32) * max_t;
+        let x = t.cos() + 0.4 * (8.0 * t).cos() + 0.2 * (16.0 * t).sin();
+        let y = t.sin() + 0.4 * (8.0 * t).sin() + 0.2 * (16.0 * t).cos();
+        let pt = Vec2::new(x, y);
+        temp_points.push(pt);
+        max_len = max_len.max(pt.length());
+    }
+
+    // Scale to standard sand bed boundaries (0.874)
+    let limit = 0.874f32;
+    let scale = if max_len > 1e-4 { limit / max_len } else { 1.0 };
+    for p in temp_points {
+        path.push(p * scale);
+    }
+    path
+}
+
+/// Generates the dynamic clock layout or clearing path based on time and phase:
+/// Phase 1 (Drawing/Display): Hour and Minute hands, plus an outer Zen border spiral.
+/// Phase 2 (Clearing): A dense Hilbert Curve (order 4) to sweep the sand clean.
+pub fn generate_clock_pattern(hours: u32, minutes: u32, _seconds: f32, _phase: u32) -> Vec<Vec2> {
+    let mut path: Vec<Vec2> = Vec::new();
+
+    // Drawing Phase: Digital Time oriented for default camera view (azimuth 0.0)
+    // Helper to retrieve digital strokes for a character
+    let get_digit_stroke = |c: char| -> &'static [(f32, f32)] {
+        match c {
+            '0' => &[
+                (0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)
+            ],
+            '1' => &[
+                (0.5, 1.0), (0.5, 0.0)
+            ],
+            '2' => &[
+                (0.0, 1.0), (1.0, 1.0), (1.0, 0.5), (0.0, 0.5), (0.0, 0.0), (1.0, 0.0)
+            ],
+            '3' => &[
+                (0.0, 1.0), (1.0, 1.0), (1.0, 0.5), (0.0, 0.5), (1.0, 0.5), (1.0, 0.0), (0.0, 0.0)
+            ],
+            '4' => &[
+                (0.0, 1.0), (0.0, 0.5), (1.0, 0.5), (1.0, 1.0), (1.0, 0.0)
+            ],
+            '5' => &[
+                (1.0, 1.0), (0.0, 1.0), (0.0, 0.5), (1.0, 0.5), (1.0, 0.0), (0.0, 0.0)
+            ],
+            '6' => &[
+                (1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 0.0), (1.0, 0.5), (0.0, 0.5)
+            ],
+            '7' => &[
+                (0.0, 1.0), (1.0, 1.0), (0.5, 0.0)
+            ],
+            '8' => &[
+                (0.0, 0.5), (0.0, 1.0), (1.0, 1.0), (1.0, 0.5), (0.0, 0.5), (0.0, 0.0), (1.0, 0.0), (1.0, 0.5), (0.0, 0.5)
+            ],
+            '9' => &[
+                (0.0, 0.5), (1.0, 0.5), (1.0, 1.0), (0.0, 1.0), (0.0, 0.5), (1.0, 0.5), (1.0, 0.0), (0.0, 0.0)
+            ],
+            ':' => &[
+                (0.5, 0.65), (0.5, 0.75), (0.5, 0.65), // tick 1
+                (0.5, 0.35), (0.5, 0.25), (0.5, 0.35)  // tick 2
+            ],
+            _ => &[],
+        }
+    };
+
+    // Layout the digital clock digits in the center, rotated for default camera view (azimuth 0.0)
+    // Screen horizontal is Y increasing (left to right), Screen vertical is X increasing (bottom to top)
+    let chars = format!("{:02}:{:02}", hours, minutes);
+    let w = 0.14f32; // width of each digit
+    let h = 0.28f32; // height of each digit
+    let spacing = 0.05f32; // spacing between digits
+    let total_w = 5.0 * w + 4.0 * spacing;
+    let start_y = -total_w / 2.0;
+
+    let add_outer_transition = |path: &mut Vec<Vec2>, start_pos: Vec2| {
+        if let Some(&last_p) = path.last() {
+            let r_outer = 0.88f32;
+            
+            // Go to the closest edge (top if last_p.x <= 0, bottom if last_p.x > 0)
+            // to avoid crossing any digit (since digits are spaced horizontally along Y)
+            let x_out1 = if last_p.x <= 0.0 {
+                -(r_outer * r_outer - last_p.y * last_p.y).sqrt()
+            } else {
+                (r_outer * r_outer - last_p.y * last_p.y).sqrt()
+            };
+            let p_out1 = Vec2::new(x_out1, last_p.y);
+            
+            // Come in from the closest edge to start_pos
+            let x_out2 = if start_pos.x <= 0.0 {
+                -(r_outer * r_outer - start_pos.y * start_pos.y).sqrt()
+            } else {
+                (r_outer * r_outer - start_pos.y * start_pos.y).sqrt()
+            };
+            let p_out2 = Vec2::new(x_out2, start_pos.y);
+
+            let theta_end = p_out1.y.atan2(p_out1.x);
+            let theta_start = p_out2.y.atan2(p_out2.x);
+
+            // 1. Move from last_p straight out along X-axis to the outer edge
+            let steps_out = 10;
+            for i in 1..=steps_out {
+                let t = i as f32 / steps_out as f32;
+                path.push(last_p.lerp(p_out1, t));
+            }
+
+            // 2. Arc sweep along the circular border to the alignment of the next digit
+            let mut diff = theta_start - theta_end;
+            while diff > std::f32::consts::PI {
+                diff -= 2.0 * std::f32::consts::PI;
+            }
+            while diff < -std::f32::consts::PI {
+                diff += 2.0 * std::f32::consts::PI;
+            }
+
+            let steps_arc = 15;
+            for i in 1..=steps_arc {
+                let t = i as f32 / steps_arc as f32;
+                let angle = theta_end + t * diff;
+                path.push(Vec2::new(r_outer * angle.cos(), r_outer * angle.sin()));
+            }
+
+            // 3. Move straight in along X-axis from the outer edge to start_pos
+            let steps_in = 10;
+            for i in 1..=steps_in {
+                let t = i as f32 / steps_in as f32;
+                path.push(p_out2.lerp(start_pos, t));
+            }
+        } else {
+            path.push(start_pos);
+        }
+    };
+
+    for (idx, c) in chars.chars().enumerate() {
+        let stroke = get_digit_stroke(c);
+        if stroke.is_empty() {
+            continue;
+        }
+
+        let char_y = start_y + idx as f32 * (w + spacing);
+
+        // Transition from the current last point to the start of this digit
+        let start_tx = stroke[0].0;
+        let start_ty = stroke[0].1;
+        let start_py = char_y + start_tx * w;
+        let start_px = -h / 2.0 + start_ty * h;
+        let start_pos = Vec2::new(start_px, start_py);
+
+        add_outer_transition(&mut path, start_pos);
+
+        // Draw the digit strokes
+        for &(tx, ty) in stroke {
+            let py = char_y + tx * w;
+            let px = -h / 2.0 + ty * h;
+            path.push(Vec2::new(px, py));
+        }
+    }
+
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,6 +1112,41 @@ mod tests {
             for p in arm {
                 assert!(p.length() <= 0.92, "Multi-spiral point {:?} out of bounds", p);
             }
+        }
+
+        // Butterfly Curve
+        let butterfly = generate_butterfly_curve();
+        assert!(!butterfly.is_empty());
+        for p in &butterfly {
+            assert!(p.length() <= 0.92, "Butterfly point {:?} out of bounds", p);
+        }
+
+        // Zen Waves
+        let zen_waves = generate_zen_waves();
+        assert!(!zen_waves.is_empty());
+        for p in &zen_waves {
+            assert!(p.length() <= 0.92, "Zen Waves point {:?} out of bounds", p);
+        }
+
+        // Zen Mandala
+        let zen_mandala = generate_zen_mandala();
+        assert!(!zen_mandala.is_empty());
+        for p in &zen_mandala {
+            assert!(p.length() <= 0.92, "Zen Mandala point {:?} out of bounds", p);
+        }
+
+        // Clock Mode (Draw Phase)
+        let clock_draw = generate_clock_pattern(10, 10, 10.0, 1);
+        assert!(!clock_draw.is_empty());
+        for p in &clock_draw {
+            assert!(p.length() <= 0.92, "Clock Draw point {:?} out of bounds", p);
+        }
+
+        // Clock Mode (Clear Phase)
+        let clock_clear = generate_clock_pattern(10, 10, 50.0, 2);
+        assert!(!clock_clear.is_empty());
+        for p in &clock_clear {
+            assert!(p.length() <= 0.92, "Clock Clear point {:?} out of bounds", p);
         }
     }
 }

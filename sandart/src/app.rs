@@ -87,6 +87,8 @@ pub struct SandArtApp {
     pub camera_elevation: f32,
     /// Camera zoom (distance from origin).
     pub camera_zoom: f32,
+    /// Track the current clock minute for Clock Mode transitions.
+    pub clock_minute: u32,
 }
 
 impl SandArtApp {
@@ -133,6 +135,7 @@ impl SandArtApp {
             camera_azimuth: 0.0,
             camera_elevation: 0.8, // ~45 degrees
             camera_zoom: 2.8,
+            clock_minute: 99,
         }
     }
 
@@ -204,6 +207,7 @@ impl SandArtApp {
     /// Helper to load the selected mathematical pattern based on config parameters
     fn load_selected_pattern(&mut self) {
         self.playback.clear_waypoints();
+        self.playback.loop_pattern = self.config.pattern_mode != crate::config::PatternMode::Clock;
         self.pattern_error = None;
 
         let base_waypoints = match self.config.pattern_mode {
@@ -246,6 +250,23 @@ impl SandArtApp {
             }
             crate::config::PatternMode::Lemniscate => {
                 crate::pattern::generate_lemniscate(0.8)
+            }
+            crate::config::PatternMode::Butterfly => {
+                crate::pattern::generate_butterfly_curve()
+            }
+            crate::config::PatternMode::ZenWaves => {
+                crate::pattern::generate_zen_waves()
+            }
+            crate::config::PatternMode::ZenMandala => {
+                crate::pattern::generate_zen_mandala()
+            }
+            crate::config::PatternMode::Clock => {
+                use chrono::Timelike;
+                let now = chrono::Local::now();
+                let h = now.hour();
+                let m = now.minute();
+                self.clock_minute = m;
+                crate::pattern::generate_clock_pattern(h, m, 0.0, 1)
             }
             crate::config::PatternMode::MultiMarble => {
                 let paths = crate::pattern::generate_multi_spiral(
@@ -344,6 +365,20 @@ impl eframe::App for SandArtApp {
         // Track frame delta time for frame-rate-independent physics calculations
         self.dt = ctx.input(|i| i.stable_dt).min(0.1);
         self.elapsed_time += self.dt;
+
+        // Dynamic clock state checking if clock mode is selected
+        if self.config.pattern_mode == crate::config::PatternMode::Clock {
+            use chrono::Timelike;
+            let now = chrono::Local::now();
+            let m = now.minute();
+
+            if m != self.clock_minute {
+                self.sim.reset();
+                self.full_upload_needed = true;
+                self.clock_minute = m;
+                self.load_selected_pattern();
+            }
+        }
 
 
         // Draw the top panel for basic info
@@ -488,6 +523,34 @@ impl eframe::App for SandArtApp {
                                     &mut self.config.pattern_mode,
                                     crate::config::PatternMode::MultiMarble,
                                     "Multi-Marble Drawing",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Butterfly,
+                                    "Butterfly Curve",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::ZenWaves,
+                                    "Zen Waves",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::ZenMandala,
+                                    "Zen Mandala",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Clock,
+                                    "Clock Mode",
                                 )
                                 .changed();
                             if changed {
@@ -719,11 +782,12 @@ impl eframe::App for SandArtApp {
                             crate::config::MaterialMode::CoarseSand => "Coarse Sand (Large Grain)",
                         })
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::ButterCream, "Butter-Cream (Viscous)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::DrySand, "Dry Sand (Granular)");
-                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Snow, "Snow (Cohesive)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::KineticSand, "Kinetic Sand");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::WetSand, "Wet Sand");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::CoarseSand, "Coarse Sand (Large Grain)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::ButterCream, "Butter-Cream (Viscous)");
+                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Snow, "Snow (Cohesive)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::FinePowder, "Fine Powder");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Oobleck, "Oobleck (Non-Newtonian)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::MoonDust, "Moon Dust");
@@ -734,7 +798,6 @@ impl eframe::App for SandArtApp {
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::VegetableOil, "Vegetable Oil (Transparent Viscous)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::CalmWater, "Water (Calm/Glassy)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Yogurt, "Yogurt (Thick/Creamy)");
-                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::CoarseSand, "Coarse Sand (Large Grain)");
                         });
 
                     ui.add_space(12.0);
@@ -1058,10 +1121,11 @@ impl eframe::App for SandArtApp {
                         self.sim.marbles[3].pos,
                         self.sim.marbles[4].pos,
                     ];
+                    let current_speed = self.config.speed;
                     targets = self.playback.step_playback_all(
                         &marble_positions,
                         self.config.marble_count as usize,
-                        self.config.speed,
+                        current_speed,
                         self.dt,
                     );
                 }

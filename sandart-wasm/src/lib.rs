@@ -50,6 +50,7 @@ pub struct WasmSimulationState {
     light_angle: f32,
     shadows_enabled: bool,
     elapsed_time: f32,
+    clock_minute: u32,
 }
 
 #[wasm_bindgen]
@@ -161,10 +162,10 @@ impl WasmSimulationState {
             surface_config,
             full_upload_needed: true,
             marble_count: 1,
-            material_mode: MaterialMode::ButterCream,
+            material_mode: MaterialMode::DrySand,
             sandbox_shape: SandboxShape::Circle,
             marble_size: 0.018,
-            speed: 1.0,
+            speed: 0.5,
             pattern_mode: "Manual".to_string(),
             spiral_spacing: 0.030,
             lissajous_a: 3.0,
@@ -184,6 +185,7 @@ impl WasmSimulationState {
             light_angle: 0.0,
             shadows_enabled: true,
             elapsed_time: 0.0,
+            clock_minute: 99,
         })
     }
 
@@ -198,6 +200,19 @@ impl WasmSimulationState {
 
     pub fn step(&mut self, dt: f32, cursor_x: f32, cursor_y: f32, shift_pressed: bool) {
         self.elapsed_time += dt;
+
+        if self.pattern_mode == "Clock" {
+            let date = js_sys::Date::new_0();
+            let m = date.get_minutes();
+
+            if m != self.clock_minute {
+                self.sim.reset();
+                self.full_upload_needed = true;
+                self.clock_minute = m;
+                self.load_preset_pattern("clock");
+            }
+        }
+
         let mut targets = [None; 5];
 
         if self.pattern_mode == "Manual" {
@@ -247,23 +262,23 @@ impl WasmSimulationState {
 
     pub fn set_material_mode(&mut self, mode: u32) {
         self.material_mode = match mode {
-            0 => MaterialMode::ButterCream,
-            1 => MaterialMode::DrySand,
-            2 => MaterialMode::Snow,
-            3 => MaterialMode::KineticSand,
-            4 => MaterialMode::WetSand,
-            5 => MaterialMode::FinePowder,
-            6 => MaterialMode::Oobleck,
-            7 => MaterialMode::MoonDust,
-            8 => MaterialMode::IronFilings,
-            9 => MaterialMode::Water,
-            10 => MaterialMode::Milk,
-            11 => MaterialMode::Ferrofluid,
-            12 => MaterialMode::VegetableOil,
-            13 => MaterialMode::CalmWater,
-            14 => MaterialMode::Yogurt,
-            15 => MaterialMode::CoarseSand,
-            _ => MaterialMode::ButterCream,
+            0 => MaterialMode::DrySand,
+            1 => MaterialMode::KineticSand,
+            2 => MaterialMode::WetSand,
+            3 => MaterialMode::CoarseSand,
+            4 => MaterialMode::ButterCream,
+            5 => MaterialMode::Snow,
+            6 => MaterialMode::FinePowder,
+            7 => MaterialMode::Oobleck,
+            8 => MaterialMode::MoonDust,
+            9 => MaterialMode::IronFilings,
+            10 => MaterialMode::Water,
+            11 => MaterialMode::Milk,
+            12 => MaterialMode::Ferrofluid,
+            13 => MaterialMode::VegetableOil,
+            14 => MaterialMode::CalmWater,
+            15 => MaterialMode::Yogurt,
+            _ => MaterialMode::DrySand,
         };
     }
 
@@ -401,6 +416,7 @@ impl WasmSimulationState {
 
     pub fn load_preset_pattern(&mut self, pattern_type: &str) -> bool {
         self.playback.clear_waypoints();
+        self.playback.loop_pattern = pattern_type != "clock";
 
         let base_waypoints = match pattern_type {
             "spiral" => {
@@ -445,6 +461,22 @@ impl WasmSimulationState {
             }
             "lemniscate" => {
                 sandart_pattern::generate_lemniscate(0.8)
+            }
+            "butterfly" => {
+                sandart_pattern::generate_butterfly_curve()
+            }
+            "zen_waves" => {
+                sandart_pattern::generate_zen_waves()
+            }
+            "zen_mandala" => {
+                sandart_pattern::generate_zen_mandala()
+            }
+            "clock" => {
+                let date = js_sys::Date::new_0();
+                let h = date.get_hours();
+                let m = date.get_minutes();
+                self.clock_minute = m;
+                sandart_pattern::generate_clock_pattern(h, m, 0.0, 1)
             }
             _ => return false,
         };
@@ -550,8 +582,8 @@ impl WasmSimulationState {
         // Calculate view projection matrix
         let aspect = self.surface_config.width as f32 / self.surface_config.height as f32;
         let projection = glam::Mat4::perspective_lh(0.785, aspect, 0.1, 100.0);
-        let cam_x = self.camera_zoom * self.camera_elevation.cos() * self.camera_azimuth.sin();
-        let cam_y = self.camera_zoom * self.camera_elevation.cos() * self.camera_azimuth.cos();
+        let cam_x = self.camera_zoom * self.camera_elevation.cos() * self.camera_azimuth.cos();
+        let cam_y = self.camera_zoom * self.camera_elevation.cos() * self.camera_azimuth.sin();
         let cam_z = self.camera_zoom * self.camera_elevation.sin();
         let eye = glam::Vec3::new(cam_x, cam_y, cam_z);
         let target = glam::Vec3::ZERO;

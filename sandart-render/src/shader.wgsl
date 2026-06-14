@@ -388,7 +388,7 @@ fn fs_main(
     var grain_scale = 1500.0;
     var grain_strength = 0.28;
 
-    if (uniforms.material_mode == 0u) { // ButterCream
+    if (uniforms.material_mode == 4u) { // ButterCream
         mat_base_color = vec3<f32>(0.95, 0.93, 0.88);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -396,7 +396,7 @@ fn fs_main(
         roughness = 0.8;
         grain_scale = 2200.0;
         grain_strength = 0.08;
-    } else if (uniforms.material_mode == 2u) { // Snow
+    } else if (uniforms.material_mode == 5u) { // Snow
         mat_base_color = vec3<f32>(0.98, 0.98, 1.0);
         sparkles_threshold = 0.990;
         sparkles_intensity = 20.0;
@@ -405,7 +405,7 @@ fn fs_main(
         roughness = 0.6;
         grain_scale = 1200.0;
         grain_strength = 0.38;
-    } else if (uniforms.material_mode == 3u) { // KineticSand
+    } else if (uniforms.material_mode == 1u) { // KineticSand
         mat_base_color = vec3<f32>(0.85, 0.82, 0.77);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -413,7 +413,7 @@ fn fs_main(
         roughness = 1.0;
         grain_scale = 900.0;
         grain_strength = 0.42;
-    } else if (uniforms.material_mode == 4u) { // WetSand
+    } else if (uniforms.material_mode == 2u) { // WetSand
         mat_base_color = vec3<f32>(0.68, 0.62, 0.53);
         sparkles_threshold = 0.999;
         sparkles_intensity = 1.0;
@@ -421,7 +421,7 @@ fn fs_main(
         roughness = 0.3;
         grain_scale = 1600.0;
         grain_strength = 0.15;
-    } else if (uniforms.material_mode == 5u) { // FinePowder
+    } else if (uniforms.material_mode == 6u) { // FinePowder
         mat_base_color = vec3<f32>(0.96, 0.96, 0.96);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -429,7 +429,7 @@ fn fs_main(
         roughness = 1.0;
         grain_scale = 3000.0;
         grain_strength = 0.05;
-    } else if (uniforms.material_mode == 6u) { // Oobleck
+    } else if (uniforms.material_mode == 7u) { // Oobleck
         mat_base_color = vec3<f32>(0.75, 0.90, 0.30);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -437,7 +437,7 @@ fn fs_main(
         roughness = 0.15;
         grain_scale = 1.0;
         grain_strength = 0.00;
-    } else if (uniforms.material_mode == 7u) { // MoonDust
+    } else if (uniforms.material_mode == 8u) { // MoonDust
         mat_base_color = vec3<f32>(0.35, 0.35, 0.35);
         sparkles_threshold = 0.997;
         sparkles_intensity = 4.0;
@@ -447,7 +447,7 @@ fn fs_main(
         is_moon_dust = 1.0;
         grain_scale = 1400.0;
         grain_strength = 0.32;
-    } else if (uniforms.material_mode == 8u) { // IronFilings
+    } else if (uniforms.material_mode == 9u) { // IronFilings
         mat_base_color = vec3<f32>(0.20, 0.20, 0.22);
         sparkles_threshold = 0.992;
         sparkles_intensity = 12.0;
@@ -457,7 +457,7 @@ fn fs_main(
         is_metallic = 1.0;
         grain_scale = 1000.0;
         grain_strength = 0.35;
-    } else if (uniforms.material_mode == 9u) { // Water
+    } else if (uniforms.material_mode == 10u) { // Water
         mat_base_color = vec3<f32>(0.01, 0.10, 0.14);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -465,7 +465,7 @@ fn fs_main(
         roughness = 0.08;
         grain_scale = 1.0;
         grain_strength = 0.00;
-    } else if (uniforms.material_mode == 10u) { // Milk
+    } else if (uniforms.material_mode == 11u) { // Milk
         mat_base_color = vec3<f32>(0.95, 0.95, 0.93);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -473,7 +473,7 @@ fn fs_main(
         roughness = 0.22;
         grain_scale = 2000.0;
         grain_strength = 0.03;
-    } else if (uniforms.material_mode == 11u) { // Ferrofluid
+    } else if (uniforms.material_mode == 12u) { // Ferrofluid
         mat_base_color = vec3<f32>(0.02, 0.02, 0.03);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -482,7 +482,7 @@ fn fs_main(
         is_metallic = 0.9;
         grain_scale = 1.0;
         grain_strength = 0.00;
-    } else if (uniforms.material_mode == 12u) { // VegetableOil
+    } else if (uniforms.material_mode == 13u) { // VegetableOil
         mat_base_color = vec3<f32>(0.50, 0.38, 0.12);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -490,7 +490,7 @@ fn fs_main(
         roughness = 0.12;
         grain_scale = 1.0;
         grain_strength = 0.00;
-    } else if (uniforms.material_mode == 13u) { // CalmWater
+    } else if (uniforms.material_mode == 14u) { // CalmWater
         mat_base_color = vec3<f32>(0.01, 0.10, 0.14);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -498,7 +498,7 @@ fn fs_main(
         roughness = 0.05;
         grain_scale = 1.0;
         grain_strength = 0.00;
-    } else if (uniforms.material_mode == 14u) { // Yogurt
+    } else if (uniforms.material_mode == 15u) { // Yogurt
         mat_base_color = vec3<f32>(0.96, 0.94, 0.88);
         sparkles_threshold = 1.0;
         sparkles_intensity = 0.0;
@@ -506,7 +506,7 @@ fn fs_main(
         roughness = 0.35;
         grain_scale = 1200.0;
         grain_strength = 0.04;
-    } else if (uniforms.material_mode == 15u) { // CoarseSand
+    } else if (uniforms.material_mode == 3u) { // CoarseSand
         mat_base_color = uniforms.sand_color.rgb * 0.95;
         sparkles_threshold = 0.990;
         sparkles_intensity = 15.0;
@@ -527,7 +527,7 @@ fn fs_main(
     );
 
     // Apply procedural magnetic spike deformation for Iron Filings
-    if (uniforms.material_mode == 8u) {
+    if (uniforms.material_mode == 9u) {
         var mag_offset = vec2<f32>(0.0, 0.0);
         for (var j = 0u; j < uniforms.marble_count; j = j + 1u) {
             let m_pos = uniforms.marbles[j].pos;
@@ -556,7 +556,7 @@ fn fs_main(
     }
 
     // Apply procedural magnetic spike deformation for Ferrofluid
-    if (uniforms.material_mode == 11u) {
+    if (uniforms.material_mode == 12u) {
         var mag_offset = vec2<f32>(0.0, 0.0);
         for (var j = 0u; j < uniforms.marble_count; j = j + 1u) {
             let m_pos = uniforms.marbles[j].pos;
@@ -828,21 +828,21 @@ fn fs_main(
     let table_color = vec3<f32>(0.02, 0.02, 0.03);
     var final_color = mix(table_color, sand_shaded, sand_opacity);
 
-    if (uniforms.material_mode == 9u || uniforms.material_mode == 13u) { // Water or CalmWater
+    if (uniforms.material_mode == 10u || uniforms.material_mode == 14u) { // Water or CalmWater
         let water_tint = vec3<f32>(0.02, 0.16, 0.22);
         let absorption = 1.0 - exp(-h_center * 12.0);
         let water_refracted = mix(table_color, water_tint, absorption);
         final_color = water_refracted + specular_reflect;
     }
  
-    if (uniforms.material_mode == 12u) { // VegetableOil
+    if (uniforms.material_mode == 13u) { // VegetableOil
         let oil_tint = vec3<f32>(0.50, 0.38, 0.12);
         let absorption = 1.0 - exp(-h_center * 11.0);
         let oil_refracted = mix(table_color, oil_tint, absorption);
         final_color = oil_refracted + specular_reflect;
     }
  
-    if (uniforms.material_mode == 11u) { // Ferrofluid in transparent oil
+    if (uniforms.material_mode == 12u) { // Ferrofluid in transparent oil
         let oil_tint = vec3<f32>(0.26, 0.24, 0.18);
         let absorption = 1.0 - exp(-h_center * 9.0);
         let oil_refracted = mix(table_color, oil_tint, absorption);

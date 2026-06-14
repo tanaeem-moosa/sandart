@@ -24,11 +24,12 @@ impl Default for SandboxShape {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MaterialMode {
-    ButterCream,
     DrySand,
-    Snow,
     KineticSand,
     WetSand,
+    CoarseSand,
+    ButterCream,
+    Snow,
     FinePowder,
     Oobleck,
     MoonDust,
@@ -39,12 +40,11 @@ pub enum MaterialMode {
     VegetableOil,
     CalmWater,
     Yogurt,
-    CoarseSand,
 }
 
 impl Default for MaterialMode {
     fn default() -> Self {
-        Self::ButterCream
+        Self::DrySand
     }
 }
 
