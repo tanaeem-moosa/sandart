@@ -26,10 +26,21 @@ async function start() {
     canvas = document.getElementById('sand-canvas');
     
     // Adjust size for High DPI screens
-    const rect = canvas.getBoundingClientRect();
+    let rect = canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
+    let w = Math.round(rect.width * dpr);
+    let h = Math.round(rect.height * dpr);
+
+    if (w === 0 || h === 0) {
+        const fallbackWidth = canvas.clientWidth || (window.innerWidth - 340);
+        const fallbackHeight = canvas.clientHeight || window.innerHeight;
+        w = Math.round(fallbackWidth * dpr);
+        h = Math.round(fallbackHeight * dpr);
+    }
+
+    canvas.width = w;
+    canvas.height = h;
+    console.log(`Canvas size initialized to ${w}x${h} (DPR: ${dpr})`);
 
     // Check if WebGL is forced via URL query parameters
     const urlParams = new URLSearchParams(window.location.search);
@@ -37,7 +48,7 @@ async function start() {
     console.log("Initializing WasmSimulationState. Force WebGL:", forceWebGL);
 
     // Create simulator state
-    state = await WasmSimulationState.create('sand-canvas', canvas.width, canvas.height, forceWebGL);
+    state = await WasmSimulationState.create('sand-canvas', w, h, forceWebGL);
 
     // Initial config sync
     syncSettings();

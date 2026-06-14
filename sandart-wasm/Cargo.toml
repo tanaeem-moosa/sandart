@@ -20,6 +20,7 @@ web-sys = { version = "0.3", features = [
 ] }
 wgpu = { version = "23.0.0", features = ["webgl"] }
 glam = "0.29.0"
+console_error_panic_hook = "0.1"
 sandart-sim = { path = "../sandart-sim" }
 sandart-render = { path = "../sandart-render" }
 sandart-pattern = { path = "../sandart-pattern" }

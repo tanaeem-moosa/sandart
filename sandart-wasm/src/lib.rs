@@ -55,6 +55,7 @@ pub struct WasmSimulationState {
 #[wasm_bindgen]
 impl WasmSimulationState {
     pub async fn create(canvas_id: String, width: u32, height: u32, force_webgl: bool) -> Result<WasmSimulationState, JsValue> {
+        console_error_panic_hook::set_once();
         let window = web_sys::window().ok_or_else(|| JsValue::from_str("No global window"))?;
         let document = window.document().ok_or_else(|| JsValue::from_str("No global document"))?;
         let canvas = document
