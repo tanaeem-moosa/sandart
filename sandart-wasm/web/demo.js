@@ -53,6 +53,7 @@ async function start() {
     // Initial config sync
     syncSettings();
     updateCamera();
+    loadActivePattern();
 
     // Hook up event listeners
     window.addEventListener('resize', handleResize);
@@ -240,12 +241,12 @@ function syncSettings() {
     state.set_light_angle(parseFloat(document.getElementById('angle-slider').value));
     state.set_shadows_enabled(document.getElementById('check-shadows').checked);
 
-    // Dynamic pattern regeneration on setting sync
+    // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
-    generatePattern(patternType);
+    updateParamPanels(patternType);
 }
 
-function generatePattern(type) {
+function updateParamPanels(type) {
     if (!state) return;
     
     // Manage dynamic param visibility
@@ -304,12 +305,15 @@ function generatePattern(type) {
             }
         }
     }
+}
 
+function loadActivePattern() {
+    if (!state) return;
+    const type = document.getElementById('pattern-select').value;
     if (type === 'manual') {
         state.set_pattern_mode('Manual');
         return;
     }
-
     state.set_pattern_mode('Pattern');
     state.load_preset_pattern(type);
 }
@@ -335,9 +339,19 @@ function setupPanelInput() {
         document.getElementById(id).addEventListener('input', syncSettings);
     });
 
-    const selects = ['material-select', 'shape-select', 'led-mode', 'pattern-select'];
+    const selects = ['material-select', 'led-mode'];
     selects.forEach(id => {
         document.getElementById(id).addEventListener('change', syncSettings);
+    });
+
+    document.getElementById('shape-select').addEventListener('change', () => {
+        syncSettings();
+        loadActivePattern();
+    });
+
+    document.getElementById('pattern-select').addEventListener('change', () => {
+        syncSettings();
+        loadActivePattern();
     });
 
     const colors = ['color-led', 'color-sand'];
@@ -354,6 +368,11 @@ function setupPanelInput() {
 
     document.getElementById('btn-ripples').addEventListener('click', () => {
         if (state) state.draw_ripples();
+    });
+
+    document.getElementById('btn-load-pattern').addEventListener('click', () => {
+        syncSettings();
+        loadActivePattern();
     });
 
     // Toggle Sidebar
