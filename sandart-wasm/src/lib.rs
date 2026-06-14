@@ -430,11 +430,11 @@ impl WasmSimulationState {
             }
             "gosper" => {
                 // Keep order in bounds for web performance
-                let order = self.hilbert_order.clamp(1, 4);
+                let order = self.hilbert_order.clamp(1, 5);
                 sandart_pattern::generate_gosper_curve(order)
             }
             "sierpinski" => {
-                let order = self.hilbert_order.clamp(1, 6);
+                let order = self.hilbert_order.clamp(1, 7);
                 sandart_pattern::generate_sierpinski_curve(order)
             }
             "random_walk" => {

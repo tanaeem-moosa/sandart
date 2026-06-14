@@ -9,6 +9,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
+            color-scheme: dark;
             --bg-base: #0c0d12;
             --bg-panel: rgba(18, 20, 29, 0.75);
             --border-color: rgba(255, 255, 255, 0.08);
@@ -161,6 +162,11 @@
             background-position: right 8px center;
             background-size: 18px;
             padding-right: 32px;
+        }
+
+        select option {
+            background-color: #12141d;
+            color: #f0f1f5;
         }
 
         input[type="range"] {
@@ -420,6 +426,70 @@
                     <option value="random_walk">Random Walk</option>
                     <option value="lemniscate">Lemniscate</option>
                 </select>
+            </div>
+
+            <!-- Pattern Parameters (Shown/Hidden dynamically based on selected pattern) -->
+            <div id="spiral-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="spiral-spacing-slider">Spiral Spacing</label>
+                    <span id="spiral-spacing-val" class="val-display">0.030</span>
+                </div>
+                <input type="range" id="spiral-spacing-slider" min="0.01" max="0.10" step="0.005" value="0.030">
+            </div>
+
+            <div id="lissajous-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="lissajous-a-slider">Frequency A</label>
+                    <span id="lissajous-a-val" class="val-display">3.00</span>
+                </div>
+                <input type="range" id="lissajous-a-slider" min="1" max="12" step="1" value="3">
+                <div class="label-val" style="margin-top: 8px;">
+                    <label for="lissajous-b-slider">Frequency B</label>
+                    <span id="lissajous-b-val" class="val-display">4.00</span>
+                </div>
+                <input type="range" id="lissajous-b-slider" min="1" max="12" step="1" value="4">
+            </div>
+
+            <div id="rose-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="rose-k-slider">Petal Parameter K</label>
+                    <span id="rose-k-val" class="val-display">5.00</span>
+                </div>
+                <input type="range" id="rose-k-slider" min="1.0" max="15.0" step="0.5" value="5.0">
+            </div>
+
+            <div id="spirograph-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="spiro-r-slider">Inner Radius R</label>
+                    <span id="spiro-r-val" class="val-display">0.28</span>
+                </div>
+                <input type="range" id="spiro-r-slider" min="0.05" max="0.95" step="0.01" value="0.28">
+                <div class="label-val" style="margin-top: 8px;">
+                    <label for="spiro-d-slider">Pen Offset D</label>
+                    <span id="spiro-d-val" class="val-display">0.20</span>
+                </div>
+                <input type="range" id="spiro-d-slider" min="0.05" max="0.95" step="0.01" value="0.20">
+            </div>
+
+            <div id="curve-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="curve-order-slider">Recursion Order (Depth)</label>
+                    <span id="curve-order-val" class="val-display">3</span>
+                </div>
+                <input type="range" id="curve-order-slider" min="1" max="6" step="1" value="3">
+            </div>
+
+            <div id="random-walk-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="walk-steps-slider">Step Count</label>
+                    <span id="walk-steps-val" class="val-display">1000</span>
+                </div>
+                <input type="range" id="walk-steps-slider" min="100" max="5000" step="100" value="1000">
+                <div class="label-val" style="margin-top: 8px;">
+                    <label for="walk-size-slider">Step Size</label>
+                    <span id="walk-size-val" class="val-display">0.020</span>
+                </div>
+                <input type="range" id="walk-size-slider" min="0.005" max="0.050" step="0.001" value="0.020">
             </div>
 
             <!-- Operations -->

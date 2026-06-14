@@ -193,6 +193,37 @@ function syncSettings() {
     state.set_marble_count(count);
     document.getElementById('count-val').innerText = `${count}`;
 
+    // Pattern Specific Sliders
+    const spiralSpacing = parseFloat(document.getElementById('spiral-spacing-slider').value);
+    state.set_spiral_spacing(spiralSpacing);
+    document.getElementById('spiral-spacing-val').innerText = spiralSpacing.toFixed(3);
+
+    const lissajousA = parseFloat(document.getElementById('lissajous-a-slider').value);
+    const lissajousB = parseFloat(document.getElementById('lissajous-b-slider').value);
+    state.set_lissajous_params(lissajousA, lissajousB);
+    document.getElementById('lissajous-a-val').innerText = lissajousA.toFixed(2);
+    document.getElementById('lissajous-b-val').innerText = lissajousB.toFixed(2);
+
+    const roseK = parseFloat(document.getElementById('rose-k-slider').value);
+    state.set_rose_k(roseK);
+    document.getElementById('rose-k-val').innerText = roseK.toFixed(2);
+
+    const spiroR = parseFloat(document.getElementById('spiro-r-slider').value);
+    const spiroD = parseFloat(document.getElementById('spiro-d-slider').value);
+    state.set_hypotrochoid_params(spiroR, spiroD);
+    document.getElementById('spiro-r-val').innerText = spiroR.toFixed(2);
+    document.getElementById('spiro-d-val').innerText = spiroD.toFixed(2);
+
+    const curveOrder = parseInt(document.getElementById('curve-order-slider').value);
+    state.set_hilbert_order(curveOrder);
+    document.getElementById('curve-order-val').innerText = curveOrder;
+
+    const walkSteps = parseInt(document.getElementById('walk-steps-slider').value);
+    const walkSize = parseFloat(document.getElementById('walk-size-slider').value);
+    state.set_random_walk_params(walkSteps, walkSize);
+    document.getElementById('walk-steps-val').innerText = walkSteps;
+    document.getElementById('walk-size-val').innerText = walkSize.toFixed(3);
+
     // Selects
     state.set_material_mode(parseInt(document.getElementById('material-select').value));
     state.set_sandbox_shape(parseInt(document.getElementById('shape-select').value));
@@ -217,6 +248,63 @@ function syncSettings() {
 function generatePattern(type) {
     if (!state) return;
     
+    // Manage dynamic param visibility
+    const paramIds = {
+        'spiral': 'spiral-params',
+        'lissajous': 'lissajous-params',
+        'rose': 'rose-params',
+        'fermat': 'rose-params',
+        'spirograph': 'spirograph-params',
+        'gosper': 'curve-params',
+        'hilbert': 'curve-params',
+        'sierpinski': 'curve-params',
+        'random_walk': 'random-walk-params'
+    };
+
+    // Hide all
+    Object.values(paramIds).forEach(id => {
+        document.getElementById(id).style.display = 'none';
+    });
+
+    // Show active
+    if (paramIds[type]) {
+        document.getElementById(paramIds[type]).style.display = 'block';
+    }
+
+    // Dynamic styling and constraints for curve recursion depth
+    if (type === 'hilbert' || type === 'gosper' || type === 'sierpinski') {
+        const orderLabel = document.querySelector('label[for="curve-order-slider"]');
+        const orderSlider = document.getElementById('curve-order-slider');
+        const displayVal = document.getElementById('curve-order-val');
+        
+        let maxVal = 6;
+        let labelText = 'Recursion Order (Depth)';
+        
+        if (type === 'hilbert') {
+            maxVal = 6;
+            labelText = 'Hilbert Curve Depth';
+        } else if (type === 'gosper') {
+            maxVal = 5;
+            labelText = 'Gosper Curve Depth';
+        } else if (type === 'sierpinski') {
+            maxVal = 7;
+            labelText = 'Sierpinski Curve Depth';
+        }
+        
+        if (orderLabel) orderLabel.textContent = labelText;
+        if (orderSlider) {
+            orderSlider.max = maxVal;
+            let currentVal = parseInt(orderSlider.value);
+            if (currentVal > maxVal) {
+                orderSlider.value = maxVal;
+                state.set_hilbert_order(maxVal);
+            }
+            if (displayVal) {
+                displayVal.innerText = orderSlider.value;
+            }
+        }
+    }
+
     if (type === 'manual') {
         state.set_pattern_mode('Manual');
         return;
@@ -228,12 +316,26 @@ function generatePattern(type) {
 
 function setupPanelInput() {
     // Input sync listeners
-    const sliders = ['speed-slider', 'size-slider', 'marble-count', 'angle-slider'];
+    const sliders = [
+        'speed-slider', 
+        'size-slider', 
+        'marble-count', 
+        'angle-slider',
+        'spiral-spacing-slider',
+        'lissajous-a-slider',
+        'lissajous-b-slider',
+        'rose-k-slider',
+        'spiro-r-slider',
+        'spiro-d-slider',
+        'curve-order-slider',
+        'walk-steps-slider',
+        'walk-size-slider'
+    ];
     sliders.forEach(id => {
         document.getElementById(id).addEventListener('input', syncSettings);
     });
 
-    const selects = ['material-select', 'shape-select', 'led-mode'];
+    const selects = ['material-select', 'shape-select', 'led-mode', 'pattern-select'];
     selects.forEach(id => {
         document.getElementById(id).addEventListener('change', syncSettings);
     });
@@ -252,11 +354,6 @@ function setupPanelInput() {
 
     document.getElementById('btn-ripples').addEventListener('click', () => {
         if (state) state.draw_ripples();
-    });
-
-    // Pattern select listener
-    document.getElementById('pattern-select').addEventListener('change', (e) => {
-        generatePattern(e.target.value);
     });
 
     // Toggle Sidebar
