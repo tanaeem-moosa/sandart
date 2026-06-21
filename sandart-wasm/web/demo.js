@@ -153,7 +153,7 @@ function setupCanvasInput() {
             mouseY = e.clientY;
 
             // Update camera angles
-            cameraAzimuth -= dx * 0.007;
+            cameraAzimuth += dx * 0.007;
             cameraElevation = Math.max(0.1, Math.min(Math.PI / 2 - 0.05, cameraElevation + dy * 0.007));
             updateCamera();
         }
