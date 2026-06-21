@@ -601,262 +601,43 @@ pub fn settle_tick(
     let mut flow_occurred = false;
 
     // 2. Cellular automata slope settling update (loop over core active box)
-    for y in active_bounds.min_y..=active_bounds.max_y {
-        let row_offset = y * w;
-        for x in active_bounds.min_x..=active_bounds.max_x {
-            let center_idx = row_offset + x;
-            let h_center = heightmap.data[center_idx];
+    let is_complex = material == crate::MaterialMode::Oobleck || material == crate::MaterialMode::IronFilings;
 
-            let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
-            
-            // Loop over 4 neighbors
-            let neighbors = [
-                (x > 0, x.wrapping_sub(1), y, center_idx.wrapping_sub(1)),
-                (x + 1 < w, x + 1, y, center_idx + 1),
-                (y > 0, x, y.wrapping_sub(1), center_idx.wrapping_sub(w)),
-                (y + 1 < h, x, y + 1, center_idx + w),
-            ];
+    if is_complex {
+        for y in active_bounds.min_y..=active_bounds.max_y {
+            let row_offset = y * w;
+            for x in active_bounds.min_x..=active_bounds.max_x {
+                let center_idx = row_offset + x;
+                let h_center = heightmap.data[center_idx];
 
-            let mut cell_flowed = false;
+                let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
+                
+                // Loop over 4 neighbors
+                let neighbors = [
+                    (x > 0, x.wrapping_sub(1), y, center_idx.wrapping_sub(1)),
+                    (x + 1 < w, x + 1, y, center_idx + 1),
+                    (y > 0, x, y.wrapping_sub(1), center_idx.wrapping_sub(w)),
+                    (y + 1 < h, x, y + 1, center_idx + w),
+                ];
 
-            // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
-            let mut avalanche_checked = false;
-            for &(cond, nx, ny, neighbor_idx) in &neighbors {
-                if !cond {
-                    continue;
-                }
+                let mut cell_flowed = false;
 
-                let h_neighbor = heightmap.data[neighbor_idx];
-                let geom_slope = h_center - h_neighbor;
-
-                if geom_slope > 0.20 {
-                    let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
-                    if flow > 0.0 {
-                        let current_temp_center = temp_heights[center_idx];
-                        let current_temp_neighbor = temp_heights[neighbor_idx];
-                        let temp_diff = current_temp_center - current_temp_neighbor;
-                        let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                        if clamped_flow > 0.0 {
-                            temp_heights[center_idx] -= clamped_flow;
-                            temp_heights[neighbor_idx] += clamped_flow;
-                            total_flow += clamped_flow;
-                            cell_flowed = true;
-                            
-                            next_min_x = next_min_x.min(nx).min(x);
-                            next_max_x = next_max_x.max(nx).max(x);
-                            next_min_y = next_min_y.min(ny).min(y);
-                            next_max_y = next_max_y.max(ny).max(y);
-                            flow_occurred = true;
-                        }
+                // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
+                let mut avalanche_checked = false;
+                for &(cond, nx, ny, neighbor_idx) in &neighbors {
+                    if !cond {
+                        continue;
                     }
-                    avalanche_checked = true;
-                }
-            }
-            if avalanche_checked {
-                sliding[center_idx] = cell_flowed;
-                continue;
-            }
 
-            // Cell-invariant properties (calculated once per cell before neighbor loop)
-            let mut higher_neighbors = 0;
-            if material == crate::MaterialMode::DrySand {
-                for &(cond, _, _, n_idx) in &neighbors {
-                    if cond && heightmap.data[n_idx] >= h_center - 1e-4 {
-                        higher_neighbors += 1;
-                    }
-                }
-            }
+                    let h_neighbor = heightmap.data[neighbor_idx];
+                    let geom_slope = h_center - h_neighbor;
 
-            let mut closest_marble_idx = None;
-            let mut min_dist_to_marble = f32::MAX;
-            if (material == crate::MaterialMode::Oobleck || material == crate::MaterialMode::IronFilings) && !active_marbles.is_empty() {
-                let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
-                let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
-                let cell_pos = Vec2::new(cell_x, cell_y);
-
-                for (idx, m) in active_marbles.iter().enumerate() {
-                    let dist = (cell_pos - m.pos).length();
-                    if dist < min_dist_to_marble {
-                        min_dist_to_marble = dist;
-                        closest_marble_idx = Some(idx);
-                    }
-                }
-            }
-
-            let oobleck_params = if material == crate::MaterialMode::Oobleck {
-                let local_vel = if let Some(idx) = closest_marble_idx {
-                    active_marbles[idx].vel
-                } else {
-                    0.0
-                };
-                let t = ((local_vel - 0.03) / 0.12).clamp(0.0, 1.0);
-                let t_steep = t * t;
-                Some((
-                    0.005 + (0.32 - 0.005) * t_steep,
-                    0.40 + (0.005 - 0.40) * t_steep,
-                    0.02 + (0.98 - 0.02) * t_steep,
-                ))
-            } else {
-                None
-            };
-
-            let iron_filings_threshold = if material == crate::MaterialMode::IronFilings && min_dist_to_marble < 0.22 {
-                let ripple = (min_dist_to_marble * 2.0 * std::f32::consts::PI / 0.025).cos();
-                (0.08 + ripple * 0.05).max(0.01)
-            } else {
-                0.08
-            };
-
-            let to_magnet_norm = if material == crate::MaterialMode::IronFilings && min_dist_to_marble > 1e-4 {
-                if let Some(idx) = closest_marble_idx {
-                    let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
-                    let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
-                    let cell_pos = Vec2::new(cell_x, cell_y);
-                    Some((active_marbles[idx].pos - cell_pos).normalize())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            for (dir_idx, &(cond, nx, ny, neighbor_idx)) in neighbors.iter().enumerate() {
-                if !cond {
-                    continue;
-                }
-
-                let h_neighbor = heightmap.data[neighbor_idx];
-                let geom_slope = h_center - h_neighbor;
-
-                // B. Material-specific parameters
-                let threshold;
-                let alpha;
-                let lock_chance;
-                let mut quantize_size = None;
-                let mut magnetic_bias = 0.0;
-
-                match material {
-                    crate::MaterialMode::ButterCream => {
-                        threshold = 0.04;
-                        alpha = 0.15;
-                        lock_chance = 0.20;
-                    }
-                    crate::MaterialMode::DrySand => {
-                        threshold = if sliding[center_idx] { 0.04 } else { 0.08 };
-                        alpha = 0.25;
-                        quantize_size = Some(0.01);
-                        lock_chance = if higher_neighbors >= 3 { 0.80 } else { 0.10 };
-                    }
-                    crate::MaterialMode::Snow => {
-                        threshold = 0.15;
-                        alpha = 0.04;
-                        lock_chance = 0.30;
-                    }
-                    crate::MaterialMode::KineticSand => {
-                        threshold = 0.12;
-                        alpha = 0.12;
-                        lock_chance = 0.75;
-                        quantize_size = Some(0.015);
-                    }
-                    crate::MaterialMode::WetSand => {
-                        threshold = 0.10;
-                        alpha = 0.06;
-                        lock_chance = 0.15;
-                    }
-                    crate::MaterialMode::FinePowder => {
-                        threshold = 0.01;
-                        alpha = 0.35;
-                        lock_chance = 0.02;
-                    }
-                    crate::MaterialMode::Oobleck => {
-                        let (th, al, lc) = oobleck_params.unwrap();
-                        threshold = th;
-                        alpha = al;
-                        lock_chance = lc;
-                    }
-                    crate::MaterialMode::MoonDust => {
-                        threshold = 0.22;
-                        alpha = 0.02;
-                        lock_chance = 0.40;
-                        quantize_size = Some(0.015);
-                    }
-                    crate::MaterialMode::CoarseSand => {
-                        threshold = if sliding[center_idx] { 0.06 } else { 0.11 };
-                        alpha = 0.22;
-                        quantize_size = Some(0.035);
-                        lock_chance = if higher_neighbors >= 3 { 0.75 } else { 0.15 };
-                    }
-                    crate::MaterialMode::IronFilings => {
-                        threshold = iron_filings_threshold;
-                        alpha = 0.35;
-                        lock_chance = 0.05;
-                        
-                        if min_dist_to_marble < 0.22 {
-                            if let Some(idx) = closest_marble_idx {
-                                // 1. Static radial pull towards the magnet center
-                                let mut pull_bias = 0.0;
-                                if let Some(to_mag_norm) = to_magnet_norm {
-                                    let dot_prod = match dir_idx {
-                                        0 => -to_mag_norm.x,
-                                        1 => to_mag_norm.x,
-                                        2 => to_mag_norm.y,
-                                        3 => -to_mag_norm.y,
-                                        _ => 0.0,
-                                    };
-                                    let pull_strength = 0.24 * (1.0 - min_dist_to_marble / 0.22).max(0.0);
-                                    pull_bias = pull_strength * dot_prod;
-                                }
-
-                                // 2. Dynamic drag along the magnet's velocity vector
-                                let mut drag_bias = 0.0;
-                                let m_vel_vec = active_marbles[idx].vel_vec;
-                                let speed = active_marbles[idx].vel;
-                                if speed > 1e-4 {
-                                    let drag_dir = m_vel_vec.normalize();
-                                    let dot_prod_drag = match dir_idx {
-                                        0 => -drag_dir.x,
-                                        1 => drag_dir.x,
-                                        2 => drag_dir.y,
-                                        3 => -drag_dir.y,
-                                        _ => 0.0,
-                                    };
-                                    // Drag is stronger closer to the magnet and scales with speed
-                                    let drag_strength = 0.35 * speed.min(0.8) * (1.0 - min_dist_to_marble / 0.22).max(0.0);
-                                    drag_bias = drag_strength * dot_prod_drag;
-                                }
-
-                                magnetic_bias = pull_bias + drag_bias;
-                            }
-                        }
-                    }
-                    crate::MaterialMode::Water | crate::MaterialMode::Milk | crate::MaterialMode::Ferrofluid | crate::MaterialMode::VegetableOil | crate::MaterialMode::CalmWater | crate::MaterialMode::Yogurt => {
-                        threshold = 0.0;
-                        alpha = 0.0;
-                        lock_chance = 0.0;
-                    }
-                }
-
-                let slope = geom_slope + magnetic_bias;
-
-                if slope <= 1e-6 {
-                    continue;
-                }
-
-                // C. Stochastic locking and sliding condition
-                if slope > threshold {
-                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
-                    let rand_val = flow_seed as f32 / 65535.0;
-                    
-                    if rand_val >= lock_chance {
-                        let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
-                        let mut flow = (alpha * (slope - threshold) * alpha_noise).max(0.0);
-                        
-                        if let Some(q) = quantize_size {
-                            flow = (flow / q).round() * q;
-                        }
-
+                    if geom_slope > 0.20 {
+                        let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
                         if flow > 0.0 {
-                            let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
+                            let current_temp_center = temp_heights[center_idx];
+                            let current_temp_neighbor = temp_heights[neighbor_idx];
+                            let temp_diff = current_temp_center - current_temp_neighbor;
                             let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
                             if clamped_flow > 0.0 {
                                 temp_heights[center_idx] -= clamped_flow;
@@ -871,11 +652,323 @@ pub fn settle_tick(
                                 flow_occurred = true;
                             }
                         }
+                        avalanche_checked = true;
                     }
                 }
-            }
+                if avalanche_checked {
+                    sliding[center_idx] = cell_flowed;
+                    continue;
+                }
 
-            sliding[center_idx] = cell_flowed;
+                // Cell-invariant properties (calculated once per cell before neighbor loop)
+                let mut closest_marble_idx = None;
+                let mut min_dist_to_marble = f32::MAX;
+                if !active_marbles.is_empty() {
+                    let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
+                    let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
+                    let cell_pos = Vec2::new(cell_x, cell_y);
+
+                    for (idx, m) in active_marbles.iter().enumerate() {
+                        let dist = (cell_pos - m.pos).length();
+                        if dist < min_dist_to_marble {
+                            min_dist_to_marble = dist;
+                            closest_marble_idx = Some(idx);
+                        }
+                    }
+                }
+
+                let oobleck_params = if material == crate::MaterialMode::Oobleck {
+                    let local_vel = if let Some(idx) = closest_marble_idx {
+                        active_marbles[idx].vel
+                    } else {
+                        0.0
+                    };
+                    let t = ((local_vel - 0.03) / 0.12).clamp(0.0, 1.0);
+                    let t_steep = t * t;
+                    Some((
+                        0.005 + (0.32 - 0.005) * t_steep,
+                        0.40 + (0.005 - 0.40) * t_steep,
+                        0.02 + (0.98 - 0.02) * t_steep,
+                    ))
+                } else {
+                    None
+                };
+
+                let iron_filings_threshold = if material == crate::MaterialMode::IronFilings && min_dist_to_marble < 0.22 {
+                    let ripple = (min_dist_to_marble * 2.0 * std::f32::consts::PI / 0.025).cos();
+                    (0.08 + ripple * 0.05).max(0.01)
+                } else {
+                    0.08
+                };
+
+                let to_magnet_norm = if material == crate::MaterialMode::IronFilings && min_dist_to_marble > 1e-4 {
+                    if let Some(idx) = closest_marble_idx {
+                        let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
+                        let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
+                        let cell_pos = Vec2::new(cell_x, cell_y);
+                        Some((active_marbles[idx].pos - cell_pos).normalize())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                for (dir_idx, &(cond, nx, ny, neighbor_idx)) in neighbors.iter().enumerate() {
+                    if !cond {
+                        continue;
+                    }
+
+                    let h_neighbor = heightmap.data[neighbor_idx];
+                    let geom_slope = h_center - h_neighbor;
+
+                    // B. Material-specific parameters
+                    let threshold;
+                    let alpha;
+                    let lock_chance;
+                    let quantize_size: Option<f32> = None;
+                    let mut magnetic_bias = 0.0;
+
+                    match material {
+                        crate::MaterialMode::Oobleck => {
+                            let (th, al, lc) = oobleck_params.unwrap();
+                            threshold = th;
+                            alpha = al;
+                            lock_chance = lc;
+                        }
+                        crate::MaterialMode::IronFilings => {
+                            threshold = iron_filings_threshold;
+                            alpha = 0.35;
+                            lock_chance = 0.05;
+                            
+                            if min_dist_to_marble < 0.22 {
+                                if let Some(idx) = closest_marble_idx {
+                                    // 1. Static radial pull towards the magnet center
+                                    let mut pull_bias = 0.0;
+                                    if let Some(to_mag_norm) = to_magnet_norm {
+                                        let dot_prod = match dir_idx {
+                                            0 => -to_mag_norm.x,
+                                            1 => to_mag_norm.x,
+                                            2 => to_mag_norm.y,
+                                            3 => -to_mag_norm.y,
+                                            _ => 0.0,
+                                        };
+                                        let pull_strength = 0.24 * (1.0 - min_dist_to_marble / 0.22).max(0.0);
+                                        pull_bias = pull_strength * dot_prod;
+                                    }
+
+                                    // 2. Dynamic drag along the magnet's velocity vector
+                                    let mut drag_bias = 0.0;
+                                    let m_vel_vec = active_marbles[idx].vel_vec;
+                                    let speed = active_marbles[idx].vel;
+                                    if speed > 1e-4 {
+                                        let drag_dir = m_vel_vec.normalize();
+                                        let dot_prod_drag = match dir_idx {
+                                            0 => -drag_dir.x,
+                                            1 => drag_dir.x,
+                                            2 => drag_dir.y,
+                                            3 => -drag_dir.y,
+                                            _ => 0.0,
+                                        };
+                                        // Drag is stronger closer to the magnet and scales with speed
+                                        let drag_strength = 0.35 * speed.min(0.8) * (1.0 - min_dist_to_marble / 0.22).max(0.0);
+                                        drag_bias = drag_strength * dot_prod_drag;
+                                    }
+
+                                    magnetic_bias = pull_bias + drag_bias;
+                                }
+                            }
+                        }
+                        _ => {
+                            threshold = 0.0;
+                            alpha = 0.0;
+                            lock_chance = 0.0;
+                        }
+                    }
+
+                    let slope = geom_slope + magnetic_bias;
+
+                    if slope <= 1e-6 {
+                        continue;
+                    }
+
+                    // C. Stochastic locking and sliding condition
+                    if slope > threshold {
+                        let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
+                        let rand_val = flow_seed as f32 / 65535.0;
+                        
+                        if rand_val >= lock_chance {
+                            let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
+                            let mut flow = (alpha * (slope - threshold) * alpha_noise).max(0.0);
+                            
+                            if let Some(q) = quantize_size {
+                                flow = (flow / q).round() * q;
+                            }
+
+                            if flow > 0.0 {
+                                let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
+                                let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                                if clamped_flow > 0.0 {
+                                    temp_heights[center_idx] -= clamped_flow;
+                                    temp_heights[neighbor_idx] += clamped_flow;
+                                    total_flow += clamped_flow;
+                                    cell_flowed = true;
+                                    
+                                    next_min_x = next_min_x.min(nx).min(x);
+                                    next_max_x = next_max_x.max(nx).max(x);
+                                    next_min_y = next_min_y.min(ny).min(y);
+                                    next_max_y = next_max_y.max(ny).max(y);
+                                    flow_occurred = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                sliding[center_idx] = cell_flowed;
+            }
+        }
+    } else {
+        // Standard loop fully optimized for DrySand, MoonDust, KineticSand, WetSand, etc.
+        for y in active_bounds.min_y..=active_bounds.max_y {
+            let row_offset = y * w;
+            for x in active_bounds.min_x..=active_bounds.max_x {
+                let center_idx = row_offset + x;
+                let h_center = heightmap.data[center_idx];
+
+                let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
+                
+                let neighbors = [
+                    (x > 0, x.wrapping_sub(1), y, center_idx.wrapping_sub(1)),
+                    (x + 1 < w, x + 1, y, center_idx + 1),
+                    (y > 0, x, y.wrapping_sub(1), center_idx.wrapping_sub(w)),
+                    (y + 1 < h, x, y + 1, center_idx + w),
+                ];
+
+                let mut cell_flowed = false;
+
+                // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
+                let mut avalanche_checked = false;
+                for &(cond, nx, ny, neighbor_idx) in &neighbors {
+                    if !cond {
+                        continue;
+                    }
+
+                    let h_neighbor = heightmap.data[neighbor_idx];
+                    let geom_slope = h_center - h_neighbor;
+
+                    if geom_slope > 0.20 {
+                        let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
+                        if flow > 0.0 {
+                            let current_temp_center = temp_heights[center_idx];
+                            let current_temp_neighbor = temp_heights[neighbor_idx];
+                            let temp_diff = current_temp_center - current_temp_neighbor;
+                            let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                            if clamped_flow > 0.0 {
+                                temp_heights[center_idx] -= clamped_flow;
+                                temp_heights[neighbor_idx] += clamped_flow;
+                                total_flow += clamped_flow;
+                                cell_flowed = true;
+                                
+                                next_min_x = next_min_x.min(nx).min(x);
+                                next_max_x = next_max_x.max(nx).max(x);
+                                next_min_y = next_min_y.min(ny).min(y);
+                                next_max_y = next_max_y.max(ny).max(y);
+                                flow_occurred = true;
+                            }
+                        }
+                        avalanche_checked = true;
+                    }
+                }
+                if avalanche_checked {
+                    sliding[center_idx] = cell_flowed;
+                    continue;
+                }
+
+                // Cell-invariant properties (calculated once per cell before neighbor loop)
+                let mut higher_neighbors = 0;
+                if material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand {
+                    for &(cond, _, _, n_idx) in &neighbors {
+                        if cond && heightmap.data[n_idx] >= h_center - 1e-4 {
+                            higher_neighbors += 1;
+                        }
+                    }
+                }
+
+                let (base_threshold, alpha, quantize_size, lock_chance_low, lock_chance_high): (f32, f32, Option<f32>, f32, f32) = match material {
+                    crate::MaterialMode::ButterCream => (0.04, 0.15, None, 0.20, 0.20),
+                    crate::MaterialMode::DrySand => (0.08, 0.25, Some(0.01), 0.10, 0.80),
+                    crate::MaterialMode::Snow => (0.15, 0.04, None, 0.30, 0.30),
+                    crate::MaterialMode::KineticSand => (0.12, 0.12, Some(0.015), 0.75, 0.75),
+                    crate::MaterialMode::WetSand => (0.10, 0.06, None, 0.15, 0.15),
+                    crate::MaterialMode::FinePowder => (0.01, 0.35, None, 0.02, 0.02),
+                    crate::MaterialMode::MoonDust => (0.22, 0.02, Some(0.015), 0.40, 0.40),
+                    crate::MaterialMode::CoarseSand => (0.11, 0.22, Some(0.035), 0.15, 0.75),
+                    _ => (0.08, 0.25, Some(0.01), 0.10, 0.80),
+                };
+
+                for &(cond, _, _, neighbor_idx) in &neighbors {
+                    if !cond {
+                        continue;
+                    }
+
+                    let h_neighbor = heightmap.data[neighbor_idx];
+                    let geom_slope = h_center - h_neighbor;
+
+                    if geom_slope <= 1e-6 {
+                        continue;
+                    }
+
+                    let threshold = if material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand {
+                        let sliding_threshold = if material == crate::MaterialMode::DrySand { 0.04 } else { 0.06 };
+                        if sliding[center_idx] { sliding_threshold } else { base_threshold }
+                    } else {
+                        base_threshold
+                    };
+
+                    let lock_chance = if material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand {
+                        if higher_neighbors >= 3 { lock_chance_high } else { lock_chance_low }
+                    } else {
+                        lock_chance_low
+                    };
+
+                    // C. Stochastic locking and sliding condition
+                    if geom_slope > threshold {
+                        let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
+                        let rand_val = flow_seed as f32 / 65535.0;
+                        
+                        if rand_val >= lock_chance {
+                            let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
+                            let mut flow = (alpha * (geom_slope - threshold) * alpha_noise).max(0.0);
+                            
+                            if let Some(q) = quantize_size {
+                                flow = (flow / q).round() * q;
+                            }
+
+                            if flow > 0.0 {
+                                let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
+                                let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                                if clamped_flow > 0.0 {
+                                    temp_heights[center_idx] -= clamped_flow;
+                                    temp_heights[neighbor_idx] += clamped_flow;
+                                    total_flow += clamped_flow;
+                                    cell_flowed = true;
+                                    
+                                    let nx = neighbor_idx % w;
+                                    let ny = neighbor_idx / w;
+                                    next_min_x = next_min_x.min(nx).min(x);
+                                    next_max_x = next_max_x.max(nx).max(x);
+                                    next_min_y = next_min_y.min(ny).min(y);
+                                    next_max_y = next_max_y.max(ny).max(y);
+                                    flow_occurred = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                sliding[center_idx] = cell_flowed;
+            }
         }
     }
 
