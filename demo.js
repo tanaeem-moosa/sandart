@@ -19,6 +19,7 @@ let cameraZoom = 2.8;
 let frameCount = 0;
 let fpsTime = 0;
 let smoothDt = null;
+let totalStepTime = 0;
 let totalRenderTime = 0;
 let renderTimeCount = 0;
 
@@ -30,7 +31,8 @@ async function start() {
     
     // Adjust size for High DPI screens
     let rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
+    // Cap DPR to 1.5 to prevent massive rendering performance hit on 4K/high-res displays
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     let w = Math.round(rect.width * dpr);
     let h = Math.round(rect.height * dpr);
 
@@ -71,7 +73,8 @@ async function start() {
 
 function handleResize() {
     const rect = canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
+    // Cap DPR to 1.5 to prevent massive rendering performance hit on 4K/high-res displays
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
     const w = Math.round(rect.width * dpr);
     const h = Math.round(rect.height * dpr);
     canvas.width = w;
@@ -100,10 +103,15 @@ function tick(now) {
 
     // Step physics & render
     if (state) {
-        const startRender = performance.now();
+        const startStep = performance.now();
         state.step(smoothDt, cursorX, cursorY, isDraggingMarble);
+        const stepTime = performance.now() - startStep;
+
+        const startRender = performance.now();
         state.render();
         const renderTime = performance.now() - startRender;
+
+        totalStepTime += stepTime;
         totalRenderTime += renderTime;
         renderTimeCount++;
     }
@@ -111,21 +119,24 @@ function tick(now) {
     // Calculate FPS and average frame time, update UI once per second to prevent DOM thrashing
     frameCount++;
     if (now - fpsTime >= 1000) {
+        const avgStepTime = renderTimeCount > 0 ? (totalStepTime / renderTimeCount) : 0;
         const avgRenderTime = renderTimeCount > 0 ? (totalRenderTime / renderTimeCount) : 0;
+        const avgTotalTime = avgStepTime + avgRenderTime;
         
         // Update sidebar stats
         document.getElementById('stat-fps').innerText = `FPS: ${frameCount}`;
-        document.getElementById('stat-render-time').innerText = `Frame time: ${avgRenderTime.toFixed(1)} ms`;
+        document.getElementById('stat-render-time').innerText = `Frame time: ${avgTotalTime.toFixed(1)} ms (CPU: ${avgStepTime.toFixed(1)} ms, GPU: ${avgRenderTime.toFixed(1)} ms)`;
         
         // Update floating HUD stats
         const hudFps = document.getElementById('hud-fps');
         const hudTime = document.getElementById('hud-time');
         if (hudFps && hudTime) {
             hudFps.innerText = `${frameCount} FPS`;
-            hudTime.innerText = `${avgRenderTime.toFixed(1)} ms`;
+            hudTime.innerText = `${avgTotalTime.toFixed(1)} ms (CPU: ${avgStepTime.toFixed(1)}ms, GPU: ${avgRenderTime.toFixed(1)}ms)`;
         }
 
         frameCount = 0;
+        totalStepTime = 0;
         totalRenderTime = 0;
         renderTimeCount = 0;
         fpsTime = now;
