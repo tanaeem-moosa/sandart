@@ -119,4 +119,23 @@ The project is built in incremental, testable blocks:
   - Added a **Glass Cover Limit** (`1.5`) in `displace_line` that caps sand height and dynamically distributes excess volume to neighboring cells.
   - Fixed the gravity-avalanche collapse flow rate to a stable `0.10` and added dynamic conservation clamps to prevent numerical blowups.
 
+---
 
+## License & Disclaimers
+
+### Disclaimer
+This is not an officially supported Google product. 
+
+This repository is a personal project authored by an employee of Google LLC. The views, code, and implementation details do not represent Google LLC or its affiliate companies.
+
+### Vibe Coding
+This project was built using "vibe coding" — designed, refactored, and implemented in partnership with agentic AI coding assistants.
+
+### License
+Copyright 2026 Google LLC
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
