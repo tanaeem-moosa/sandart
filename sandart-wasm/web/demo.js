@@ -18,6 +18,9 @@ let cameraZoom = 2.8;
 // Event loop variables
 let frameCount = 0;
 let fpsTime = 0;
+let smoothDt = null;
+let totalRenderTime = 0;
+let renderTimeCount = 0;
 
 async function start() {
     // Initialize WASM module
@@ -79,23 +82,52 @@ function handleResize() {
 }
 
 function tick(now) {
-    const dt = Math.min((now - lastTime) / 1000, 0.1); // Clamp dt to prevent massive steps
+    const rawDt = Math.min((now - lastTime) / 1000, 0.1); // Clamp dt to prevent massive steps
     lastTime = now;
+
+    // Smooth delta-time using Exponential Moving Average (EMA) to eliminate browser timer resolution jitter
+    if (smoothDt === null) {
+        smoothDt = rawDt > 0.0 ? rawDt : 0.01666;
+    } else if (rawDt > 0.0) {
+        if (rawDt > 0.1) {
+            // Reset smoothDt on huge frame gaps (e.g. after tab focus loss)
+            smoothDt = rawDt;
+        } else {
+            // Apply standard EMA filter (90% history, 10% new frame)
+            smoothDt = smoothDt * 0.9 + rawDt * 0.1;
+        }
+    }
 
     // Step physics & render
     if (state) {
         const startRender = performance.now();
-        state.step(dt, cursorX, cursorY, isDraggingMarble);
+        state.step(smoothDt, cursorX, cursorY, isDraggingMarble);
         state.render();
         const renderTime = performance.now() - startRender;
-        document.getElementById('stat-render-time').innerText = `Frame time: ${renderTime.toFixed(1)} ms`;
+        totalRenderTime += renderTime;
+        renderTimeCount++;
     }
 
-    // Calculate FPS
+    // Calculate FPS and average frame time, update UI once per second to prevent DOM thrashing
     frameCount++;
     if (now - fpsTime >= 1000) {
+        const avgRenderTime = renderTimeCount > 0 ? (totalRenderTime / renderTimeCount) : 0;
+        
+        // Update sidebar stats
         document.getElementById('stat-fps').innerText = `FPS: ${frameCount}`;
+        document.getElementById('stat-render-time').innerText = `Frame time: ${avgRenderTime.toFixed(1)} ms`;
+        
+        // Update floating HUD stats
+        const hudFps = document.getElementById('hud-fps');
+        const hudTime = document.getElementById('hud-time');
+        if (hudFps && hudTime) {
+            hudFps.innerText = `${frameCount} FPS`;
+            hudTime.innerText = `${avgRenderTime.toFixed(1)} ms`;
+        }
+
         frameCount = 0;
+        totalRenderTime = 0;
+        renderTimeCount = 0;
         fpsTime = now;
     }
 
