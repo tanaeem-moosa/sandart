@@ -341,6 +341,31 @@
         #settings-sidebar.collapsed ~ #toggle-sidebar {
             left: 20px;
         }
+
+        /* Floating Stats HUD */
+        #stats-hud {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background-color: var(--bg-panel);
+            backdrop-filter: var(--glass-blur);
+            -webkit-backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--border-color);
+            padding: 8px 14px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--accent-color);
+            z-index: 100;
+            pointer-events: none;
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+
+        #stats-hud span {
+            color: var(--text-main);
+        }
     </style>
 </head>
 <body>
@@ -550,6 +575,12 @@
             <!-- Instruction Overlay -->
             <div id="instructions">
                 💡 Left Click + Drag to rotate camera • Scroll to zoom • Shift + Left Click & Drag to move magnet/marble
+            </div>
+            <!-- Floating HUD for Stats -->
+            <div id="stats-hud">
+                <span id="hud-fps">-- FPS</span>
+                <span style="color: var(--border-color);">|</span>
+                <span id="hud-time">-- ms</span>
             </div>
             <canvas id="sand-canvas"></canvas>
         </div>
