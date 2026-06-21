@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sands of Time: WebAssembly Sand Art Simulator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg-base: #0c0d12;
+            --bg-panel: rgba(18, 20, 29, 0.75);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --accent-color: #d4af37; /* Gold */
+            --accent-hover: #f3e5ab;
+            --text-main: #f0f1f5;
+            --text-muted: #8e92a2;
+            --glass-blur: blur(12px);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body {
+            font-family: 'Outfit', sans-serif;
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            overflow: hidden;
+            display: flex;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        /* Container layout */
+        #app-container {
+            display: flex;
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+
+        /* Sidebar settings panel */
+        #settings-sidebar {
+            width: 320px;
+            height: 100%;
+            background-color: var(--bg-panel);
+            backdrop-filter: var(--glass-blur);
+            -webkit-backdrop-filter: var(--glass-blur);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 24px;
+            overflow-y: auto;
+            z-index: 10;
+            transition: transform 0.3s ease;
+        }
+
+        #settings-sidebar.collapsed {
+            transform: translateX(-320px);
+        }
+
+        /* Main viewport */
+        #viewport-container {
+            flex-grow: 1;
+            height: 100%;
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: radial-gradient(circle at center, #161824 0%, #08090d 100%);
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        /* UI elements styling */
+        h1 {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--accent-color);
+            margin-bottom: 4px;
+            letter-spacing: 0.5px;
+        }
+
+        .subtitle {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 24px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-main);
+            margin-bottom: 12px;
+            margin-top: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            padding-bottom: 6px;
+        }
+
+        .control-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: block;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+
+        .label-val {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .val-display {
+            font-size: 12px;
+            color: var(--accent-color);
+            font-weight: 600;
+        }
+
+        /* Inputs */
+        select, input[type="range"], button {
+            width: 100%;
+            background-color: rgba(255,255,255,0.04);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-family: inherit;
+            font-size: 13px;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        select:focus, button:hover {
+            border-color: var(--accent-color);
+            background-color: rgba(255,255,255,0.08);
+        }
+
+        select {
+            cursor: pointer;
+            appearance: none;
+            background-image: url("data:image/svg+xml;utf8,<svg fill='white' height='24' viewBox='0 0 24 24' width='24' xmlns='http://www.w3.org/2000/svg'><path d='M7 10l5 5 5-5z'/><path d='M0 0h24v24H0z' fill='none'/></svg>");
+            background-repeat: no-repeat;
+            background-position: right 8px center;
+            background-size: 18px;
+            padding-right: 32px;
+        }
+
+        select option {
+            background-color: #12141d;
+            color: #f0f1f5;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            height: 6px;
+            padding: 0;
+            background: rgba(255,255,255,0.1);
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: var(--accent-color);
+            transition: transform 0.1s ease;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        /* Buttons */
+        button {
+            cursor: pointer;
+            font-weight: 600;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        button.primary {
+            background-color: var(--accent-color);
+            color: #0c0d12;
+            border: none;
+        }
+
+        button.primary:hover {
+            background-color: var(--accent-hover);
+        }
+
+        .btn-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        .btn-row button {
+            flex: 1;
+        }
+
+        /* Checkbox styling */
+        .checkbox-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            color: var(--text-main);
+            margin-top: 10px;
+        }
+
+        .checkbox-container input {
+            display: none;
+        }
+
+        .checkmark {
+            width: 18px;
+            height: 18px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background-color: rgba(255,255,255,0.04);
+            display: inline-block;
+            position: relative;
+            transition: all 0.2s ease;
+        }
+
+        .checkbox-container:hover .checkmark {
+            border-color: var(--accent-color);
+        }
+
+        .checkbox-container input:checked + .checkmark {
+            background-color: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+
+        .checkbox-container input:checked + .checkmark::after {
+            content: "";
+            position: absolute;
+            left: 5px;
+            top: 2px;
+            width: 5px;
+            height: 9px;
+            border: solid #0c0d12;
+            border-width: 0 2px 2px 0;
+            transform: rotate(45deg);
+        }
+
+        /* Instructions overlay */
+        #instructions {
+            position: absolute;
+            top: 20px;
+            left: 340px;
+            background-color: rgba(12, 13, 18, 0.65);
+            backdrop-filter: var(--glass-blur);
+            -webkit-backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--border-color);
+            padding: 10px 16px;
+            border-radius: 8px;
+            pointer-events: none;
+            font-size: 12px;
+            color: var(--text-muted);
+            z-index: 5;
+            transition: left 0.3s ease;
+        }
+
+        #settings-sidebar.collapsed ~ #instructions {
+            left: 20px;
+        }
+
+        .stat-display {
+            margin-top: auto;
+            border-top: 1px solid var(--border-color);
+            padding-top: 16px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        /* Color inputs */
+        .color-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .color-row input[type="color"] {
+            border: none;
+            background: none;
+            width: 32px;
+            height: 32px;
+            cursor: pointer;
+            outline: none;
+            border-radius: 4px;
+        }
+
+        /* Toggle Sidebar Button */
+        #toggle-sidebar {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            background-color: var(--bg-panel);
+            backdrop-filter: var(--glass-blur);
+            -webkit-backdrop-filter: var(--glass-blur);
+            border: 1px solid var(--border-color);
+            z-index: 100;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: var(--text-main);
+            font-size: 18px;
+            cursor: pointer;
+            transition: left 0.3s ease;
+        }
+
+        #settings-sidebar.collapsed ~ #toggle-sidebar {
+            left: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="app-container">
+        <!-- Settings Sidebar -->
+        <div id="settings-sidebar">
+            <h1>Sands of Time</h1>
+            <div class="subtitle">Wasm Simulator v2</div>
+
+            <!-- Marble settings -->
+            <div class="section-title">🔮 Marble Settings</div>
+            <div class="control-group">
+                <div class="label-val">
+                    <label for="speed-slider">Speed</label>
+                    <span id="speed-val" class="val-display">0.50 R/s</span>
+                </div>
+                <input type="range" id="speed-slider" min="0.05" max="2.0" step="0.05" value="0.5">
+            </div>
+
+            <div class="control-group">
+                <div class="label-val">
+                    <label for="size-slider">Marble Radius</label>
+                    <span id="size-val" class="val-display">0.018 R</span>
+                </div>
+                <input type="range" id="size-slider" min="0.015" max="0.045" step="0.001" value="0.018">
+            </div>
+
+            <div class="control-group">
+                <div class="label-val">
+                    <label for="marble-count">Marble Count</label>
+                    <span id="count-val" class="val-display">1</span>
+                </div>
+                <input type="range" id="marble-count" min="1" max="5" step="1" value="1">
+            </div>
+
+            <!-- Simulation preset -->
+            <div class="section-title">🔬 Sand Physics</div>
+            <div class="control-group">
+                <label for="material-select">Material Preset</label>
+                <select id="material-select">
+                    <option value="0" selected>Dry Sand</option>
+                    <option value="1">Kinetic Sand</option>
+                    <option value="2">Wet Sand</option>
+                    <option value="3">Coarse Sand</option>
+                    <option value="4">Butter-Cream</option>
+                    <option value="5">Snow</option>
+                    <option value="6">Fine Powder</option>
+                    <option value="7">Oobleck</option>
+                    <option value="8">Moon Dust</option>
+                    <option value="9">Iron Filings</option>
+                    <option value="10">Water</option>
+                    <option value="11">Milk</option>
+                    <option value="12">Ferrofluid</option>
+                    <option value="13">Vegetable Oil</option>
+                    <option value="14">Calm Water</option>
+                    <option value="15">Yogurt</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label for="shape-select">Sandbox Shape</label>
+                <select id="shape-select">
+                    <option value="0">Circle</option>
+                    <option value="1">Square</option>
+                    <option value="2">Oval</option>
+                </select>
+            </div>
+
+            <!-- Pattern generator -->
+            <div class="section-title">📐 Drawing Pattern</div>
+            <div class="control-group">
+                <label for="pattern-select">Active Pattern</label>
+                <select id="pattern-select">
+                    <option value="manual">Manual Draw</option>
+                    <option value="spiral">Archimedean Spiral</option>
+                    <option value="lissajous">Lissajous Curve</option>
+                    <option value="rose">Rose Flower Curve</option>
+                    <option value="spirograph">Spirograph (Hypotrochoid)</option>
+                    <option value="gosper">Gosper Space-Filling Curve</option>
+                    <option value="hilbert">Hilbert Space-Filling Curve</option>
+                    <option value="fermat">Fermat Spiral</option>
+                    <option value="sierpinski">Sierpinski Curve</option>
+                    <option value="random_walk">Random Walk</option>
+                    <option value="lemniscate">Lemniscate</option>
+                    <option value="butterfly">Butterfly Curve</option>
+                    <option value="zen_waves">Zen Waves</option>
+                    <option value="zen_mandala">Zen Mandala</option>
+                    <option value="clock">Clock Mode</option>
+                </select>
+            </div>
+
+            <!-- Pattern Parameters (Shown/Hidden dynamically based on selected pattern) -->
+            <div id="spiral-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="spiral-spacing-slider">Spiral Spacing</label>
+                    <span id="spiral-spacing-val" class="val-display">0.030</span>
+                </div>
+                <input type="range" id="spiral-spacing-slider" min="0.01" max="0.10" step="0.005" value="0.030">
+            </div>
+
+            <div id="lissajous-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="lissajous-a-slider">Frequency A</label>
+                    <span id="lissajous-a-val" class="val-display">3.00</span>
+                </div>
+                <input type="range" id="lissajous-a-slider" min="1" max="12" step="1" value="3">
+                <div class="label-val" style="margin-top: 8px;">
+                    <label for="lissajous-b-slider">Frequency B</label>
+                    <span id="lissajous-b-val" class="val-display">4.00</span>
+                </div>
+                <input type="range" id="lissajous-b-slider" min="1" max="12" step="1" value="4">
+            </div>
+
+            <div id="rose-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="rose-k-slider">Petal Parameter K</label>
+                    <span id="rose-k-val" class="val-display">5.00</span>
+                </div>
+                <input type="range" id="rose-k-slider" min="1.0" max="15.0" step="0.5" value="5.0">
+            </div>
+
+            <div id="spirograph-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="spiro-r-slider">Inner Radius R</label>
+                    <span id="spiro-r-val" class="val-display">0.28</span>
+                </div>
+                <input type="range" id="spiro-r-slider" min="0.05" max="0.95" step="0.01" value="0.28">
+                <div class="label-val" style="margin-top: 8px;">
+                    <label for="spiro-d-slider">Pen Offset D</label>
+                    <span id="spiro-d-val" class="val-display">0.20</span>
+                </div>
+                <input type="range" id="spiro-d-slider" min="0.05" max="0.95" step="0.01" value="0.20">
+            </div>
+
+            <div id="curve-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="curve-order-slider">Recursion Order (Depth)</label>
+                    <span id="curve-order-val" class="val-display">3</span>
+                </div>
+                <input type="range" id="curve-order-slider" min="1" max="6" step="1" value="3">
+            </div>
+
+            <div id="random-walk-params" class="control-group" style="display: none;">
+                <div class="label-val">
+                    <label for="walk-steps-slider">Step Count</label>
+                    <span id="walk-steps-val" class="val-display">1000</span>
+                </div>
+                <input type="range" id="walk-steps-slider" min="100" max="5000" step="100" value="1000">
+                <div class="label-val" style="margin-top: 8px;">
+                    <label for="walk-size-slider">Step Size</label>
+                    <span id="walk-size-val" class="val-display">0.020</span>
+                </div>
+                <input type="range" id="walk-size-slider" min="0.005" max="0.050" step="0.001" value="0.020">
+            </div>
+            <button id="btn-load-pattern" class="primary" style="margin-bottom: 24px;">Load / Restart Pattern</button>
+
+            <!-- Operations -->
+            <div class="section-title">⚙️ Operations</div>
+            <button id="btn-reset" class="primary">Reset Sand Bed</button>
+            <button id="btn-ripples">Draw Ripple Pattern</button>
+
+            <!-- Render Settings -->
+            <div class="section-title">💡 Rendering & Light</div>
+            <div class="control-group">
+                <label for="led-mode">LED Mode</label>
+                <select id="led-mode">
+                    <option value="0">Single LED</option>
+                    <option value="1">Rainbow Ring</option>
+                    <option value="2">Color Cycle</option>
+                    <option value="3">Overhead Moon Light</option>
+                    <option value="4">Rainbow Ring + Moon</option>
+                </select>
+            </div>
+
+            <div class="control-group color-row">
+                <label for="color-led">LED:</label>
+                <input type="color" id="color-led" value="#d4af37">
+                <label for="color-sand">Sand:</label>
+                <input type="color" id="color-sand" value="#ebd9bb">
+            </div>
+
+            <div class="control-group">
+                <div class="label-val">
+                    <label for="angle-slider">Light Direction</label>
+                </div>
+                <input type="range" id="angle-slider" min="0" max="6.28" step="0.05" value="0">
+            </div>
+
+            <label class="checkbox-container">
+                <input type="checkbox" id="check-shadows" checked>
+                <span class="checkmark"></span>
+                Raymarched Shadows
+            </label>
+
+            <!-- Stats -->
+            <div class="stat-display">
+                <div id="stat-fps">FPS: 60</div>
+                <div id="stat-render-time">Frame time: -- ms</div>
+            </div>
+        </div>
+
+        <!-- Toggle Sidebar Button -->
+        <div id="toggle-sidebar">⚙</div>
+
+        <!-- Viewport -->
+        <div id="viewport-container">
+            <!-- Instruction Overlay -->
+            <div id="instructions">
+                💡 Left Click + Drag to rotate camera • Scroll to zoom • Shift + Left Click & Drag to move magnet/marble
+            </div>
+            <canvas id="sand-canvas"></canvas>
+        </div>
+    </div>
+
+    <!-- Load the JS Module -->
+    <script type="module" src="./demo.js"></script>
+</body>
+</html>
