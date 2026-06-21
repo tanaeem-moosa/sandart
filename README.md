@@ -2,7 +2,10 @@
 
 A beautiful, high-performance simulation of a kinetic sand art table (like the Sisyphus table) written in Rust. The application simulates a physical steel ball rolling through a sand bed, carving intricate mathematical and path-based designs, illuminated by a dynamic RGB LED ring.
 
-![Sand Art Table Design Concept](https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80) *Note: Placeholder illustration for visual concept.*
+### 🌐 Live Web Sandbox
+👉 **[tanaeem-moosa.github.io/sandart/](https://tanaeem-moosa.github.io/sandart/)**
+
+![Kinetic Sand Art Simulation](assets/screenshot.png)
 
 ## Project Goals
 
