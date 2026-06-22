@@ -809,9 +809,9 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = if clamped_flow > 0.01 {
+                                    let flow_activity = if clamped_flow > 0.02 {
                                         crate::BlockActivity::Fast
-                                    } else if clamped_flow > 1e-3 {
+                                    } else if clamped_flow > 3e-3 {
                                         crate::BlockActivity::Medium
                                     } else {
                                         crate::BlockActivity::Slow
@@ -982,9 +982,9 @@ pub fn settle_tick(
                                         let ny = neighbor_idx / w;
                                         let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                         
-                                        let flow_activity = if clamped_flow > 0.01 {
+                                        let flow_activity = if clamped_flow > 0.02 {
                                             crate::BlockActivity::Fast
-                                        } else if clamped_flow > 1e-3 {
+                                        } else if clamped_flow > 3e-3 {
                                             crate::BlockActivity::Medium
                                         } else {
                                             crate::BlockActivity::Slow
@@ -1076,9 +1076,9 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = if clamped_flow > 0.01 {
+                                    let flow_activity = if clamped_flow > 0.02 {
                                         crate::BlockActivity::Fast
-                                    } else if clamped_flow > 1e-3 {
+                                    } else if clamped_flow > 3e-3 {
                                         crate::BlockActivity::Medium
                                     } else {
                                         crate::BlockActivity::Slow
@@ -1151,9 +1151,9 @@ pub fn settle_tick(
                                         let ny = neighbor_idx / w;
                                         let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                         
-                                        let flow_activity = if clamped_flow > 0.01 {
+                                        let flow_activity = if clamped_flow > 0.02 {
                                             crate::BlockActivity::Fast
-                                        } else if clamped_flow > 1e-3 {
+                                        } else if clamped_flow > 3e-3 {
                                             crate::BlockActivity::Medium
                                         } else {
                                             crate::BlockActivity::Slow
@@ -1256,9 +1256,9 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = if clamped_flow > 0.01 {
+                                    let flow_activity = if clamped_flow > 0.02 {
                                         crate::BlockActivity::Fast
-                                    } else if clamped_flow > 1e-3 {
+                                    } else if clamped_flow > 3e-3 {
                                         crate::BlockActivity::Medium
                                     } else {
                                         crate::BlockActivity::Slow
@@ -1310,9 +1310,9 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = if clamped_flow > 0.01 {
+                                    let flow_activity = if clamped_flow > 0.02 {
                                         crate::BlockActivity::Fast
-                                    } else if clamped_flow > 1e-3 {
+                                    } else if clamped_flow > 3e-3 {
                                         crate::BlockActivity::Medium
                                     } else {
                                         crate::BlockActivity::Slow
