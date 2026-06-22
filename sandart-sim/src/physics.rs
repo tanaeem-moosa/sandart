@@ -641,7 +641,7 @@ pub fn settle_tick(
                             let current_temp_neighbor = temp_heights[neighbor_idx];
                             let temp_diff = current_temp_center - current_temp_neighbor;
                             let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                            if clamped_flow > 0.0 {
+                            if clamped_flow > 1e-5 {
                                 temp_heights[center_idx] -= clamped_flow;
                                 temp_heights[neighbor_idx] += clamped_flow;
                                 total_flow += clamped_flow;
@@ -808,7 +808,7 @@ pub fn settle_tick(
                             if flow > 0.0 {
                                 let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
                                 let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                if clamped_flow > 0.0 {
+                                if clamped_flow > 1e-5 {
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
                                     total_flow += clamped_flow;
@@ -862,7 +862,7 @@ pub fn settle_tick(
                             let current_temp_neighbor = temp_heights[neighbor_idx];
                             let temp_diff = current_temp_center - current_temp_neighbor;
                             let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                            if clamped_flow > 0.0 {
+                            if clamped_flow > 1e-5 {
                                 temp_heights[center_idx] -= clamped_flow;
                                 temp_heights[neighbor_idx] += clamped_flow;
                                 total_flow += clamped_flow;
@@ -930,7 +930,7 @@ pub fn settle_tick(
                             if flow > 0.0 {
                                 let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
                                 let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                if clamped_flow > 0.0 {
+                                if clamped_flow > 1e-5 {
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
                                     total_flow += clamped_flow;
@@ -994,7 +994,7 @@ pub fn settle_tick(
                             let current_temp_neighbor = temp_heights[neighbor_idx];
                             let temp_diff = current_temp_center - current_temp_neighbor;
                             let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                            if clamped_flow > 0.0 {
+                            if clamped_flow > 1e-5 {
                                 temp_heights[center_idx] -= clamped_flow;
                                 temp_heights[neighbor_idx] += clamped_flow;
                                 total_flow += clamped_flow;
@@ -1041,7 +1041,7 @@ pub fn settle_tick(
                         if flow > 0.0 {
                             let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
                             let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                            if clamped_flow > 0.0 {
+                            if clamped_flow > 1e-5 {
                                 temp_heights[center_idx] -= clamped_flow;
                                 temp_heights[neighbor_idx] += clamped_flow;
                                 total_flow += clamped_flow;
