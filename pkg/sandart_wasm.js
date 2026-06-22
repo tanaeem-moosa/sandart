@@ -34,6 +34,13 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_draw_ripples(this.__wbg_ptr);
     }
     /**
+     * @returns {Int32Array}
+     */
+    get_active_block_counts() {
+        const ret = wasm.wasmsimulationstate_get_active_block_counts(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @returns {Float32Array}
      */
     get_heightmap() {
@@ -1365,6 +1372,10 @@ function __wbg_get_imports() {
         },
         __wbg_new_from_slice_18fa1f71286d66b8: function(arg0, arg1) {
             const ret = new Uint8Array(getArrayU8FromWasm0(arg0, arg1));
+            return ret;
+        },
+        __wbg_new_from_slice_1b23616ada25abcb: function(arg0, arg1) {
+            const ret = new Int32Array(getArrayI32FromWasm0(arg0, arg1));
             return ret;
         },
         __wbg_new_typed_bf31d18f92484486: function(arg0, arg1) {
