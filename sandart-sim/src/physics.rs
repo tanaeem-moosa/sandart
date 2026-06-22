@@ -481,6 +481,21 @@ pub fn settle_tick(
         }
     };
 
+    // Flow-rate thresholds for block activity tier assignment
+    const FLOW_FAST_THRESHOLD: f32 = 0.05;
+    const FLOW_MEDIUM_THRESHOLD: f32 = 0.01;
+    const FLOW_INACTIVE_THRESHOLD: f32 = 3e-4;
+
+    let flow_to_activity = |clamped_flow: f32| -> crate::BlockActivity {
+        if clamped_flow > FLOW_FAST_THRESHOLD {
+            crate::BlockActivity::Fast
+        } else if clamped_flow > FLOW_MEDIUM_THRESHOLD {
+            crate::BlockActivity::Medium
+        } else {
+            crate::BlockActivity::Slow
+        }
+    };
+
     // If material is a liquid (Water, Milk, Ferrofluid, Yogurt), run the 2D wave propagation solver instead of CA settling.
     if material == crate::MaterialMode::Water
         || material == crate::MaterialMode::Milk
@@ -804,18 +819,12 @@ pub fn settle_tick(
                                 let current_temp_neighbor = temp_heights[neighbor_idx];
                                 let temp_diff = current_temp_center - current_temp_neighbor;
                                 let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                if clamped_flow > 3e-4 {
+                                if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                     let nx = neighbor_idx % w;
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = if clamped_flow > 0.02 {
-                                        crate::BlockActivity::Fast
-                                    } else if clamped_flow > 3e-3 {
-                                        crate::BlockActivity::Medium
-                                    } else {
-                                        crate::BlockActivity::Slow
-                                    };
+                                    let flow_activity = flow_to_activity(clamped_flow);
                                     activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
                                     activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
 
@@ -977,18 +986,12 @@ pub fn settle_tick(
                                 if flow > 0.0 {
                                     let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
                                     let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                    if clamped_flow > 3e-4 {
+                                    if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                         let nx = neighbor_idx % w;
                                         let ny = neighbor_idx / w;
                                         let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                         
-                                        let flow_activity = if clamped_flow > 0.02 {
-                                            crate::BlockActivity::Fast
-                                        } else if clamped_flow > 3e-3 {
-                                            crate::BlockActivity::Medium
-                                        } else {
-                                            crate::BlockActivity::Slow
-                                        };
+                                        let flow_activity = flow_to_activity(clamped_flow);
                                         activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
                                         activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
 
@@ -1071,7 +1074,7 @@ pub fn settle_tick(
                                 let current_temp_neighbor = temp_heights[neighbor_idx];
                                 let temp_diff = current_temp_center - current_temp_neighbor;
                                 let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                if clamped_flow > 3e-4 {
+                                if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                     let nx = neighbor_idx % w;
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
@@ -1146,18 +1149,12 @@ pub fn settle_tick(
                                 if flow > 0.0 {
                                     let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
                                     let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                    if clamped_flow > 3e-4 {
+                                    if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                         let nx = neighbor_idx % w;
                                         let ny = neighbor_idx / w;
                                         let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                         
-                                        let flow_activity = if clamped_flow > 0.02 {
-                                            crate::BlockActivity::Fast
-                                        } else if clamped_flow > 3e-3 {
-                                            crate::BlockActivity::Medium
-                                        } else {
-                                            crate::BlockActivity::Slow
-                                        };
+                                        let flow_activity = flow_to_activity(clamped_flow);
                                         activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
                                         activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
 
@@ -1251,7 +1248,7 @@ pub fn settle_tick(
                                 let current_temp_neighbor = temp_heights[neighbor_idx];
                                 let temp_diff = current_temp_center - current_temp_neighbor;
                                 let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                if clamped_flow > 3e-4 {
+                                if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                     let nx = neighbor_idx % w;
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
@@ -1305,7 +1302,7 @@ pub fn settle_tick(
                             if flow > 0.0 {
                                 let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
                                 let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                if clamped_flow > 3e-4 {
+                                if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                     let nx = neighbor_idx % w;
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
