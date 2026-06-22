@@ -105,6 +105,11 @@ pub struct DrawingSimulation {
     pub marble_radius: f32,
     pub material_mode: MaterialMode,
     pub sandbox_shape: SandboxShape,
+
+    /// Coarse block activity grid for CA optimization.
+    pub active_blocks: Vec<bool>,
+    /// Block size (e.g. 32 pixels).
+    pub block_size: usize,
 }
 
 fn generate_smooth_noise(seed_val: u32) -> Heightmap {
@@ -179,6 +184,11 @@ impl DrawingSimulation {
         let sliding = vec![false; GRID_SIZE * GRID_SIZE];
         let wave_vel = vec![0.0f32; GRID_SIZE * GRID_SIZE];
 
+        let block_size = 32;
+        let cols = (GRID_SIZE + block_size - 1) / block_size;
+        let rows = (GRID_SIZE + block_size - 1) / block_size;
+        let active_blocks = vec![false; cols * rows];
+
         Self {
             heightmap,
             temp_heights,
@@ -200,6 +210,8 @@ impl DrawingSimulation {
             marble_radius: 0.018,
             material_mode: MaterialMode::default(),
             sandbox_shape: SandboxShape::default(),
+            active_blocks,
+            block_size,
         }
     }
 
@@ -222,6 +234,7 @@ impl DrawingSimulation {
             active: false,
         };
         self.seed = 98765u32;
+        self.active_blocks.fill(false);
     }
 
     /// Convert normalized Cartesian coordinates ([-1.0, 1.0]) to grid index coordinates.
@@ -304,6 +317,12 @@ impl DrawingSimulation {
         self.seed ^= self.seed << 5;
         let time_seed = self.seed;
 
+        let w = self.heightmap.width;
+        let h = self.heightmap.height;
+        let block_size = self.block_size;
+        let cols = (w + block_size - 1) / block_size;
+        let rows = (h + block_size - 1) / block_size;
+
         for j in 0..5 {
             if let Some(target) = targets[j] {
                 // Sanitize target coordinate float boundaries against NaNs/Infs
@@ -312,6 +331,14 @@ impl DrawingSimulation {
                 let target_sanitized = Vec2::new(tx, ty);
 
                 let clamped_target = Self::clamp_to_sandbox(target_sanitized, shape, marble_radius);
+
+                let mut segment_bounds = ActiveBounds {
+                    min_x: 0,
+                    max_x: 0,
+                    min_y: 0,
+                    max_y: 0,
+                    active: false,
+                };
 
                 if self.marbles[j].was_active {
                     self.marbles[j].prev_pos = self.marbles[j].pos;
@@ -363,7 +390,7 @@ impl DrawingSimulation {
                         self.marbles[j].prev_pos,
                         self.marbles[j].pos,
                         marble_radius,
-                        &mut self.active_bounds,
+                        &mut segment_bounds,
                         material,
                     );
                 } else {
@@ -375,10 +402,23 @@ impl DrawingSimulation {
                         clamped_target,
                         clamped_target,
                         marble_radius,
-                        &mut self.active_bounds,
+                        &mut segment_bounds,
                         material,
                     );
                     self.marbles[j].was_active = true;
+                }
+
+                // Activate blocks overlapping with the new displacement segment
+                if segment_bounds.active {
+                    let block_min_x = segment_bounds.min_x / block_size;
+                    let block_max_x = (segment_bounds.max_x / block_size).min(cols - 1);
+                    let block_min_y = segment_bounds.min_y / block_size;
+                    let block_max_y = (segment_bounds.max_y / block_size).min(rows - 1);
+                    for by in block_min_y..=block_max_y {
+                        for bx in block_min_x..=block_max_x {
+                            self.active_blocks[by * cols + bx] = true;
+                        }
+                    }
                 }
             } else {
                 self.marbles[j].was_active = false;
@@ -393,36 +433,35 @@ impl DrawingSimulation {
             }
         }
 
-        // If material is IronFilings, expand the active bounds to cover the magnet's reach
+        // If material is IronFilings, expand the active blocks to cover the magnet's reach
         // around all active marbles so filings can react dynamically as the magnet moves.
         if material == MaterialMode::IronFilings {
             for j in 0..5 {
                 if self.marbles[j].was_active {
-                    let (mx, my) = Self::norm_to_grid(self.marbles[j].pos, GRID_SIZE, GRID_SIZE);
+                    let (mx, my) = Self::norm_to_grid(self.marbles[j].pos, w, h);
                     let r_reach = 225; // ~0.22 radius in grid cells (matches 0.22 magnet reach)
                     let min_x = mx.saturating_sub(r_reach);
-                    let max_x = (mx + r_reach).min(GRID_SIZE - 1);
+                    let max_x = (mx + r_reach).min(w - 1);
                     let min_y = my.saturating_sub(r_reach);
-                    let max_y = (my + r_reach).min(GRID_SIZE - 1);
+                    let max_y = (my + r_reach).min(h - 1);
 
-                    if self.active_bounds.active {
-                        self.active_bounds.min_x = self.active_bounds.min_x.min(min_x);
-                        self.active_bounds.max_x = self.active_bounds.max_x.max(max_x);
-                        self.active_bounds.min_y = self.active_bounds.min_y.min(min_y);
-                        self.active_bounds.max_y = self.active_bounds.max_y.max(max_y);
-                    } else {
-                        self.active_bounds.min_x = min_x;
-                        self.active_bounds.max_x = max_x;
-                        self.active_bounds.min_y = min_y;
-                        self.active_bounds.max_y = max_y;
-                        self.active_bounds.active = true;
+                    let block_min_x = min_x / block_size;
+                    let block_max_x = (max_x / block_size).min(cols - 1);
+                    let block_min_y = min_y / block_size;
+                    let block_max_y = (max_y / block_size).min(rows - 1);
+
+                    for by in block_min_y..=block_max_y {
+                        for bx in block_min_x..=block_max_x {
+                            self.active_blocks[by * cols + bx] = true;
+                        }
                     }
                 }
             }
         }
 
         // Run the gravity-driven settling cellular automata tick
-        if self.active_bounds.active {
+        let has_active = self.active_blocks.iter().any(|&x| x);
+        if has_active {
             let mut active_marbles = [physics::ActiveMarbleInfo {
                 pos: Vec2::ZERO,
                 vel: 0.0,
@@ -446,12 +485,16 @@ impl DrawingSimulation {
                 &mut self.temp_heights,
                 &mut self.sliding,
                 &mut self.active_bounds,
+                &mut self.active_blocks,
+                self.block_size,
                 material,
                 &active_marbles[..active_count],
                 time_seed,
                 &mut self.wave_vel,
                 shape,
             );
+        } else {
+            self.active_bounds.active = false;
         }
     }
 }
