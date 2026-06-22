@@ -481,22 +481,39 @@ impl WasmSimulationState {
             _ => return false,
         };
 
+        let base_waypoints = sandart_pattern::close_loop_path(base_waypoints);
+        if base_waypoints.is_empty() {
+            return false;
+        }
+
         let arms = self.marble_count.clamp(1, 5) as usize;
-        for j in 0..arms {
-            let angle_offset = (j as f32 / arms as f32) * 2.0 * std::f32::consts::PI;
-            let mut rotated = Vec::with_capacity(base_waypoints.len());
-            for p in &base_waypoints {
-                let cos_a = angle_offset.cos();
-                let sin_a = angle_offset.sin();
-                let rx = p.x * cos_a - p.y * sin_a;
-                let ry = p.x * sin_a + p.y * cos_a;
-                let mut p_rot = glam::Vec2::new(rx, ry);
+        for j in 0..5 {
+            if j < arms {
+                let mut path = base_waypoints.clone();
                 if self.sandbox_shape == SandboxShape::Oval {
-                    p_rot.y *= 0.652;
+                    for p in &mut path {
+                        p.y *= 0.652;
+                    }
                 }
-                rotated.push(p_rot);
+                self.playback.waypoints[j] = path;
+                let start_idx = (j * base_waypoints.len() / arms) % base_waypoints.len();
+                self.playback.current_indices[j] = start_idx;
+
+                // Snap simulation marble to its starting waypoint position
+                let start_pos = self.playback.waypoints[j][start_idx];
+                self.sim.marbles[j].pos = start_pos;
+                self.sim.marbles[j].prev_pos = start_pos;
+                self.sim.marbles[j].vel = glam::Vec2::ZERO;
+                self.sim.marbles[j].was_active = true;
+            } else {
+                self.sim.marbles[j].was_active = false;
             }
-            self.playback.waypoints[j] = rotated;
+        }
+        if arms > 0 {
+            self.sim.marble_pos = self.sim.marbles[0].pos;
+            self.sim.prev_marble_pos = self.sim.marbles[0].prev_pos;
+            self.sim.marble_vel = self.sim.marbles[0].vel;
+            self.sim.was_active = self.sim.marbles[0].was_active;
         }
 
         self.playback.randomize_speeds(arms, self.sim.seed);
