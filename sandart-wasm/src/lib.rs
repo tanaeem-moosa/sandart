@@ -682,6 +682,22 @@ impl WasmSimulationState {
     pub fn get_heightmap(&self) -> js_sys::Float32Array {
         unsafe { js_sys::Float32Array::view(self.sim.heightmap.as_slice()) }
     }
+
+    pub fn get_active_block_counts(&self) -> js_sys::Int32Array {
+        let mut inactive = 0;
+        let mut slow = 0;
+        let mut medium = 0;
+        let mut fast = 0;
+        for &activity in &self.sim.active_blocks {
+            match activity {
+                sandart_sim::BlockActivity::Inactive => inactive += 1,
+                sandart_sim::BlockActivity::Slow => slow += 1,
+                sandart_sim::BlockActivity::Medium => medium += 1,
+                sandart_sim::BlockActivity::Fast => fast += 1,
+            }
+        }
+        js_sys::Int32Array::from(&[inactive, slow, medium, fast][..])
+    }
 }
 
 pub const GRID_SIZE: usize = 1024;

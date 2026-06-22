@@ -127,6 +127,13 @@ function tick(now) {
         document.getElementById('stat-fps').innerText = `FPS: ${frameCount}`;
         document.getElementById('stat-render-time').innerText = `Frame time: ${avgTotalTime.toFixed(1)} ms (CPU: ${avgStepTime.toFixed(1)} ms, GPU: ${avgRenderTime.toFixed(1)} ms)`;
         
+        const blockCounts = state.get_active_block_counts();
+        const inactive = blockCounts[0];
+        const slow = blockCounts[1];
+        const medium = blockCounts[2];
+        const fast = blockCounts[3];
+        document.getElementById('stat-blocks').innerText = `Blocks: F: ${fast}, M: ${medium}, S: ${slow}, I: ${inactive}`;
+        
         // Update floating HUD stats
         const hudFps = document.getElementById('hud-fps');
         const hudTime = document.getElementById('hud-time');
