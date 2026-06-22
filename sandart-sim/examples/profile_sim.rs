@@ -21,7 +21,7 @@ fn main() {
             let sin_a = angle_offset.sin();
             let rx = p.x * cos_a - p.y * sin_a;
             let ry = p.x * sin_a + p.y * cos_a;
-            let p_rot = glam::Vec2::new(rx, ry);
+            let p_rot = Vec2::new(rx, ry);
             rotated.push(p_rot);
         }
         playback.waypoints[j] = rotated;
@@ -39,11 +39,12 @@ fn main() {
         sim.marbles[4].pos,
     ];
     let targets = playback.step_playback_all(&positions, arms, 0.4, 0.016);
-    sim.update(0.016, &targets, 0.018, MaterialMode::MoonDust, SandboxShape::Circle);
+    sim.update(0.016, &targets, 0.018, MaterialMode::ButterCream, SandboxShape::Circle);
 
     println!("Starting profiling session (sampling at 250Hz)...");
     let guard = pprof::ProfilerGuard::new(250).unwrap(); // 250Hz sample rate
 
+    let start_time = std::time::Instant::now();
     // Run 3000 simulation steps
     for _ in 0..3000 {
         let positions = [
@@ -54,8 +55,10 @@ fn main() {
             sim.marbles[4].pos,
         ];
         let targets = playback.step_playback_all(&positions, arms, 0.4, 0.016);
-        sim.update(0.016, &targets, 0.018, MaterialMode::MoonDust, SandboxShape::Circle);
+        sim.update(0.016, &targets, 0.018, MaterialMode::ButterCream, SandboxShape::Circle);
     }
+    let elapsed = start_time.elapsed();
+    println!("Simulation of 3000 steps took: {:?}", elapsed);
 
     println!("Profiling finished. Generating flamegraph...");
     if let Ok(report) = guard.report().build() {

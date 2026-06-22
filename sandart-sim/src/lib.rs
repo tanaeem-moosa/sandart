@@ -48,6 +48,21 @@ impl Default for MaterialMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum BlockActivity {
+    Inactive = 0,
+    Slow = 1,
+    Medium = 2,
+    Fast = 3,
+}
+
+impl Default for BlockActivity {
+    fn default() -> Self {
+        Self::Inactive
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MarbleState {
     pub pos: Vec2,
@@ -107,9 +122,11 @@ pub struct DrawingSimulation {
     pub sandbox_shape: SandboxShape,
 
     /// Coarse block activity grid for CA optimization.
-    pub active_blocks: Vec<bool>,
+    pub active_blocks: Vec<BlockActivity>,
     /// Block size (e.g. 32 pixels).
     pub block_size: usize,
+    /// Tick count for multi-rate LOD scheduling.
+    pub tick_count: u32,
 }
 
 fn generate_smooth_noise(seed_val: u32) -> Heightmap {
@@ -187,7 +204,7 @@ impl DrawingSimulation {
         let block_size = 32;
         let cols = (GRID_SIZE + block_size - 1) / block_size;
         let rows = (GRID_SIZE + block_size - 1) / block_size;
-        let active_blocks = vec![false; cols * rows];
+        let active_blocks = vec![BlockActivity::Inactive; cols * rows];
 
         Self {
             heightmap,
@@ -212,6 +229,7 @@ impl DrawingSimulation {
             sandbox_shape: SandboxShape::default(),
             active_blocks,
             block_size,
+            tick_count: 0,
         }
     }
 
@@ -234,7 +252,8 @@ impl DrawingSimulation {
             active: false,
         };
         self.seed = 98765u32;
-        self.active_blocks.fill(false);
+        self.active_blocks.fill(BlockActivity::Inactive);
+        self.tick_count = 0;
     }
 
     /// Convert normalized Cartesian coordinates ([-1.0, 1.0]) to grid index coordinates.
@@ -416,7 +435,7 @@ impl DrawingSimulation {
                     let block_max_y = (segment_bounds.max_y / block_size).min(rows - 1);
                     for by in block_min_y..=block_max_y {
                         for bx in block_min_x..=block_max_x {
-                            self.active_blocks[by * cols + bx] = true;
+                            self.active_blocks[by * cols + bx] = BlockActivity::Fast;
                         }
                     }
                 }
@@ -452,7 +471,7 @@ impl DrawingSimulation {
 
                     for by in block_min_y..=block_max_y {
                         for bx in block_min_x..=block_max_x {
-                            self.active_blocks[by * cols + bx] = true;
+                            self.active_blocks[by * cols + bx] = BlockActivity::Fast;
                         }
                     }
                 }
@@ -460,7 +479,7 @@ impl DrawingSimulation {
         }
 
         // Run the gravity-driven settling cellular automata tick
-        let has_active = self.active_blocks.iter().any(|&x| x);
+        let has_active = self.active_blocks.iter().any(|&x| x != BlockActivity::Inactive);
         if has_active {
             let mut active_marbles = [physics::ActiveMarbleInfo {
                 pos: Vec2::ZERO,
@@ -492,10 +511,12 @@ impl DrawingSimulation {
                 time_seed,
                 &mut self.wave_vel,
                 shape,
+                self.tick_count,
             );
         } else {
             self.active_bounds.active = false;
         }
+        self.tick_count = self.tick_count.wrapping_add(1);
     }
 }
 
