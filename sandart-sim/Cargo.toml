@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 glam = "0.29.0"
 serde = { version = "1.0.217", features = ["derive"] }
+
+[dev-dependencies]
+pprof = { version = "0.13.0", features = ["flamegraph"] }

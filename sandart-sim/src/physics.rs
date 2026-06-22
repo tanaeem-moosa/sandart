@@ -602,33 +602,35 @@ pub fn settle_tick(
 
     // 2. Cellular automata slope settling update (loop over core active box)
     let is_complex = material == crate::MaterialMode::Oobleck || material == crate::MaterialMode::IronFilings;
+    let is_dynamic = material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand;
+
+    // Clamp active bounds to interior cells to ensure safe direct indexing without bounds checks
+    let min_x = active_bounds.min_x.max(1);
+    let max_x = active_bounds.max_x.min(w - 2);
+    let min_y = active_bounds.min_y.max(1);
+    let max_y = active_bounds.max_y.min(h - 2);
 
     if is_complex {
-        for y in active_bounds.min_y..=active_bounds.max_y {
+        for y in min_y..=max_y {
             let row_offset = y * w;
-            for x in active_bounds.min_x..=active_bounds.max_x {
+            for x in min_x..=max_x {
                 let center_idx = row_offset + x;
                 let h_center = heightmap.data[center_idx];
 
                 let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
                 
-                // Loop over 4 neighbors
                 let neighbors = [
-                    (x > 0, x.wrapping_sub(1), y, center_idx.wrapping_sub(1)),
-                    (x + 1 < w, x + 1, y, center_idx + 1),
-                    (y > 0, x, y.wrapping_sub(1), center_idx.wrapping_sub(w)),
-                    (y + 1 < h, x, y + 1, center_idx + w),
+                    center_idx - 1, // Left
+                    center_idx + 1, // Right
+                    center_idx - w, // Top
+                    center_idx + w, // Bottom
                 ];
 
                 let mut cell_flowed = false;
 
                 // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
                 let mut avalanche_checked = false;
-                for &(cond, nx, ny, neighbor_idx) in &neighbors {
-                    if !cond {
-                        continue;
-                    }
-
+                for &neighbor_idx in &neighbors {
                     let h_neighbor = heightmap.data[neighbor_idx];
                     let geom_slope = h_center - h_neighbor;
 
@@ -645,6 +647,8 @@ pub fn settle_tick(
                                 total_flow += clamped_flow;
                                 cell_flowed = true;
                                 
+                                let nx = neighbor_idx % w;
+                                let ny = neighbor_idx / w;
                                 next_min_x = next_min_x.min(nx).min(x);
                                 next_max_x = next_max_x.max(nx).max(x);
                                 next_min_y = next_min_y.min(ny).min(y);
@@ -714,11 +718,7 @@ pub fn settle_tick(
                     None
                 };
 
-                for (dir_idx, &(cond, nx, ny, neighbor_idx)) in neighbors.iter().enumerate() {
-                    if !cond {
-                        continue;
-                    }
-
+                for (dir_idx, &neighbor_idx) in neighbors.iter().enumerate() {
                     let h_neighbor = heightmap.data[neighbor_idx];
                     let geom_slope = h_center - h_neighbor;
 
@@ -814,6 +814,8 @@ pub fn settle_tick(
                                     total_flow += clamped_flow;
                                     cell_flowed = true;
                                     
+                                    let nx = neighbor_idx % w;
+                                    let ny = neighbor_idx / w;
                                     next_min_x = next_min_x.min(nx).min(x);
                                     next_max_x = next_max_x.max(nx).max(x);
                                     next_min_y = next_min_y.min(ny).min(y);
@@ -828,32 +830,28 @@ pub fn settle_tick(
                 sliding[center_idx] = cell_flowed;
             }
         }
-    } else {
-        // Standard loop fully optimized for DrySand, MoonDust, KineticSand, WetSand, etc.
-        for y in active_bounds.min_y..=active_bounds.max_y {
+    } else if is_dynamic {
+        // Dynamic CA loop (DrySand, CoarseSand)
+        for y in min_y..=max_y {
             let row_offset = y * w;
-            for x in active_bounds.min_x..=active_bounds.max_x {
+            for x in min_x..=max_x {
                 let center_idx = row_offset + x;
                 let h_center = heightmap.data[center_idx];
 
                 let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
                 
                 let neighbors = [
-                    (x > 0, x.wrapping_sub(1), y, center_idx.wrapping_sub(1)),
-                    (x + 1 < w, x + 1, y, center_idx + 1),
-                    (y > 0, x, y.wrapping_sub(1), center_idx.wrapping_sub(w)),
-                    (y + 1 < h, x, y + 1, center_idx + w),
+                    center_idx - 1, // Left
+                    center_idx + 1, // Right
+                    center_idx - w, // Top
+                    center_idx + w, // Bottom
                 ];
 
                 let mut cell_flowed = false;
 
                 // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
                 let mut avalanche_checked = false;
-                for &(cond, nx, ny, neighbor_idx) in &neighbors {
-                    if !cond {
-                        continue;
-                    }
-
+                for &neighbor_idx in &neighbors {
                     let h_neighbor = heightmap.data[neighbor_idx];
                     let geom_slope = h_center - h_neighbor;
 
@@ -870,6 +868,8 @@ pub fn settle_tick(
                                 total_flow += clamped_flow;
                                 cell_flowed = true;
                                 
+                                let nx = neighbor_idx % w;
+                                let ny = neighbor_idx / w;
                                 next_min_x = next_min_x.min(nx).min(x);
                                 next_max_x = next_max_x.max(nx).max(x);
                                 next_min_y = next_min_y.min(ny).min(y);
@@ -887,31 +887,19 @@ pub fn settle_tick(
 
                 // Cell-invariant properties (calculated once per cell before neighbor loop)
                 let mut higher_neighbors = 0;
-                if material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand {
-                    for &(cond, _, _, n_idx) in &neighbors {
-                        if cond && heightmap.data[n_idx] >= h_center - 1e-4 {
-                            higher_neighbors += 1;
-                        }
+                for &n_idx in &neighbors {
+                    if heightmap.data[n_idx] >= h_center - 1e-4 {
+                        higher_neighbors += 1;
                     }
                 }
 
                 let (base_threshold, alpha, quantize_size, lock_chance_low, lock_chance_high): (f32, f32, Option<f32>, f32, f32) = match material {
-                    crate::MaterialMode::ButterCream => (0.04, 0.15, None, 0.20, 0.20),
                     crate::MaterialMode::DrySand => (0.08, 0.25, Some(0.01), 0.10, 0.80),
-                    crate::MaterialMode::Snow => (0.15, 0.04, None, 0.30, 0.30),
-                    crate::MaterialMode::KineticSand => (0.12, 0.12, Some(0.015), 0.75, 0.75),
-                    crate::MaterialMode::WetSand => (0.10, 0.06, None, 0.15, 0.15),
-                    crate::MaterialMode::FinePowder => (0.01, 0.35, None, 0.02, 0.02),
-                    crate::MaterialMode::MoonDust => (0.22, 0.02, Some(0.015), 0.40, 0.40),
                     crate::MaterialMode::CoarseSand => (0.11, 0.22, Some(0.035), 0.15, 0.75),
                     _ => (0.08, 0.25, Some(0.01), 0.10, 0.80),
                 };
 
-                for &(cond, _, _, neighbor_idx) in &neighbors {
-                    if !cond {
-                        continue;
-                    }
-
+                for &neighbor_idx in &neighbors {
                     let h_neighbor = heightmap.data[neighbor_idx];
                     let geom_slope = h_center - h_neighbor;
 
@@ -919,18 +907,12 @@ pub fn settle_tick(
                         continue;
                     }
 
-                    let threshold = if material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand {
+                    let threshold = {
                         let sliding_threshold = if material == crate::MaterialMode::DrySand { 0.04 } else { 0.06 };
                         if sliding[center_idx] { sliding_threshold } else { base_threshold }
-                    } else {
-                        base_threshold
                     };
 
-                    let lock_chance = if material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand {
-                        if higher_neighbors >= 3 { lock_chance_high } else { lock_chance_low }
-                    } else {
-                        lock_chance_low
-                    };
+                    let lock_chance = if higher_neighbors >= 3 { lock_chance_high } else { lock_chance_low };
 
                     // C. Stochastic locking and sliding condition
                     if geom_slope > threshold {
@@ -962,6 +944,116 @@ pub fn settle_tick(
                                     next_max_y = next_max_y.max(ny).max(y);
                                     flow_occurred = true;
                                 }
+                            }
+                        }
+                    }
+                }
+
+                sliding[center_idx] = cell_flowed;
+            }
+        }
+    } else {
+        // Static CA loop fully optimized for ButterCream, Snow, WetSand, FinePowder, MoonDust, KineticSand
+        let (threshold, alpha, quantize_size, lock_chance): (f32, f32, Option<f32>, f32) = match material {
+            crate::MaterialMode::ButterCream => (0.04, 0.15, None, 0.20),
+            crate::MaterialMode::Snow => (0.15, 0.04, None, 0.30),
+            crate::MaterialMode::WetSand => (0.10, 0.06, None, 0.15),
+            crate::MaterialMode::FinePowder => (0.01, 0.35, None, 0.02),
+            crate::MaterialMode::MoonDust => (0.22, 0.02, Some(0.015), 0.40),
+            crate::MaterialMode::KineticSand => (0.12, 0.12, Some(0.015), 0.75),
+            _ => (0.10, 0.06, None, 0.15),
+        };
+
+        for y in min_y..=max_y {
+            let row_offset = y * w;
+            for x in min_x..=max_x {
+                let center_idx = row_offset + x;
+                let h_center = heightmap.data[center_idx];
+
+                let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
+                
+                let neighbors = [
+                    center_idx - 1, // Left
+                    center_idx + 1, // Right
+                    center_idx - w, // Top
+                    center_idx + w, // Bottom
+                ];
+
+                let mut cell_flowed = false;
+
+                // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
+                let mut avalanche_checked = false;
+                for &neighbor_idx in &neighbors {
+                    let h_neighbor = heightmap.data[neighbor_idx];
+                    let geom_slope = h_center - h_neighbor;
+
+                    if geom_slope > 0.20 {
+                        let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
+                        if flow > 0.0 {
+                            let current_temp_center = temp_heights[center_idx];
+                            let current_temp_neighbor = temp_heights[neighbor_idx];
+                            let temp_diff = current_temp_center - current_temp_neighbor;
+                            let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                            if clamped_flow > 0.0 {
+                                temp_heights[center_idx] -= clamped_flow;
+                                temp_heights[neighbor_idx] += clamped_flow;
+                                total_flow += clamped_flow;
+                                cell_flowed = true;
+                                
+                                let nx = neighbor_idx % w;
+                                let ny = neighbor_idx / w;
+                                next_min_x = next_min_x.min(nx).min(x);
+                                next_max_x = next_max_x.max(nx).max(x);
+                                next_min_y = next_min_y.min(ny).min(y);
+                                next_max_y = next_max_y.max(ny).max(y);
+                                flow_occurred = true;
+                            }
+                        }
+                        avalanche_checked = true;
+                    }
+                }
+                if avalanche_checked {
+                    sliding[center_idx] = cell_flowed;
+                    continue;
+                }
+
+                // Standard Settling Check (Highly optimized, zero branch logic for material properties)
+                for &neighbor_idx in &neighbors {
+                    let h_neighbor = heightmap.data[neighbor_idx];
+                    let geom_slope = h_center - h_neighbor;
+
+                    if geom_slope <= threshold {
+                        continue;
+                    }
+
+                    // C. Stochastic locking and sliding condition
+                    let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
+                    let rand_val = flow_seed as f32 / 65535.0;
+                    
+                    if rand_val >= lock_chance {
+                        let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
+                        let mut flow = (alpha * (geom_slope - threshold) * alpha_noise).max(0.0);
+                        
+                        if let Some(q) = quantize_size {
+                            flow = (flow / q).round() * q;
+                        }
+
+                        if flow > 0.0 {
+                            let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
+                            let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                            if clamped_flow > 0.0 {
+                                temp_heights[center_idx] -= clamped_flow;
+                                temp_heights[neighbor_idx] += clamped_flow;
+                                total_flow += clamped_flow;
+                                cell_flowed = true;
+                                
+                                let nx = neighbor_idx % w;
+                                let ny = neighbor_idx / w;
+                                next_min_x = next_min_x.min(nx).min(x);
+                                next_max_x = next_max_x.max(nx).max(x);
+                                next_min_y = next_min_y.min(ny).min(y);
+                                next_max_y = next_max_y.max(ny).max(y);
+                                flow_occurred = true;
                             }
                         }
                     }
