@@ -475,8 +475,8 @@ pub fn settle_tick(
     let should_process_block = |activity: crate::BlockActivity| -> bool {
         match activity {
             crate::BlockActivity::Fast => true,
-            crate::BlockActivity::Medium => tick_count % 2 == 0,
-            crate::BlockActivity::Slow => tick_count % 4 == 0,
+            crate::BlockActivity::Medium => tick_count % 3 == 0,
+            crate::BlockActivity::Slow => tick_count % 5 == 0,
             crate::BlockActivity::Inactive => false,
         }
     };
