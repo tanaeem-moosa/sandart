@@ -1,124 +1,206 @@
-# Future Optimization: Adaptive Budget Simulation
+# Adaptive Budget Simulation
 
-## Status: Idea / Not Started
+## Status: Approved Design / Not Started
 
 ## Summary
 
-Replace the current 3-tier block LOD system with a **priority-queue based cell scheduler** that simulates the **N most important blocks per tick**, where N is dynamically adjusted to maintain a target frame rate (30 FPS).
+Replace the current 3-tier block LOD system with a **priority-based scheduler** that:
 
-## Motivation
+1. **Always simulates** blocks with displacement ≥ 0.1 (critical flow)
+2. **Budget-simulates** the next highest-priority blocks up to a dynamic limit N
+3. **Force-simulates** any block that hasn't been touched in 30 ticks (stale limit)
+4. **Auto-tunes** N using an exponential moving average of frame time to hold 30 FPS
 
-The current approach uses fixed flow-rate thresholds to bucket blocks into Fast/Medium/Slow/Inactive tiers, each processed at different frequencies. This works but has downsides:
+## Design Decisions
 
-- **Threshold tuning is manual** — different patterns and materials produce different flow distributions, so no single set of thresholds is universally optimal.
-- **Block architecture adds complexity** — 3 separate code paths for tier scheduling, block activation/deactivation logic, neighbor wake-up rules, etc.
-- **No frame-rate awareness** — the system doesn't adapt to actual performance; it just hopes the tier distribution keeps things fast enough.
+- **Approach A (single-threaded adaptive budget)** chosen over background-thread decoupling
+- WASM threading (`SharedArrayBuffer`) adds deployment friction for no real gain — we're vsync-locked at 30 FPS on Steam Deck anyway, so both approaches process the same amount of work per second
+- The adaptive budget fills the entire 33ms frame budget naturally
 
-## Core Idea
-
-### Priority Score
-
-Each block gets a priority score that combines two factors:
-
-```
-priority(block) = displacement(block) × staleness(block)
-```
-
-Where:
-- **`displacement`**: Max height delta observed in the block's last simulation tick (how actively sand is flowing). Could also use sum or mean of cell deltas.
-- **`staleness`**: Number of ticks since the block was last simulated. A block that hasn't been touched in 10 ticks is more "urgent" than one simulated last tick.
-
-The multiplication means:
-- High displacement + stale → **very high priority** (active flow being ignored)
-- High displacement + fresh → **medium priority** (active but recently handled)
-- Low displacement + stale → **low priority** (not much happening, fine to skip)
-- Low displacement + fresh → **lowest priority** (just simulated, nothing to do)
-
-### Adaptive Budget (N)
-
-Instead of a fixed N=256, dynamically adjust the budget:
+## Per-Tick Loop
 
 ```
-if avg_frame_time > target_frame_time:
-    N = N - step       # shed load
-elif avg_frame_time < target_frame_time * 0.8:
-    N = N + step       # we have headroom, simulate more
+┌─────────────────────────────────────────────────┐
+│  1. Score all active blocks                      │
+│     priority = f(displacement, staleness)        │
+│                                                  │
+│  2. Partition into three sets:                   │
+│     MUST  = { displacement ≥ 0.1 }              │
+│     STALE = { staleness ≥ 30 }                  │
+│     REST  = everything else                      │
+│                                                  │
+│  3. Simulate all MUST blocks (uncapped)          │
+│     Simulate all STALE blocks (uncapped)         │
+│                                                  │
+│  4. remaining = budget_N - |MUST| - |STALE|      │
+│     if remaining > 0:                            │
+│       top-N select from REST by priority         │
+│       simulate those                             │
+│                                                  │
+│  5. Update EMA frame time, adjust budget_N       │
+└─────────────────────────────────────────────────┘
 ```
 
-- **Target**: 33.3 ms (30 FPS) or whatever the display refresh is
-- **Step size**: Could be 8–16 blocks per adjustment
-- **Smoothing**: Use an exponential moving average of frame time to avoid oscillation
-- **Bounds**: `N_min = 32` (always simulate at least something), `N_max = total_blocks` (don't exceed the grid)
+MUST and STALE are always simulated regardless of budget. The budget N only governs the discretionary REST blocks. If MUST + STALE already exceeds N, we simulate all of them anyway (can't skip critical work) and the EMA will naturally lower N for subsequent ticks to compensate.
 
-### Safety Guardrail
+## Constants
 
-Blocks with displacement above a critical threshold **always get simulated**, regardless of the budget. This prevents visible artifacts like sand "freezing" mid-avalanche.
+| Constant | Value | Purpose |
+|---|---|---|
+| `MUST_SIMULATE_THRESHOLD` | **0.1** | Displacement above this → always simulate |
+| `MAX_STALENESS` | **30** | Ticks before a block is force-simulated |
+| `TARGET_FRAME_MS` | **33.3** | 30 FPS target |
+| `EMA_ALPHA` | **0.1** | Smoothing factor for frame time EMA |
+| `BUDGET_MIN` | **32** | Never drop below 32 blocks/tick |
+| `BUDGET_MAX` | **total_blocks** | Upper bound = all blocks |
+| `BUDGET_STEP` | **4** | Blocks added/removed per adjustment |
+
+## Priority Function
+
+### Per-Block State
+
+```rust
+struct BlockState {
+    last_displacement: f32,  // max |Δh| observed last time this block was simulated
+    last_simulated: u32,     // tick number when last simulated
+}
+```
+
+`staleness = current_tick - last_simulated` (capped at `MAX_STALENESS`)
+
+### Option 1: Linear Product (Recommended)
 
 ```
-if displacement(block) > CRITICAL_THRESHOLD:
-    // always simulate, doesn't count toward budget N
+priority = staleness × displacement
 ```
 
-The budget N only governs the remaining blocks that fall below the critical threshold.
+| displacement | staleness=1 | staleness=10 | staleness=30 |
+|---|---|---|---|
+| 0.08 | 0.08 | 0.80 | 2.40 |
+| 0.01 | 0.01 | 0.10 | 0.30 |
+| 0.001 | 0.001 | 0.01 | 0.03 |
+
+**Why this works:**
+- The MUST threshold (0.1) already catches the high-displacement blocks unconditionally
+- The stale limit (30) already catches forgotten blocks unconditionally
+- The priority function only needs to rank the **middle ground** — blocks with moderate displacement (0.001–0.1) and moderate staleness (1–29)
+- In that range, the linear product produces sensible orderings: a block with 0.05 displacement unsimulated for 5 ticks (priority=0.25) ranks above a block with 0.01 displacement unsimulated for 3 ticks (priority=0.03)
+- Simple, cheap (one multiply), easy to reason about
+
+### Option 2: Staleness-Weighted (Superlinear)
+
+```
+priority = staleness^1.5 × displacement
+```
+
+| displacement | staleness=1 | staleness=10 | staleness=30 |
+|---|---|---|---|
+| 0.08 | 0.08 | 2.53 | 13.14 |
+| 0.01 | 0.01 | 0.32 | 1.64 |
+| 0.001 | 0.001 | 0.032 | 0.164 |
+
+**Tradeoff:** More aggressively prioritizes stale blocks, which reduces worst-case visual lag. But the stale limit at 30 already handles the worst case, so the superlinear term mostly affects blocks in the 10–25 staleness range. Adds an `f32::powf` call per block (~700 per tick), which is still cheap but not free.
+
+### Option 3: Log-Staleness (Sublinear)
+
+```
+priority = ln(1 + staleness) × displacement
+```
+
+**Tradeoff:** Diminishing returns on staleness — a block at staleness 20 vs 25 gets almost the same priority boost. This favors displacement more heavily. Probably not what we want since high-displacement blocks are already caught by the MUST threshold.
+
+### Recommendation
+
+**Start with Option 1 (linear product)**. It's the simplest, cheapest, and the two safety nets (MUST threshold + stale limit) cover the edge cases where a fancier function would matter. If testing reveals that blocks in the 10–25 staleness range cause visible artifacts, upgrade to Option 2.
+
+## Adaptive Budget via EMA
+
+```rust
+// After each tick:
+let frame_ms = frame_timer.elapsed_ms();
+ema_frame_ms = EMA_ALPHA * frame_ms + (1.0 - EMA_ALPHA) * ema_frame_ms;
+
+if ema_frame_ms > TARGET_FRAME_MS {
+    // Over budget — shed load
+    budget_n = (budget_n - BUDGET_STEP).max(BUDGET_MIN);
+} else if ema_frame_ms < TARGET_FRAME_MS * 0.85 {
+    // Under budget with headroom — simulate more
+    budget_n = (budget_n + BUDGET_STEP).min(BUDGET_MAX);
+}
+// else: in the sweet spot (85%-100% of target), hold steady
+```
+
+**Key design choices:**
+
+- **EMA with α=0.1**: Reacts slowly. A single spike won't cause budget changes — it takes ~10 consecutive over-budget frames to meaningfully shift the EMA. Prevents oscillation.
+- **Hysteresis band (85%–100%)**: We only *increase* budget when frame time is below 85% of target (28.3ms), not immediately when we're under. This dead zone prevents the budget from bouncing around the target.
+- **Fixed step of 4 blocks**: Small enough to avoid overshooting, large enough to converge within a few seconds. At 30 FPS with step=4, we adjust by 120 blocks/second max — for ~700 total blocks, that's full range in ~6 seconds.
+
+### Convergence Example
+
+Starting at budget_n=256, target=33.3ms:
+
+```
+Tick 1-30:   frame_time ~25ms  →  EMA drifts to ~25ms  →  below 28.3ms  →  budget grows
+Tick 30-60:  budget ~380, frame_time ~30ms  →  EMA ~29ms  →  below 28.3ms  →  grows slower  
+Tick 60-90:  budget ~450, frame_time ~33ms  →  EMA ~32ms  →  in dead zone  →  holds steady ✓
+```
+
+If a complex pattern starts:
+
+```
+Tick 90-100: frame_time spikes to 45ms  →  EMA slowly rises: 32→33→34ms
+Tick 100+:   EMA > 33.3ms  →  budget shrinks by 4/tick  →  frame time drops  →  converges
+```
+
+## Cross-Block Flow & Dirty Marking
+
+When simulating a block pushes sand into a neighboring block, that neighbor's `last_displacement` should be updated (boosted) even though it wasn't simulated this tick. This ensures flow-receiving blocks get high priority next tick:
+
+```rust
+// Inside simulate(block):
+if flow_to_neighbor > 0.0 {
+    neighbor.last_displacement = neighbor.last_displacement.max(flow_to_neighbor);
+    // Don't update neighbor.last_simulated — it's still stale
+}
+```
+
+This replaces the current `activate_neighbor` mechanism and is simpler — no tier transitions, just a number update.
 
 ## Architecture Simplification
 
-This approach could **eliminate the tier system entirely**:
-
 | Current (3-Tier LOD) | Proposed (Priority Budget) |
 |---|---|
-| `BlockActivity` enum (Fast/Medium/Slow/Inactive) | Single `f32` priority score per block |
-| `should_process_block()` with tick modulos | Top-N selection via `select_nth_unstable` |
-| 3 fixed frequency rates | Continuous priority spectrum |
-| Manual threshold constants | Self-tuning via staleness × displacement |
-| No FPS awareness | Closed-loop FPS targeting |
-
-The physics loop simplifies to:
-
-```rust
-// 1. Score all blocks
-for block in blocks {
-    block.priority = block.last_displacement * (tick - block.last_simulated) as f32;
-}
-
-// 2. Always-simulate set (above critical threshold)
-let (critical, rest) = partition(blocks, |b| b.last_displacement > CRITICAL);
-
-// 3. Budget the rest: pick top N by priority
-rest.select_nth_unstable_by(budget_n, |a, b| b.priority.partial_cmp(&a.priority));
-let to_simulate = &rest[..budget_n];
-
-// 4. Simulate critical + top-N
-for block in critical.chain(to_simulate) {
-    simulate(block);
-    block.last_simulated = tick;
-}
-
-// 5. Adjust budget based on frame time
-adjust_budget(&mut budget_n, frame_time, TARGET_FPS);
-```
+| `BlockActivity` enum with 4 variants | `BlockState { last_displacement, last_simulated }` |
+| `should_process_block()` with modulo scheduling | `select_nth_unstable_by` on priority scores |
+| `FLOW_FAST/MEDIUM/INACTIVE_THRESHOLD` constants | `MUST_SIMULATE_THRESHOLD` + `MAX_STALENESS` |
+| `activate_neighbor()` with tier promotion | Dirty-mark via `last_displacement.max(flow)` |
+| No FPS awareness | Closed-loop EMA budget control |
 
 ## Performance Estimate
 
-- **Scoring**: ~700 blocks × 1 multiply = trivial
-- **Selection**: `select_nth_unstable` is O(n) ≈ 700 ops ≈ ~1–2 μs
-- **Overhead vs current**: Comparable or less (no tier bookkeeping, no modulo checks)
+Per-tick overhead of the new system:
 
-## Risks & Considerations
+| Operation | Cost |
+|---|---|
+| Score ~700 blocks (1 multiply each) | ~1 μs |
+| Partition MUST + STALE | O(n) ≈ ~1 μs |
+| `select_nth_unstable` on REST | O(n) ≈ ~1–2 μs |
+| EMA update + budget adjust | trivial |
+| **Total overhead** | **~3–4 μs** |
 
-- **Temporal coherence**: Blocks that get deprioritized might cause visible "popping" when they suddenly get simulated after many stale ticks. Mitigation: cap max staleness so nothing goes unsimulated for more than ~15 ticks.
-- **Oscillation**: Budget N bouncing up and down could cause inconsistent behavior. Mitigation: use EMA smoothing and hysteresis (only adjust if frame time is consistently over/under target).
-- **Cross-block dependencies**: Sand flowing from a simulated block into an unsimulated neighbor could cause inconsistencies. Mitigation: when a block is simulated and pushes flow into a neighbor, mark that neighbor as "dirty" which boosts its priority for the next tick (similar to current `activate_neighbor`).
-- **Minimum simulation rate**: Even low-priority blocks should be simulated at least once every ~15 ticks to avoid drift. The staleness factor in the priority score naturally handles this — a block that hasn't been touched in 15 ticks will have high priority regardless of its displacement.
+vs current tier system overhead (modulo checks, tier transitions, activate_neighbor): comparable or slightly more.
 
 ## Implementation Phases
 
-1. **Phase 1**: Add per-block `last_displacement` and `last_simulated_tick` tracking alongside the current tier system (no behavior change).
-2. **Phase 2**: Implement priority scoring and top-N selection as an alternative to the tier system, behind a feature flag.
-3. **Phase 3**: Add adaptive budget adjustment based on frame time.
-4. **Phase 4**: Remove the old tier system if the priority approach proves superior.
+1. **Phase 1 — Tracking**: Add `last_displacement` and `last_simulated` per block alongside the current tier system. No behavior change. Verify values look reasonable.
+2. **Phase 2 — Priority Scheduler**: Replace tier-based `should_process_block` with priority scoring + top-N selection. Use a fixed budget N=256 initially. Remove `BlockActivity` enum.
+3. **Phase 3 — Adaptive Budget**: Add EMA frame time tracking and budget adjustment. Wire `budget_n` to the WASM/JS layer so it can be displayed in the HUD alongside block counts.
+4. **Phase 4 — Cleanup**: Remove old tier constants, simplify `activate_neighbor` to dirty-marking, update HUD to show budget_n and EMA frame time.
 
-## Related
+## Related Files
 
-- Current implementation: `settle_tick` in `sandart-sim/src/physics.rs`
-- Current tier thresholds: `FLOW_FAST_THRESHOLD`, `FLOW_MEDIUM_THRESHOLD`, `FLOW_INACTIVE_THRESHOLD` constants in `settle_tick`
+- `sandart-sim/src/physics.rs` — `settle_tick` (main simulation loop)
+- `sandart-sim/src/lib.rs` — `BlockActivity` enum, `DrawingSimulation` struct
+- `sandart-wasm/src/lib.rs` — WASM bindings, `get_active_block_counts()`
+- `sandart-wasm/web/demo.js` — HUD rendering
