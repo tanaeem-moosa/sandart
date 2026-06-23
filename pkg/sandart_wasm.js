@@ -41,6 +41,20 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * @returns {number}
+     */
+    get_budget_n() {
+        const ret = wasm.wasmsimulationstate_get_budget_n(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    get_ema_frame_ms() {
+        const ret = wasm.wasmsimulationstate_get_ema_frame_ms(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @returns {Float32Array}
      */
     get_heightmap() {
@@ -231,9 +245,10 @@ export class WasmSimulationState {
      * @param {number} cursor_x
      * @param {number} cursor_y
      * @param {boolean} shift_pressed
+     * @param {number} last_frame_time_ms
      */
-    step(dt, cursor_x, cursor_y, shift_pressed) {
-        wasm.wasmsimulationstate_step(this.__wbg_ptr, dt, cursor_x, cursor_y, shift_pressed);
+    step(dt, cursor_x, cursor_y, shift_pressed, last_frame_time_ms) {
+        wasm.wasmsimulationstate_step(this.__wbg_ptr, dt, cursor_x, cursor_y, shift_pressed, last_frame_time_ms);
     }
 }
 if (Symbol.dispose) WasmSimulationState.prototype[Symbol.dispose] = WasmSimulationState.prototype.free;
