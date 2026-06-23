@@ -545,7 +545,8 @@ impl DrawingSimulation {
         // Update EMA of frame time and adjust budget_n
         const EMA_ALPHA: f32 = 0.1;
         const BUDGET_MIN: usize = 32;
-        const BUDGET_STEP: usize = 4;
+        const BUDGET_STEP_DOWN: usize = 4;
+        const BUDGET_STEP_UP: usize = 1;
 
         if last_frame_time_ms > 0.0 && target_frame_time_ms > 0.0 {
             self.ema_frame_ms = EMA_ALPHA * last_frame_time_ms + (1.0 - EMA_ALPHA) * self.ema_frame_ms;
@@ -553,9 +554,9 @@ impl DrawingSimulation {
             let budget_max = cols * rows; // e.g. 1024
 
             if self.ema_frame_ms > target_frame_time_ms {
-                self.budget_n = self.budget_n.saturating_sub(BUDGET_STEP).max(BUDGET_MIN);
-            } else if self.ema_frame_ms < target_frame_time_ms * 0.85 {
-                self.budget_n = (self.budget_n + BUDGET_STEP).min(budget_max);
+                self.budget_n = self.budget_n.saturating_sub(BUDGET_STEP_DOWN).max(BUDGET_MIN);
+            } else if self.ema_frame_ms < target_frame_time_ms {
+                self.budget_n = (self.budget_n + BUDGET_STEP_UP).min(budget_max);
             }
         }
     }
