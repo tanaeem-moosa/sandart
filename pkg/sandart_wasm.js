@@ -246,9 +246,10 @@ export class WasmSimulationState {
      * @param {number} cursor_y
      * @param {boolean} shift_pressed
      * @param {number} last_frame_time_ms
+     * @param {number} target_frame_time_ms
      */
-    step(dt, cursor_x, cursor_y, shift_pressed, last_frame_time_ms) {
-        wasm.wasmsimulationstate_step(this.__wbg_ptr, dt, cursor_x, cursor_y, shift_pressed, last_frame_time_ms);
+    step(dt, cursor_x, cursor_y, shift_pressed, last_frame_time_ms, target_frame_time_ms) {
+        wasm.wasmsimulationstate_step(this.__wbg_ptr, dt, cursor_x, cursor_y, shift_pressed, last_frame_time_ms, target_frame_time_ms);
     }
 }
 if (Symbol.dispose) WasmSimulationState.prototype[Symbol.dispose] = WasmSimulationState.prototype.free;
