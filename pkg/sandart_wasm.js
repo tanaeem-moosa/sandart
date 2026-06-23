@@ -130,6 +130,12 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_camera(this.__wbg_ptr, azimuth, elevation, zoom);
     }
     /**
+     * @param {number} mode
+     */
+    set_color_mode(mode) {
+        wasm.wasmsimulationstate_set_color_mode(this.__wbg_ptr, mode);
+    }
+    /**
      * @param {number} order
      */
     set_hilbert_order(order) {
@@ -250,6 +256,14 @@ export class WasmSimulationState {
      */
     step(dt, cursor_x, cursor_y, shift_pressed, last_frame_time_ms, target_frame_time_ms) {
         wasm.wasmsimulationstate_step(this.__wbg_ptr, dt, cursor_x, cursor_y, shift_pressed, last_frame_time_ms, target_frame_time_ms);
+    }
+    /**
+     * @param {Uint8Array} data
+     */
+    update_colormap(data) {
+        const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmsimulationstate_update_colormap(this.__wbg_ptr, ptr0, len0);
     }
 }
 if (Symbol.dispose) WasmSimulationState.prototype[Symbol.dispose] = WasmSimulationState.prototype.free;
@@ -2266,6 +2280,13 @@ function makeMutClosure(arg0, arg1, f) {
     };
     CLOSURE_DTORS.register(real, state, state);
     return real;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {

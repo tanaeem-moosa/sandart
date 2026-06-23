@@ -541,10 +541,41 @@
             </div>
 
             <div class="control-group color-row">
-                <label for="color-led">LED:</label>
+                <label for="color-led">LED Color:</label>
                 <input type="color" id="color-led" value="#d4af37">
-                <label for="color-sand">Sand:</label>
-                <input type="color" id="color-sand" value="#ebd9bb">
+            </div>
+
+            <!-- Sand Color Theme Section -->
+            <div class="section-title">🎨 Sand Color Theme</div>
+            <div class="control-group">
+                <label for="color-pattern">Color Pattern</label>
+                <select id="color-pattern">
+                    <option value="solid" selected>Solid Color</option>
+                    <option value="gradient">Linear Gradient</option>
+                    <option value="stripes">Stripes (Alternating)</option>
+                    <option value="concentric">Concentric Rings</option>
+                    <option value="rainbow_linear">Rainbow (Linear)</option>
+                    <option value="rainbow_radial">Rainbow (Radial)</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="color-preset">Theme Preset</label>
+                <select id="color-preset">
+                    <option value="custom" selected>Custom (Pick Below)</option>
+                    <option value="rainbow">Rainbow (Auto)</option>
+                    <option value="black_white">Black & White</option>
+                    <option value="desert">Desert Sand</option>
+                    <option value="ocean">Ocean Teal</option>
+                    <option value="forest">Forest Gold</option>
+                </select>
+            </div>
+            <div class="control-group" id="custom-color-inputs">
+                <div class="color-row">
+                    <label for="color-sand-1">Color 1:</label>
+                    <input type="color" id="color-sand-1" value="#ebd9bb">
+                    <label for="color-sand-2" id="label-sand-2" style="margin-left: 10px; display: none;">Color 2:</label>
+                    <input type="color" id="color-sand-2" value="#5c4033" style="display: none;">
+                </div>
             </div>
 
             <div class="control-group">

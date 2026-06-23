@@ -58,6 +58,7 @@ async function start() {
 
     // Initial config sync
     syncSettings();
+    syncColorTheme();
     updateCamera();
     loadActivePattern();
 
@@ -85,18 +86,60 @@ function handleResize() {
     }
 }
 
+const STANDARD_TARGETS = [
+    { fps: 240, ms: 1000 / 240 },
+    { fps: 165, ms: 1000 / 165 },
+    { fps: 144, ms: 1000 / 144 },
+    { fps: 120, ms: 1000 / 120 },
+    { fps: 90,  ms: 1000 / 90 },
+    { fps: 75,  ms: 1000 / 75 },
+    { fps: 60,  ms: 1000 / 60 },
+    { fps: 30,  ms: 1000 / 30 }
+];
+
+function detectTargetFrameTime(durations) {
+    if (durations.length < 10) {
+        return 1000 / 60; // Default to 60 FPS during startup
+    }
+    const counts = {};
+    for (const d of durations) {
+        if (d < 3.0 || d > 100.0) continue;
+        // Find the nearest standard target
+        let nearest = STANDARD_TARGETS[6]; // Default to 60
+        let minDist = Infinity;
+        for (const t of STANDARD_TARGETS) {
+            const dist = Math.abs(d - t.ms);
+            if (dist < minDist) {
+                minDist = dist;
+                nearest = t;
+            }
+        }
+        counts[nearest.ms] = (counts[nearest.ms] || 0) + 1;
+    }
+    // Find the mode (highest frequency)
+    let modeMs = 1000 / 60;
+    let maxCount = 0;
+    for (const ms in counts) {
+        if (counts[ms] > maxCount) {
+            maxCount = counts[ms];
+            modeMs = parseFloat(ms);
+        }
+    }
+    return modeMs;
+}
+
 function tick(now) {
     const frameTimeMs = now - lastTime;
     const rawDt = Math.min(frameTimeMs / 1000, 0.1); // Clamp dt to prevent massive steps
     lastTime = now;
 
-    // Track rolling history of frame durations (last 60 frames) to detect physical Vsync
+    // Track rolling history of frame durations (last 120 frames) to detect physical Vsync
     frameDurations.push(frameTimeMs);
-    if (frameDurations.length > 60) {
+    if (frameDurations.length > 120) {
         frameDurations.shift();
     }
-    // Compute detected vsync as the minimum of the history, clamped to sensible bounds [7.0, 35.0]
-    const detectedVsyncMs = Math.max(7.0, Math.min(Math.min(...frameDurations), 35.0));
+    // Compute detected vsync using a robust mode-based approach
+    const detectedVsyncMs = detectTargetFrameTime(frameDurations);
 
     // Smooth delta-time using Exponential Moving Average (EMA) to eliminate browser timer resolution jitter
     if (smoothDt === null) {
@@ -136,7 +179,8 @@ function tick(now) {
         // Update sidebar stats
         const budgetN = state.get_budget_n();
         const emaMs = state.get_ema_frame_ms();
-        document.getElementById('stat-fps').innerText = `FPS: ${frameCount} (EMA: ${emaMs.toFixed(1)} ms, Budget N: ${budgetN})`;
+        const targetFps = 1000.0 / detectedVsyncMs;
+        document.getElementById('stat-fps').innerText = `FPS: ${frameCount} (EMA: ${emaMs.toFixed(1)} ms, Target: ${targetFps.toFixed(0)} FPS, Budget N: ${budgetN})`;
         document.getElementById('stat-render-time').innerText = `Frame time: ${avgTotalTime.toFixed(1)} ms (CPU: ${avgStepTime.toFixed(1)} ms, GPU: ${avgRenderTime.toFixed(1)} ms)`;
         
         const blockCounts = state.get_active_block_counts();
@@ -233,6 +277,172 @@ function setupCanvasInput() {
     }, { passive: false });
 }
 
+function hexToRgbBytes(hex) {
+    const r = parseInt(hex.slice(1, 3), 16);
+    const g = parseInt(hex.slice(3, 5), 16);
+    const b = parseInt(hex.slice(5, 7), 16);
+    return [r, g, b];
+}
+
+function hueToRgbBytes(h) {
+    const r = Math.abs(h * 6.0 - 3.0) - 1.0;
+    const g = 2.0 - Math.abs(h * 6.0 - 2.0);
+    const b = 2.0 - Math.abs(h * 6.0 - 4.0);
+    return [
+        Math.round(Math.max(0.0, Math.min(1.0, r)) * 255.0),
+        Math.round(Math.max(0.0, Math.min(1.0, g)) * 255.0),
+        Math.round(Math.max(0.0, Math.min(1.0, b)) * 255.0),
+    ];
+}
+
+function generateColormap(pattern, color1Hex, color2Hex) {
+    const size = 1024;
+    const data = new Uint8Array(size * size * 4);
+    const c1 = hexToRgbBytes(color1Hex);
+    const c2 = hexToRgbBytes(color2Hex);
+
+    if (pattern === 'solid') {
+        for (let i = 0; i < size * size; i++) {
+            data[i * 4] = c1[0];
+            data[i * 4 + 1] = c1[1];
+            data[i * 4 + 2] = c1[2];
+            data[i * 4 + 3] = 255;
+        }
+    } else if (pattern === 'gradient') {
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const t = x / (size - 1);
+                const idx = (y * size + x) * 4;
+                data[idx] = Math.round(c1[0] * (1.0 - t) + c2[0] * t);
+                data[idx + 1] = Math.round(c1[1] * (1.0 - t) + c2[1] * t);
+                data[idx + 2] = Math.round(c1[2] * (1.0 - t) + c2[2] * t);
+                data[idx + 3] = 255;
+            }
+        }
+    } else if (pattern === 'stripes') {
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const t = Math.floor((x + y) / 32) % 2 === 0;
+                const idx = (y * size + x) * 4;
+                const color = t ? c1 : c2;
+                data[idx] = color[0];
+                data[idx + 1] = color[1];
+                data[idx + 2] = color[2];
+                data[idx + 3] = 255;
+            }
+        }
+    } else if (pattern === 'concentric') {
+        const cx = size / 2;
+        const cy = size / 2;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const dx = x - cx;
+                const dy = y - cy;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const t = Math.floor(dist / 32) % 2 === 0;
+                const idx = (y * size + x) * 4;
+                const color = t ? c1 : c2;
+                data[idx] = color[0];
+                data[idx + 1] = color[1];
+                data[idx + 2] = color[2];
+                data[idx + 3] = 255;
+            }
+        }
+    } else if (pattern === 'rainbow_linear') {
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const hue = x / (size - 1);
+                const rgb = hueToRgbBytes(hue);
+                const idx = (y * size + x) * 4;
+                data[idx] = rgb[0];
+                data[idx + 1] = rgb[1];
+                data[idx + 2] = rgb[2];
+                data[idx + 3] = 255;
+            }
+        }
+    } else if (pattern === 'rainbow_radial') {
+        const cx = size / 2;
+        const cy = size / 2;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const dx = x - cx;
+                const dy = y - cy;
+                const angle = Math.atan2(dy, dx);
+                const hue = (angle + Math.PI) / (2.0 * Math.PI);
+                const rgb = hueToRgbBytes(hue);
+                const idx = (y * size + x) * 4;
+                data[idx] = rgb[0];
+                data[idx + 1] = rgb[1];
+                data[idx + 2] = rgb[2];
+                data[idx + 3] = 255;
+            }
+        }
+    }
+    return data;
+}
+
+function syncColorTheme() {
+    const patternSelect = document.getElementById('color-pattern');
+    const presetSelect = document.getElementById('color-preset');
+    const colorInput1 = document.getElementById('color-sand-1');
+    const colorInput2 = document.getElementById('color-sand-2');
+    const label2 = document.getElementById('label-sand-2');
+    const customDiv = document.getElementById('custom-color-inputs');
+
+    const pattern = patternSelect.value;
+    const preset = presetSelect.value;
+
+    // 1. Handle presets override
+    if (preset === 'rainbow') {
+        patternSelect.value = 'rainbow_linear';
+        customDiv.style.display = 'none';
+    } else if (preset !== 'custom') {
+        customDiv.style.display = 'block';
+        if (preset === 'black_white') {
+            colorInput1.value = '#ffffff';
+            colorInput2.value = '#050505';
+        } else if (preset === 'desert') {
+            colorInput1.value = '#ebd9bb';
+            colorInput2.value = '#8b5a2b';
+        } else if (preset === 'ocean') {
+            colorInput1.value = '#008080';
+            colorInput2.value = '#e0f7fa';
+        } else if (preset === 'forest') {
+            colorInput1.value = '#228b22';
+            colorInput2.value = '#ffd700';
+        }
+    } else {
+        customDiv.style.display = 'block';
+    }
+
+    // 2. Handle pattern inputs visibility
+    const updatedPattern = patternSelect.value;
+    if (updatedPattern === 'solid') {
+        colorInput1.style.display = 'inline-block';
+        colorInput2.style.display = 'none';
+        label2.style.display = 'none';
+    } else if (updatedPattern === 'rainbow_linear' || updatedPattern === 'rainbow_radial') {
+        customDiv.style.display = 'none';
+    } else {
+        customDiv.style.display = 'block';
+        colorInput1.style.display = 'inline-block';
+        colorInput2.style.display = 'inline-block';
+        label2.style.display = 'inline-block';
+    }
+
+    // 3. Update WASM state color mode
+    if (state) {
+        const isSolid = updatedPattern === 'solid';
+        state.set_color_mode(isSolid ? 0 : 1);
+        
+        const c1 = hexToRgb(colorInput1.value);
+        state.set_sand_color(c1[0], c1[1], c1[2]);
+
+        const colormapData = generateColormap(updatedPattern, colorInput1.value, colorInput2.value);
+        state.update_colormap(colormapData);
+    }
+}
+
 function hexToRgb(hex) {
     const r = parseInt(hex.slice(1, 3), 16) / 255;
     const g = parseInt(hex.slice(3, 5), 16) / 255;
@@ -295,9 +505,6 @@ function syncSettings() {
     // Colors
     const ledColor = hexToRgb(document.getElementById('color-led').value);
     state.set_led_color(ledColor[0], ledColor[1], ledColor[2]);
-
-    const sandColor = hexToRgb(document.getElementById('color-sand').value);
-    state.set_sand_color(sandColor[0], sandColor[1], sandColor[2]);
 
     // Lighting Angle & Shadows
     state.set_light_angle(parseFloat(document.getElementById('angle-slider').value));
@@ -420,9 +627,12 @@ function setupPanelInput() {
         loadActivePattern();
     });
 
-    const colors = ['color-led', 'color-sand'];
-    colors.forEach(id => {
-        document.getElementById(id).addEventListener('change', syncSettings);
+    document.getElementById('color-led').addEventListener('change', syncSettings);
+
+    const colorThemeControls = ['color-pattern', 'color-preset', 'color-sand-1', 'color-sand-2'];
+    colorThemeControls.forEach(id => {
+        document.getElementById(id).addEventListener('change', syncColorTheme);
+        document.getElementById(id).addEventListener('input', syncColorTheme);
     });
 
     document.getElementById('check-shadows').addEventListener('change', syncSettings);
