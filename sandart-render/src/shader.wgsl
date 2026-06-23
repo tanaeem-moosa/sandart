@@ -1,5 +1,6 @@
 @group(0) @binding(0) var heightmap_tex: texture_2d<f32>;
 @group(0) @binding(1) var heightmap_sampler: sampler;
+@group(0) @binding(4) var colormap_tex: texture_2d<f32>;
 
 const PI: f32 = 3.14159265359;
 const Z_SCALE: f32 = 0.009; // Unified heightmap displacement scale
@@ -21,7 +22,7 @@ struct LightingUniforms {
     marble_count: u32,
     material_mode: u32,
     sandbox_shape: u32,
-    padding2: u32,
+    color_mode: u32,
     marbles: array<MarbleUniform, 5>,
 };
 
@@ -515,6 +516,10 @@ fn fs_main(
         roughness = 0.85;
         grain_scale = 400.0;
         grain_strength = 0.45;
+    }
+
+    if (uniforms.color_mode > 0u) {
+        mat_base_color = textureSampleLevel(colormap_tex, heightmap_sampler, uv, 0.0).rgb;
     }
 
     // 3. Perturb normal with micro-surface grain noise

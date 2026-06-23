@@ -51,6 +51,7 @@ pub struct WasmSimulationState {
     shadows_enabled: bool,
     elapsed_time: f32,
     clock_minute: u32,
+    color_mode: u32,
 }
 
 #[wasm_bindgen]
@@ -186,6 +187,7 @@ impl WasmSimulationState {
             shadows_enabled: true,
             elapsed_time: 0.0,
             clock_minute: 99,
+            color_mode: 0,
         })
     }
 
@@ -260,6 +262,10 @@ impl WasmSimulationState {
     pub fn draw_ripples(&mut self) {
         self.sim.heightmap.generate_ripples();
         self.full_upload_needed = true;
+    }
+
+    pub fn update_colormap(&mut self, data: &[u8]) {
+        self.renderer.update_colormap(&self.queue, data);
     }
 
     pub fn set_material_mode(&mut self, mode: u32) {
@@ -352,6 +358,10 @@ impl WasmSimulationState {
 
     pub fn set_sand_color(&mut self, r: f32, g: f32, b: f32) {
         self.sand_color = [r, g, b, 1.0];
+    }
+
+    pub fn set_color_mode(&mut self, mode: u32) {
+        self.color_mode = mode;
     }
 
     pub fn set_light_angle(&mut self, angle: f32) {
@@ -593,7 +603,7 @@ impl WasmSimulationState {
             marble_count: self.marble_count,
             material_mode: self.material_mode as u32,
             sandbox_shape: self.sandbox_shape as u32,
-            _padding: 0,
+            color_mode: self.color_mode,
             marbles: current_marbles,
         };
         self.renderer.update_uniforms(&self.queue, &current_uniforms);

@@ -45,7 +45,7 @@ pub struct LightingUniforms {
     pub marble_count: u32,     // active marbles count (1 to 5)
     pub material_mode: u32,    // active material preset (0 to 8)
     pub sandbox_shape: u32,    // active sandbox shape (0 = Circle, 1 = Square, 2 = Oval)
-    pub _padding: u32,
+    pub color_mode: u32,       // active color mode (0 = Solid, 1 = Gradient/Pattern)
     pub marbles: [MarbleUniform; 5], // array of up to 5 marbles
 }
 
@@ -68,6 +68,7 @@ pub struct ActiveBounds {
 pub struct HeightmapRenderer {
     pub pipeline: wgpu::RenderPipeline,
     pub heightmap_texture: wgpu::Texture,
+    pub colormap_texture: wgpu::Texture,
     pub bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
     pub camera_buffer: wgpu::Buffer,
@@ -150,6 +151,21 @@ impl HeightmapRenderer {
         let heightmap_texture_view =
             heightmap_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Create colormap texture (GRID_SIZE x GRID_SIZE Rgba8Unorm)
+        let colormap_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("colormap_texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let colormap_texture_view =
+            colormap_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         // 2. Create heightmap sampler (using Nearest filtering for portable R32Float manual bilinear interpolation in shader)
         let heightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("heightmap_sampler"),
@@ -218,6 +234,16 @@ impl HeightmapRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -241,6 +267,10 @@ impl HeightmapRenderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: camera_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&colormap_texture_view),
                 },
             ],
         });
@@ -296,6 +326,7 @@ impl HeightmapRenderer {
         Self {
             pipeline,
             heightmap_texture,
+            colormap_texture,
             bind_group,
             uniform_buffer,
             camera_buffer,
@@ -358,6 +389,29 @@ impl HeightmapRenderer {
             wgpu::Extent3d {
                 width: sub_width,
                 height: sub_height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Upload CPU RGBA colormap data directly to the WGPU texture.
+    pub fn update_colormap(&mut self, queue: &wgpu::Queue, data: &[u8]) {
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.colormap_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some((GRID_SIZE * 4) as u32),
+                rows_per_image: Some(GRID_SIZE as u32),
+            },
+            wgpu::Extent3d {
+                width: GRID_SIZE as u32,
+                height: GRID_SIZE as u32,
                 depth_or_array_layers: 1,
             },
         );
@@ -478,7 +532,7 @@ mod tests {
                 marble_count: 1,
                 material_mode: 0,
                 sandbox_shape: 0,
-                _padding: 0,
+                color_mode: 0,
                 marbles: [
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
@@ -736,7 +790,7 @@ mod tests {
                     marble_count,
                     material_mode: mat_mode,
                     sandbox_shape: 0, // Circle
-                    _padding: 0,
+                    color_mode: 0,
                     marbles: [
                         MarbleUniform { pos: [m_x, m_y], radius: 0.018, z_pos: m_z },
                         MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },

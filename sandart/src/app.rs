@@ -97,7 +97,9 @@ impl SandArtApp {
         if let Some(wgpu_state) = &cc.wgpu_render_state {
             let device = &wgpu_state.device;
             let target_format = wgpu_state.target_format;
-            let resources = crate::renderer::HeightmapRenderer::new(device, target_format);
+            let mut resources = crate::renderer::HeightmapRenderer::new(device, target_format);
+            let default_color = vec![255u8; 1024 * 1024 * 4];
+            resources.update_colormap(&wgpu_state.queue, &default_color);
             wgpu_state
                 .renderer
                 .write()
@@ -992,7 +994,7 @@ impl eframe::App for SandArtApp {
                 marble_count: self.config.marble_count,
                 material_mode: self.config.material_mode as u32,
                 sandbox_shape: self.config.sandbox_shape as u32,
-                _padding: 0,
+                color_mode: 0,
                 marbles: [
                     crate::renderer::MarbleUniform {
                         pos: [self.sim.marbles[0].pos.x, self.sim.marbles[0].pos.y],
