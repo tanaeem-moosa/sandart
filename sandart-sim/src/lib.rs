@@ -553,9 +553,13 @@ impl DrawingSimulation {
             
             let budget_max = cols * rows; // e.g. 1024
 
-            if self.ema_frame_ms > target_frame_time_ms {
+            // Target 95% of target FPS (Vsync interval * 1.05) to account for browser Vsync-locking
+            // and allow the budget to grow back up when running smoothly.
+            let adjusted_target = target_frame_time_ms * 1.05;
+
+            if self.ema_frame_ms > adjusted_target {
                 self.budget_n = self.budget_n.saturating_sub(BUDGET_STEP_DOWN).max(BUDGET_MIN);
-            } else if self.ema_frame_ms < target_frame_time_ms {
+            } else if self.ema_frame_ms < adjusted_target {
                 self.budget_n = (self.budget_n + BUDGET_STEP_UP).min(budget_max);
             }
         }
