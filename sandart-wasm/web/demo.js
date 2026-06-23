@@ -389,6 +389,9 @@ function syncColorTheme() {
     const label2 = document.getElementById('label-sand-2');
     const customDiv = document.getElementById('custom-color-inputs');
 
+    // Guard: if the color theme elements don't exist in the DOM yet (e.g. browser cached old HTML), bail out
+    if (!patternSelect || !presetSelect || !colorInput1 || !colorInput2) return;
+
     const pattern = patternSelect.value;
     const preset = presetSelect.value;
 
