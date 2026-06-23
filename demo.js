@@ -446,6 +446,20 @@ function setupPanelInput() {
     const toggleBtn = document.getElementById('toggle-sidebar');
     toggleBtn.addEventListener('click', () => {
         sidebar.classList.toggle('collapsed');
+
+        // Animate canvas resizing during the 300ms sidebar transition to expand drawing area in real-time
+        const startTime = performance.now();
+        const duration = 300; // matches CSS transition duration
+
+        function animateResize(now) {
+            handleResize();
+            if (now - startTime < duration) {
+                requestAnimationFrame(animateResize);
+            } else {
+                handleResize(); // Final call to guarantee exact match
+            }
+        }
+        requestAnimationFrame(animateResize);
     });
 }
 
