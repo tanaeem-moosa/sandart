@@ -39,7 +39,7 @@ fn main() {
         sim.marbles[4].pos,
     ];
     let targets = playback.step_playback_all(&positions, arms, 0.4, 0.016);
-    sim.update(0.016, &targets, 0.018, MaterialMode::ButterCream, SandboxShape::Circle, 16.0);
+    sim.update(0.016, &targets, 0.018, MaterialMode::ButterCream, SandboxShape::Circle, 33.3);
 
     println!("Starting profiling session (sampling at 250Hz)...");
     let guard = pprof::ProfilerGuard::new(250).unwrap(); // 250Hz sample rate
@@ -55,7 +55,7 @@ fn main() {
             sim.marbles[4].pos,
         ];
         let targets = playback.step_playback_all(&positions, arms, 0.4, 0.016);
-        sim.update(0.016, &targets, 0.018, MaterialMode::ButterCream, SandboxShape::Circle, 16.0);
+        sim.update(0.016, &targets, 0.018, MaterialMode::ButterCream, SandboxShape::Circle, 33.3);
     }
     let elapsed = start_time.elapsed();
     println!("Simulation of 3000 steps took: {:?}", elapsed);
