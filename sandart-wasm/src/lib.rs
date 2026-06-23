@@ -198,7 +198,7 @@ impl WasmSimulationState {
         }
     }
 
-    pub fn step(&mut self, dt: f32, cursor_x: f32, cursor_y: f32, shift_pressed: bool) {
+    pub fn step(&mut self, dt: f32, cursor_x: f32, cursor_y: f32, shift_pressed: bool, last_frame_time_ms: f32) {
         self.elapsed_time += dt;
 
         if self.pattern_mode == "Clock" {
@@ -245,6 +245,7 @@ impl WasmSimulationState {
             self.marble_size,
             self.material_mode,
             self.sandbox_shape,
+            last_frame_time_ms,
         );
     }
 
@@ -697,6 +698,14 @@ impl WasmSimulationState {
             }
         }
         js_sys::Int32Array::from(&[inactive, slow, medium, fast][..])
+    }
+
+    pub fn get_budget_n(&self) -> usize {
+        self.sim.budget_n
+    }
+
+    pub fn get_ema_frame_ms(&self) -> f32 {
+        self.sim.ema_frame_ms
     }
 }
 

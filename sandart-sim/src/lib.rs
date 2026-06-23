@@ -123,6 +123,14 @@ pub struct DrawingSimulation {
 
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
+    /// Max displacement observed in each block during the last time it was simulated.
+    pub last_displacements: Vec<f32>,
+    /// Tick count of when each block was last simulated.
+    pub last_simulated_ticks: Vec<u32>,
+    /// Current dynamic simulation budget (N blocks).
+    pub budget_n: usize,
+    /// Exponential moving average of step time in milliseconds.
+    pub ema_frame_ms: f32,
     /// Block size (e.g. 32 pixels).
     pub block_size: usize,
     /// Tick count for multi-rate LOD scheduling.
@@ -205,6 +213,10 @@ impl DrawingSimulation {
         let cols = (GRID_SIZE + block_size - 1) / block_size;
         let rows = (GRID_SIZE + block_size - 1) / block_size;
         let active_blocks = vec![BlockActivity::Inactive; cols * rows];
+        let last_displacements = vec![0.0f32; cols * rows];
+        let last_simulated_ticks = vec![0u32; cols * rows];
+        let budget_n = 256;
+        let ema_frame_ms = 33.3;
 
         Self {
             heightmap,
@@ -228,6 +240,10 @@ impl DrawingSimulation {
             material_mode: MaterialMode::default(),
             sandbox_shape: SandboxShape::default(),
             active_blocks,
+            last_displacements,
+            last_simulated_ticks,
+            budget_n,
+            ema_frame_ms,
             block_size,
             tick_count: 0,
         }
@@ -253,6 +269,10 @@ impl DrawingSimulation {
         };
         self.seed = 98765u32;
         self.active_blocks.fill(BlockActivity::Inactive);
+        self.last_displacements.fill(0.0);
+        self.last_simulated_ticks.fill(0);
+        self.budget_n = 256;
+        self.ema_frame_ms = 33.3;
         self.tick_count = 0;
     }
 
@@ -324,7 +344,7 @@ impl DrawingSimulation {
     }
 
     /// Run a physics frame tick.
-    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, material: MaterialMode, shape: SandboxShape) {
+    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, material: MaterialMode, shape: SandboxShape, last_frame_time_ms: f32) {
         // Prevent seed degeneracy (XORShift stuck state at 0)
         if self.seed == 0 {
             self.seed = 98765u32;
@@ -435,7 +455,7 @@ impl DrawingSimulation {
                     let block_max_y = (segment_bounds.max_y / block_size).min(rows - 1);
                     for by in block_min_y..=block_max_y {
                         for bx in block_min_x..=block_max_x {
-                            self.active_blocks[by * cols + bx] = BlockActivity::Fast;
+                            self.last_displacements[by * cols + bx] = 1.0;
                         }
                     }
                 }
@@ -471,7 +491,7 @@ impl DrawingSimulation {
 
                     for by in block_min_y..=block_max_y {
                         for bx in block_min_x..=block_max_x {
-                            self.active_blocks[by * cols + bx] = BlockActivity::Fast;
+                            self.last_displacements[by * cols + bx] = 1.0;
                         }
                     }
                 }
@@ -479,7 +499,8 @@ impl DrawingSimulation {
         }
 
         // Run the gravity-driven settling cellular automata tick
-        let has_active = self.active_blocks.iter().any(|&x| x != BlockActivity::Inactive);
+        let has_active = self.last_displacements.iter().any(|&x| x > 3e-4)
+            || self.marbles.iter().any(|m| m.was_active);
         if has_active {
             let mut active_marbles = [physics::ActiveMarbleInfo {
                 pos: Vec2::ZERO,
@@ -505,6 +526,9 @@ impl DrawingSimulation {
                 &mut self.sliding,
                 &mut self.active_bounds,
                 &mut self.active_blocks,
+                &mut self.last_displacements,
+                &mut self.last_simulated_ticks,
+                self.budget_n,
                 self.block_size,
                 material,
                 &active_marbles[..active_count],
@@ -517,6 +541,24 @@ impl DrawingSimulation {
             self.active_bounds.active = false;
         }
         self.tick_count = self.tick_count.wrapping_add(1);
+
+        // Update EMA of frame time and adjust budget_n
+        const EMA_ALPHA: f32 = 0.1;
+        const TARGET_FRAME_MS: f32 = 33.3;
+        const BUDGET_MIN: usize = 32;
+        const BUDGET_STEP: usize = 4;
+
+        if last_frame_time_ms > 0.0 {
+            self.ema_frame_ms = EMA_ALPHA * last_frame_time_ms + (1.0 - EMA_ALPHA) * self.ema_frame_ms;
+            
+            let budget_max = cols * rows; // e.g. 1024
+
+            if self.ema_frame_ms > TARGET_FRAME_MS {
+                self.budget_n = self.budget_n.saturating_sub(BUDGET_STEP).max(BUDGET_MIN);
+            } else if self.ema_frame_ms < TARGET_FRAME_MS * 0.85 {
+                self.budget_n = (self.budget_n + BUDGET_STEP).min(budget_max);
+            }
+        }
     }
 }
 
@@ -529,7 +571,7 @@ impl HeightmapSimulation for DrawingSimulation {
         let radius = self.marble_radius;
         let mat = self.material_mode;
         let shape = self.sandbox_shape;
-        self.update(dt, &targets, radius, mat, shape);
+        self.update(dt, &targets, radius, mat, shape, dt * 1000.0);
     }
 
     fn reset(&mut self) {
@@ -621,19 +663,19 @@ mod tests {
         let mut sim = DrawingSimulation::new();
         let mut targets = [None; 5];
         // Initially target is None, should not be active
-        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle);
+        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0);
         assert!(!sim.was_active);
 
         // Move to start point (first point is exact target)
         targets[0] = Some(Vec2::new(0.1, 0.2));
-        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle);
+        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0);
         assert!(sim.was_active);
         assert_eq!(sim.marble_pos, Vec2::new(0.1, 0.2));
 
         // Move to next point, introducing noise, drag, and jitter
         let target = Vec2::new(0.3, 0.4);
         targets[0] = Some(target);
-        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle);
+        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0);
 
         // Ensure marble position shifted from start and is not exactly the target due to physics drift/noise
         assert_ne!(sim.marble_pos, Vec2::new(0.1, 0.2));
@@ -683,6 +725,7 @@ mod tests {
                 0.018,
                 MaterialMode::DrySand,
                 SandboxShape::Circle,
+                16.0,
             );
             
             let current_sum: f64 = sim.heightmap.data.iter().map(|&x| x as f64).sum();
@@ -713,6 +756,7 @@ mod tests {
                 marble_radius,
                 MaterialMode::DrySand,
                 SandboxShape::Circle,
+                16.0,
             );
             
             let current_sum: f64 = sim.heightmap.data.iter().map(|&x| x as f64).sum();

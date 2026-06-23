@@ -104,7 +104,8 @@ function tick(now) {
     // Step physics & render
     if (state) {
         const startStep = performance.now();
-        state.step(smoothDt, cursorX, cursorY, isDraggingMarble);
+        const frameTimeMs = now - lastTime;
+        state.step(smoothDt, cursorX, cursorY, isDraggingMarble, frameTimeMs);
         const stepTime = performance.now() - startStep;
 
         const startRender = performance.now();
@@ -124,7 +125,9 @@ function tick(now) {
         const avgTotalTime = avgStepTime + avgRenderTime;
         
         // Update sidebar stats
-        document.getElementById('stat-fps').innerText = `FPS: ${frameCount}`;
+        const budgetN = state.get_budget_n();
+        const emaMs = state.get_ema_frame_ms();
+        document.getElementById('stat-fps').innerText = `FPS: ${frameCount} (EMA: ${emaMs.toFixed(1)} ms, Budget N: ${budgetN})`;
         document.getElementById('stat-render-time').innerText = `Frame time: ${avgTotalTime.toFixed(1)} ms (CPU: ${avgStepTime.toFixed(1)} ms, GPU: ${avgRenderTime.toFixed(1)} ms)`;
         
         const blockCounts = state.get_active_block_counts();
@@ -132,7 +135,7 @@ function tick(now) {
         const slow = blockCounts[1];
         const medium = blockCounts[2];
         const fast = blockCounts[3];
-        document.getElementById('stat-blocks').innerText = `Blocks: F: ${fast}, M: ${medium}, S: ${slow}, I: ${inactive}`;
+        document.getElementById('stat-blocks').innerText = `Blocks: Must(F): ${fast}, Budget(M): ${medium}, Stale(S): ${slow}, Inactive(I): ${inactive}`;
         
         // Update floating HUD stats
         const hudFps = document.getElementById('hud-fps');

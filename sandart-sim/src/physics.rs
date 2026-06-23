@@ -404,6 +404,9 @@ pub fn settle_tick(
     sliding: &mut Vec<bool>,
     active_bounds: &mut ActiveBounds,
     active_blocks: &mut Vec<crate::BlockActivity>,
+    last_displacements: &mut Vec<f32>,
+    last_simulated_ticks: &mut Vec<u32>,
+    budget_n: usize,
     block_size: usize,
     material: crate::MaterialMode,
     active_marbles: &[ActiveMarbleInfo],
@@ -433,25 +436,87 @@ pub fn settle_tick(
     let rows = (h + block_size - 1) / block_size;
     let expected_len = cols * rows;
 
+    if last_displacements.len() != expected_len {
+        last_displacements.resize(expected_len, 0.0);
+    }
+    if last_simulated_ticks.len() != expected_len {
+        last_simulated_ticks.resize(expected_len, 0);
+    }
     if active_blocks.len() != expected_len {
         active_blocks.resize(expected_len, crate::BlockActivity::Inactive);
-        if active_bounds.active {
-            let block_min_x = active_bounds.min_x / block_size;
-            let block_max_x = (active_bounds.max_x / block_size).min(cols - 1);
-            let block_min_y = active_bounds.min_y / block_size;
-            let block_max_y = (active_bounds.max_y / block_size).min(rows - 1);
-            for by in block_min_y..=block_max_y {
-                for bx in block_min_x..=block_max_x {
-                    active_blocks[by * cols + bx] = crate::BlockActivity::Fast;
-                }
-            }
+    }
+
+    // Constants from the design doc
+    const MUST_SIMULATE_THRESHOLD: f32 = 0.1;
+    const MAX_STALENESS: u32 = 30;
+    const FLOW_INACTIVE_THRESHOLD: f32 = 3e-4;
+
+    // 1. Identify MUST, STALE, and REST blocks, and calculate priorities
+    let mut must_simulate = Vec::new();
+    let mut stale_simulate = Vec::new();
+    let mut rest_candidates = Vec::new();
+
+    for b in 0..expected_len {
+        let displacement = last_displacements[b];
+        let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
+
+        if displacement >= MUST_SIMULATE_THRESHOLD {
+            must_simulate.push(b);
+        } else if staleness >= MAX_STALENESS {
+            stale_simulate.push(b);
+        } else if displacement > 0.0 {
+            // Priority function: staleness * displacement
+            let priority = (staleness as f32) * displacement;
+            rest_candidates.push((b, priority));
         }
     }
 
     // Quick exit check if no blocks are active
-    if !active_blocks.iter().any(|&x| x != crate::BlockActivity::Inactive) {
+    if must_simulate.is_empty() && stale_simulate.is_empty() && rest_candidates.is_empty() {
         active_bounds.active = false;
+        active_blocks.fill(crate::BlockActivity::Inactive);
         return 0.0;
+    }
+
+    let total_always = must_simulate.len() + stale_simulate.len();
+    let remaining_budget = if budget_n > total_always {
+        budget_n - total_always
+    } else {
+        0
+    };
+
+    let mut budget_simulate = Vec::new();
+    if remaining_budget > 0 && !rest_candidates.is_empty() {
+        let n = remaining_budget.min(rest_candidates.len());
+        rest_candidates.select_nth_unstable_by(n - 1, |a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for i in 0..n {
+            budget_simulate.push(rest_candidates[i].0);
+        }
+    }
+
+    let mut will_simulate = vec![false; expected_len];
+    for &b in &must_simulate {
+        will_simulate[b] = true;
+    }
+    for &b in &stale_simulate {
+        will_simulate[b] = true;
+    }
+    for &b in &budget_simulate {
+        will_simulate[b] = true;
+    }
+
+    // Update active_blocks for HUD statistics
+    active_blocks.fill(crate::BlockActivity::Inactive);
+    for &b in &must_simulate {
+        active_blocks[b] = crate::BlockActivity::Fast;
+    }
+    for &b in &stale_simulate {
+        active_blocks[b] = crate::BlockActivity::Slow;
+    }
+    for &b in &budget_simulate {
+        active_blocks[b] = crate::BlockActivity::Medium;
     }
 
     // Sandbox boundary helper scaled to current width and height
@@ -472,30 +537,6 @@ pub fn settle_tick(
         }
     };
 
-    let should_process_block = |activity: crate::BlockActivity| -> bool {
-        match activity {
-            crate::BlockActivity::Fast => true,
-            crate::BlockActivity::Medium => tick_count % 3 == 0,
-            crate::BlockActivity::Slow => tick_count % 5 == 0,
-            crate::BlockActivity::Inactive => false,
-        }
-    };
-
-    // Flow-rate thresholds for block activity tier assignment
-    const FLOW_FAST_THRESHOLD: f32 = 0.05;
-    const FLOW_MEDIUM_THRESHOLD: f32 = 0.01;
-    const FLOW_INACTIVE_THRESHOLD: f32 = 3e-4;
-
-    let flow_to_activity = |clamped_flow: f32| -> crate::BlockActivity {
-        if clamped_flow > FLOW_FAST_THRESHOLD {
-            crate::BlockActivity::Fast
-        } else if clamped_flow > FLOW_MEDIUM_THRESHOLD {
-            crate::BlockActivity::Medium
-        } else {
-            crate::BlockActivity::Slow
-        }
-    };
-
     // If material is a liquid (Water, Milk, Ferrofluid, Yogurt), run the 2D wave propagation solver instead of CA settling.
     if material == crate::MaterialMode::Water
         || material == crate::MaterialMode::Milk
@@ -504,32 +545,33 @@ pub fn settle_tick(
         || material == crate::MaterialMode::CalmWater
         || material == crate::MaterialMode::Yogurt
     {
+        let mut modified = will_simulate.clone();
+        let mut next_displacements = vec![0.0f32; expected_len];
+
         // Helper closure to activate neighbor blocks and copy their heights on demand
-        let mut next_active_blocks = vec![crate::BlockActivity::Inactive; expected_len];
-        let activate_neighbor = |neighbor_b: usize, activity: crate::BlockActivity, next_active_blocks: &mut Vec<crate::BlockActivity>, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap| {
-            if next_active_blocks[neighbor_b] < activity {
-                if active_blocks[neighbor_b] == crate::BlockActivity::Inactive 
-                    && next_active_blocks[neighbor_b] == crate::BlockActivity::Inactive 
-                {
-                    let nbx = neighbor_b % cols;
-                    let nby = neighbor_b / cols;
-                    let start_x = nbx * block_size;
-                    let end_x = ((nbx + 1) * block_size).min(w);
-                    let start_y = nby * block_size;
-                    let end_y = ((nby + 1) * block_size).min(h);
-                    for y in start_y..end_y {
-                        let offset = y * w;
-                        temp_heights[offset + start_x..offset + end_x]
-                            .copy_from_slice(&heightmap.data[offset + start_x..offset + end_x]);
-                    }
+        let activate_neighbor = |neighbor_b: usize, flow: f32, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
+            if !modified[neighbor_b] {
+                let nbx = neighbor_b % cols;
+                let nby = neighbor_b / cols;
+                let start_x = nbx * block_size;
+                let end_x = ((nbx + 1) * block_size).min(w);
+                let start_y = nby * block_size;
+                let end_y = ((nby + 1) * block_size).min(h);
+                for y in start_y..end_y {
+                    let offset = y * w;
+                    temp_heights[offset + start_x..offset + end_x]
+                        .copy_from_slice(&heightmap.data[offset + start_x..offset + end_x]);
                 }
-                next_active_blocks[neighbor_b] = activity;
+                modified[neighbor_b] = true;
+            }
+            if next_displacements[neighbor_b] < flow {
+                next_displacements[neighbor_b] = flow;
             }
         };
 
         // 1. Copy active blocks from heightmap to temp buffer
         for b in 0..expected_len {
-            if active_blocks[b] != crate::BlockActivity::Inactive {
+            if will_simulate[b] {
                 let bx = b % cols;
                 let by = b / cols;
                 let start_x = bx * block_size;
@@ -560,7 +602,7 @@ pub fn settle_tick(
 
         // Run wave equation inside active blocks
         for b in 0..expected_len {
-            if active_blocks[b] != crate::BlockActivity::Inactive {
+            if will_simulate[b] {
                 let bx = b % cols;
                 let by = b / cols;
                 let start_x = bx * block_size;
@@ -629,12 +671,12 @@ pub fn settle_tick(
 
                         if v_new.abs() > 3e-4 || (h_new - crate::DEFAULT_SAND_HEIGHT).abs() > 1e-4 {
                             flow_occurred = true;
-                            // Activate this block and neighbors
-                            activate_neighbor(b, crate::BlockActivity::Fast, &mut next_active_blocks, temp_heights, heightmap);
-                            if bx > 0 { activate_neighbor(b - 1, crate::BlockActivity::Fast, &mut next_active_blocks, temp_heights, heightmap); }
-                            if bx + 1 < cols { activate_neighbor(b + 1, crate::BlockActivity::Fast, &mut next_active_blocks, temp_heights, heightmap); }
-                            if by > 0 { activate_neighbor(b - cols, crate::BlockActivity::Fast, &mut next_active_blocks, temp_heights, heightmap); }
-                            if by + 1 < rows { activate_neighbor(b + cols, crate::BlockActivity::Fast, &mut next_active_blocks, temp_heights, heightmap); }
+                            let flow_val = v_new.abs().max((h_new - crate::DEFAULT_SAND_HEIGHT).abs());
+                            activate_neighbor(b, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                            if bx > 0 { activate_neighbor(b - 1, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
+                            if bx + 1 < cols { activate_neighbor(b + 1, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
+                            if by > 0 { activate_neighbor(b - cols, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
+                            if by + 1 < rows { activate_neighbor(b + cols, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
                         }
                     }
                 }
@@ -643,7 +685,7 @@ pub fn settle_tick(
 
         // Copy back updated heights for active and next active blocks
         for b in 0..expected_len {
-            if active_blocks[b] != crate::BlockActivity::Inactive || next_active_blocks[b] != crate::BlockActivity::Inactive {
+            if modified[b] {
                 let bx = b % cols;
                 let by = b / cols;
                 let start_x = bx * block_size;
@@ -666,7 +708,7 @@ pub fn settle_tick(
         let mut any_modified = false;
 
         for b in 0..expected_len {
-            if active_blocks[b] != crate::BlockActivity::Inactive || next_active_blocks[b] != crate::BlockActivity::Inactive {
+            if modified[b] {
                 any_modified = true;
                 let bx = b % cols;
                 let by = b / cols;
@@ -687,17 +729,23 @@ pub fn settle_tick(
             active_bounds.active = false;
         }
 
-        *active_blocks = next_active_blocks;
+        for b in 0..expected_len {
+            if !will_simulate[b] {
+                next_displacements[b] = next_displacements[b].max(last_displacements[b]);
+            } else {
+                last_simulated_ticks[b] = tick_count;
+            }
+        }
+        *last_displacements = next_displacements;
+
         return total_flow;
     }
 
-    let mut modified = vec![false; expected_len];
+    let mut modified = will_simulate.clone();
 
     // 1. Copy active blocks scheduled to run this frame from heightmap to temp buffer
     for b in 0..expected_len {
-        let activity = active_blocks[b];
-        if activity != crate::BlockActivity::Inactive && should_process_block(activity) {
-            modified[b] = true;
+        if will_simulate[b] {
             let bx = b % cols;
             let by = b / cols;
             let start_x = bx * block_size;
@@ -713,11 +761,11 @@ pub fn settle_tick(
     }
 
     let mut total_flow = 0.0f32;
-    let mut next_active_blocks = vec![crate::BlockActivity::Inactive; expected_len];
+    let mut next_displacements = vec![0.0f32; expected_len];
     let mut flow_occurred = false;
 
     // Helper closure to activate neighbor blocks and copy their heights on demand
-    let mut activate_neighbor = |neighbor_b: usize, activity: crate::BlockActivity, next_active_blocks: &mut Vec<crate::BlockActivity>, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap| {
+    let activate_neighbor = |neighbor_b: usize, flow: f32, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
         if !modified[neighbor_b] {
             let nbx = neighbor_b % cols;
             let nby = neighbor_b / cols;
@@ -732,8 +780,8 @@ pub fn settle_tick(
             }
             modified[neighbor_b] = true;
         }
-        if next_active_blocks[neighbor_b] < activity {
-            next_active_blocks[neighbor_b] = activity;
+        if next_displacements[neighbor_b] < flow {
+            next_displacements[neighbor_b] = flow;
         }
     };
 
@@ -757,14 +805,7 @@ pub fn settle_tick(
 
     if is_complex {
         for b in 0..expected_len {
-            let activity = active_blocks[b];
-            if activity == crate::BlockActivity::Inactive {
-                continue;
-            }
-            if !should_process_block(activity) {
-                if next_active_blocks[b] < activity {
-                    next_active_blocks[b] = activity;
-                }
+            if !will_simulate[b] {
                 continue;
             }
 
@@ -824,9 +865,8 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = flow_to_activity(clamped_flow);
-                                    activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
-                                    activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
+                                    activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                                    activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
@@ -991,9 +1031,8 @@ pub fn settle_tick(
                                         let ny = neighbor_idx / w;
                                         let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                         
-                                        let flow_activity = flow_to_activity(clamped_flow);
-                                        activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
-                                        activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
+                                        activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                                        activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
                                         temp_heights[center_idx] -= clamped_flow;
                                         temp_heights[neighbor_idx] += clamped_flow;
@@ -1012,14 +1051,7 @@ pub fn settle_tick(
         }
     } else if is_dynamic {
         for b in 0..expected_len {
-            let activity = active_blocks[b];
-            if activity == crate::BlockActivity::Inactive {
-                continue;
-            }
-            if !should_process_block(activity) {
-                if next_active_blocks[b] < activity {
-                    next_active_blocks[b] = activity;
-                }
+            if !will_simulate[b] {
                 continue;
             }
 
@@ -1079,15 +1111,8 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = if clamped_flow > 0.02 {
-                                        crate::BlockActivity::Fast
-                                    } else if clamped_flow > 3e-3 {
-                                        crate::BlockActivity::Medium
-                                    } else {
-                                        crate::BlockActivity::Slow
-                                    };
-                                    activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
-                                    activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
+                                    activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                                    activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
@@ -1154,9 +1179,8 @@ pub fn settle_tick(
                                         let ny = neighbor_idx / w;
                                         let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                         
-                                        let flow_activity = flow_to_activity(clamped_flow);
-                                        activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
-                                        activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
+                                        activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                                        activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
                                         temp_heights[center_idx] -= clamped_flow;
                                         temp_heights[neighbor_idx] += clamped_flow;
@@ -1186,14 +1210,7 @@ pub fn settle_tick(
         };
 
         for b in 0..expected_len {
-            let activity = active_blocks[b];
-            if activity == crate::BlockActivity::Inactive {
-                continue;
-            }
-            if !should_process_block(activity) {
-                if next_active_blocks[b] < activity {
-                    next_active_blocks[b] = activity;
-                }
+            if !will_simulate[b] {
                 continue;
             }
 
@@ -1253,15 +1270,8 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = if clamped_flow > 0.02 {
-                                        crate::BlockActivity::Fast
-                                    } else if clamped_flow > 3e-3 {
-                                        crate::BlockActivity::Medium
-                                    } else {
-                                        crate::BlockActivity::Slow
-                                    };
-                                    activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
-                                    activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
+                                    activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                                    activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
@@ -1307,15 +1317,8 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    let flow_activity = if clamped_flow > 0.02 {
-                                        crate::BlockActivity::Fast
-                                    } else if clamped_flow > 3e-3 {
-                                        crate::BlockActivity::Medium
-                                    } else {
-                                        crate::BlockActivity::Slow
-                                    };
-                                    activate_neighbor(b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
-                                    activate_neighbor(neighbor_b, flow_activity, &mut next_active_blocks, temp_heights, heightmap);
+                                    activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                                    activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
@@ -1358,7 +1361,7 @@ pub fn settle_tick(
     let mut any_modified = false;
 
     for b in 0..expected_len {
-        if modified[b] || next_active_blocks[b] != crate::BlockActivity::Inactive {
+        if modified[b] {
             any_modified = true;
             let bx = b % cols;
             let by = b / cols;
@@ -1379,7 +1382,15 @@ pub fn settle_tick(
         active_bounds.active = false;
     }
 
-    *active_blocks = next_active_blocks;
+    for b in 0..expected_len {
+        if !will_simulate[b] {
+            next_displacements[b] = next_displacements[b].max(last_displacements[b]);
+        } else {
+            last_simulated_ticks[b] = tick_count;
+        }
+    }
+    *last_displacements = next_displacements;
+
     total_flow
 }
 
@@ -1636,6 +1647,9 @@ mod tests {
 
         let mut wave_vel = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
+        let mut last_displacements = vec![1.0; 256];
+        let mut last_simulated_ticks = vec![0; 256];
+        let budget_n = 256;
         let mut flow_occurred = false;
         for i in 0..10 {
             let flow = settle_tick(
@@ -1644,6 +1658,9 @@ mod tests {
                 &mut vec![false; 512 * 512],
                 &mut bounds,
                 &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                budget_n,
                 32,
                 crate::MaterialMode::ButterCream,
                 &[],
@@ -1687,12 +1704,18 @@ mod tests {
 
         let mut wave_vel = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
+        let mut last_displacements = Vec::new();
+        let mut last_simulated_ticks = Vec::new();
+        let budget_n = 256;
         let flow = settle_tick(
             &mut hm,
             &mut temp_heights,
             &mut vec![false; 512 * 512],
             &mut bounds,
             &mut active_blocks,
+            &mut last_displacements,
+            &mut last_simulated_ticks,
+            budget_n,
             32,
             crate::MaterialMode::ButterCream,
             &[],
@@ -1745,15 +1768,20 @@ mod tests {
             hm.data[center_idx] = 1.0;
             hm.data[center_idx - 1] = 0.5; // slope = 0.5 > 0.20
 
-            // Settle should trigger avalanche flow for all materials
             let mut wave_vel = vec![0.0; 64 * 64];
             let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
+            let mut last_displacements = vec![1.0; 4];
+            let mut last_simulated_ticks = vec![0; 4];
+            let budget_n = 256;
             let flow = settle_tick(
                 &mut hm,
                 &mut temp_heights,
                 &mut sliding,
                 &mut bounds,
                 &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                budget_n,
                 32,
                 mat,
                 &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1, vel_vec: Vec2::new(0.1, 0.0) }],
