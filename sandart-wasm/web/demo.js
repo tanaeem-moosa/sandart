@@ -22,6 +22,7 @@ let smoothDt = null;
 let totalStepTime = 0;
 let totalRenderTime = 0;
 let renderTimeCount = 0;
+let frameDurations = [];
 
 async function start() {
     // Initialize WASM module
@@ -85,8 +86,17 @@ function handleResize() {
 }
 
 function tick(now) {
-    const rawDt = Math.min((now - lastTime) / 1000, 0.1); // Clamp dt to prevent massive steps
+    const frameTimeMs = now - lastTime;
+    const rawDt = Math.min(frameTimeMs / 1000, 0.1); // Clamp dt to prevent massive steps
     lastTime = now;
+
+    // Track rolling history of frame durations (last 60 frames) to detect physical Vsync
+    frameDurations.push(frameTimeMs);
+    if (frameDurations.length > 60) {
+        frameDurations.shift();
+    }
+    // Compute detected vsync as the minimum of the history, clamped to sensible bounds [7.0, 35.0]
+    const detectedVsyncMs = Math.max(7.0, Math.min(Math.min(...frameDurations), 35.0));
 
     // Smooth delta-time using Exponential Moving Average (EMA) to eliminate browser timer resolution jitter
     if (smoothDt === null) {
@@ -104,8 +114,7 @@ function tick(now) {
     // Step physics & render
     if (state) {
         const startStep = performance.now();
-        const frameTimeMs = now - lastTime;
-        state.step(smoothDt, cursorX, cursorY, isDraggingMarble, frameTimeMs);
+        state.step(smoothDt, cursorX, cursorY, isDraggingMarble, frameTimeMs, detectedVsyncMs);
         const stepTime = performance.now() - startStep;
 
         const startRender = performance.now();

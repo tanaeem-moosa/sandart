@@ -198,7 +198,7 @@ impl WasmSimulationState {
         }
     }
 
-    pub fn step(&mut self, dt: f32, cursor_x: f32, cursor_y: f32, shift_pressed: bool, last_frame_time_ms: f32) {
+    pub fn step(&mut self, dt: f32, cursor_x: f32, cursor_y: f32, shift_pressed: bool, last_frame_time_ms: f32, target_frame_time_ms: f32) {
         self.elapsed_time += dt;
 
         if self.pattern_mode == "Clock" {
@@ -246,6 +246,7 @@ impl WasmSimulationState {
             self.material_mode,
             self.sandbox_shape,
             last_frame_time_ms,
+            target_frame_time_ms,
         );
     }
 

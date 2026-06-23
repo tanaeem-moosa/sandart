@@ -344,7 +344,7 @@ impl DrawingSimulation {
     }
 
     /// Run a physics frame tick.
-    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, material: MaterialMode, shape: SandboxShape, last_frame_time_ms: f32) {
+    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, material: MaterialMode, shape: SandboxShape, last_frame_time_ms: f32, target_frame_time_ms: f32) {
         // Prevent seed degeneracy (XORShift stuck state at 0)
         if self.seed == 0 {
             self.seed = 98765u32;
@@ -544,18 +544,17 @@ impl DrawingSimulation {
 
         // Update EMA of frame time and adjust budget_n
         const EMA_ALPHA: f32 = 0.1;
-        const TARGET_FRAME_MS: f32 = 33.3;
         const BUDGET_MIN: usize = 32;
         const BUDGET_STEP: usize = 4;
 
-        if last_frame_time_ms > 0.0 {
+        if last_frame_time_ms > 0.0 && target_frame_time_ms > 0.0 {
             self.ema_frame_ms = EMA_ALPHA * last_frame_time_ms + (1.0 - EMA_ALPHA) * self.ema_frame_ms;
             
             let budget_max = cols * rows; // e.g. 1024
 
-            if self.ema_frame_ms > TARGET_FRAME_MS {
+            if self.ema_frame_ms > target_frame_time_ms {
                 self.budget_n = self.budget_n.saturating_sub(BUDGET_STEP).max(BUDGET_MIN);
-            } else if self.ema_frame_ms < TARGET_FRAME_MS * 0.85 {
+            } else if self.ema_frame_ms < target_frame_time_ms * 0.85 {
                 self.budget_n = (self.budget_n + BUDGET_STEP).min(budget_max);
             }
         }
@@ -571,7 +570,7 @@ impl HeightmapSimulation for DrawingSimulation {
         let radius = self.marble_radius;
         let mat = self.material_mode;
         let shape = self.sandbox_shape;
-        self.update(dt, &targets, radius, mat, shape, dt * 1000.0);
+        self.update(dt, &targets, radius, mat, shape, dt * 1000.0, dt * 1000.0);
     }
 
     fn reset(&mut self) {
@@ -663,19 +662,19 @@ mod tests {
         let mut sim = DrawingSimulation::new();
         let mut targets = [None; 5];
         // Initially target is None, should not be active
-        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0);
+        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0, 16.0);
         assert!(!sim.was_active);
 
         // Move to start point (first point is exact target)
         targets[0] = Some(Vec2::new(0.1, 0.2));
-        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0);
+        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0, 16.0);
         assert!(sim.was_active);
         assert_eq!(sim.marble_pos, Vec2::new(0.1, 0.2));
 
         // Move to next point, introducing noise, drag, and jitter
         let target = Vec2::new(0.3, 0.4);
         targets[0] = Some(target);
-        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0);
+        sim.update(0.016, &targets, 0.025, MaterialMode::ButterCream, SandboxShape::Circle, 16.0, 16.0);
 
         // Ensure marble position shifted from start and is not exactly the target due to physics drift/noise
         assert_ne!(sim.marble_pos, Vec2::new(0.1, 0.2));
@@ -726,6 +725,7 @@ mod tests {
                 MaterialMode::DrySand,
                 SandboxShape::Circle,
                 16.0,
+                16.0,
             );
             
             let current_sum: f64 = sim.heightmap.data.iter().map(|&x| x as f64).sum();
@@ -756,6 +756,7 @@ mod tests {
                 marble_radius,
                 MaterialMode::DrySand,
                 SandboxShape::Circle,
+                16.0,
                 16.0,
             );
             

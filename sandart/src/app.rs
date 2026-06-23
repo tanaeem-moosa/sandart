@@ -1132,7 +1132,7 @@ impl eframe::App for SandArtApp {
             }
 
             // Run simulation tick
-            self.sim.update(self.dt, &targets, self.config.marble_size, self.config.material_mode, self.config.sandbox_shape, self.dt * 1000.0);
+            self.sim.update(self.dt, &targets, self.config.marble_size, self.config.material_mode, self.config.sandbox_shape, self.dt * 1000.0, self.dt * 1000.0);
 
             // Direct GPU update (zero-mutex, zero-CPU-to-CPU copies)
             if let Some(wgpu_state) = _frame.wgpu_render_state() {
