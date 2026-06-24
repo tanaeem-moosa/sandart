@@ -130,6 +130,14 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_camera(this.__wbg_ptr, azimuth, elevation, zoom);
     }
     /**
+     * @param {Float32Array} data
+     */
+    set_cell_props(data) {
+        const ptr0 = passArrayF32ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * @param {number} mode
      */
     set_color_mode(mode) {
@@ -2285,6 +2293,13 @@ function makeMutClosure(arg0, arg1, f) {
 function passArray8ToWasm0(arg, malloc) {
     const ptr = malloc(arg.length * 1, 1) >>> 0;
     getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
 }
