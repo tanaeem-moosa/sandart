@@ -774,10 +774,8 @@ impl eframe::App for SandArtApp {
                             crate::config::MaterialMode::FinePowder => "Fine Powder",
                             crate::config::MaterialMode::Oobleck => "Oobleck (Non-Newtonian)",
                             crate::config::MaterialMode::MoonDust => "Moon Dust",
-                            crate::config::MaterialMode::IronFilings => "Iron Filings",
                             crate::config::MaterialMode::Water => "Water (Ripples)",
                             crate::config::MaterialMode::Milk => "Milk (Thick Liquid)",
-                            crate::config::MaterialMode::Ferrofluid => "Ferrofluid (Magnetic Liquid)",
                             crate::config::MaterialMode::VegetableOil => "Vegetable Oil (Transparent Viscous)",
                             crate::config::MaterialMode::CalmWater => "Water (Calm/Glassy)",
                             crate::config::MaterialMode::Yogurt => "Yogurt (Thick/Creamy)",
@@ -793,10 +791,8 @@ impl eframe::App for SandArtApp {
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::FinePowder, "Fine Powder");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Oobleck, "Oobleck (Non-Newtonian)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::MoonDust, "Moon Dust");
-                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::IronFilings, "Iron Filings");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Water, "Water (Ripples)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Milk, "Milk (Thick Liquid)");
-                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Ferrofluid, "Ferrofluid (Magnetic Liquid)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::VegetableOil, "Vegetable Oil (Transparent Viscous)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::CalmWater, "Water (Calm/Glassy)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Yogurt, "Yogurt (Thick/Creamy)");

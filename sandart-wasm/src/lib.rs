@@ -265,7 +265,8 @@ impl WasmSimulationState {
     }
 
     pub fn update_colormap(&mut self, data: &[u8]) {
-        self.renderer.update_colormap(&self.queue, data);
+        self.sim.set_cell_colors(data);
+        self.full_upload_needed = true;
     }
 
     pub fn set_material_mode(&mut self, mode: u32) {
@@ -279,10 +280,8 @@ impl WasmSimulationState {
             6 => MaterialMode::FinePowder,
             7 => MaterialMode::Oobleck,
             8 => MaterialMode::MoonDust,
-            9 => MaterialMode::IronFilings,
             10 => MaterialMode::Water,
             11 => MaterialMode::Milk,
-            12 => MaterialMode::Ferrofluid,
             13 => MaterialMode::VegetableOil,
             14 => MaterialMode::CalmWater,
             15 => MaterialMode::Yogurt,
@@ -544,9 +543,10 @@ impl WasmSimulationState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Update GPU heightmap
+        // Update GPU heightmap and colormap
         if self.full_upload_needed {
             self.renderer.update_heightmap(&self.queue, self.sim.heightmap.as_slice());
+            self.renderer.update_colormap(&self.queue, &self.sim.cell_colors);
             self.full_upload_needed = false;
         } else {
             let bounds = self.sim.active_bounds;
@@ -560,6 +560,11 @@ impl WasmSimulationState {
             self.renderer.update_heightmap_partial(
                 &self.queue,
                 self.sim.heightmap.as_slice(),
+                render_bounds,
+            );
+            self.renderer.update_colormap_partial(
+                &self.queue,
+                &self.sim.cell_colors,
                 render_bounds,
             );
         }

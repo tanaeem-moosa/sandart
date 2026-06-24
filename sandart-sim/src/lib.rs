@@ -33,10 +33,8 @@ pub enum MaterialMode {
     FinePowder,
     Oobleck,
     MoonDust,
-    IronFilings,
     Water,
     Milk,
-    Ferrofluid,
     VegetableOil,
     CalmWater,
     Yogurt,
@@ -97,6 +95,8 @@ pub struct DrawingSimulation {
     pub heightmap: Heightmap,
     /// Pre-allocated temp buffer for double-buffering settling flows.
     pub temp_heights: Vec<f32>,
+    /// Per-cell RGBA color buffer. Advected during CA settling and displacement.
+    pub cell_colors: Vec<u8>,
     /// Current position of the primary marble (backward compatibility).
     pub marble_pos: Vec2,
     /// Previous position of the primary marble (backward compatibility).
@@ -208,6 +208,13 @@ impl DrawingSimulation {
         let temp_heights = heightmap.data.clone();
         let sliding = vec![false; GRID_SIZE * GRID_SIZE];
         let wave_vel = vec![0.0f32; GRID_SIZE * GRID_SIZE];
+        let mut cell_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
+        for chunk in cell_colors.chunks_exact_mut(4) {
+            chunk[0] = 210;
+            chunk[1] = 180;
+            chunk[2] = 140;
+            chunk[3] = 255;
+        }
 
         let block_size = 32;
         let cols = (GRID_SIZE + block_size - 1) / block_size;
@@ -221,6 +228,7 @@ impl DrawingSimulation {
         Self {
             heightmap,
             temp_heights,
+            cell_colors,
             marble_pos: Vec2::ZERO,
             prev_marble_pos: Vec2::ZERO,
             marble_vel: Vec2::ZERO,
@@ -255,6 +263,12 @@ impl DrawingSimulation {
         self.temp_heights.copy_from_slice(&self.heightmap.data);
         self.sliding.fill(false);
         self.wave_vel.fill(0.0);
+        for chunk in self.cell_colors.chunks_exact_mut(4) {
+            chunk[0] = 210;
+            chunk[1] = 180;
+            chunk[2] = 140;
+            chunk[3] = 255;
+        }
         self.marble_pos = Vec2::ZERO;
         self.prev_marble_pos = Vec2::ZERO;
         self.marble_vel = Vec2::ZERO;
@@ -276,6 +290,12 @@ impl DrawingSimulation {
         self.tick_count = 0;
     }
 
+    /// Copy color patterns into CPU color buffer
+    pub fn set_cell_colors(&mut self, rgba_data: &[u8]) {
+        let len = self.cell_colors.len().min(rgba_data.len());
+        self.cell_colors[..len].copy_from_slice(&rgba_data[..len]);
+    }
+
     /// Convert normalized Cartesian coordinates ([-1.0, 1.0]) to grid index coordinates.
     #[allow(dead_code)]
     pub fn norm_to_grid(pos: Vec2, width: usize, height: usize) -> (usize, usize) {
@@ -291,6 +311,7 @@ impl DrawingSimulation {
     pub fn draw_point(&mut self, pos: Vec2, radius: f32) {
         displace_line(
             &mut self.heightmap,
+            &mut self.cell_colors,
             pos,
             pos,
             radius,
@@ -304,6 +325,7 @@ impl DrawingSimulation {
     pub fn draw_line(&mut self, start: Vec2, end: Vec2, radius: f32) {
         displace_line(
             &mut self.heightmap,
+            &mut self.cell_colors,
             start,
             end,
             radius,
@@ -426,6 +448,7 @@ impl DrawingSimulation {
 
                     displace_line(
                         &mut self.heightmap,
+                        &mut self.cell_colors,
                         self.marbles[j].prev_pos,
                         self.marbles[j].pos,
                         marble_radius,
@@ -438,6 +461,7 @@ impl DrawingSimulation {
                     self.marbles[j].vel = Vec2::ZERO;
                     displace_line(
                         &mut self.heightmap,
+                        &mut self.cell_colors,
                         clamped_target,
                         clamped_target,
                         marble_radius,
@@ -472,31 +496,7 @@ impl DrawingSimulation {
             }
         }
 
-        // If material is IronFilings, expand the active blocks to cover the magnet's reach
-        // around all active marbles so filings can react dynamically as the magnet moves.
-        if material == MaterialMode::IronFilings {
-            for j in 0..5 {
-                if self.marbles[j].was_active {
-                    let (mx, my) = Self::norm_to_grid(self.marbles[j].pos, w, h);
-                    let r_reach = 225; // ~0.22 radius in grid cells (matches 0.22 magnet reach)
-                    let min_x = mx.saturating_sub(r_reach);
-                    let max_x = (mx + r_reach).min(w - 1);
-                    let min_y = my.saturating_sub(r_reach);
-                    let max_y = (my + r_reach).min(h - 1);
 
-                    let block_min_x = min_x / block_size;
-                    let block_max_x = (max_x / block_size).min(cols - 1);
-                    let block_min_y = min_y / block_size;
-                    let block_max_y = (max_y / block_size).min(rows - 1);
-
-                    for by in block_min_y..=block_max_y {
-                        for bx in block_min_x..=block_max_x {
-                            self.last_displacements[by * cols + bx] = 1.0;
-                        }
-                    }
-                }
-            }
-        }
 
         // Run the gravity-driven settling cellular automata tick
         let has_active = self.last_displacements.iter().any(|&x| x > 3e-4)
@@ -523,6 +523,7 @@ impl DrawingSimulation {
             settle_tick(
                 &mut self.heightmap,
                 &mut self.temp_heights,
+                &mut self.cell_colors,
                 &mut self.sliding,
                 &mut self.active_bounds,
                 &mut self.active_blocks,
@@ -770,5 +771,125 @@ mod tests {
             // Use 1e-2 threshold for multi-marble large updates, due to larger accumulated float rounding errors.
             assert!(diff < 1e-2, "Step {}: Multi-marble volume leaked! diff = {}, initial = {}, current = {}", i, diff, initial_sum, current_sum);
         }
+    }
+
+    #[test]
+    fn test_simulation_color_preservation() {
+        let mut sim = DrawingSimulation::new();
+        
+        // Initialize cell_colors with a gradient/pattern
+        let mut initial_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
+        for y in 0..GRID_SIZE {
+            for x in 0..GRID_SIZE {
+                let idx = y * GRID_SIZE + x;
+                initial_colors[idx * 4 + 0] = (x % 256) as u8;
+                initial_colors[idx * 4 + 1] = (y % 256) as u8;
+                initial_colors[idx * 4 + 2] = 128;
+                initial_colors[idx * 4 + 3] = 255;
+            }
+        }
+        sim.set_cell_colors(&initial_colors);
+
+        let calculate_color_mass = |s: &DrawingSimulation| -> (f64, f64) {
+            let mut red_mass = 0.0f64;
+            let mut green_mass = 0.0f64;
+            for (idx, &h) in s.heightmap.data.iter().enumerate() {
+                let r = s.cell_colors[idx * 4 + 0] as f64;
+                let g = s.cell_colors[idx * 4 + 1] as f64;
+                red_mass += r * h as f64;
+                green_mass += g * h as f64;
+            }
+            (red_mass, green_mass)
+        };
+
+        let (initial_red, initial_green) = calculate_color_mass(&sim);
+
+        let mut targets = [None; 5];
+        // Move marble in a spiral over 200 steps
+        for i in 0..200 {
+            let angle = i as f32 * 0.1;
+            let radius = i as f32 * 0.004;
+            targets[0] = Some(Vec2::new(angle.cos() * radius, angle.sin() * radius));
+            sim.update(
+                0.016,
+                &targets,
+                0.018,
+                MaterialMode::DrySand,
+                SandboxShape::Circle,
+                16.0,
+                16.0,
+            );
+        }
+
+        let (final_red, final_green) = calculate_color_mass(&sim);
+
+        let diff_red = (final_red - initial_red).abs() / initial_red;
+        let diff_green = (final_green - initial_green).abs() / initial_green;
+
+        // Verify that the color mass is preserved within 0.5% (to account for u8 integer rounding at each step)
+        assert!(diff_red < 0.005, "Red color mass leaked! diff = {:.5}%, initial = {}, final = {}", diff_red * 100.0, initial_red, final_red);
+        assert!(diff_green < 0.005, "Green color mass leaked! diff = {:.5}%, initial = {}, final = {}", diff_green * 100.0, initial_green, final_green);
+    }
+
+    #[test]
+    fn test_multi_marble_large_spiral_color_preservation() {
+        let mut sim = DrawingSimulation::new();
+
+        // Initialize cell_colors with a gradient/pattern
+        let mut initial_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
+        for y in 0..GRID_SIZE {
+            for x in 0..GRID_SIZE {
+                let idx = y * GRID_SIZE + x;
+                initial_colors[idx * 4 + 0] = (x % 256) as u8;
+                initial_colors[idx * 4 + 1] = (y % 256) as u8;
+                initial_colors[idx * 4 + 2] = 128;
+                initial_colors[idx * 4 + 3] = 255;
+            }
+        }
+        sim.set_cell_colors(&initial_colors);
+
+        let calculate_color_mass = |s: &DrawingSimulation| -> (f64, f64) {
+            let mut red_mass = 0.0f64;
+            let mut green_mass = 0.0f64;
+            for (idx, &h) in s.heightmap.data.iter().enumerate() {
+                let r = s.cell_colors[idx * 4 + 0] as f64;
+                let g = s.cell_colors[idx * 4 + 1] as f64;
+                red_mass += r * h as f64;
+                green_mass += g * h as f64;
+            }
+            (red_mass, green_mass)
+        };
+
+        let (initial_red, initial_green) = calculate_color_mass(&sim);
+
+        let mut targets = [None; 5];
+        let marble_radius = 0.08;
+        
+        // Move 3 marbles in out-of-phase spirals over 150 steps
+        for i in 0..150 {
+            for j in 0..3 {
+                let angle = i as f32 * 0.15 + (j as f32 * 2.0 * std::f32::consts::PI / 3.0);
+                let radius = i as f32 * 0.005;
+                targets[j] = Some(Vec2::new(angle.cos() * radius, angle.sin() * radius));
+            }
+            sim.update(
+                0.016,
+                &targets,
+                marble_radius,
+                MaterialMode::DrySand,
+                SandboxShape::Circle,
+                16.0,
+                16.0,
+            );
+        }
+
+        let (final_red, final_green) = calculate_color_mass(&sim);
+
+        let diff_red = (final_red - initial_red).abs() / initial_red;
+        let diff_green = (final_green - initial_green).abs() / initial_green;
+
+        // Verify that the color mass is preserved within 0.5%
+        assert!(diff_red < 0.005, "Multi-marble Red color mass leaked! diff = {:.5}%, initial = {}, final = {}", diff_red * 100.0, initial_red, final_red);
+        assert!(diff_green < 0.005, "Multi-marble Green color mass leaked! diff = {:.5}%, initial = {}, final = {}", diff_green * 100.0, initial_green, final_green);
     }
 }

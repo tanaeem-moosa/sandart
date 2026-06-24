@@ -19,17 +19,49 @@ pub struct ActiveMarbleInfo {
     pub vel_vec: Vec2,
 }
 
+/// Advect color from src cell to dst cell based on the flow amount and dst cell's height before arrival
+pub fn advect_color(colors: &mut [u8], src: usize, dst: usize, flow: f32, h_dst: f32) {
+    let total = h_dst + flow;
+    if total < 1e-6 {
+        return;
+    }
+    let w_keep = h_dst / total;
+    let w_arrive = flow / total;
+
+    let src_base = src * 4;
+    let dst_base = dst * 4;
+
+    for ch in 0..3 {
+        colors[dst_base + ch] = (
+            colors[dst_base + ch] as f32 * w_keep
+            + colors[src_base + ch] as f32 * w_arrive
+        ).clamp(0.0, 255.0).round() as u8;
+    }
+    colors[dst_base + 3] = 255; // opaque alpha
+}
+
 /// Helper function to add sand to a cell, clamping it at max_height (glass top)
-/// and distributing any excess volume to its available 4-way neighbors.
-fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize, amount: f32, max_height: f32) {
+/// and distributing any excess volume to its available 4-way neighbors, with color advection.
+fn add_sand_with_limit_color(
+    heightmap: &mut Heightmap,
+    cell_colors: &mut [u8],
+    src_idx: usize,
+    idx: usize,
+    w: usize,
+    h: usize,
+    amount: f32,
+    max_height: f32,
+) {
     if amount <= 0.0 {
         return;
     }
     let current_h = heightmap.data[idx];
     if current_h + amount <= max_height {
+        advect_color(cell_colors, src_idx, idx, amount, current_h);
         heightmap.data[idx] = current_h + amount;
     } else {
         let allowed = (max_height - current_h).max(0.0);
+        advect_color(cell_colors, src_idx, idx, allowed, current_h);
         heightmap.data[idx] = current_h + allowed;
         let mut excess = amount - allowed;
         if excess > 1e-6 {
@@ -61,7 +93,9 @@ fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize
                 let num = num_neighbors as f32;
                 let share = excess / num;
                 for i in 0..num_neighbors {
-                    heightmap.data[neighbors[i]] += share;
+                    let n_idx = neighbors[i];
+                    advect_color(cell_colors, idx, n_idx, share, heightmap.data[n_idx]);
+                    heightmap.data[n_idx] += share;
                 }
             } else {
                 // Distribute to room_neighbors proportional to their room
@@ -82,6 +116,7 @@ fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize
                         let (n_idx, room) = room_neighbors[i];
                         if room > 0.0 {
                             let to_add = share.min(room);
+                            advect_color(cell_colors, idx, n_idx, to_add, heightmap.data[n_idx]);
                             heightmap.data[n_idx] += to_add;
                             excess -= to_add;
                             let new_room = room - to_add;
@@ -98,7 +133,9 @@ fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize
                     let num = num_neighbors as f32;
                     let share = excess / num;
                     for i in 0..num_neighbors {
-                        heightmap.data[neighbors[i]] += share;
+                        let n_idx = neighbors[i];
+                        advect_color(cell_colors, idx, n_idx, share, heightmap.data[n_idx]);
+                        heightmap.data[n_idx] += share;
                     }
                 }
             }
@@ -110,6 +147,7 @@ fn add_sand_with_limit(heightmap: &mut Heightmap, idx: usize, w: usize, h: usize
 /// and depositing the displaced volume into the surrounding ridge area.
 pub fn displace_line(
     heightmap: &mut Heightmap,
+    cell_colors: &mut [u8],
     start: Vec2,
     end: Vec2,
     radius: f32,
@@ -134,12 +172,10 @@ pub fn displace_line(
         crate::MaterialMode::KineticSand => 0.10,
         crate::MaterialMode::DrySand => 0.20,
         crate::MaterialMode::MoonDust => 0.20,
-        crate::MaterialMode::IronFilings => 0.24,
         crate::MaterialMode::Snow => 0.28,
         crate::MaterialMode::WetSand => 0.35,
         crate::MaterialMode::Water => 0.00,
         crate::MaterialMode::Milk => 0.00,
-        crate::MaterialMode::Ferrofluid => 0.00,
         crate::MaterialMode::VegetableOil => 0.00,
         crate::MaterialMode::CalmWater => 0.00,
         crate::MaterialMode::Yogurt => 0.00,
@@ -384,9 +420,9 @@ pub fn displace_line(
                     let deposited_volume = diff * (w1 * m1 + w2 * m2 + w3 * m3);
                     if deposited_volume > 1e-6 {
                         heightmap.data[current_idx] = current_h - deposited_volume;
-                        add_sand_with_limit(heightmap, dest1_idx, w, h, diff * w1 * m1, 1.5);
-                        add_sand_with_limit(heightmap, dest2_idx, w, h, diff * w2 * m2, 1.5);
-                        add_sand_with_limit(heightmap, dest3_idx, w, h, diff * w3 * m3, 1.5);
+                        add_sand_with_limit_color(heightmap, cell_colors, current_idx, dest1_idx, w, h, diff * w1 * m1, 1.5);
+                        add_sand_with_limit_color(heightmap, cell_colors, current_idx, dest2_idx, w, h, diff * w2 * m2, 1.5);
+                        add_sand_with_limit_color(heightmap, cell_colors, current_idx, dest3_idx, w, h, diff * w3 * m3, 1.5);
                     } else {
                         // Restore height to conserve volume if no deposition can happen
                         heightmap.data[current_idx] = current_h;
@@ -401,6 +437,7 @@ pub fn displace_line(
 pub fn settle_tick(
     heightmap: &mut Heightmap,
     temp_heights: &mut Vec<f32>,
+    cell_colors: &mut Vec<u8>,
     sliding: &mut Vec<bool>,
     active_bounds: &mut ActiveBounds,
     active_blocks: &mut Vec<crate::BlockActivity>,
@@ -537,10 +574,9 @@ pub fn settle_tick(
         }
     };
 
-    // If material is a liquid (Water, Milk, Ferrofluid, Yogurt), run the 2D wave propagation solver instead of CA settling.
+    // If material is a liquid (Water, Milk, Yogurt, etc.), run the 2D wave propagation solver instead of CA settling.
     if material == crate::MaterialMode::Water
         || material == crate::MaterialMode::Milk
-        || material == crate::MaterialMode::Ferrofluid
         || material == crate::MaterialMode::VegetableOil
         || material == crate::MaterialMode::CalmWater
         || material == crate::MaterialMode::Yogurt
@@ -590,7 +626,6 @@ pub fn settle_tick(
         let (c_sq, damping) = match material {
             crate::MaterialMode::Water => (0.24f32, 0.98f32),
             crate::MaterialMode::Milk => (0.16f32, 0.86f32),
-            crate::MaterialMode::Ferrofluid => (0.12f32, 0.82f32),
             crate::MaterialMode::VegetableOil => (0.18f32, 0.92f32),
             crate::MaterialMode::CalmWater => (0.22f32, 0.88f32),
             crate::MaterialMode::Yogurt => (0.08f32, 0.76f32),
@@ -629,38 +664,7 @@ pub fn settle_tick(
 
                         let laplacian = h_left + h_right + h_top + h_bottom - 4.0 * h_center;
 
-                        // Calculate magnetic force for Ferrofluid
-                        let mut f_mag = 0.0f32;
-                        if material == crate::MaterialMode::Ferrofluid && !active_marbles.is_empty() {
-                            let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
-                            let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
-                            let cell_pos = Vec2::new(cell_x, cell_y);
-
-                            let mut max_attraction = 0.0f32;
-                            for marble in active_marbles {
-                                let dist = (cell_pos - marble.pos).length();
-                                if dist < 0.22 {
-                                    let weight = (1.0 - dist / 0.22).max(0.0);
-                                    let base_pull = weight * 0.25;
-
-                                    let angle = (cell_pos.y - marble.pos.y).atan2(cell_pos.x - marble.pos.x);
-                                    let radial_spikes = (angle * 24.0).cos();
-                                    let concentric_spikes = (dist * 2.0 * std::f32::consts::PI / 0.012).cos();
-                                    let spike_pattern = 0.5 + 0.5 * radial_spikes * concentric_spikes;
-
-                                    let attraction = base_pull * (0.3 + 0.7 * spike_pattern);
-                                    if attraction > max_attraction {
-                                        max_attraction = attraction;
-                                    }
-                                }
-                            }
-                            if max_attraction > 0.0 {
-                                let target_h = crate::DEFAULT_SAND_HEIGHT + max_attraction;
-                                f_mag = 0.25 * (target_h - h_center);
-                            }
-                        }
-
-                        let v_new = (wave_vel[center_idx] + c_sq * laplacian + f_mag) * damping;
+                        let v_new = (wave_vel[center_idx] + c_sq * laplacian) * damping;
                         wave_vel[center_idx] = v_new;
 
                         let h_new = (h_center + v_new).clamp(0.0, 1.0);
@@ -786,7 +790,7 @@ pub fn settle_tick(
     };
 
     // 2. Cellular automata slope settling update (loop over active blocks)
-    let is_complex = material == crate::MaterialMode::Oobleck || material == crate::MaterialMode::IronFilings;
+    let is_complex = material == crate::MaterialMode::Oobleck;
     let is_dynamic = material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand;
 
     let threshold_min = match material {
@@ -799,7 +803,6 @@ pub fn settle_tick(
         crate::MaterialMode::DrySand => 0.04,
         crate::MaterialMode::CoarseSand => 0.06,
         crate::MaterialMode::Oobleck => 0.005,
-        crate::MaterialMode::IronFilings => 0.01,
         _ => 0.10,
     };
 
@@ -868,6 +871,7 @@ pub fn settle_tick(
                                     activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
                                     activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
+                                    advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
                                     total_flow += clamped_flow;
@@ -917,27 +921,7 @@ pub fn settle_tick(
                         None
                     };
 
-                    let iron_filings_threshold = if material == crate::MaterialMode::IronFilings && min_dist_to_marble < 0.22 {
-                        let ripple = (min_dist_to_marble * 2.0 * std::f32::consts::PI / 0.025).cos();
-                        (0.08 + ripple * 0.05).max(0.01)
-                    } else {
-                        0.08
-                    };
-
-                    let to_magnet_norm = if material == crate::MaterialMode::IronFilings && min_dist_to_marble > 1e-4 {
-                        if let Some(idx) = closest_marble_idx {
-                            let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
-                            let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
-                            let cell_pos = Vec2::new(cell_x, cell_y);
-                            Some((active_marbles[idx].pos - cell_pos).normalize())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-
-                    for (dir_idx, &neighbor_idx) in neighbors.iter().enumerate() {
+                    for (_dir_idx, &neighbor_idx) in neighbors.iter().enumerate() {
                         let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
 
@@ -946,7 +930,6 @@ pub fn settle_tick(
                         let alpha;
                         let lock_chance;
                         let quantize_size: Option<f32> = None;
-                        let mut magnetic_bias = 0.0;
 
                         match material {
                             crate::MaterialMode::Oobleck => {
@@ -955,48 +938,6 @@ pub fn settle_tick(
                                 alpha = al;
                                 lock_chance = lc;
                             }
-                            crate::MaterialMode::IronFilings => {
-                                threshold = iron_filings_threshold;
-                                alpha = 0.35;
-                                lock_chance = 0.05;
-                                
-                                if min_dist_to_marble < 0.22 {
-                                    if let Some(idx) = closest_marble_idx {
-                                        // 1. Static radial pull towards the magnet center
-                                        let mut pull_bias = 0.0;
-                                        if let Some(to_mag_norm) = to_magnet_norm {
-                                            let dot_prod = match dir_idx {
-                                                0 => -to_mag_norm.x,
-                                                1 => to_mag_norm.x,
-                                                2 => to_mag_norm.y,
-                                                3 => -to_mag_norm.y,
-                                                _ => 0.0,
-                                            };
-                                            let pull_strength = 0.24 * (1.0 - min_dist_to_marble / 0.22).max(0.0);
-                                            pull_bias = pull_strength * dot_prod;
-                                        }
-
-                                        // 2. Dynamic drag along the magnet's velocity vector
-                                        let mut drag_bias = 0.0;
-                                        let m_vel_vec = active_marbles[idx].vel_vec;
-                                        let speed = active_marbles[idx].vel;
-                                        if speed > 1e-4 {
-                                            let drag_dir = m_vel_vec.normalize();
-                                            let dot_prod_drag = match dir_idx {
-                                                0 => -drag_dir.x,
-                                                1 => drag_dir.x,
-                                                2 => drag_dir.y,
-                                                3 => -drag_dir.y,
-                                                _ => 0.0,
-                                            };
-                                            let drag_strength = 0.35 * speed.min(0.8) * (1.0 - min_dist_to_marble / 0.22).max(0.0);
-                                            drag_bias = drag_strength * dot_prod_drag;
-                                        }
-
-                                        magnetic_bias = pull_bias + drag_bias;
-                                    }
-                                }
-                            }
                             _ => {
                                 threshold = 0.0;
                                 alpha = 0.0;
@@ -1004,7 +945,7 @@ pub fn settle_tick(
                             }
                         }
 
-                        let slope = geom_slope + magnetic_bias;
+                        let slope = geom_slope;
 
                         if slope <= 1e-6 {
                             continue;
@@ -1034,6 +975,7 @@ pub fn settle_tick(
                                         activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
                                         activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
+                                        advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                         temp_heights[center_idx] -= clamped_flow;
                                         temp_heights[neighbor_idx] += clamped_flow;
                                         total_flow += clamped_flow;
@@ -1114,6 +1056,7 @@ pub fn settle_tick(
                                     activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
                                     activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
+                                    advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
                                     total_flow += clamped_flow;
@@ -1182,6 +1125,7 @@ pub fn settle_tick(
                                         activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
                                         activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
+                                        advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                         temp_heights[center_idx] -= clamped_flow;
                                         temp_heights[neighbor_idx] += clamped_flow;
                                         total_flow += clamped_flow;
@@ -1273,6 +1217,7 @@ pub fn settle_tick(
                                     activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
                                     activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
+                                    advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
                                     total_flow += clamped_flow;
@@ -1320,6 +1265,7 @@ pub fn settle_tick(
                                     activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
                                     activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
+                                    advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
                                     total_flow += clamped_flow;
@@ -1401,6 +1347,7 @@ mod tests {
     #[test]
     fn test_draw_point_out_of_bounds() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1412,6 +1359,7 @@ mod tests {
         // Drawing completely offscreen should not panic or modify the heightmap
         displace_line(
             &mut hm,
+            &mut cell_colors,
             Vec2::new(5.0, 5.0),
             Vec2::new(5.0, 5.0),
             0.1,
@@ -1428,6 +1376,7 @@ mod tests {
     #[test]
     fn test_draw_point_partial_overlap() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1439,6 +1388,7 @@ mod tests {
         // Position marble so it sits on the left boundary
         displace_line(
             &mut hm,
+            &mut cell_colors,
             Vec2::new(-1.0, 0.0),
             Vec2::new(-1.0, 0.0),
             0.05,
@@ -1460,6 +1410,7 @@ mod tests {
     #[test]
     fn test_draw_line_interpolation() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1471,6 +1422,7 @@ mod tests {
         // Draw a line from (-0.5, 0.0) to (0.5, 0.0)
         displace_line(
             &mut hm,
+            &mut cell_colors,
             Vec2::new(-0.5, 0.0),
             Vec2::new(0.5, 0.0),
             0.05,
@@ -1498,6 +1450,7 @@ mod tests {
     #[test]
     fn test_draw_point_extreme_coordinates_overflow() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1508,6 +1461,7 @@ mod tests {
 
         displace_line(
             &mut hm,
+            &mut cell_colors,
             Vec2::new(1e18, 1e18),
             Vec2::new(1e18, 1e18),
             0.1,
@@ -1522,6 +1476,7 @@ mod tests {
     #[test]
     fn test_multipass_carving() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1533,6 +1488,7 @@ mod tests {
         // Pass 1: carving at (0.0, 0.0) with DrySand (20% residual factor)
         displace_line(
             &mut hm,
+            &mut cell_colors,
             Vec2::ZERO,
             Vec2::ZERO,
             0.05,
@@ -1548,6 +1504,7 @@ mod tests {
         // Pass 2: carving again at (0.0, 0.0)
         displace_line(
             &mut hm,
+            &mut cell_colors,
             Vec2::ZERO,
             Vec2::ZERO,
             0.05,
@@ -1563,6 +1520,7 @@ mod tests {
     #[test]
     fn test_volume_conservation() {
         let mut hm = Heightmap::new(512, 512, 0.4);
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1575,6 +1533,7 @@ mod tests {
         // Perform displacement along a path
         displace_line(
             &mut hm,
+            &mut cell_colors,
             Vec2::new(-0.2, 0.2),
             Vec2::new(0.2, -0.2),
             0.03,
@@ -1590,6 +1549,7 @@ mod tests {
     #[test]
     fn test_draw_line_extreme_coordinates_overflow() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1599,6 +1559,7 @@ mod tests {
         };
         displace_line(
             &mut hm,
+            &mut cell_colors,
             Vec2::new(-1e18, 0.0),
             Vec2::new(1e18, 0.0),
             0.1,
@@ -1610,6 +1571,7 @@ mod tests {
     #[test]
     fn test_volume_conservation_with_saturation() {
         let mut hm = Heightmap::new(512, 512, 0.70);
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1620,7 +1582,7 @@ mod tests {
         let initial_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
 
         // Perform displacement at a single point to trigger local saturation in the inner ridge
-        displace_line(&mut hm, Vec2::ZERO, Vec2::ZERO, 0.02, &mut bounds, crate::MaterialMode::ButterCream);
+        displace_line(&mut hm, &mut cell_colors, Vec2::ZERO, Vec2::ZERO, 0.02, &mut bounds, crate::MaterialMode::ButterCream);
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
         let diff = (final_sum - initial_sum).abs();
@@ -1631,6 +1593,7 @@ mod tests {
     fn test_settling_flow_and_volume_conservation() {
         let mut hm = Heightmap::new(512, 512, 0.5);
         let mut temp_heights = vec![0.5; 512 * 512];
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
 
         let center_idx = 256 * 512 + 256;
         hm.data[center_idx] = 0.8;
@@ -1651,11 +1614,14 @@ mod tests {
         let mut last_simulated_ticks = vec![0; 256];
         let budget_n = 256;
         let mut flow_occurred = false;
+        let mut sliding = vec![false; 512 * 512];
+
         for i in 0..10 {
             let flow = settle_tick(
                 &mut hm,
                 &mut temp_heights,
-                &mut vec![false; 512 * 512],
+                &mut cell_colors,
+                &mut sliding,
                 &mut bounds,
                 &mut active_blocks,
                 &mut last_displacements,
@@ -1693,6 +1659,7 @@ mod tests {
     fn test_settling_deactivation() {
         let mut hm = Heightmap::new(512, 512, 0.5);
         let mut temp_heights = vec![0.5; 512 * 512];
+        let mut cell_colors = vec![0u8; 512 * 512 * 4];
 
         let mut bounds = ActiveBounds {
             min_x: 250,
@@ -1707,10 +1674,13 @@ mod tests {
         let mut last_displacements = Vec::new();
         let mut last_simulated_ticks = Vec::new();
         let budget_n = 256;
+        let mut sliding = vec![false; 512 * 512];
+
         let flow = settle_tick(
             &mut hm,
             &mut temp_heights,
-            &mut vec![false; 512 * 512],
+            &mut cell_colors,
+            &mut sliding,
             &mut bounds,
             &mut active_blocks,
             &mut last_displacements,
@@ -1741,10 +1711,8 @@ mod tests {
             MaterialMode::FinePowder,
             MaterialMode::Oobleck,
             MaterialMode::MoonDust,
-            MaterialMode::IronFilings,
             MaterialMode::Water,
             MaterialMode::Milk,
-            MaterialMode::Ferrofluid,
             MaterialMode::VegetableOil,
             MaterialMode::CalmWater,
             MaterialMode::Yogurt,
@@ -1754,6 +1722,7 @@ mod tests {
         for &mat in &materials {
             let mut hm = Heightmap::new(64, 64, 0.5);
             let mut temp_heights = vec![0.5; 64 * 64];
+            let mut cell_colors = vec![0u8; 64 * 64 * 4];
             let mut sliding = vec![false; 64 * 64];
             let mut bounds = ActiveBounds {
                 min_x: 10,
@@ -1776,6 +1745,7 @@ mod tests {
             let flow = settle_tick(
                 &mut hm,
                 &mut temp_heights,
+                &mut cell_colors,
                 &mut sliding,
                 &mut bounds,
                 &mut active_blocks,
@@ -1793,6 +1763,78 @@ mod tests {
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
         }
+    }
+
+    #[test]
+    fn test_color_conservation() {
+        let mut hm = Heightmap::new(128, 128, 0.5);
+        // Put a peak in the center so sand flows
+        let center_idx = 64 * 128 + 64;
+        hm.data[center_idx] = 1.0;
+
+        let mut cell_colors = vec![0u8; 128 * 128 * 4];
+        // Initialize cell_colors with a gradient/pattern
+        for y in 0..128 {
+            for x in 0..128 {
+                let idx = y * 128 + x;
+                cell_colors[idx * 4 + 0] = (x * 2) as u8; // Red channel
+                cell_colors[idx * 4 + 1] = (y * 2) as u8; // Green channel
+                cell_colors[idx * 4 + 2] = 100;
+                cell_colors[idx * 4 + 3] = 255;
+            }
+        }
+
+        // Calculate initial total color (Red mass)
+        let initial_red_mass: f64 = cell_colors.chunks_exact(4)
+            .zip(hm.as_slice())
+            .map(|(c, &h)| c[0] as f64 * h as f64)
+            .sum();
+
+        let mut temp_heights = vec![0.5; 128 * 128];
+        let mut sliding = vec![false; 128 * 128];
+        let mut bounds = ActiveBounds {
+            min_x: 60,
+            max_x: 68,
+            min_y: 60,
+            max_y: 68,
+            active: true,
+        };
+
+        let mut wave_vel = vec![0.0; 128 * 128];
+        let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
+        let mut last_displacements = vec![1.0; 16];
+        let mut last_simulated_ticks = vec![0; 16];
+
+        // Settle a bit to trigger flows
+        let flow = settle_tick(
+            &mut hm,
+            &mut temp_heights,
+            &mut cell_colors,
+            &mut sliding,
+            &mut bounds,
+            &mut active_blocks,
+            &mut last_displacements,
+            &mut last_simulated_ticks,
+            256,
+            32,
+            crate::MaterialMode::DrySand,
+            &[],
+            12345,
+            &mut wave_vel,
+            crate::SandboxShape::Circle,
+            0,
+        );
+
+        assert!(flow > 0.0, "Settling flow must occur for the test");
+
+        // Calculate final total color (Red mass)
+        let final_red_mass: f64 = cell_colors.chunks_exact(4)
+            .zip(hm.as_slice())
+            .map(|(c, &h)| c[0] as f64 * h as f64)
+            .sum();
+
+        let diff = (final_red_mass - initial_red_mass).abs();
+        assert!(diff < 1e-4, "Color mass not conserved! diff = {}, initial = {}, final = {}", diff, initial_red_mass, final_red_mass);
     }
 }
 

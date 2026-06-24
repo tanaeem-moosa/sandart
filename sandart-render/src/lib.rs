@@ -417,6 +417,41 @@ impl HeightmapRenderer {
         );
     }
 
+    /// Upload a sub-rectangle of CPU RGBA colormap data directly to the WGPU texture.
+    pub fn update_colormap_partial(&mut self, queue: &wgpu::Queue, data: &[u8], bounds: ActiveBounds) {
+        if !bounds.active {
+            return;
+        }
+
+        let sub_width = (bounds.max_x - bounds.min_x + 1) as u32;
+        let sub_height = (bounds.max_y - bounds.min_y + 1) as u32;
+        let offset = ((bounds.min_y * GRID_SIZE + bounds.min_x) * 4) as wgpu::BufferAddress;
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.colormap_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: bounds.min_x as u32,
+                    y: bounds.min_y as u32,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::ImageDataLayout {
+                offset,
+                bytes_per_row: Some((GRID_SIZE * 4) as u32),
+                rows_per_image: Some(GRID_SIZE as u32),
+            },
+            wgpu::Extent3d {
+                width: sub_width,
+                height: sub_height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
     /// Upload uniform data directly to the WGPU uniform buffer.
     pub fn update_uniforms(&self, queue: &wgpu::Queue, uniforms: &LightingUniforms) {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(uniforms));
