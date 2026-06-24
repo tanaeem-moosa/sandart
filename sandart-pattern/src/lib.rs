@@ -899,6 +899,59 @@ pub fn generate_clock_pattern(hours: u32, minutes: u32, _seconds: f32, _phase: u
     path
 }
 
+pub fn generate_dinosaur() -> Vec<Vec2> {
+    let raw_pts = [
+        // Head & Snout
+        (0.3, 0.6), (0.33, 0.65), (0.4, 0.67), (0.45, 0.65), (0.46, 0.6), 
+        (0.43, 0.57), (0.38, 0.55), (0.35, 0.5),
+        // Long Neck going down
+        (0.32, 0.4), (0.28, 0.28), (0.22, 0.15), (0.15, 0.05), (0.05, -0.02),
+        // Back curve
+        (-0.1, -0.01), (-0.25, -0.03), (-0.4, -0.08), (-0.55, -0.15), (-0.68, -0.25),
+        // Tail
+        (-0.8, -0.4), (-0.85, -0.5), (-0.8, -0.53), (-0.7, -0.48), (-0.58, -0.4), (-0.48, -0.32),
+        // Back leg 1
+        (-0.45, -0.45), (-0.45, -0.7), (-0.38, -0.7), (-0.36, -0.45),
+        // Belly
+        (-0.25, -0.42), (-0.1, -0.41),
+        // Back leg 2 (slightly offset)
+        (-0.12, -0.45), (-0.12, -0.68), (-0.05, -0.68), (-0.03, -0.42),
+        // Belly front
+        (0.1, -0.42),
+        // Front leg 1
+        (0.15, -0.45), (0.15, -0.7), (0.22, -0.7), (0.24, -0.4),
+        // Chest
+        (0.28, -0.25), (0.3, -0.1), (0.35, 0.1), (0.38, 0.28), (0.36, 0.42), (0.32, 0.52),
+    ];
+    raw_pts.iter().map(|&(x, y)| Vec2::new(x * 0.90, y * 0.90)).collect()
+}
+
+pub fn generate_unicorn() -> Vec<Vec2> {
+    let raw_pts = [
+        // Snout & Mouth
+        (-0.25, 0.0), (-0.3, -0.05), (-0.28, -0.12), (-0.2, -0.15), (-0.1, -0.12),
+        // Jaw & Neck/Chest curve
+        (0.05, -0.2), (0.15, -0.4), (0.25, -0.6), (0.3, -0.65), (0.28, -0.55),
+        // Mane bump 1
+        (0.25, -0.4), (0.32, -0.32), (0.25, -0.22),
+        // Mane bump 2
+        (0.33, -0.15), (0.26, -0.05),
+        // Mane bump 3
+        (0.35, 0.05), (0.24, 0.15),
+        // Mane bump 4 / Back of head
+        (0.3, 0.25), (0.2, 0.32),
+        // Ear
+        (0.22, 0.45), (0.25, 0.6), (0.18, 0.58), (0.15, 0.42),
+        // Forehead
+        (0.08, 0.38),
+        // Horn!
+        (0.15, 0.48), (0.35, 0.8), (0.05, 0.4),
+        // Nose bridge
+        (-0.05, 0.28), (-0.15, 0.15), (-0.2, 0.08),
+    ];
+    raw_pts.iter().map(|&(x, y)| Vec2::new(x * 0.90, y * 0.90)).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,6 +1200,20 @@ mod tests {
         assert!(!clock_clear.is_empty());
         for p in &clock_clear {
             assert!(p.length() <= 0.92, "Clock Clear point {:?} out of bounds", p);
+        }
+
+        // Dinosaur
+        let dinosaur = generate_dinosaur();
+        assert!(!dinosaur.is_empty());
+        for p in &dinosaur {
+            assert!(p.length() <= 0.92, "Dinosaur point {:?} out of bounds", p);
+        }
+
+        // Unicorn
+        let unicorn = generate_unicorn();
+        assert!(!unicorn.is_empty());
+        for p in &unicorn {
+            assert!(p.length() <= 0.92, "Unicorn point {:?} out of bounds", p);
         }
     }
 }

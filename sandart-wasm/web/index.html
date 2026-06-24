@@ -20,6 +20,114 @@
             --glass-blur: blur(12px);
         }
 
+        /* Premium custom color pickers and preset swatches */
+        .color-picker-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-top: 8px;
+        }
+        .color-picker-container {
+            position: relative;
+            width: 38px;
+            height: 38px;
+            border-radius: 50%;
+            overflow: hidden;
+            border: 2px solid rgba(255, 255, 255, 0.15);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .color-picker-container:hover {
+            transform: scale(1.1);
+            border-color: var(--accent-color);
+        }
+        .color-picker-container input[type="color"] {
+            position: absolute;
+            top: -5px;
+            left: -5px;
+            width: 48px;
+            height: 48px;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+            background: none;
+        }
+        .preset-swatches {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+            margin-top: 6px;
+        }
+        .swatch {
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            cursor: pointer;
+            border: 1px solid rgba(255,255,255,0.15);
+            transition: all 0.2s ease;
+            position: relative;
+        }
+        .swatch:hover {
+            transform: scale(1.15);
+            border-color: var(--accent-color);
+        }
+        .swatch.active {
+            box-shadow: 0 0 0 2px var(--accent-color);
+        }
+        .swatch-split {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: linear-gradient(135deg, var(--c1) 50%, var(--c2) 50%);
+        }
+        .material-preview-card {
+            background-color: rgba(255,255,255,0.02);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 8px;
+            padding: 10px;
+            font-size: 11px;
+            margin-top: 10px;
+        }
+        .material-preview-title {
+            font-weight: 600;
+            color: var(--text-main);
+            margin-bottom: 6px;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .material-prop-bar-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+        .material-prop-label {
+            width: 70px;
+            color: var(--text-muted);
+        }
+        .material-prop-bar-outer {
+            flex: 1;
+            height: 4px;
+            background-color: rgba(255,255,255,0.08);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .material-prop-bar-inner {
+            height: 100%;
+            background-color: var(--accent-color);
+            border-radius: 2px;
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .material-prop-val {
+            width: 25px;
+            text-align: right;
+            color: var(--text-main);
+            font-weight: 500;
+        }
+
         * {
             box-sizing: border-box;
             margin: 0;
@@ -402,10 +510,20 @@
             </div>
 
             <!-- Simulation preset -->
-            <div class="section-title">🔬 Sand Physics</div>
+            <div class="section-title">🔬 Sand Physics & Materials</div>
             <div class="control-group">
-                <label for="material-select">Material Preset</label>
-                <select id="material-select">
+                <label for="material-pattern">Material Distribution</label>
+                <select id="material-pattern">
+                    <option value="solid" selected>Uniform Material</option>
+                    <option value="gradient">Linear Gradient (Blend)</option>
+                    <option value="stripes">Stripes (Alternating)</option>
+                    <option value="concentric">Concentric Rings</option>
+                    <option value="checkerboard">Checkerboard Grid</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label for="material-1" id="label-material-1">Primary Material</label>
+                <select id="material-1">
                     <option value="0" selected>Dry Sand</option>
                     <option value="1">Kinetic Sand</option>
                     <option value="2">Wet Sand</option>
@@ -422,6 +540,26 @@
                     <option value="15">Yogurt</option>
                 </select>
             </div>
+            <div class="control-group" id="material-2-group" style="display: none;">
+                <label for="material-2">Secondary Material</label>
+                <select id="material-2">
+                    <option value="0">Dry Sand</option>
+                    <option value="1">Kinetic Sand</option>
+                    <option value="2" selected>Wet Sand</option>
+                    <option value="3">Coarse Sand</option>
+                    <option value="4">Butter-Cream</option>
+                    <option value="5">Snow</option>
+                    <option value="6">Fine Powder</option>
+                    <option value="7">Oobleck</option>
+                    <option value="8">Moon Dust</option>
+                    <option value="10">Water</option>
+                    <option value="11">Milk</option>
+                    <option value="13">Vegetable Oil</option>
+                    <option value="14">Calm Water</option>
+                    <option value="15">Yogurt</option>
+                </select>
+            </div>
+            <div id="material-properties-preview" class="material-preview-card"></div>
 
             <div class="control-group">
                 <label for="shape-select">Sandbox Shape</label>
@@ -451,6 +589,8 @@
                     <option value="butterfly">Butterfly Curve</option>
                     <option value="zen_waves">Zen Waves</option>
                     <option value="zen_mandala">Zen Mandala</option>
+                    <option value="dinosaur">Dinosaur Outline</option>
+                    <option value="unicorn">Unicorn Outline</option>
                     <option value="clock">Clock Mode</option>
                 </select>
             </div>
@@ -552,27 +692,50 @@
                     <option value="gradient">Linear Gradient</option>
                     <option value="stripes">Stripes (Alternating)</option>
                     <option value="concentric">Concentric Rings</option>
+                    <option value="checkerboard">Checkerboard Grid</option>
                     <option value="rainbow_linear">Rainbow (Linear)</option>
                     <option value="rainbow_radial">Rainbow (Radial)</option>
                 </select>
             </div>
-            <div class="control-group">
-                <label for="color-preset">Theme Preset</label>
-                <select id="color-preset">
-                    <option value="custom" selected>Custom (Pick Below)</option>
-                    <option value="rainbow">Rainbow (Auto)</option>
-                    <option value="black_white">Black & White</option>
-                    <option value="desert">Desert Sand</option>
-                    <option value="ocean">Ocean Teal</option>
-                    <option value="forest">Forest Gold</option>
-                </select>
+
+            <!-- Hide the old select preset but keep a hidden one for backward compatibility if needed -->
+            <select id="color-preset" style="display: none;">
+                <option value="custom" selected>Custom</option>
+                <option value="rainbow">Rainbow</option>
+                <option value="black_white">Black & White</option>
+                <option value="desert">Desert Sand</option>
+                <option value="ocean">Ocean Teal</option>
+                <option value="forest">Forest Gold</option>
+                <option value="vaporwave">Vaporwave</option>
+                <option value="sunset">Sunset Gold</option>
+            </select>
+
+            <!-- Quick Swatches -->
+            <label>Color Theme Swatches</label>
+            <div class="preset-swatches" id="preset-swatches">
+                <div class="swatch" data-preset="desert" title="Desert Sand" style="--c1: #ebd9bb; --c2: #8b5a2b;"><div class="swatch-split"></div></div>
+                <div class="swatch" data-preset="ocean" title="Ocean Teal" style="--c1: #008080; --c2: #e0f7fa;"><div class="swatch-split"></div></div>
+                <div class="swatch" data-preset="forest" title="Forest Gold" style="--c1: #228b22; --c2: #ffd700;"><div class="swatch-split"></div></div>
+                <div class="swatch" data-preset="vaporwave" title="Vaporwave" style="--c1: #ff007f; --c2: #00f0ff;"><div class="swatch-split"></div></div>
+                <div class="swatch" data-preset="sunset" title="Sunset Gold" style="--c1: #ff4500; --c2: #ffd700;"><div class="swatch-split"></div></div>
+                <div class="swatch" data-preset="black_white" title="Black & White" style="--c1: #ffffff; --c2: #050505;"><div class="swatch-split"></div></div>
+                <div class="swatch" data-preset="rainbow" title="Rainbow" style="background: linear-gradient(135deg, red, yellow, green, blue); border-radius: 50%; width: 28px; height: 28px;"></div>
             </div>
+
             <div class="control-group" id="custom-color-inputs">
-                <div class="color-row">
-                    <label for="color-sand-1">Color 1:</label>
-                    <input type="color" id="color-sand-1" value="#ebd9bb">
-                    <label for="color-sand-2" id="label-sand-2" style="margin-left: 10px; display: none;">Color 2:</label>
-                    <input type="color" id="color-sand-2" value="#5c4033" style="display: none;">
+                <div class="color-picker-wrapper">
+                    <div style="display: flex; flex-direction: column; align-items: center;">
+                        <span style="font-size: 10px; color: var(--text-muted); margin-bottom: 2px;">Color 1</span>
+                        <div class="color-picker-container">
+                            <input type="color" id="color-sand-1" value="#ebd9bb">
+                        </div>
+                    </div>
+                    <div id="color-sand-2-wrapper" style="display: none; flex-direction: column; align-items: center;">
+                        <span style="font-size: 10px; color: var(--text-muted); margin-bottom: 2px;">Color 2</span>
+                        <div class="color-picker-container">
+                            <input type="color" id="color-sand-2" value="#5c4033">
+                        </div>
+                    </div>
                 </div>
             </div>
 

@@ -500,12 +500,30 @@ pub fn displace_line(
                     let x3 = h_above3 / scale;
                     let m3 = 1.0 / (1.0 + x3 * x3 * x3 * x3);
 
-                    let deposited_volume = diff * (w1 * m1 + w2 * m2 + w3 * m3);
+                    let mut forward_vol = 0.0f32;
+                    let mut forward_dest_idx = 0;
+                    if len_sq >= 1e-6 && len > 1e-4 {
+                        let forward_dist = r_grid_clamped * 1.05; // Just in front of the marble boundary
+                        let fx = (px + (vx / len) * forward_dist).floor() as isize;
+                        let fy = (py + (vy / len) * forward_dist).floor() as isize;
+                        let fx_clamped = fx.clamp(0, w as isize - 1) as usize;
+                        let fy_clamped = fy.clamp(0, h as isize - 1) as usize;
+                        forward_dest_idx = fy_clamped * w + fx_clamped;
+                        forward_vol = (diff * 0.10).min(0.10);
+                    }
+
+                    let side_diff = diff - forward_vol;
+                    let deposited_volume = side_diff * (w1 * m1 + w2 * m2 + w3 * m3) + forward_vol;
                     if deposited_volume > 1e-6 {
                         heightmap.data[current_idx] = current_h - deposited_volume;
-                        add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest1_idx, w, h, diff * w1 * m1, 1.5);
-                        add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest2_idx, w, h, diff * w2 * m2, 1.5);
-                        add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest3_idx, w, h, diff * w3 * m3, 1.5);
+                        if side_diff > 0.0 {
+                            add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest1_idx, w, h, side_diff * w1 * m1, 1.5);
+                            add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest2_idx, w, h, side_diff * w2 * m2, 1.5);
+                            add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest3_idx, w, h, side_diff * w3 * m3, 1.5);
+                        }
+                        if forward_vol > 0.0 {
+                            add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, forward_dest_idx, w, h, forward_vol, 1.5);
+                        }
                     } else {
                         // Restore height to conserve volume if no deposition can happen
                         heightmap.data[current_idx] = current_h;

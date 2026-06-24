@@ -270,6 +270,12 @@ impl SandArtApp {
                 self.clock_minute = m;
                 crate::pattern::generate_clock_pattern(h, m, 0.0, 1)
             }
+            crate::config::PatternMode::Dinosaur => {
+                crate::pattern::generate_dinosaur()
+            }
+            crate::config::PatternMode::Unicorn => {
+                crate::pattern::generate_unicorn()
+            }
             crate::config::PatternMode::MultiMarble => {
                 let paths = crate::pattern::generate_multi_spiral(
                     self.config.spiral_spacing,
@@ -546,6 +552,20 @@ impl eframe::App for SandArtApp {
                                     &mut self.config.pattern_mode,
                                     crate::config::PatternMode::ZenMandala,
                                     "Zen Mandala",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Dinosaur,
+                                    "Dinosaur Outline",
+                                )
+                                .changed();
+                            changed |= ui
+                                .selectable_value(
+                                    &mut self.config.pattern_mode,
+                                    crate::config::PatternMode::Unicorn,
+                                    "Unicorn Outline",
                                 )
                                 .changed();
                             changed |= ui

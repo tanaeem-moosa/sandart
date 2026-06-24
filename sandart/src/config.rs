@@ -21,6 +21,8 @@ pub enum PatternMode {
     ZenWaves,
     ZenMandala,
     Clock,
+    Dinosaur,
+    Unicorn,
 }
 
 impl Default for PatternMode {

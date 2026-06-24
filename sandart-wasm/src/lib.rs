@@ -490,6 +490,12 @@ impl WasmSimulationState {
             "zen_mandala" => {
                 sandart_pattern::generate_zen_mandala()
             }
+            "dinosaur" => {
+                sandart_pattern::generate_dinosaur()
+            }
+            "unicorn" => {
+                sandart_pattern::generate_unicorn()
+            }
             "clock" => {
                 let date = js_sys::Date::new_0();
                 let h = date.get_hours();
