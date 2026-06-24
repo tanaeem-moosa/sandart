@@ -362,14 +362,23 @@ fn fs_main(
     let u1 = clamp((index.x + 1.5) / tex_size, 0.0, 1.0);
     let v1 = clamp((index.y + 1.5) / tex_size, 0.0, 1.0);
 
-    let h00 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v0), 0.0).r;
-    let h10 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v0), 0.0).r;
-    let h01 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v1), 0.0).r;
-    let h11 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v1), 0.0).r;
+    let sample00 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v0), 0.0);
+    let sample10 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v0), 0.0);
+    let sample01 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v1), 0.0);
+    let sample11 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v1), 0.0);
+
+    let h00 = sample00.r;
+    let h10 = sample10.r;
+    let h01 = sample01.r;
+    let h11 = sample11.r;
 
     let h_center = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
     let dh_dx = mix(h10 - h00, h11 - h01, f.y);
     let dh_dy = mix(h01 - h00, h11 - h10, f.x);
+
+    let props = mix(mix(sample00, sample10, f.x), mix(sample01, sample11, f.x), f.y);
+    let wetness = props.g;
+    let grain_size = props.b;
 
     var normal = normalize(vec3<f32>(
         -dh_dx * depth_factor,
@@ -377,149 +386,84 @@ fn fs_main(
         1.0
     ));
 
-    // 2. Define material presets and grain configurations
+    // 2. Define material presets and grain configurations using continuous property mapping
+    let sparkles_fade = clamp(1.0 - wetness / 0.3, 0.0, 1.0);
+    let sparkles_intensity = mix(2.0, 18.0, grain_size) * sparkles_fade;
+    let sparkles_threshold = clamp(mix(0.998, 0.990, grain_size) + (1.0 - sparkles_fade) * 0.01, 0.990, 1.0);
+    let sparkles_power = mix(500.0, 250.0, grain_size);
+    let rim_mult = mix(0.40, 0.15, clamp(wetness, 0.0, 1.0));
+    let roughness = clamp(mix(1.0 - 0.2 * grain_size, 0.05, wetness), 0.05, 1.0);
+    let grain_fade = clamp(1.0 - wetness / 0.5, 0.0, 1.0);
+    let grain_strength = mix(0.0, 0.55, grain_size) * grain_fade;
+    let grain_scale = mix(3500.0, 300.0, grain_size);
+    let is_metallic = 0.0;
+    let is_moon_dust = 0.0;
+
     var mat_base_color = uniforms.sand_color.rgb;
-    var sparkles_threshold = 0.996;
-    var sparkles_intensity = 8.0;
-    var sparkles_power = 500.0;
-    var rim_mult = 0.45;
-    var roughness = 0.9;
-    var is_metallic = 0.0;
-    var is_moon_dust = 0.0;
-    var grain_scale = 1500.0;
-    var grain_strength = 0.28;
-
-    if (uniforms.material_mode == 4u) { // ButterCream
-        mat_base_color = vec3<f32>(0.95, 0.93, 0.88);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.10;
-        roughness = 0.8;
-        grain_scale = 2200.0;
-        grain_strength = 0.08;
-    } else if (uniforms.material_mode == 5u) { // Snow
-        mat_base_color = vec3<f32>(0.98, 0.98, 1.0);
-        sparkles_threshold = 0.990;
-        sparkles_intensity = 20.0;
-        sparkles_power = 400.0;
-        rim_mult = 0.90;
-        roughness = 0.6;
-        grain_scale = 1200.0;
-        grain_strength = 0.38;
-    } else if (uniforms.material_mode == 1u) { // KineticSand
-        mat_base_color = vec3<f32>(0.85, 0.82, 0.77);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.20;
-        roughness = 1.0;
-        grain_scale = 900.0;
-        grain_strength = 0.42;
-    } else if (uniforms.material_mode == 2u) { // WetSand
-        mat_base_color = vec3<f32>(0.68, 0.62, 0.53);
-        sparkles_threshold = 0.999;
-        sparkles_intensity = 1.0;
-        rim_mult = 0.10;
-        roughness = 0.3;
-        grain_scale = 1600.0;
-        grain_strength = 0.15;
-    } else if (uniforms.material_mode == 6u) { // FinePowder
-        mat_base_color = vec3<f32>(0.96, 0.96, 0.96);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.15;
-        roughness = 1.0;
-        grain_scale = 3000.0;
-        grain_strength = 0.05;
-    } else if (uniforms.material_mode == 7u) { // Oobleck
-        mat_base_color = vec3<f32>(0.75, 0.90, 0.30);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.60;
-        roughness = 0.15;
-        grain_scale = 1.0;
-        grain_strength = 0.00;
-    } else if (uniforms.material_mode == 8u) { // MoonDust
-        mat_base_color = vec3<f32>(0.35, 0.35, 0.35);
-        sparkles_threshold = 0.997;
-        sparkles_intensity = 4.0;
-        sparkles_power = 450.0;
-        rim_mult = 0.05;
-        roughness = 0.95;
-        is_moon_dust = 1.0;
-        grain_scale = 1400.0;
-        grain_strength = 0.32;
-    } else if (uniforms.material_mode == 9u) { // IronFilings
-        mat_base_color = vec3<f32>(0.20, 0.20, 0.22);
-        sparkles_threshold = 0.992;
-        sparkles_intensity = 12.0;
-        sparkles_power = 450.0;
-        rim_mult = 0.20;
-        roughness = 0.4;
-        is_metallic = 1.0;
-        grain_scale = 1000.0;
-        grain_strength = 0.35;
-    } else if (uniforms.material_mode == 10u) { // Water
-        mat_base_color = vec3<f32>(0.01, 0.10, 0.14);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.40;
-        roughness = 0.08;
-        grain_scale = 1.0;
-        grain_strength = 0.00;
-    } else if (uniforms.material_mode == 11u) { // Milk
-        mat_base_color = vec3<f32>(0.95, 0.95, 0.93);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.30;
-        roughness = 0.22;
-        grain_scale = 2000.0;
-        grain_strength = 0.03;
-    } else if (uniforms.material_mode == 12u) { // Ferrofluid
-        mat_base_color = vec3<f32>(0.02, 0.02, 0.03);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.50;
-        roughness = 0.08;
-        is_metallic = 0.9;
-        grain_scale = 1.0;
-        grain_strength = 0.00;
-    } else if (uniforms.material_mode == 13u) { // VegetableOil
-        mat_base_color = vec3<f32>(0.50, 0.38, 0.12);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.35;
-        roughness = 0.12;
-        grain_scale = 1.0;
-        grain_strength = 0.00;
-    } else if (uniforms.material_mode == 14u) { // CalmWater
-        mat_base_color = vec3<f32>(0.01, 0.10, 0.14);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.40;
-        roughness = 0.05;
-        grain_scale = 1.0;
-        grain_strength = 0.00;
-    } else if (uniforms.material_mode == 15u) { // Yogurt
-        mat_base_color = vec3<f32>(0.96, 0.94, 0.88);
-        sparkles_threshold = 1.0;
-        sparkles_intensity = 0.0;
-        rim_mult = 0.25;
-        roughness = 0.35;
-        grain_scale = 1200.0;
-        grain_strength = 0.04;
-    } else if (uniforms.material_mode == 3u) { // CoarseSand
-        mat_base_color = uniforms.sand_color.rgb * 0.95;
-        sparkles_threshold = 0.990;
-        sparkles_intensity = 15.0;
-        sparkles_power = 250.0;
-        rim_mult = 0.40;
-        roughness = 0.85;
-        grain_scale = 400.0;
-        grain_strength = 0.45;
-    }
-
     if (uniforms.color_mode > 0u) {
         mat_base_color = textureSampleLevel(colormap_tex, heightmap_sampler, uv, 0.0).rgb;
+    } else {
+        // Continuous color mapping for solid/preset colors based on wetness & grain_size
+        let dry_sand = uniforms.sand_color.rgb;
+        let coarse_sand = dry_sand * 0.95;
+        let fine_powder = vec3<f32>(0.96, 0.96, 0.96);
+        let moon_dust = vec3<f32>(0.35, 0.35, 0.35);
+
+        // Mix dry states based on grain_size
+        var dry_color = dry_sand;
+        if (grain_size < 0.15) {
+            let t = clamp((grain_size - 0.05) / 0.10, 0.0, 1.0);
+            dry_color = mix(fine_powder, moon_dust, t);
+        } else if (grain_size < 0.45) {
+            let t = clamp((grain_size - 0.10) / 0.35, 0.0, 1.0);
+            dry_color = mix(moon_dust, dry_sand, t);
+        } else {
+            let t = clamp((grain_size - 0.45) / 0.35, 0.0, 1.0);
+            dry_color = mix(dry_sand, coarse_sand, t);
+        }
+
+        let snow = vec3<f32>(0.98, 0.98, 1.0);
+        let kinetic_sand = vec3<f32>(0.85, 0.82, 0.77);
+        let wet_sand = vec3<f32>(0.68, 0.62, 0.53);
+        let oobleck = vec3<f32>(0.75, 0.90, 0.30);
+        let buttercream = vec3<f32>(0.95, 0.93, 0.88);
+        let yogurt = vec3<f32>(0.96, 0.94, 0.88);
+        let oil = vec3<f32>(0.50, 0.38, 0.12);
+        let water = vec3<f32>(0.01, 0.10, 0.14);
+        let milk = vec3<f32>(0.95, 0.95, 0.93);
+
+        // Blend dry color towards wet colors depending on wetness
+        if (wetness < 0.05) {
+            let t = clamp(wetness / 0.05, 0.0, 1.0);
+            mat_base_color = mix(dry_color, snow, t);
+        } else if (wetness < 0.20) {
+            let t = clamp((wetness - 0.05) / 0.15, 0.0, 1.0);
+            mat_base_color = mix(snow, kinetic_sand, t);
+        } else if (wetness < 0.45) {
+            let t = clamp((wetness - 0.20) / 0.25, 0.0, 1.0);
+            mat_base_color = mix(kinetic_sand, wet_sand, t);
+        } else if (wetness < 0.55) {
+            let t = clamp((wetness - 0.45) / 0.10, 0.0, 1.0);
+            mat_base_color = mix(wet_sand, oobleck, t);
+        } else if (wetness < 0.70) {
+            let t = clamp((wetness - 0.55) / 0.15, 0.0, 1.0);
+            mat_base_color = mix(oobleck, buttercream, t);
+        } else if (wetness < 0.75) {
+            let t = clamp((wetness - 0.70) / 0.05, 0.0, 1.0);
+            mat_base_color = mix(buttercream, yogurt, t);
+        } else if (wetness < 0.85) {
+            let t = clamp((wetness - 0.75) / 0.10, 0.0, 1.0);
+            mat_base_color = mix(yogurt, oil, t);
+        } else if (wetness < 0.90) {
+            let t = clamp((wetness - 0.85) / 0.05, 0.0, 1.0);
+            mat_base_color = mix(oil, water, t);
+        } else if (wetness < 0.95) {
+            let t = clamp((wetness - 0.90) / 0.05, 0.0, 1.0);
+            mat_base_color = mix(water, milk, t);
+        } else {
+            let t = clamp((wetness - 0.95) / 0.05, 0.0, 1.0);
+            mat_base_color = mix(milk, water, t);
+        }
     }
 
     // 3. Perturb normal with micro-surface grain noise
@@ -530,64 +474,6 @@ fn fs_main(
         (grain_noise_y - 0.5) * grain_strength,
         0.0
     );
-
-    // Apply procedural magnetic spike deformation for Iron Filings
-    if (uniforms.material_mode == 9u) {
-        var mag_offset = vec2<f32>(0.0, 0.0);
-        for (var j = 0u; j < uniforms.marble_count; j = j + 1u) {
-            let m_pos = uniforms.marbles[j].pos;
-            let m_uv = vec2<f32>(m_pos.x * 0.5 + 0.5, -m_pos.y * 0.5 + 0.5);
-            let to_m = uv - m_uv;
-            let dist = length(to_m);
-            if (dist < 0.22) {
-                let weight = clamp((0.22 - dist) / 0.22, 0.0, 1.0);
-                let w_steep = weight * weight * weight;
-                
-                // Concentric magnetic ripples
-                let conc = cos(dist * 2.0 * PI / 0.015);
-                
-                // Radial spike needles
-                let angle = atan2(to_m.y, to_m.x);
-                let rad = cos(angle * 28.0);
-                
-                let dir = to_m / (dist + 0.0001);
-                let perp = vec2<f32>(-dir.y, dir.x);
-                
-                // Perturb normal along radial field lines and transverse spikes
-                mag_offset = mag_offset + dir * conc * w_steep * 0.55 + perp * rad * conc * w_steep * 0.40;
-            }
-        }
-        perturb = perturb + vec3<f32>(mag_offset.x, mag_offset.y, 0.0);
-    }
-
-    // Apply procedural magnetic spike deformation for Ferrofluid
-    if (uniforms.material_mode == 12u) {
-        var mag_offset = vec2<f32>(0.0, 0.0);
-        for (var j = 0u; j < uniforms.marble_count; j = j + 1u) {
-            let m_pos = uniforms.marbles[j].pos;
-            let m_uv = vec2<f32>(m_pos.x * 0.5 + 0.5, -m_pos.y * 0.5 + 0.5);
-            let to_m = uv - m_uv;
-            let dist = length(to_m);
-            if (dist < 0.22) {
-                let weight = clamp((0.22 - dist) / 0.22, 0.0, 1.0);
-                let w_steep = weight * weight * weight;
-                
-                // Concentric magnetic ripples
-                let conc = cos(dist * 2.0 * PI / 0.012);
-                
-                // Radial spike needles
-                let angle = atan2(to_m.y, to_m.x);
-                let rad = cos(angle * 24.0);
-                
-                let dir = to_m / (dist + 0.0001);
-                let perp = vec2<f32>(-dir.y, dir.x);
-                
-                // Perturb normal along radial field lines and transverse spikes
-                mag_offset = mag_offset + (dir * conc * 0.60 + perp * rad * conc * 0.50) * w_steep;
-            }
-        }
-        perturb = perturb + vec3<f32>(mag_offset.x, mag_offset.y, 0.0);
-    }
 
     normal = normalize(normal + perturb);
 
@@ -833,40 +719,11 @@ fn fs_main(
     let table_color = vec3<f32>(0.02, 0.02, 0.03);
     var final_color = mix(table_color, sand_shaded, sand_opacity);
 
-    if (uniforms.material_mode == 10u || uniforms.material_mode == 14u) { // Water or CalmWater
-        let water_tint = vec3<f32>(0.02, 0.16, 0.22);
+    if (wetness >= 0.75) {
         let absorption = 1.0 - exp(-h_center * 12.0);
-        let water_refracted = mix(table_color, water_tint, absorption);
-        final_color = water_refracted + specular_reflect;
-    }
- 
-    if (uniforms.material_mode == 13u) { // VegetableOil
-        let oil_tint = vec3<f32>(0.50, 0.38, 0.12);
-        let absorption = 1.0 - exp(-h_center * 11.0);
-        let oil_refracted = mix(table_color, oil_tint, absorption);
-        final_color = oil_refracted + specular_reflect;
-    }
- 
-    if (uniforms.material_mode == 12u) { // Ferrofluid in transparent oil
-        let oil_tint = vec3<f32>(0.26, 0.24, 0.18);
-        let absorption = 1.0 - exp(-h_center * 9.0);
-        let oil_refracted = mix(table_color, oil_tint, absorption);
-        
-        let ferro_color = vec3<f32>(0.02, 0.02, 0.03);
-        let ferro_shaded = ferro_color * final_lighting + specular_reflect * ferro_color;
-        
-        var ferro_factor = 0.0;
-        for (var j = 0u; j < uniforms.marble_count; j = j + 1u) {
-            let m_pos = uniforms.marbles[j].pos;
-            let m_uv = vec2<f32>(m_pos.x * 0.5 + 0.5, -m_pos.y * 0.5 + 0.5);
-            let dist_to_m = distance(uv, m_uv);
-            if (dist_to_m < 0.22) {
-                let weight = clamp((0.22 - dist_to_m) / 0.22, 0.0, 1.0);
-                ferro_factor = max(ferro_factor, weight * weight * weight);
-            }
-        }
-        
-        final_color = mix(oil_refracted + specular_reflect, ferro_shaded, ferro_factor);
+        let liquid_refracted = mix(table_color, mat_base_color, absorption);
+        let liquid_factor = (wetness - 0.75) / 0.25;
+        final_color = mix(final_color, liquid_refracted + specular_reflect, liquid_factor);
     }
 
     return vec4<f32>(final_color, 1.0);

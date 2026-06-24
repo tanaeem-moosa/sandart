@@ -143,7 +143,7 @@ impl HeightmapRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R32Float,
+            format: wgpu::TextureFormat::Rgba32Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -348,7 +348,7 @@ impl HeightmapRenderer {
             bytemuck::cast_slice(data),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some((GRID_SIZE * 4) as u32),
+                bytes_per_row: Some((GRID_SIZE * 16) as u32),
                 rows_per_image: Some(GRID_SIZE as u32),
             },
             wgpu::Extent3d {
@@ -367,7 +367,7 @@ impl HeightmapRenderer {
 
         let sub_width = (bounds.max_x - bounds.min_x + 1) as u32;
         let sub_height = (bounds.max_y - bounds.min_y + 1) as u32;
-        let offset = ((bounds.min_y * GRID_SIZE + bounds.min_x) * 4) as wgpu::BufferAddress;
+        let offset = ((bounds.min_y * GRID_SIZE + bounds.min_x) * 16) as wgpu::BufferAddress;
 
         queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -383,7 +383,7 @@ impl HeightmapRenderer {
             bytemuck::cast_slice(data),
             wgpu::ImageDataLayout {
                 offset,
-                bytes_per_row: Some((GRID_SIZE * 4) as u32),
+                bytes_per_row: Some((GRID_SIZE * 16) as u32),
                 rows_per_image: Some(GRID_SIZE as u32),
             },
             wgpu::Extent3d {
@@ -547,10 +547,14 @@ mod tests {
 
             let mut resources = HeightmapRenderer::new(&device, target_format);
 
-            let mut heightmap_data = vec![0.0f32; GRID_SIZE * GRID_SIZE];
+            let mut heightmap_data = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
             for y in 0..256 {
                 for x in 0..GRID_SIZE {
-                    heightmap_data[y * GRID_SIZE + x] = 1.0;
+                    let idx = y * GRID_SIZE + x;
+                    heightmap_data[idx * 4 + 0] = 1.0;
+                    heightmap_data[idx * 4 + 1] = 0.0;
+                    heightmap_data[idx * 4 + 2] = 0.45;
+                    heightmap_data[idx * 4 + 3] = 1.0;
                 }
             }
             resources.update_heightmap(&queue, &heightmap_data);
@@ -786,14 +790,24 @@ mod tests {
             ];
 
             for (suffix, mat_mode, led_mode, marble_count, m_x, m_y, m_z) in configs {
-                let mut heightmap_data = vec![0.35f32; GRID_SIZE * GRID_SIZE];
+                let mut heightmap_data = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+                let (wetness, grain_size) = match mat_mode {
+                    9 => (1.00, 0.00), // Water
+                    11 => (0.00, 0.45), // Ferrofluid (which is magnetism-less dry sand now, since magnetism was removed as part of this)
+                    12 => (0.85, 0.00), // VegetableOil
+                    13 => (0.90, 0.00), // CalmWater
+                    14 => (0.75, 0.08), // Yogurt
+                    15 => (0.00, 0.80), // CoarseSand
+                    _ => (0.00, 0.45), // Default
+                };
+
                 for y in 0..GRID_SIZE {
                     for x in 0..GRID_SIZE {
                         let dx = (x as f32 - (GRID_SIZE / 2) as f32) / (GRID_SIZE as f32);
                         let dy = (y as f32 - (GRID_SIZE / 2) as f32) / (GRID_SIZE as f32);
                         let r = (dx * dx + dy * dy).sqrt();
 
-                        if mat_mode == 11 { // Ferrofluid
+                        let h = if mat_mode == 11 { // Ferrofluid
                             let mut spike_pattern = 0.0f32;
                             if r < 0.22 {
                                 let weight = (1.0 - r / 0.22).max(0.0);
@@ -804,12 +818,18 @@ mod tests {
                                 let pattern = 0.5 + 0.5 * radial_spikes * concentric_spikes;
                                 spike_pattern = base_pull * (0.3 + 0.7 * pattern);
                             }
-                            heightmap_data[y * GRID_SIZE + x] = (0.35 + spike_pattern).clamp(0.0, 1.0);
+                            (0.35 + spike_pattern).clamp(0.0, 1.0)
                         } else {
                             let decay = if mat_mode == 13 { 20.0 } else { 6.0 };
                             let ripple = 0.045 * (r * 75.0).cos() * (-r * decay).exp();
-                            heightmap_data[y * GRID_SIZE + x] = (0.35 + ripple).clamp(0.0, 1.0);
-                        }
+                            (0.35 + ripple).clamp(0.0, 1.0)
+                        };
+
+                        let idx = y * GRID_SIZE + x;
+                        heightmap_data[idx * 4 + 0] = h;
+                        heightmap_data[idx * 4 + 1] = wetness;
+                        heightmap_data[idx * 4 + 2] = grain_size;
+                        heightmap_data[idx * 4 + 3] = 1.0;
                     }
                 }
                 resources.update_heightmap(&queue, &heightmap_data);

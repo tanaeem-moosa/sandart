@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 pub const GRID_SIZE: usize = 1024;
 pub const DEFAULT_SAND_HEIGHT: f32 = 0.35;
 
+pub const PROP_WETNESS: usize = 0;
+pub const PROP_THRESHOLD: usize = 1;
+pub const PROP_FLOW_RATE: usize = 2;
+pub const PROP_GRAIN_SIZE: usize = 3;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SandboxShape {
     Circle,
@@ -97,6 +102,9 @@ pub struct DrawingSimulation {
     pub temp_heights: Vec<f32>,
     /// Per-cell RGBA color buffer. Advected during CA settling and displacement.
     pub cell_colors: Vec<u8>,
+    /// Per-cell physics & render properties. Advected with height.
+    /// Layout: [wetness, threshold, flow_rate, grain_size] interleaved.
+    pub cell_props: Vec<f32>,
     /// Current position of the primary marble (backward compatibility).
     pub marble_pos: Vec2,
     /// Previous position of the primary marble (backward compatibility).
@@ -215,6 +223,14 @@ impl DrawingSimulation {
             chunk[2] = 140;
             chunk[3] = 255;
         }
+        let mut cell_props = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+        // Initialize with default DrySand preset
+        for chunk in cell_props.chunks_exact_mut(4) {
+            chunk[PROP_WETNESS] = 0.00;
+            chunk[PROP_THRESHOLD] = 0.08;
+            chunk[PROP_FLOW_RATE] = 0.25;
+            chunk[PROP_GRAIN_SIZE] = 0.45;
+        }
 
         let block_size = 32;
         let cols = (GRID_SIZE + block_size - 1) / block_size;
@@ -229,6 +245,7 @@ impl DrawingSimulation {
             heightmap,
             temp_heights,
             cell_colors,
+            cell_props,
             marble_pos: Vec2::ZERO,
             prev_marble_pos: Vec2::ZERO,
             marble_vel: Vec2::ZERO,
@@ -269,6 +286,7 @@ impl DrawingSimulation {
             chunk[2] = 140;
             chunk[3] = 255;
         }
+        self.apply_preset(self.material_mode);
         self.marble_pos = Vec2::ZERO;
         self.prev_marble_pos = Vec2::ZERO;
         self.marble_vel = Vec2::ZERO;
@@ -290,10 +308,43 @@ impl DrawingSimulation {
         self.tick_count = 0;
     }
 
+    /// Apply a preset to the per-cell properties buffer.
+    pub fn apply_preset(&mut self, mode: MaterialMode) {
+        let (wetness, threshold, flow_rate, grain_size) = match mode {
+            MaterialMode::DrySand => (0.00, 0.08, 0.25, 0.45),
+            MaterialMode::CoarseSand => (0.00, 0.11, 0.22, 0.80),
+            MaterialMode::KineticSand => (0.20, 0.10, 0.15, 0.35),
+            MaterialMode::WetSand => (0.45, 0.14, 0.08, 0.40),
+            MaterialMode::FinePowder => (0.00, 0.05, 0.30, 0.05),
+            MaterialMode::Snow => (0.05, 0.15, 0.20, 0.20),
+            MaterialMode::MoonDust => (0.00, 0.20, 0.20, 0.10),
+            MaterialMode::Oobleck => (0.55, 0.04, 0.12, 0.15),
+            MaterialMode::ButterCream => (0.70, 0.04, 0.15, 0.08),
+            MaterialMode::Water => (1.00, 0.00, 0.00, 0.00),
+            MaterialMode::CalmWater => (0.90, 0.00, 0.00, 0.00),
+            MaterialMode::Milk => (0.95, 0.00, 0.00, 0.00),
+            MaterialMode::VegetableOil => (0.85, 0.00, 0.00, 0.00),
+            MaterialMode::Yogurt => (0.75, 0.00, 0.00, 0.08),
+        };
+        for chunk in self.cell_props.chunks_exact_mut(4) {
+            chunk[PROP_WETNESS] = wetness;
+            chunk[PROP_THRESHOLD] = threshold;
+            chunk[PROP_FLOW_RATE] = flow_rate;
+            chunk[PROP_GRAIN_SIZE] = grain_size;
+        }
+        self.material_mode = mode;
+    }
+
     /// Copy color patterns into CPU color buffer
     pub fn set_cell_colors(&mut self, rgba_data: &[u8]) {
         let len = self.cell_colors.len().min(rgba_data.len());
         self.cell_colors[..len].copy_from_slice(&rgba_data[..len]);
+    }
+
+    /// Copy per-cell properties from a custom buffer
+    pub fn set_cell_props(&mut self, props_data: &[f32]) {
+        let len = self.cell_props.len().min(props_data.len());
+        self.cell_props[..len].copy_from_slice(&props_data[..len]);
     }
 
     /// Convert normalized Cartesian coordinates ([-1.0, 1.0]) to grid index coordinates.
@@ -312,11 +363,11 @@ impl DrawingSimulation {
         displace_line(
             &mut self.heightmap,
             &mut self.cell_colors,
+            &mut self.cell_props,
             pos,
             pos,
             radius,
             &mut self.active_bounds,
-            MaterialMode::DrySand,
         );
     }
 
@@ -326,11 +377,11 @@ impl DrawingSimulation {
         displace_line(
             &mut self.heightmap,
             &mut self.cell_colors,
+            &mut self.cell_props,
             start,
             end,
             radius,
             &mut self.active_bounds,
-            MaterialMode::DrySand,
         );
     }
 
@@ -449,11 +500,11 @@ impl DrawingSimulation {
                     displace_line(
                         &mut self.heightmap,
                         &mut self.cell_colors,
+                        &mut self.cell_props,
                         self.marbles[j].prev_pos,
                         self.marbles[j].pos,
                         marble_radius,
                         &mut segment_bounds,
-                        material,
                     );
                 } else {
                     self.marbles[j].pos = clamped_target;
@@ -462,11 +513,11 @@ impl DrawingSimulation {
                     displace_line(
                         &mut self.heightmap,
                         &mut self.cell_colors,
+                        &mut self.cell_props,
                         clamped_target,
                         clamped_target,
                         marble_radius,
                         &mut segment_bounds,
-                        material,
                     );
                     self.marbles[j].was_active = true;
                 }
@@ -524,6 +575,7 @@ impl DrawingSimulation {
                 &mut self.heightmap,
                 &mut self.temp_heights,
                 &mut self.cell_colors,
+                &mut self.cell_props,
                 &mut self.sliding,
                 &mut self.active_bounds,
                 &mut self.active_blocks,
@@ -531,7 +583,6 @@ impl DrawingSimulation {
                 &mut self.last_simulated_ticks,
                 self.budget_n,
                 self.block_size,
-                material,
                 &active_marbles[..active_count],
                 time_seed,
                 &mut self.wave_vel,

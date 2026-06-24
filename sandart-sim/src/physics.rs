@@ -19,8 +19,10 @@ pub struct ActiveMarbleInfo {
     pub vel_vec: Vec2,
 }
 
-/// Advect color from src cell to dst cell based on the flow amount and dst cell's height before arrival
-pub fn advect_color(colors: &mut [u8], src: usize, dst: usize, flow: f32, h_dst: f32) {
+use crate::{PROP_WETNESS, PROP_THRESHOLD, PROP_FLOW_RATE, PROP_GRAIN_SIZE};
+
+/// Advect color and properties from src cell to dst cell based on the flow amount and dst cell's height before arrival
+pub fn advect_properties(colors: &mut [u8], props: &mut [f32], src: usize, dst: usize, flow: f32, h_dst: f32) {
     let total = h_dst + flow;
     if total < 1e-6 {
         return;
@@ -38,13 +40,18 @@ pub fn advect_color(colors: &mut [u8], src: usize, dst: usize, flow: f32, h_dst:
         ).clamp(0.0, 255.0).round() as u8;
     }
     colors[dst_base + 3] = 255; // opaque alpha
+
+    for ch in 0..4 {
+        props[dst_base + ch] = props[dst_base + ch] * w_keep + props[src_base + ch] * w_arrive;
+    }
 }
 
 /// Helper function to add sand to a cell, clamping it at max_height (glass top)
-/// and distributing any excess volume to its available 4-way neighbors, with color advection.
-fn add_sand_with_limit_color(
+/// and distributing any excess volume to its available 4-way neighbors, with properties advection.
+fn add_sand_with_limit_properties(
     heightmap: &mut Heightmap,
     cell_colors: &mut [u8],
+    cell_props: &mut [f32],
     src_idx: usize,
     idx: usize,
     w: usize,
@@ -57,11 +64,11 @@ fn add_sand_with_limit_color(
     }
     let current_h = heightmap.data[idx];
     if current_h + amount <= max_height {
-        advect_color(cell_colors, src_idx, idx, amount, current_h);
+        advect_properties(cell_colors, cell_props, src_idx, idx, amount, current_h);
         heightmap.data[idx] = current_h + amount;
     } else {
         let allowed = (max_height - current_h).max(0.0);
-        advect_color(cell_colors, src_idx, idx, allowed, current_h);
+        advect_properties(cell_colors, cell_props, src_idx, idx, allowed, current_h);
         heightmap.data[idx] = current_h + allowed;
         let mut excess = amount - allowed;
         if excess > 1e-6 {
@@ -94,12 +101,11 @@ fn add_sand_with_limit_color(
                 let share = excess / num;
                 for i in 0..num_neighbors {
                     let n_idx = neighbors[i];
-                    advect_color(cell_colors, idx, n_idx, share, heightmap.data[n_idx]);
+                    advect_properties(cell_colors, cell_props, idx, n_idx, share, heightmap.data[n_idx]);
                     heightmap.data[n_idx] += share;
                 }
             } else {
                 // Distribute to room_neighbors proportional to their room
-                // Let's do up to 3 passes to distribute everything
                 let mut distributed = false;
                 for _ in 0..3 {
                     if excess <= 1e-6 {
@@ -116,7 +122,7 @@ fn add_sand_with_limit_color(
                         let (n_idx, room) = room_neighbors[i];
                         if room > 0.0 {
                             let to_add = share.min(room);
-                            advect_color(cell_colors, idx, n_idx, to_add, heightmap.data[n_idx]);
+                            advect_properties(cell_colors, cell_props, idx, n_idx, to_add, heightmap.data[n_idx]);
                             heightmap.data[n_idx] += to_add;
                             excess -= to_add;
                             let new_room = room - to_add;
@@ -134,7 +140,7 @@ fn add_sand_with_limit_color(
                     let share = excess / num;
                     for i in 0..num_neighbors {
                         let n_idx = neighbors[i];
-                        advect_color(cell_colors, idx, n_idx, share, heightmap.data[n_idx]);
+                        advect_properties(cell_colors, cell_props, idx, n_idx, share, heightmap.data[n_idx]);
                         heightmap.data[n_idx] += share;
                     }
                 }
@@ -143,44 +149,106 @@ fn add_sand_with_limit_color(
     }
 }
 
+fn wave_params(wetness: f32) -> (f32, f32) {
+    if wetness <= 0.75 {
+        (0.08, 0.76)
+    } else if wetness <= 0.85 {
+        let t = (wetness - 0.75) / 0.10;
+        (0.08 + (0.18 - 0.08) * t, 0.76 + (0.92 - 0.76) * t)
+    } else if wetness <= 0.90 {
+        let t = (wetness - 0.85) / 0.05;
+        (0.18 + (0.22 - 0.18) * t, 0.92 + (0.88 - 0.92) * t)
+    } else if wetness <= 0.95 {
+        let t = (wetness - 0.90) / 0.05;
+        (0.22 + (0.16 - 0.22) * t, 0.88 + (0.86 - 0.88) * t)
+    } else {
+        let t = ((wetness - 0.95) / 0.05).min(1.0);
+        (0.16 + (0.24 - 0.16) * t, 0.86 + (0.98 - 0.86) * t)
+    }
+}
+
+fn get_ca_params(
+    wetness: f32,
+    threshold_prop: f32,
+    flow_rate_prop: f32,
+    grain_size: f32,
+    higher_neighbors: usize,
+    sliding_active: bool,
+    closest_marble_vel: f32,
+) -> (f32, f32, f32, Option<f32>) {
+    // Oobleck shear-thickening
+    if wetness >= 0.50 && wetness < 0.65 {
+        let t = ((closest_marble_vel - 0.03) / 0.12).clamp(0.0, 1.0);
+        let t_steep = t * t;
+        let threshold = 0.005 + (0.32 - 0.005) * t_steep;
+        let alpha = 0.40 + (0.005 - 0.40) * t_steep;
+        let lock_chance = 0.02 + (0.98 - 0.02) * t_steep;
+        return (threshold, alpha, lock_chance, None);
+    }
+
+    // Quantization size
+    let quantize_size = if wetness < 0.30 {
+        if grain_size >= 0.60 {
+            Some(0.035)
+        } else if grain_size >= 0.40 {
+            Some(0.01)
+        } else if grain_size >= 0.08 {
+            Some(0.015)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Hysteresis threshold
+    let threshold = if wetness < 0.15 && sliding_active {
+        0.5 * threshold_prop
+    } else {
+        threshold_prop
+    };
+
+    // Flow rate (alpha)
+    let alpha = flow_rate_prop;
+
+    // Lock chance
+    let lock_chance = if wetness < 0.05 {
+        if flow_rate_prop >= 0.21 {
+            // DrySand / CoarseSand stochastic locking
+            if higher_neighbors >= 3 { 0.80 } else { 0.10 }
+        } else {
+            // FinePowder / MoonDust
+            let t = ((threshold_prop - 0.05) / 0.15).clamp(0.0, 1.0);
+            0.02 + (0.40 - 0.02) * t
+        }
+    } else if wetness < 0.30 {
+        // Snow / KineticSand
+        let t = ((wetness - 0.05) / 0.25).clamp(0.0, 1.0);
+        0.30 + (0.75 - 0.30) * t
+    } else {
+        // WetSand / ButterCream
+        let t = ((wetness - 0.30) / 0.40).clamp(0.0, 1.0);
+        0.15 + (0.20 - 0.15) * t
+    };
+
+    (threshold, alpha, lock_chance, quantize_size)
+}
+
+
 /// Displace sand along a line segment from start to end, carving a groove
 /// and depositing the displaced volume into the surrounding ridge area.
 pub fn displace_line(
     heightmap: &mut Heightmap,
     cell_colors: &mut [u8],
+    cell_props: &mut [f32],
     start: Vec2,
     end: Vec2,
     radius: f32,
     active_bounds: &mut ActiveBounds,
-    material: crate::MaterialMode,
 ) {
     if !start.is_finite() || !end.is_finite() || !radius.is_finite() || radius <= 0.0 {
         return;
     }
-
-    let residual_factor = match material {
-        crate::MaterialMode::ButterCream => 0.00,
-        crate::MaterialMode::Oobleck => {
-            // Calculate displacement segment speed.
-            // Fast marble movement means high shear stress (solid-like), leaving a shallow groove.
-            // Slow movement means low shear stress (liquid-like), carving all the way down.
-            let speed = (end - start).length();
-            let t = (speed / 0.01).clamp(0.0, 1.0);
-            0.50 * t * t
-        }
-        crate::MaterialMode::FinePowder => 0.05,
-        crate::MaterialMode::KineticSand => 0.10,
-        crate::MaterialMode::DrySand => 0.20,
-        crate::MaterialMode::MoonDust => 0.20,
-        crate::MaterialMode::Snow => 0.28,
-        crate::MaterialMode::WetSand => 0.35,
-        crate::MaterialMode::Water => 0.00,
-        crate::MaterialMode::Milk => 0.00,
-        crate::MaterialMode::VegetableOil => 0.00,
-        crate::MaterialMode::CalmWater => 0.00,
-        crate::MaterialMode::Yogurt => 0.00,
-        crate::MaterialMode::CoarseSand => 0.18,
-    };
 
     let w = heightmap.width;
     let h = heightmap.height;
@@ -296,6 +364,21 @@ pub fn displace_line(
 
                 let current_idx = row_offset + x;
                 let current_h = heightmap.data[current_idx];
+
+                let wetness = cell_props[current_idx * 4 + PROP_WETNESS];
+
+                // Continuous residual_factor mapping based on wetness
+                let residual_factor = if wetness >= 0.50 && wetness < 0.65 {
+                    let speed = (end - start).length();
+                    let t = (speed / 0.01).clamp(0.0, 1.0);
+                    0.50 * t * t
+                } else if wetness >= 0.70 {
+                    0.0
+                } else if wetness < 0.45 {
+                    0.20 + (0.35 - 0.20) * (wetness / 0.45)
+                } else {
+                    0.35 * (1.0 - (wetness - 0.45) / 0.25)
+                };
 
                 // Scale target height relative to the current height to support multi-pass clearing
                 let h_target_norm = residual_factor * current_h.max(h_target_profile) + (1.0 - residual_factor) * h_target_profile;
@@ -420,9 +503,9 @@ pub fn displace_line(
                     let deposited_volume = diff * (w1 * m1 + w2 * m2 + w3 * m3);
                     if deposited_volume > 1e-6 {
                         heightmap.data[current_idx] = current_h - deposited_volume;
-                        add_sand_with_limit_color(heightmap, cell_colors, current_idx, dest1_idx, w, h, diff * w1 * m1, 1.5);
-                        add_sand_with_limit_color(heightmap, cell_colors, current_idx, dest2_idx, w, h, diff * w2 * m2, 1.5);
-                        add_sand_with_limit_color(heightmap, cell_colors, current_idx, dest3_idx, w, h, diff * w3 * m3, 1.5);
+                        add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest1_idx, w, h, diff * w1 * m1, 1.5);
+                        add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest2_idx, w, h, diff * w2 * m2, 1.5);
+                        add_sand_with_limit_properties(heightmap, cell_colors, cell_props, current_idx, dest3_idx, w, h, diff * w3 * m3, 1.5);
                     } else {
                         // Restore height to conserve volume if no deposition can happen
                         heightmap.data[current_idx] = current_h;
@@ -438,6 +521,7 @@ pub fn settle_tick(
     heightmap: &mut Heightmap,
     temp_heights: &mut Vec<f32>,
     cell_colors: &mut Vec<u8>,
+    cell_props: &mut Vec<f32>,
     sliding: &mut Vec<bool>,
     active_bounds: &mut ActiveBounds,
     active_blocks: &mut Vec<crate::BlockActivity>,
@@ -445,7 +529,6 @@ pub fn settle_tick(
     last_simulated_ticks: &mut Vec<u32>,
     budget_n: usize,
     block_size: usize,
-    material: crate::MaterialMode,
     active_marbles: &[ActiveMarbleInfo],
     time_seed: u32,
     wave_vel: &mut Vec<f32>,
@@ -574,177 +657,6 @@ pub fn settle_tick(
         }
     };
 
-    // If material is a liquid (Water, Milk, Yogurt, etc.), run the 2D wave propagation solver instead of CA settling.
-    if material == crate::MaterialMode::Water
-        || material == crate::MaterialMode::Milk
-        || material == crate::MaterialMode::VegetableOil
-        || material == crate::MaterialMode::CalmWater
-        || material == crate::MaterialMode::Yogurt
-    {
-        let mut modified = will_simulate.clone();
-        let mut next_displacements = vec![0.0f32; expected_len];
-
-        // Helper closure to activate neighbor blocks and copy their heights on demand
-        let activate_neighbor = |neighbor_b: usize, flow: f32, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
-            if !modified[neighbor_b] {
-                let nbx = neighbor_b % cols;
-                let nby = neighbor_b / cols;
-                let start_x = nbx * block_size;
-                let end_x = ((nbx + 1) * block_size).min(w);
-                let start_y = nby * block_size;
-                let end_y = ((nby + 1) * block_size).min(h);
-                for y in start_y..end_y {
-                    let offset = y * w;
-                    temp_heights[offset + start_x..offset + end_x]
-                        .copy_from_slice(&heightmap.data[offset + start_x..offset + end_x]);
-                }
-                modified[neighbor_b] = true;
-            }
-            if next_displacements[neighbor_b] < flow {
-                next_displacements[neighbor_b] = flow;
-            }
-        };
-
-        // 1. Copy active blocks from heightmap to temp buffer
-        for b in 0..expected_len {
-            if will_simulate[b] {
-                let bx = b % cols;
-                let by = b / cols;
-                let start_x = bx * block_size;
-                let end_x = ((bx + 1) * block_size).min(w);
-                let start_y = by * block_size;
-                let end_y = ((by + 1) * block_size).min(h);
-                for y in start_y..end_y {
-                    let offset = y * w;
-                    temp_heights[offset + start_x..offset + end_x]
-                        .copy_from_slice(&heightmap.data[offset + start_x..offset + end_x]);
-                }
-            }
-        }
-
-        // Wave propagation parameters
-        let (c_sq, damping) = match material {
-            crate::MaterialMode::Water => (0.24f32, 0.98f32),
-            crate::MaterialMode::Milk => (0.16f32, 0.86f32),
-            crate::MaterialMode::VegetableOil => (0.18f32, 0.92f32),
-            crate::MaterialMode::CalmWater => (0.22f32, 0.88f32),
-            crate::MaterialMode::Yogurt => (0.08f32, 0.76f32),
-            _ => (0.24f32, 0.98f32),
-        };
-
-        let mut flow_occurred = false;
-        let mut total_flow = 0.0f32;
-
-        // Run wave equation inside active blocks
-        for b in 0..expected_len {
-            if will_simulate[b] {
-                let bx = b % cols;
-                let by = b / cols;
-                let start_x = bx * block_size;
-                let end_x = ((bx + 1) * block_size).min(w);
-                let start_y = by * block_size;
-                let end_y = ((by + 1) * block_size).min(h);
-
-                for y in start_y..end_y {
-                    let row_offset = y * w;
-                    for x in start_x..end_x {
-                        let center_idx = row_offset + x;
-
-                        if !is_inside(x, y) {
-                            continue;
-                        }
-
-                        let h_center = heightmap.data[center_idx];
-
-                        // Neumann boundary reflection conditions
-                        let h_left = if x > 0 && is_inside(x - 1, y) { heightmap.data[center_idx - 1] } else { h_center };
-                        let h_right = if x + 1 < w && is_inside(x + 1, y) { heightmap.data[center_idx + 1] } else { h_center };
-                        let h_top = if y > 0 && is_inside(x, y - 1) { heightmap.data[center_idx - w] } else { h_center };
-                        let h_bottom = if y + 1 < h && is_inside(x, y + 1) { heightmap.data[center_idx + w] } else { h_center };
-
-                        let laplacian = h_left + h_right + h_top + h_bottom - 4.0 * h_center;
-
-                        let v_new = (wave_vel[center_idx] + c_sq * laplacian) * damping;
-                        wave_vel[center_idx] = v_new;
-
-                        let h_new = (h_center + v_new).clamp(0.0, 1.0);
-                        temp_heights[center_idx] = h_new;
-
-                        let height_diff = (h_new - h_center).abs();
-                        total_flow += height_diff;
-
-                        if v_new.abs() > 3e-4 || (h_new - crate::DEFAULT_SAND_HEIGHT).abs() > 1e-4 {
-                            flow_occurred = true;
-                            let flow_val = v_new.abs().max((h_new - crate::DEFAULT_SAND_HEIGHT).abs());
-                            activate_neighbor(b, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements);
-                            if bx > 0 { activate_neighbor(b - 1, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
-                            if bx + 1 < cols { activate_neighbor(b + 1, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
-                            if by > 0 { activate_neighbor(b - cols, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
-                            if by + 1 < rows { activate_neighbor(b + cols, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Copy back updated heights for active and next active blocks
-        for b in 0..expected_len {
-            if modified[b] {
-                let bx = b % cols;
-                let by = b / cols;
-                let start_x = bx * block_size;
-                let end_x = ((bx + 1) * block_size).min(w);
-                let start_y = by * block_size;
-                let end_y = ((by + 1) * block_size).min(h);
-                for y in start_y..end_y {
-                    let offset = y * w;
-                    heightmap.data[offset + start_x..offset + end_x]
-                        .copy_from_slice(&temp_heights[offset + start_x..offset + end_x]);
-                }
-            }
-        }
-
-        // Compute active bounds for the GPU
-        let mut min_bx = cols;
-        let mut max_bx = 0;
-        let mut min_by = rows;
-        let mut max_by = 0;
-        let mut any_modified = false;
-
-        for b in 0..expected_len {
-            if modified[b] {
-                any_modified = true;
-                let bx = b % cols;
-                let by = b / cols;
-                min_bx = min_bx.min(bx);
-                max_bx = max_bx.max(bx);
-                min_by = min_by.min(by);
-                max_by = max_by.max(by);
-            }
-        }
-
-        if any_modified {
-            active_bounds.min_x = min_bx * block_size;
-            active_bounds.max_x = ((max_bx + 1) * block_size - 1).min(w - 1);
-            active_bounds.min_y = min_by * block_size;
-            active_bounds.max_y = ((max_by + 1) * block_size - 1).min(h - 1);
-            active_bounds.active = flow_occurred;
-        } else {
-            active_bounds.active = false;
-        }
-
-        for b in 0..expected_len {
-            if !will_simulate[b] {
-                next_displacements[b] = next_displacements[b].max(last_displacements[b]);
-            } else {
-                last_simulated_ticks[b] = tick_count;
-            }
-        }
-        *last_displacements = next_displacements;
-
-        return total_flow;
-    }
-
     let mut modified = will_simulate.clone();
 
     // 1. Copy active blocks scheduled to run this frame from heightmap to temp buffer
@@ -769,7 +681,7 @@ pub fn settle_tick(
     let mut flow_occurred = false;
 
     // Helper closure to activate neighbor blocks and copy their heights on demand
-    let activate_neighbor = |neighbor_b: usize, flow: f32, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
+    let mut activate_neighbor = |neighbor_b: usize, flow: f32, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
         if !modified[neighbor_b] {
             let nbx = neighbor_b % cols;
             let nby = neighbor_b / cols;
@@ -789,40 +701,69 @@ pub fn settle_tick(
         }
     };
 
-    // 2. Cellular automata slope settling update (loop over active blocks)
-    let is_complex = material == crate::MaterialMode::Oobleck;
-    let is_dynamic = material == crate::MaterialMode::DrySand || material == crate::MaterialMode::CoarseSand;
+    // 2. Continuous per-cell solver (loop over active blocks)
+    for b in 0..expected_len {
+        if !will_simulate[b] {
+            continue;
+        }
 
-    let threshold_min = match material {
-        crate::MaterialMode::ButterCream => 0.04,
-        crate::MaterialMode::Snow => 0.15,
-        crate::MaterialMode::WetSand => 0.10,
-        crate::MaterialMode::FinePowder => 0.01,
-        crate::MaterialMode::MoonDust => 0.20, // threshold is 0.22, but avalanche is 0.20
-        crate::MaterialMode::KineticSand => 0.12,
-        crate::MaterialMode::DrySand => 0.04,
-        crate::MaterialMode::CoarseSand => 0.06,
-        crate::MaterialMode::Oobleck => 0.005,
-        _ => 0.10,
-    };
+        let bx = b % cols;
+        let by = b / cols;
+        let start_x = bx * block_size;
+        let end_x = ((bx + 1) * block_size).min(w);
+        let start_y = by * block_size;
+        let end_y = ((by + 1) * block_size).min(h);
 
-    if is_complex {
-        for b in 0..expected_len {
-            if !will_simulate[b] {
-                continue;
-            }
+        for y in start_y..end_y {
+            let row_offset = y * w;
+            for x in start_x..end_x {
+                let center_idx = row_offset + x;
 
-            let bx = b % cols;
-            let by = b / cols;
-            let start_x = (bx * block_size).max(1);
-            let end_x = (((bx + 1) * block_size) - 1).min(w - 2);
-            let start_y = (by * block_size).max(1);
-            let end_y = (((by + 1) * block_size) - 1).min(h - 2);
+                if !is_inside(x, y) {
+                    continue;
+                }
 
-            for y in start_y..=end_y {
-                let row_offset = y * w;
-                for x in start_x..=end_x {
-                    let center_idx = row_offset + x;
+                let wetness = cell_props[center_idx * 4 + PROP_WETNESS];
+
+                if wetness >= 0.75 {
+                    // --- Wave propagation (Liquid behavior) ---
+                    let h_center = heightmap.data[center_idx];
+
+                    // Neumann boundary reflection conditions
+                    let h_left = if x > 0 && is_inside(x - 1, y) { heightmap.data[center_idx - 1] } else { h_center };
+                    let h_right = if x + 1 < w && is_inside(x + 1, y) { heightmap.data[center_idx + 1] } else { h_center };
+                    let h_top = if y > 0 && is_inside(x, y - 1) { heightmap.data[center_idx - w] } else { h_center };
+                    let h_bottom = if y + 1 < h && is_inside(x, y + 1) { heightmap.data[center_idx + w] } else { h_center };
+
+                    let laplacian = h_left + h_right + h_top + h_bottom - 4.0 * h_center;
+
+                    let (c_sq, damping) = wave_params(wetness);
+                    let v_new = (wave_vel[center_idx] + c_sq * laplacian) * damping;
+                    wave_vel[center_idx] = v_new;
+
+                    let h_new = (h_center + v_new).clamp(0.0, 1.0);
+                    temp_heights[center_idx] = h_new;
+
+                    let height_diff = (h_new - h_center).abs();
+                    total_flow += height_diff;
+
+                    if v_new.abs() > 3e-4 || (h_new - crate::DEFAULT_SAND_HEIGHT).abs() > 1e-4 {
+                        flow_occurred = true;
+                        let flow_val = v_new.abs().max((h_new - crate::DEFAULT_SAND_HEIGHT).abs());
+                        activate_neighbor(b, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                        if bx > 0 { activate_neighbor(b - 1, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
+                        if bx + 1 < cols { activate_neighbor(b + 1, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
+                        if by > 0 { activate_neighbor(b - cols, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
+                        if by + 1 < rows { activate_neighbor(b + cols, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
+                    }
+                } else {
+                    // --- Cellular Automata (Sand settling behavior) ---
+                    // CA requires accessing neighbors at offset 1, so we must be inside the grid boundaries
+                    if x == 0 || x + 1 >= w || y == 0 || y + 1 >= h {
+                        sliding[center_idx] = false;
+                        continue;
+                    }
+
                     let h_center = heightmap.data[center_idx];
 
                     // Load neighbor heights and find minimum
@@ -833,7 +774,17 @@ pub fn settle_tick(
 
                     let min_h = h_left.min(h_right).min(h_top).min(h_bottom);
 
-                    // Fast-path shortcut: check if cell needs any updates
+                    let threshold_prop = cell_props[center_idx * 4 + PROP_THRESHOLD];
+                    let flow_rate_prop = cell_props[center_idx * 4 + PROP_FLOW_RATE];
+                    let grain_size = cell_props[center_idx * 4 + PROP_GRAIN_SIZE];
+
+                    let threshold_min = if wetness < 0.15 {
+                        0.5 * threshold_prop
+                    } else {
+                        threshold_prop
+                    };
+
+                    // Fast-path shortcut
                     if h_center - min_h <= threshold_min {
                         sliding[center_idx] = false;
                         continue;
@@ -871,7 +822,7 @@ pub fn settle_tick(
                                     activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
                                     activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
-                                    advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
+                                    advect_properties(cell_colors, cell_props, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
                                     total_flow += clamped_flow;
@@ -887,7 +838,14 @@ pub fn settle_tick(
                         continue;
                     }
 
-                    // Cell-invariant properties (calculated once per cell before neighbor loop)
+                    // Cell-invariant properties
+                    let mut higher_neighbors = 0;
+                    for &n_idx in &neighbors {
+                        if heightmap.data[n_idx] >= h_center - 1e-4 {
+                            higher_neighbors += 1;
+                        }
+                    }
+
                     let mut closest_marble_idx = None;
                     let mut min_dist_to_marble = f32::MAX;
                     if !active_marbles.is_empty() {
@@ -904,336 +862,22 @@ pub fn settle_tick(
                         }
                     }
 
-                    let oobleck_params = if material == crate::MaterialMode::Oobleck {
-                        let local_vel = if let Some(idx) = closest_marble_idx {
-                            active_marbles[idx].vel
-                        } else {
-                            0.0
-                        };
-                        let t = ((local_vel - 0.03) / 0.12).clamp(0.0, 1.0);
-                        let t_steep = t * t;
-                        Some((
-                            0.005 + (0.32 - 0.005) * t_steep,
-                            0.40 + (0.005 - 0.40) * t_steep,
-                            0.02 + (0.98 - 0.02) * t_steep,
-                        ))
+                    let closest_marble_vel = if let Some(idx) = closest_marble_idx {
+                        active_marbles[idx].vel
                     } else {
-                        None
+                        0.0
                     };
 
-                    for (_dir_idx, &neighbor_idx) in neighbors.iter().enumerate() {
-                        let h_neighbor = heightmap.data[neighbor_idx];
-                        let geom_slope = h_center - h_neighbor;
+                    let (threshold, alpha, lock_chance, quantize_size) = get_ca_params(
+                        wetness,
+                        threshold_prop,
+                        flow_rate_prop,
+                        grain_size,
+                        higher_neighbors,
+                        sliding[center_idx],
+                        closest_marble_vel,
+                    );
 
-                        // B. Material-specific parameters
-                        let threshold;
-                        let alpha;
-                        let lock_chance;
-                        let quantize_size: Option<f32> = None;
-
-                        match material {
-                            crate::MaterialMode::Oobleck => {
-                                let (th, al, lc) = oobleck_params.unwrap();
-                                threshold = th;
-                                alpha = al;
-                                lock_chance = lc;
-                            }
-                            _ => {
-                                threshold = 0.0;
-                                alpha = 0.0;
-                                lock_chance = 0.0;
-                            }
-                        }
-
-                        let slope = geom_slope;
-
-                        if slope <= 1e-6 {
-                            continue;
-                        }
-
-                        // C. Stochastic locking and sliding condition
-                        if slope > threshold {
-                            let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
-                            let rand_val = flow_seed as f32 / 65535.0;
-                            
-                            if rand_val >= lock_chance {
-                                let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
-                                let mut flow = (alpha * (slope - threshold) * alpha_noise).max(0.0);
-                                
-                                if let Some(q) = quantize_size {
-                                    flow = (flow / q).round() * q;
-                                }
-
-                                if flow > 0.0 {
-                                    let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
-                                    let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                    if clamped_flow > FLOW_INACTIVE_THRESHOLD {
-                                        let nx = neighbor_idx % w;
-                                        let ny = neighbor_idx / w;
-                                        let neighbor_b = (ny / block_size) * cols + (nx / block_size);
-                                        
-                                        activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-                                        activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-
-                                        advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
-                                        temp_heights[center_idx] -= clamped_flow;
-                                        temp_heights[neighbor_idx] += clamped_flow;
-                                        total_flow += clamped_flow;
-                                        cell_flowed = true;
-                                        flow_occurred = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    sliding[center_idx] = cell_flowed;
-                }
-            }
-        }
-    } else if is_dynamic {
-        for b in 0..expected_len {
-            if !will_simulate[b] {
-                continue;
-            }
-
-            let bx = b % cols;
-            let by = b / cols;
-            let start_x = (bx * block_size).max(1);
-            let end_x = (((bx + 1) * block_size) - 1).min(w - 2);
-            let start_y = (by * block_size).max(1);
-            let end_y = (((by + 1) * block_size) - 1).min(h - 2);
-
-            for y in start_y..=end_y {
-                let row_offset = y * w;
-                for x in start_x..=end_x {
-                    let center_idx = row_offset + x;
-                    let h_center = heightmap.data[center_idx];
-
-                    // Load neighbor heights and find minimum
-                    let h_left = heightmap.data[center_idx - 1];
-                    let h_right = heightmap.data[center_idx + 1];
-                    let h_top = heightmap.data[center_idx - w];
-                    let h_bottom = heightmap.data[center_idx + w];
-
-                    let min_h = h_left.min(h_right).min(h_top).min(h_bottom);
-
-                    // Fast-path shortcut
-                    if h_center - min_h <= threshold_min {
-                        sliding[center_idx] = false;
-                        continue;
-                    }
-
-                    let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
-                    
-                    let neighbors = [
-                        center_idx - 1, // Left
-                        center_idx + 1, // Right
-                        center_idx - w, // Top
-                        center_idx + w, // Bottom
-                    ];
-
-                    let mut cell_flowed = false;
-
-                    // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
-                    let mut avalanche_checked = false;
-                    for &neighbor_idx in &neighbors {
-                        let h_neighbor = heightmap.data[neighbor_idx];
-                        let geom_slope = h_center - h_neighbor;
-
-                        if geom_slope > 0.20 {
-                            let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
-                            if flow > 0.0 {
-                                let current_temp_center = temp_heights[center_idx];
-                                let current_temp_neighbor = temp_heights[neighbor_idx];
-                                let temp_diff = current_temp_center - current_temp_neighbor;
-                                let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                if clamped_flow > FLOW_INACTIVE_THRESHOLD {
-                                    let nx = neighbor_idx % w;
-                                    let ny = neighbor_idx / w;
-                                    let neighbor_b = (ny / block_size) * cols + (nx / block_size);
-                                    
-                                    activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-                                    activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-
-                                    advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
-                                    temp_heights[center_idx] -= clamped_flow;
-                                    temp_heights[neighbor_idx] += clamped_flow;
-                                    total_flow += clamped_flow;
-                                    cell_flowed = true;
-                                    flow_occurred = true;
-                                }
-                            }
-                            avalanche_checked = true;
-                        }
-                    }
-                    if avalanche_checked {
-                        sliding[center_idx] = cell_flowed;
-                        continue;
-                    }
-
-                    // Cell-invariant properties (calculated once per cell before neighbor loop)
-                    let mut higher_neighbors = 0;
-                    for &n_idx in &neighbors {
-                        if heightmap.data[n_idx] >= h_center - 1e-4 {
-                            higher_neighbors += 1;
-                        }
-                    }
-
-                    let (base_threshold, alpha, quantize_size, lock_chance_low, lock_chance_high): (f32, f32, Option<f32>, f32, f32) = match material {
-                        crate::MaterialMode::DrySand => (0.08, 0.25, Some(0.01), 0.10, 0.80),
-                        crate::MaterialMode::CoarseSand => (0.11, 0.22, Some(0.035), 0.15, 0.75),
-                        _ => (0.08, 0.25, Some(0.01), 0.10, 0.80),
-                    };
-
-                    for &neighbor_idx in &neighbors {
-                        let h_neighbor = heightmap.data[neighbor_idx];
-                        let geom_slope = h_center - h_neighbor;
-
-                        if geom_slope <= 1e-6 {
-                            continue;
-                        }
-
-                        let threshold = {
-                            let sliding_threshold = if material == crate::MaterialMode::DrySand { 0.04 } else { 0.06 };
-                            if sliding[center_idx] { sliding_threshold } else { base_threshold }
-                        };
-
-                        let lock_chance = if higher_neighbors >= 3 { lock_chance_high } else { lock_chance_low };
-
-                        // C. Stochastic locking and sliding condition
-                        if geom_slope > threshold {
-                            let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
-                            let rand_val = flow_seed as f32 / 65535.0;
-                            
-                            if rand_val >= lock_chance {
-                                let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
-                                let mut flow = (alpha * (geom_slope - threshold) * alpha_noise).max(0.0);
-                                
-                                if let Some(q) = quantize_size {
-                                    flow = (flow / q).round() * q;
-                                }
-
-                                if flow > 0.0 {
-                                    let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
-                                    let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                    if clamped_flow > FLOW_INACTIVE_THRESHOLD {
-                                        let nx = neighbor_idx % w;
-                                        let ny = neighbor_idx / w;
-                                        let neighbor_b = (ny / block_size) * cols + (nx / block_size);
-                                        
-                                        activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-                                        activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-
-                                        advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
-                                        temp_heights[center_idx] -= clamped_flow;
-                                        temp_heights[neighbor_idx] += clamped_flow;
-                                        total_flow += clamped_flow;
-                                        cell_flowed = true;
-                                        flow_occurred = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    sliding[center_idx] = cell_flowed;
-                }
-            }
-        }
-    } else {
-        // Static CA loop fully optimized
-        let (threshold, alpha, quantize_size, lock_chance): (f32, f32, Option<f32>, f32) = match material {
-            crate::MaterialMode::ButterCream => (0.04, 0.15, None, 0.20),
-            crate::MaterialMode::Snow => (0.15, 0.04, None, 0.30),
-            crate::MaterialMode::WetSand => (0.10, 0.06, None, 0.15),
-            crate::MaterialMode::FinePowder => (0.01, 0.35, None, 0.02),
-            crate::MaterialMode::MoonDust => (0.22, 0.02, Some(0.015), 0.40),
-            crate::MaterialMode::KineticSand => (0.12, 0.12, Some(0.015), 0.75),
-            _ => (0.10, 0.06, None, 0.15),
-        };
-
-        for b in 0..expected_len {
-            if !will_simulate[b] {
-                continue;
-            }
-
-            let bx = b % cols;
-            let by = b / cols;
-            let start_x = (bx * block_size).max(1);
-            let end_x = (((bx + 1) * block_size) - 1).min(w - 2);
-            let start_y = (by * block_size).max(1);
-            let end_y = (((by + 1) * block_size) - 1).min(h - 2);
-
-            for y in start_y..=end_y {
-                let row_offset = y * w;
-                for x in start_x..=end_x {
-                    let center_idx = row_offset + x;
-                    let h_center = heightmap.data[center_idx];
-
-                    // Load neighbor heights and find minimum
-                    let h_left = heightmap.data[center_idx - 1];
-                    let h_right = heightmap.data[center_idx + 1];
-                    let h_top = heightmap.data[center_idx - w];
-                    let h_bottom = heightmap.data[center_idx + w];
-
-                    let min_h = h_left.min(h_right).min(h_top).min(h_bottom);
-
-                    // Fast-path shortcut
-                    if h_center - min_h <= threshold_min {
-                        sliding[center_idx] = false;
-                        continue;
-                    }
-
-                    let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
-                    
-                    let neighbors = [
-                        center_idx - 1, // Left
-                        center_idx + 1, // Right
-                        center_idx - w, // Top
-                        center_idx + w, // Bottom
-                    ];
-
-                    let mut cell_flowed = false;
-
-                    // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
-                    let mut avalanche_checked = false;
-                    for &neighbor_idx in &neighbors {
-                        let h_neighbor = heightmap.data[neighbor_idx];
-                        let geom_slope = h_center - h_neighbor;
-
-                        if geom_slope > 0.20 {
-                            let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
-                            if flow > 0.0 {
-                                let current_temp_center = temp_heights[center_idx];
-                                let current_temp_neighbor = temp_heights[neighbor_idx];
-                                let temp_diff = current_temp_center - current_temp_neighbor;
-                                let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
-                                if clamped_flow > FLOW_INACTIVE_THRESHOLD {
-                                    let nx = neighbor_idx % w;
-                                    let ny = neighbor_idx / w;
-                                    let neighbor_b = (ny / block_size) * cols + (nx / block_size);
-                                    
-                                    activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-                                    activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-
-                                    advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
-                                    temp_heights[center_idx] -= clamped_flow;
-                                    temp_heights[neighbor_idx] += clamped_flow;
-                                    total_flow += clamped_flow;
-                                    cell_flowed = true;
-                                    flow_occurred = true;
-                                }
-                            }
-                            avalanche_checked = true;
-                        }
-                    }
-                    if avalanche_checked {
-                        sliding[center_idx] = cell_flowed;
-                        continue;
-                    }
-
-                    // Standard Settling Check
                     for &neighbor_idx in &neighbors {
                         let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
@@ -1265,7 +909,7 @@ pub fn settle_tick(
                                     activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
                                     activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
 
-                                    advect_color(cell_colors, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
+                                    advect_properties(cell_colors, cell_props, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                     temp_heights[center_idx] -= clamped_flow;
                                     temp_heights[neighbor_idx] += clamped_flow;
                                     total_flow += clamped_flow;
@@ -1343,11 +987,40 @@ pub fn settle_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DrawingSimulation, GRID_SIZE, MaterialMode, SandboxShape};
+
+    fn get_test_props(mode: crate::MaterialMode, size: usize) -> Vec<f32> {
+        let (wetness, threshold, flow_rate, grain_size) = match mode {
+            crate::MaterialMode::DrySand => (0.00, 0.08, 0.25, 0.45),
+            crate::MaterialMode::CoarseSand => (0.00, 0.11, 0.22, 0.80),
+            crate::MaterialMode::KineticSand => (0.20, 0.10, 0.15, 0.35),
+            crate::MaterialMode::WetSand => (0.45, 0.14, 0.08, 0.40),
+            crate::MaterialMode::FinePowder => (0.00, 0.05, 0.30, 0.05),
+            crate::MaterialMode::Snow => (0.05, 0.15, 0.20, 0.20),
+            crate::MaterialMode::MoonDust => (0.00, 0.20, 0.20, 0.10),
+            crate::MaterialMode::Oobleck => (0.55, 0.04, 0.12, 0.15),
+            crate::MaterialMode::ButterCream => (0.70, 0.04, 0.15, 0.08),
+            crate::MaterialMode::Water => (1.00, 0.00, 0.00, 0.00),
+            crate::MaterialMode::CalmWater => (0.90, 0.00, 0.00, 0.00),
+            crate::MaterialMode::Milk => (0.95, 0.00, 0.00, 0.00),
+            crate::MaterialMode::VegetableOil => (0.85, 0.00, 0.00, 0.00),
+            crate::MaterialMode::Yogurt => (0.75, 0.00, 0.00, 0.08),
+        };
+        let mut props = vec![0.0f32; size * 4];
+        for chunk in props.chunks_exact_mut(4) {
+            chunk[PROP_WETNESS] = wetness;
+            chunk[PROP_THRESHOLD] = threshold;
+            chunk[PROP_FLOW_RATE] = flow_rate;
+            chunk[PROP_GRAIN_SIZE] = grain_size;
+        }
+        props
+    }
 
     #[test]
     fn test_draw_point_out_of_bounds() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1360,11 +1033,11 @@ mod tests {
         displace_line(
             &mut hm,
             &mut cell_colors,
+            &mut cell_props,
             Vec2::new(5.0, 5.0),
             Vec2::new(5.0, 5.0),
             0.1,
             &mut bounds,
-            crate::MaterialMode::ButterCream,
         );
 
         // Assert that heightmap data is unchanged
@@ -1377,6 +1050,7 @@ mod tests {
     fn test_draw_point_partial_overlap() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1389,11 +1063,11 @@ mod tests {
         displace_line(
             &mut hm,
             &mut cell_colors,
+            &mut cell_props,
             Vec2::new(-1.0, 0.0),
             Vec2::new(-1.0, 0.0),
             0.05,
             &mut bounds,
-            crate::MaterialMode::ButterCream,
         );
 
         // Check that some points are carved below 0.1, and bounds are respected
@@ -1411,6 +1085,7 @@ mod tests {
     fn test_draw_line_interpolation() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1423,11 +1098,11 @@ mod tests {
         displace_line(
             &mut hm,
             &mut cell_colors,
+            &mut cell_props,
             Vec2::new(-0.5, 0.0),
             Vec2::new(0.5, 0.0),
             0.05,
             &mut bounds,
-            crate::MaterialMode::ButterCream,
         );
 
         // Helper to convert pos to grid index
@@ -1451,6 +1126,7 @@ mod tests {
     fn test_draw_point_extreme_coordinates_overflow() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1462,11 +1138,11 @@ mod tests {
         displace_line(
             &mut hm,
             &mut cell_colors,
+            &mut cell_props,
             Vec2::new(1e18, 1e18),
             Vec2::new(1e18, 1e18),
             0.1,
             &mut bounds,
-            crate::MaterialMode::ButterCream,
         );
         for &val in hm.as_slice() {
             assert_eq!(val, crate::DEFAULT_SAND_HEIGHT);
@@ -1477,6 +1153,7 @@ mod tests {
     fn test_multipass_carving() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::DrySand, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1485,15 +1162,15 @@ mod tests {
             active: false,
         };
 
-        // Pass 1: carving at (0.0, 0.0) with DrySand (20% residual factor)
+        // Pass 1: carving at (0.0, 0.0) with DrySand properties
         displace_line(
             &mut hm,
             &mut cell_colors,
+            &mut cell_props,
             Vec2::ZERO,
             Vec2::ZERO,
             0.05,
             &mut bounds,
-            crate::MaterialMode::DrySand,
         );
 
         let center_idx = 256 * 512 + 256;
@@ -1505,11 +1182,11 @@ mod tests {
         displace_line(
             &mut hm,
             &mut cell_colors,
+            &mut cell_props,
             Vec2::ZERO,
             Vec2::ZERO,
             0.05,
             &mut bounds,
-            crate::MaterialMode::DrySand,
         );
         let h2 = hm.data[center_idx];
         // Expect height to be approximately 20% of h1 = 0.20 * 0.07 = 0.014
@@ -1521,6 +1198,7 @@ mod tests {
     fn test_volume_conservation() {
         let mut hm = Heightmap::new(512, 512, 0.4);
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1534,11 +1212,11 @@ mod tests {
         displace_line(
             &mut hm,
             &mut cell_colors,
+            &mut cell_props,
             Vec2::new(-0.2, 0.2),
             Vec2::new(0.2, -0.2),
             0.03,
             &mut bounds,
-            crate::MaterialMode::ButterCream,
         );
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
@@ -1550,6 +1228,7 @@ mod tests {
     fn test_draw_line_extreme_coordinates_overflow() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1560,11 +1239,11 @@ mod tests {
         displace_line(
             &mut hm,
             &mut cell_colors,
+            &mut cell_props,
             Vec2::new(-1e18, 0.0),
             Vec2::new(1e18, 0.0),
             0.1,
             &mut bounds,
-            crate::MaterialMode::ButterCream,
         );
     }
 
@@ -1572,6 +1251,7 @@ mod tests {
     fn test_volume_conservation_with_saturation() {
         let mut hm = Heightmap::new(512, 512, 0.70);
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
             max_x: 0,
@@ -1582,7 +1262,15 @@ mod tests {
         let initial_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
 
         // Perform displacement at a single point to trigger local saturation in the inner ridge
-        displace_line(&mut hm, &mut cell_colors, Vec2::ZERO, Vec2::ZERO, 0.02, &mut bounds, crate::MaterialMode::ButterCream);
+        displace_line(
+            &mut hm,
+            &mut cell_colors,
+            &mut cell_props,
+            Vec2::ZERO,
+            Vec2::ZERO,
+            0.02,
+            &mut bounds,
+        );
 
         let final_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
         let diff = (final_sum - initial_sum).abs();
@@ -1594,6 +1282,7 @@ mod tests {
         let mut hm = Heightmap::new(512, 512, 0.5);
         let mut temp_heights = vec![0.5; 512 * 512];
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
 
         let center_idx = 256 * 512 + 256;
         hm.data[center_idx] = 0.8;
@@ -1621,6 +1310,7 @@ mod tests {
                 &mut hm,
                 &mut temp_heights,
                 &mut cell_colors,
+                &mut cell_props,
                 &mut sliding,
                 &mut bounds,
                 &mut active_blocks,
@@ -1628,7 +1318,6 @@ mod tests {
                 &mut last_simulated_ticks,
                 budget_n,
                 32,
-                crate::MaterialMode::ButterCream,
                 &[],
                 12345,
                 &mut wave_vel,
@@ -1660,6 +1349,7 @@ mod tests {
         let mut hm = Heightmap::new(512, 512, 0.5);
         let mut temp_heights = vec![0.5; 512 * 512];
         let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
 
         let mut bounds = ActiveBounds {
             min_x: 250,
@@ -1680,6 +1370,7 @@ mod tests {
             &mut hm,
             &mut temp_heights,
             &mut cell_colors,
+            &mut cell_props,
             &mut sliding,
             &mut bounds,
             &mut active_blocks,
@@ -1687,7 +1378,6 @@ mod tests {
             &mut last_simulated_ticks,
             budget_n,
             32,
-            crate::MaterialMode::ButterCream,
             &[],
             12345,
             &mut wave_vel,
@@ -1723,6 +1413,7 @@ mod tests {
             let mut hm = Heightmap::new(64, 64, 0.5);
             let mut temp_heights = vec![0.5; 64 * 64];
             let mut cell_colors = vec![0u8; 64 * 64 * 4];
+            let mut cell_props = get_test_props(mat, 64 * 64);
             let mut sliding = vec![false; 64 * 64];
             let mut bounds = ActiveBounds {
                 min_x: 10,
@@ -1746,6 +1437,7 @@ mod tests {
                 &mut hm,
                 &mut temp_heights,
                 &mut cell_colors,
+                &mut cell_props,
                 &mut sliding,
                 &mut bounds,
                 &mut active_blocks,
@@ -1753,7 +1445,6 @@ mod tests {
                 &mut last_simulated_ticks,
                 budget_n,
                 32,
-                mat,
                 &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1, vel_vec: Vec2::new(0.1, 0.0) }],
                 9999,
                 &mut wave_vel,
@@ -1773,22 +1464,52 @@ mod tests {
         hm.data[center_idx] = 1.0;
 
         let mut cell_colors = vec![0u8; 128 * 128 * 4];
-        // Initialize cell_colors with a gradient/pattern
+        let mut cell_props = vec![0.0f32; 128 * 128 * 4];
+        // Initialize cell_colors and cell_props with a mixed striped pattern
         for y in 0..128 {
             for x in 0..128 {
                 let idx = y * 128 + x;
-                cell_colors[idx * 4 + 0] = (x * 2) as u8; // Red channel
-                cell_colors[idx * 4 + 1] = (y * 2) as u8; // Green channel
-                cell_colors[idx * 4 + 2] = 100;
-                cell_colors[idx * 4 + 3] = 255;
+                if (x / 16) % 2 == 0 {
+                    cell_props[idx * 4 + PROP_WETNESS] = 0.00;
+                    cell_props[idx * 4 + PROP_THRESHOLD] = 0.08;
+                    cell_props[idx * 4 + PROP_FLOW_RATE] = 0.25;
+                    cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.45;
+
+                    cell_colors[idx * 4 + 0] = 200; // Reddish DrySand
+                    cell_colors[idx * 4 + 1] = 100;
+                    cell_colors[idx * 4 + 2] = 50;
+                    cell_colors[idx * 4 + 3] = 255;
+                } else {
+                    cell_props[idx * 4 + PROP_WETNESS] = 0.45;
+                    cell_props[idx * 4 + PROP_THRESHOLD] = 0.14;
+                    cell_props[idx * 4 + PROP_FLOW_RATE] = 0.08;
+                    cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.40;
+
+                    cell_colors[idx * 4 + 0] = 50; // Bluish WetSand
+                    cell_colors[idx * 4 + 1] = 100;
+                    cell_colors[idx * 4 + 2] = 200;
+                    cell_colors[idx * 4 + 3] = 255;
+                }
             }
         }
 
-        // Calculate initial total color (Red mass)
-        let initial_red_mass: f64 = cell_colors.chunks_exact(4)
-            .zip(hm.as_slice())
-            .map(|(c, &h)| c[0] as f64 * h as f64)
-            .sum();
+        // Calculate initial total colors (Red, Green, Blue masses)
+        let calculate_color_masses = |colors: &[u8], hmap: &Heightmap| -> (f64, f64, f64) {
+            let mut r_mass = 0.0f64;
+            let mut g_mass = 0.0f64;
+            let mut b_mass = 0.0f64;
+            for (idx, &h) in hmap.as_slice().iter().enumerate() {
+                let r = colors[idx * 4 + 0] as f64;
+                let g = colors[idx * 4 + 1] as f64;
+                let b = colors[idx * 4 + 2] as f64;
+                r_mass += r * h as f64;
+                g_mass += g * h as f64;
+                b_mass += b * h as f64;
+            }
+            (r_mass, g_mass, b_mass)
+        };
+
+        let (initial_r, initial_g, initial_b) = calculate_color_masses(&cell_colors, &hm);
 
         let mut temp_heights = vec![0.5; 128 * 128];
         let mut sliding = vec![false; 128 * 128];
@@ -1810,6 +1531,7 @@ mod tests {
             &mut hm,
             &mut temp_heights,
             &mut cell_colors,
+            &mut cell_props,
             &mut sliding,
             &mut bounds,
             &mut active_blocks,
@@ -1817,7 +1539,6 @@ mod tests {
             &mut last_simulated_ticks,
             256,
             32,
-            crate::MaterialMode::DrySand,
             &[],
             12345,
             &mut wave_vel,
@@ -1827,14 +1548,213 @@ mod tests {
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
 
-        // Calculate final total color (Red mass)
-        let final_red_mass: f64 = cell_colors.chunks_exact(4)
-            .zip(hm.as_slice())
-            .map(|(c, &h)| c[0] as f64 * h as f64)
-            .sum();
+        // Calculate final total colors
+        let (final_r, final_g, final_b) = calculate_color_masses(&cell_colors, &hm);
 
-        let diff = (final_red_mass - initial_red_mass).abs();
-        assert!(diff < 1e-4, "Color mass not conserved! diff = {}, initial = {}, final = {}", diff, initial_red_mass, final_red_mass);
+        let diff_r = (final_r - initial_r).abs() / initial_r;
+        let diff_g = (final_g - initial_g).abs() / initial_g;
+        let diff_b = (final_b - initial_b).abs() / initial_b;
+
+        assert!(diff_r < 0.005, "Red color mass not conserved! diff = {:.5}%, initial = {}, final = {}", diff_r * 100.0, initial_r, final_r);
+        assert!(diff_g < 0.005, "Green color mass not conserved! diff = {:.5}%, initial = {}, final = {}", diff_g * 100.0, initial_g, final_g);
+        assert!(diff_b < 0.005, "Blue color mass not conserved! diff = {:.5}%, initial = {}, final = {}", diff_b * 100.0, initial_b, final_b);
+    }
+
+    #[test]
+    fn test_advect_properties_weighted() {
+        let mut cell_colors = vec![0u8; 8];
+        let mut cell_props = vec![0.0f32; 8];
+
+        // Cell 0: Red, Wet Sand-ish
+        cell_colors[0..4].copy_from_slice(&[200, 100, 50, 255]);
+        cell_props[0..4].copy_from_slice(&[0.5, 0.1, 0.15, 0.3]);
+
+        // Cell 1: Blue, Dry Sand-ish
+        cell_colors[4..8].copy_from_slice(&[50, 100, 200, 255]);
+        cell_props[4..8].copy_from_slice(&[0.0, 0.08, 0.25, 0.45]);
+
+        // Advect from 0 to 1 with flow = 0.2, and dst height h_dst = 0.2
+        advect_properties(&mut cell_colors, &mut cell_props, 0, 1, 0.2, 0.2);
+
+        // Expected colors (weighted average):
+        // Red = (50 * 0.5 + 200 * 0.5) = 125
+        // Green = 100
+        // Blue = (200 * 0.5 + 50 * 0.5) = 125
+        assert_eq!(cell_colors[4], 125);
+        assert_eq!(cell_colors[5], 100);
+        assert_eq!(cell_colors[6], 125);
+
+        // Expected properties (weighted average):
+        // wetness = (0.0 * 0.5 + 0.5 * 0.5) = 0.25
+        // threshold = (0.08 * 0.5 + 0.1 * 0.5) = 0.09
+        // flow_rate = (0.25 * 0.5 + 0.15 * 0.5) = 0.20
+        // grain_size = (0.45 * 0.5 + 0.3 * 0.5) = 0.375
+        assert_eq!(cell_props[4], 0.25);
+        assert_eq!(cell_props[5], 0.09);
+        assert_eq!(cell_props[6], 0.20);
+        assert_eq!(cell_props[7], 0.375);
+    }
+
+    #[test]
+    fn test_displace_line_advects() {
+        let mut hm = Heightmap::new(128, 128, 0.5);
+        let mut cell_colors = vec![100u8; 128 * 128 * 4];
+        let mut cell_props = vec![0.5f32; 128 * 128 * 4];
+        let mut active_bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 127,
+            min_y: 0,
+            max_y: 127,
+            active: true,
+        };
+
+        // Source center area has different properties & colors
+        for y in 60..68 {
+            for x in 60..68 {
+                let idx = y * 128 + x;
+                cell_colors[idx * 4 + 0] = 200;
+                cell_props[idx * 4 + PROP_WETNESS] = 0.1;
+            }
+        }
+
+        // Draw a line through the center
+        displace_line(
+            &mut hm,
+            &mut cell_colors,
+            &mut cell_props,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(0.1, 0.1),
+            0.05,
+            &mut active_bounds,
+        );
+
+        // Check that some cell outside the immediate line segment but within radius received advected properties
+        // We will sum the red color and wetness in the ridge and assert change.
+        let mut changed = false;
+        for y in 0..128 {
+            for x in 0..128 {
+                let idx = y * 128 + x;
+                // Exclude the starting zone
+                if (x < 60 || x >= 68) || (y < 60 || y >= 68) {
+                    if cell_colors[idx * 4 + 0] != 100 || cell_props[idx * 4 + PROP_WETNESS] != 0.5 {
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(changed, "Properties/colors must have advected to surrounding cells during displacement");
+    }
+
+    #[test]
+    fn test_property_and_color_conservation() {
+        let mut sim = DrawingSimulation::new();
+        // Set up alternating stripes of DrySand and WetSand properties, and mixed colors
+        let mut cell_props = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+        let mut cell_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
+        for y in 0..GRID_SIZE {
+            for x in 0..GRID_SIZE {
+                let idx = y * GRID_SIZE + x;
+                // Alternating stripes of DrySand and WetSand properties
+                if (x / 32) % 2 == 0 {
+                    cell_props[idx * 4 + PROP_WETNESS] = 0.00;
+                    cell_props[idx * 4 + PROP_THRESHOLD] = 0.08;
+                    cell_props[idx * 4 + PROP_FLOW_RATE] = 0.25;
+                    cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.45;
+
+                    cell_colors[idx * 4 + 0] = 200; // Reddish DrySand
+                    cell_colors[idx * 4 + 1] = 100;
+                    cell_colors[idx * 4 + 2] = 50;
+                    cell_colors[idx * 4 + 3] = 255;
+                } else {
+                    cell_props[idx * 4 + PROP_WETNESS] = 0.45;
+                    cell_props[idx * 4 + PROP_THRESHOLD] = 0.14;
+                    cell_props[idx * 4 + PROP_FLOW_RATE] = 0.08;
+                    cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.40;
+
+                    cell_colors[idx * 4 + 0] = 50; // Bluish WetSand
+                    cell_colors[idx * 4 + 1] = 100;
+                    cell_colors[idx * 4 + 2] = 200;
+                    cell_colors[idx * 4 + 3] = 255;
+                }
+            }
+        }
+        sim.set_cell_props(&cell_props);
+        sim.set_cell_colors(&cell_colors);
+
+        // Put several heaps of sand to force movement
+        sim.heightmap.data.fill(0.1);
+        for cy in [256, 512, 768] {
+            for cx in [256, 512, 768] {
+                let c_idx = cy * GRID_SIZE + cx;
+                sim.heightmap.data[c_idx] = 1.0;
+            }
+        }
+
+        // Calculate initial total property masses and color masses
+        let calculate_masses = |s: &DrawingSimulation| -> (f64, f64, f64, f64, f64, f64, f64) {
+            let mut wet_mass = 0.0f64;
+            let mut thresh_mass = 0.0f64;
+            let mut flow_mass = 0.0f64;
+            let mut grain_mass = 0.0f64;
+            let mut r_mass = 0.0f64;
+            let mut g_mass = 0.0f64;
+            let mut b_mass = 0.0f64;
+            for (idx, &h) in s.heightmap.data.iter().enumerate() {
+                let w = s.cell_props[idx * 4 + PROP_WETNESS] as f64;
+                let t = s.cell_props[idx * 4 + PROP_THRESHOLD] as f64;
+                let f = s.cell_props[idx * 4 + PROP_FLOW_RATE] as f64;
+                let gr = s.cell_props[idx * 4 + PROP_GRAIN_SIZE] as f64;
+                let r = s.cell_colors[idx * 4 + 0] as f64;
+                let g = s.cell_colors[idx * 4 + 1] as f64;
+                let bl = s.cell_colors[idx * 4 + 2] as f64;
+                wet_mass += w * h as f64;
+                thresh_mass += t * h as f64;
+                flow_mass += f * h as f64;
+                grain_mass += gr * h as f64;
+                r_mass += r * h as f64;
+                g_mass += g * h as f64;
+                b_mass += bl * h as f64;
+            }
+            (wet_mass, thresh_mass, flow_mass, grain_mass, r_mass, g_mass, b_mass)
+        };
+
+        let (init_wet, init_thresh, init_flow, init_grain, init_r, init_g, init_b) = calculate_masses(&sim);
+
+        // Run 100 simulation steps with a moving marble
+        let mut targets = [None; 5];
+        for i in 0..100 {
+            let angle = i as f32 * 0.15;
+            let radius = i as f32 * 0.005;
+            targets[0] = Some(Vec2::new(angle.cos() * radius, angle.sin() * radius));
+            sim.update(
+                0.016,
+                &targets,
+                0.02,
+                MaterialMode::DrySand, // preset parameter is ignored for properties after init
+                SandboxShape::Circle,
+                16.0,
+                16.0,
+            );
+        }
+
+        let (final_wet, final_thresh, final_flow, final_grain, final_r, final_g, final_b) = calculate_masses(&sim);
+
+        let diff_wet = (final_wet - init_wet).abs() / init_wet;
+        let diff_thresh = (final_thresh - init_thresh).abs() / init_thresh;
+        let diff_flow = (final_flow - init_flow).abs() / init_flow;
+        let diff_grain = (final_grain - init_grain).abs() / init_grain;
+        let diff_r = (final_r - init_r).abs() / init_r;
+        let diff_g = (final_g - init_g).abs() / init_g;
+        let diff_b = (final_b - init_b).abs() / init_b;
+
+        // Properties and colors must be conserved within 0.8%
+        assert!(diff_wet < 0.008, "Wetness mass leaked! diff = {:.5}%, init = {}, final = {}", diff_wet * 100.0, init_wet, final_wet);
+        assert!(diff_thresh < 0.008, "Threshold mass leaked! diff = {:.5}%, init = {}, final = {}", diff_thresh * 100.0, init_thresh, final_thresh);
+        assert!(diff_flow < 0.008, "Flow rate mass leaked! diff = {:.5}%, init = {}, final = {}", diff_flow * 100.0, init_flow, final_flow);
+        assert!(diff_grain < 0.008, "Grain size mass leaked! diff = {:.5}%, init = {}, final = {}", diff_grain * 100.0, init_grain, final_grain);
+        assert!(diff_r < 0.008, "Red color mass leaked! diff = {:.5}%, init = {}, final = {}", diff_r * 100.0, init_r, final_r);
+        assert!(diff_g < 0.008, "Green color mass leaked! diff = {:.5}%, init = {}, final = {}", diff_g * 100.0, init_g, final_g);
+        assert!(diff_b < 0.008, "Blue color mass leaked! diff = {:.5}%, init = {}, final = {}", diff_b * 100.0, init_b, final_b);
     }
 }
-

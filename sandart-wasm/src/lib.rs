@@ -269,8 +269,13 @@ impl WasmSimulationState {
         self.full_upload_needed = true;
     }
 
+    pub fn set_cell_props(&mut self, data: &[f32]) {
+        self.sim.set_cell_props(data);
+        self.full_upload_needed = true;
+    }
+
     pub fn set_material_mode(&mut self, mode: u32) {
-        self.material_mode = match mode {
+        let preset = match mode {
             0 => MaterialMode::DrySand,
             1 => MaterialMode::KineticSand,
             2 => MaterialMode::WetSand,
@@ -287,6 +292,9 @@ impl WasmSimulationState {
             15 => MaterialMode::Yogurt,
             _ => MaterialMode::DrySand,
         };
+        self.material_mode = preset;
+        self.sim.apply_preset(preset);
+        self.full_upload_needed = true;
     }
 
     pub fn set_sandbox_shape(&mut self, shape: u32) {
@@ -545,7 +553,14 @@ impl WasmSimulationState {
 
         // Update GPU heightmap and colormap
         if self.full_upload_needed {
-            self.renderer.update_heightmap(&self.queue, self.sim.heightmap.as_slice());
+            let mut interleaved = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+            for i in 0..GRID_SIZE * GRID_SIZE {
+                interleaved[i * 4 + 0] = self.sim.heightmap.data[i];
+                interleaved[i * 4 + 1] = self.sim.cell_props[i * 4 + sandart_sim::PROP_WETNESS];
+                interleaved[i * 4 + 2] = self.sim.cell_props[i * 4 + sandart_sim::PROP_GRAIN_SIZE];
+                interleaved[i * 4 + 3] = 1.0;
+            }
+            self.renderer.update_heightmap(&self.queue, &interleaved);
             self.renderer.update_colormap(&self.queue, &self.sim.cell_colors);
             self.full_upload_needed = false;
         } else {
@@ -557,16 +572,29 @@ impl WasmSimulationState {
                 max_y: bounds.max_y,
                 active: bounds.active,
             };
-            self.renderer.update_heightmap_partial(
-                &self.queue,
-                self.sim.heightmap.as_slice(),
-                render_bounds,
-            );
-            self.renderer.update_colormap_partial(
-                &self.queue,
-                &self.sim.cell_colors,
-                render_bounds,
-            );
+            if render_bounds.active {
+                let mut interleaved = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+                for y in bounds.min_y..=bounds.max_y {
+                    let row_offset = y * GRID_SIZE;
+                    for x in bounds.min_x..=bounds.max_x {
+                        let i = row_offset + x;
+                        interleaved[i * 4 + 0] = self.sim.heightmap.data[i];
+                        interleaved[i * 4 + 1] = self.sim.cell_props[i * 4 + sandart_sim::PROP_WETNESS];
+                        interleaved[i * 4 + 2] = self.sim.cell_props[i * 4 + sandart_sim::PROP_GRAIN_SIZE];
+                        interleaved[i * 4 + 3] = 1.0;
+                    }
+                }
+                self.renderer.update_heightmap_partial(
+                    &self.queue,
+                    &interleaved,
+                    render_bounds,
+                );
+                self.renderer.update_colormap_partial(
+                    &self.queue,
+                    &self.sim.cell_colors,
+                    render_bounds,
+                );
+            }
         }
 
         // Calculate uniforms
