@@ -348,6 +348,18 @@ function generateColormap(pattern, color1Hex, color2Hex) {
                 data[idx + 3] = 255;
             }
         }
+    } else if (pattern === 'checkerboard') {
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const t = (Math.floor(x / 32) % 2 === 0) !== (Math.floor(y / 32) % 2 === 0);
+                const idx = (y * size + x) * 4;
+                const color = t ? c1 : c2;
+                data[idx] = color[0];
+                data[idx + 1] = color[1];
+                data[idx + 2] = color[2];
+                data[idx + 3] = 255;
+            }
+        }
     } else if (pattern === 'rainbow_linear') {
         for (let y = 0; y < size; y++) {
             for (let x = 0; x < size; x++) {
@@ -386,10 +398,9 @@ function syncColorTheme() {
     const presetSelect = document.getElementById('color-preset');
     const colorInput1 = document.getElementById('color-sand-1');
     const colorInput2 = document.getElementById('color-sand-2');
-    const label2 = document.getElementById('label-sand-2');
+    const colorInput2Wrapper = document.getElementById('color-sand-2-wrapper');
     const customDiv = document.getElementById('custom-color-inputs');
 
-    // Guard: if the color theme elements don't exist in the DOM yet (e.g. browser cached old HTML), bail out
     if (!patternSelect || !presetSelect || !colorInput1 || !colorInput2) return;
 
     const pattern = patternSelect.value;
@@ -413,6 +424,12 @@ function syncColorTheme() {
         } else if (preset === 'forest') {
             colorInput1.value = '#228b22';
             colorInput2.value = '#ffd700';
+        } else if (preset === 'vaporwave') {
+            colorInput1.value = '#ff007f';
+            colorInput2.value = '#00f0ff';
+        } else if (preset === 'sunset') {
+            colorInput1.value = '#ff4500';
+            colorInput2.value = '#ffd700';
         }
     } else {
         customDiv.style.display = 'block';
@@ -421,16 +438,12 @@ function syncColorTheme() {
     // 2. Handle pattern inputs visibility
     const updatedPattern = patternSelect.value;
     if (updatedPattern === 'solid') {
-        colorInput1.style.display = 'inline-block';
-        colorInput2.style.display = 'none';
-        label2.style.display = 'none';
+        colorInput2Wrapper.style.display = 'none';
     } else if (updatedPattern === 'rainbow_linear' || updatedPattern === 'rainbow_radial') {
         customDiv.style.display = 'none';
     } else {
         customDiv.style.display = 'block';
-        colorInput1.style.display = 'inline-block';
-        colorInput2.style.display = 'inline-block';
-        label2.style.display = 'inline-block';
+        colorInput2Wrapper.style.display = 'flex';
     }
 
     // 3. Update WASM state color mode
@@ -443,6 +456,186 @@ function syncColorTheme() {
 
         const colormapData = generateColormap(updatedPattern, colorInput1.value, colorInput2.value);
         state.update_colormap(colormapData);
+    }
+}
+
+// 4. Multi-Material Property Configuration
+const MATERIAL_PRESETS = {
+    0: [0.00, 0.08, 0.25, 0.45], // DrySand
+    1: [0.20, 0.10, 0.15, 0.35], // KineticSand
+    2: [0.45, 0.14, 0.08, 0.40], // WetSand
+    3: [0.00, 0.11, 0.22, 0.80], // CoarseSand
+    4: [0.70, 0.04, 0.15, 0.08], // ButterCream
+    5: [0.05, 0.15, 0.20, 0.20], // Snow
+    6: [0.00, 0.05, 0.30, 0.05], // FinePowder
+    7: [0.55, 0.04, 0.12, 0.15], // Oobleck
+    8: [0.00, 0.20, 0.20, 0.10], // MoonDust
+    10: [1.00, 0.00, 0.00, 0.00], // Water
+    11: [0.95, 0.00, 0.00, 0.00], // Milk
+    13: [0.85, 0.00, 0.00, 0.00], // VegetableOil
+    14: [0.90, 0.00, 0.00, 0.00], // CalmWater
+    15: [0.75, 0.00, 0.00, 0.08]  // Yogurt
+};
+
+const MATERIAL_LABELS = {
+    0: "Dry Sand",
+    1: "Kinetic Sand",
+    2: "Wet Sand",
+    3: "Coarse Sand",
+    4: "Butter-Cream",
+    5: "Snow",
+    6: "Fine Powder",
+    7: "Oobleck",
+    8: "Moon Dust",
+    10: "Water",
+    11: "Milk",
+    13: "Vegetable Oil",
+    14: "Calm Water",
+    15: "Yogurt"
+};
+
+function generateMaterialProps(pattern, mat1Id, mat2Id) {
+    const size = 1024;
+    const data = new Float32Array(size * size * 4);
+    const m1 = MATERIAL_PRESETS[mat1Id] || MATERIAL_PRESETS[0];
+    const m2 = MATERIAL_PRESETS[mat2Id] || MATERIAL_PRESETS[0];
+
+    if (pattern === 'solid') {
+        for (let i = 0; i < size * size; i++) {
+            data[i * 4 + 0] = m1[0];
+            data[i * 4 + 1] = m1[1];
+            data[i * 4 + 2] = m1[2];
+            data[i * 4 + 3] = m1[3];
+        }
+    } else if (pattern === 'gradient') {
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const t = x / (size - 1);
+                const idx = (y * size + x) * 4;
+                data[idx + 0] = m1[0] * (1.0 - t) + m2[0] * t;
+                data[idx + 1] = m1[1] * (1.0 - t) + m2[1] * t;
+                data[idx + 2] = m1[2] * (1.0 - t) + m2[2] * t;
+                data[idx + 3] = m1[3] * (1.0 - t) + m2[3] * t;
+            }
+        }
+    } else if (pattern === 'stripes') {
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const t = Math.floor((x + y) / 32) % 2 === 0;
+                const idx = (y * size + x) * 4;
+                const m = t ? m1 : m2;
+                data[idx + 0] = m[0];
+                data[idx + 1] = m[1];
+                data[idx + 2] = m[2];
+                data[idx + 3] = m[3];
+            }
+        }
+    } else if (pattern === 'concentric') {
+        const cx = size / 2;
+        const cy = size / 2;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const dx = x - cx;
+                const dy = y - cy;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                const t = Math.floor(dist / 32) % 2 === 0;
+                const idx = (y * size + x) * 4;
+                const m = t ? m1 : m2;
+                data[idx + 0] = m[0];
+                data[idx + 1] = m[1];
+                data[idx + 2] = m[2];
+                data[idx + 3] = m[3];
+            }
+        }
+    } else if (pattern === 'checkerboard') {
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const t = (Math.floor(x / 32) % 2 === 0) !== (Math.floor(y / 32) % 2 === 0);
+                const idx = (y * size + x) * 4;
+                const m = t ? m1 : m2;
+                data[idx + 0] = m[0];
+                data[idx + 1] = m[1];
+                data[idx + 2] = m[2];
+                data[idx + 3] = m[3];
+            }
+        }
+    }
+    return data;
+}
+
+function renderMaterialPreview(m1Id, m2Id, isBlend) {
+    const previewDiv = document.getElementById('material-properties-preview');
+    if (!previewDiv) return;
+
+    const m1 = MATERIAL_PRESETS[m1Id];
+    const m2 = MATERIAL_PRESETS[m2Id];
+    if (!m1) return;
+
+    let html = '';
+    if (!isBlend) {
+        html += `<div class="material-preview-title">Profile: ${MATERIAL_LABELS[m1Id]}</div>`;
+        html += renderPropBar("💧 Wetness", m1[0]);
+        html += renderPropBar("📐 Repose", m1[1], 0.25);
+        html += renderPropBar("🏎️ Flow Rate", m1[2]);
+        html += renderPropBar("🌾 Grain Size", m1[3]);
+    } else {
+        html += `<div class="material-preview-title">Blend Profiles</div>`;
+        html += `<div style="color: var(--text-muted); margin-bottom: 6px; font-size: 10px;">${MATERIAL_LABELS[m1Id]} ➔ ${MATERIAL_LABELS[m2Id]}</div>`;
+        html += renderPropBar("💧 Wetness", m1[0], 1.0, m2[0]);
+        html += renderPropBar("📐 Repose", m1[1], 0.25, m2[1]);
+        html += renderPropBar("🏎️ Flow Rate", m1[2], 1.0, m2[2]);
+        html += renderPropBar("🌾 Grain Size", m1[3], 1.0, m2[3]);
+    }
+    previewDiv.innerHTML = html;
+}
+
+function renderPropBar(label, val, maxVal = 1.0, blendVal = null) {
+    const percent = Math.round((val / maxVal) * 100);
+    const blendPercent = blendVal !== null ? Math.round((blendVal / maxVal) * 100) : null;
+    
+    let barStyle = `width: ${percent}%;`;
+    if (blendPercent !== null) {
+        barStyle = `width: 100%; background: linear-gradient(90deg, var(--accent-color) ${percent}%, #00f0ff ${blendPercent}%);`;
+    }
+
+    const displayVal = blendVal !== null ? `${val.toFixed(2)}➔${blendVal.toFixed(2)}` : val.toFixed(2);
+
+    return `
+        <div class="material-prop-bar-container">
+            <div class="material-prop-label">${label}</div>
+            <div class="material-prop-bar-outer">
+                <div class="material-prop-bar-inner" style="${barStyle}"></div>
+            </div>
+            <div class="material-prop-val">${displayVal}</div>
+        </div>
+    `;
+}
+
+function syncMaterialTheme() {
+    const patternSelect = document.getElementById('material-pattern');
+    const mat1Select = document.getElementById('material-1');
+    const mat2Select = document.getElementById('material-2');
+    const mat2Group = document.getElementById('material-2-group');
+
+    if (!patternSelect || !mat1Select || !mat2Select) return;
+
+    const pattern = patternSelect.value;
+    const mat1Id = parseInt(mat1Select.value);
+    const mat2Id = parseInt(mat2Select.value);
+
+    const isBlend = pattern !== 'solid';
+    if (isBlend) {
+        mat2Group.style.display = 'block';
+    } else {
+        mat2Group.style.display = 'none';
+    }
+
+    renderMaterialPreview(mat1Id, mat2Id, isBlend);
+
+    if (state) {
+        state.set_material_mode(mat1Id);
+        const propData = generateMaterialProps(pattern, mat1Id, mat2Id);
+        state.set_cell_props(propData);
     }
 }
 
@@ -501,7 +694,7 @@ function syncSettings() {
     document.getElementById('walk-size-val').innerText = walkSize.toFixed(3);
 
     // Selects
-    state.set_material_mode(parseInt(document.getElementById('material-select').value));
+    syncMaterialTheme();
     state.set_sandbox_shape(parseInt(document.getElementById('shape-select').value));
     state.set_led_mode(parseInt(document.getElementById('led-mode').value));
 
@@ -615,9 +808,24 @@ function setupPanelInput() {
         document.getElementById(id).addEventListener('input', syncSettings);
     });
 
-    const selects = ['material-select', 'led-mode'];
+    const selects = ['material-pattern', 'material-1', 'material-2', 'led-mode'];
     selects.forEach(id => {
-        document.getElementById(id).addEventListener('change', syncSettings);
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', syncSettings);
+    });
+
+    // Preset Swatches Click Listeners
+    document.querySelectorAll('.swatch').forEach(sw => {
+        sw.addEventListener('click', () => {
+            document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
+            sw.classList.add('active');
+            const preset = sw.dataset.preset;
+            const presetSelect = document.getElementById('color-preset');
+            if (presetSelect) {
+                presetSelect.value = preset;
+                syncColorTheme();
+            }
+        });
     });
 
     document.getElementById('shape-select').addEventListener('change', () => {
@@ -634,8 +842,11 @@ function setupPanelInput() {
 
     const colorThemeControls = ['color-pattern', 'color-preset', 'color-sand-1', 'color-sand-2'];
     colorThemeControls.forEach(id => {
-        document.getElementById(id).addEventListener('change', syncColorTheme);
-        document.getElementById(id).addEventListener('input', syncColorTheme);
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('change', syncColorTheme);
+            el.addEventListener('input', syncColorTheme);
+        }
     });
 
     document.getElementById('check-shadows').addEventListener('change', syncSettings);
