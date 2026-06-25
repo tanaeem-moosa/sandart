@@ -232,7 +232,7 @@ impl DrawingSimulation {
             chunk[PROP_GRAIN_SIZE] = 0.45;
         }
 
-        let block_size = 32;
+        let block_size = 16;
         let cols = (GRID_SIZE + block_size - 1) / block_size;
         let rows = (GRID_SIZE + block_size - 1) / block_size;
         let active_blocks = vec![BlockActivity::Inactive; cols * rows];
