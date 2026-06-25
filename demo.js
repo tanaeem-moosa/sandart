@@ -297,7 +297,7 @@ function hueToRgbBytes(h) {
 }
 
 function generateColormap(pattern, color1Hex, color2Hex) {
-    const size = 1024;
+    const size = 512;
     const data = new Uint8Array(size * size * 4);
     const c1 = hexToRgbBytes(color1Hex);
     const c2 = hexToRgbBytes(color2Hex);
@@ -496,7 +496,7 @@ const MATERIAL_LABELS = {
 };
 
 function generateMaterialProps(pattern, mat1Id, mat2Id) {
-    const size = 1024;
+    const size = 512;
     const data = new Float32Array(size * size * 4);
     const m1 = MATERIAL_PRESETS[mat1Id] || MATERIAL_PRESETS[0];
     const m2 = MATERIAL_PRESETS[mat2Id] || MATERIAL_PRESETS[0];
