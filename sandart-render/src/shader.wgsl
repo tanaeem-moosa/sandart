@@ -61,7 +61,7 @@ fn hue_to_rgb(h: f32) -> vec3<f32> {
 // Manual Bilinear Texture Filtering to support linear height interpolation
 // on platforms without float32_filterable extension support
 fn sample_height_bilinear(uv: vec2<f32>) -> f32 {
-    let tex_size = 1024.0;
+    let tex_size = 512.0;
     let texel_coords = uv * tex_size - 0.5;
     let f = fract(texel_coords);
     let index = floor(texel_coords);
@@ -351,8 +351,8 @@ fn fs_main(
     
     // 1. Compute finite difference normal from neighbor heightmap pixels
     // Normal tilting scale (high factor creates visual depth)
-    let depth_factor = 28.0;
-    let tex_size = 1024.0;
+    let tex_size = 512.0;
+    let texel_size = 1.0 / tex_size;
     let texel_coords = uv * tex_size - 0.5;
     let index = floor(texel_coords);
     let f = fract(texel_coords);
@@ -373,12 +373,37 @@ fn fs_main(
     let h11 = sample11.r;
 
     let h_center = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
-    let dh_dx = mix(h10 - h00, h11 - h01, f.y);
-    let dh_dy = mix(h01 - h00, h11 - h10, f.x);
-
     let props = mix(mix(sample00, sample10, f.x), mix(sample01, sample11, f.x), f.y);
     let wetness = props.g;
     let grain_size = props.b;
+
+    // For water (high wetness), use a wider 3-tap Sobel-like filter for smooth wave normals.
+    // For dry materials, use the standard 1-texel finite difference.
+    var dh_dx: f32;
+    var dh_dy: f32;
+    let depth_factor = 28.0;
+    let is_water = step(0.85, wetness);
+    if (is_water > 0.5) {
+        // 3-tap Sobel over 2 texels for smoother water wave normals
+        let u_prev = clamp((index.x - 0.5) / tex_size, 0.0, 1.0);
+        let u_next = clamp((index.x + 2.5) / tex_size, 0.0, 1.0);
+        let v_prev = clamp((index.y - 0.5) / tex_size, 0.0, 1.0);
+        let v_next = clamp((index.y + 2.5) / tex_size, 0.0, 1.0);
+        let hL0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_prev, v0), 0.0).r;
+        let hL1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_prev, v1), 0.0).r;
+        let hR0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_next, v0), 0.0).r;
+        let hR1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_next, v1), 0.0).r;
+        let hB0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v_prev), 0.0).r;
+        let hB1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v_prev), 0.0).r;
+        let hT0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v_next), 0.0).r;
+        let hT1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v_next), 0.0).r;
+        // Weighted Sobel: center pair weighted 2x
+        dh_dx = (mix(hR0, hR1, f.y) - mix(hL0, hL1, f.y)) * 0.5 + (h10 - h00) * 0.5;
+        dh_dy = (mix(hT0, hT1, f.x) - mix(hB0, hB1, f.x)) * 0.5 + (h01 - h00) * 0.5;
+    } else {
+        dh_dx = mix(h10 - h00, h11 - h01, f.y);
+        dh_dy = mix(h01 - h00, h11 - h10, f.x);
+    }
 
     var normal = normalize(vec3<f32>(
         -dh_dx * depth_factor,
@@ -429,7 +454,8 @@ fn fs_main(
     let buttercream = mix(dry_color * 0.9, vec3<f32>(0.95, 0.93, 0.88), 0.7);
     let yogurt = mix(dry_color * 0.9, vec3<f32>(0.96, 0.94, 0.88), 0.75);
     let oil = mix(dry_color * 0.4, vec3<f32>(0.60, 0.45, 0.15), 0.5);
-    let water = mix(dry_color * 0.25, vec3<f32>(0.01, 0.10, 0.14), 0.4);
+    // Rich, deep blue water — more saturated and vivid
+    let water = mix(dry_color * 0.15, vec3<f32>(0.03, 0.22, 0.58), 0.85);
     let milk = mix(dry_color * 0.9, vec3<f32>(0.95, 0.95, 0.93), 0.8);
 
     var mat_base_color = dry_color;
@@ -682,7 +708,8 @@ fn fs_main(
     }
 
     // Base sand color from presets with grain color variation locked to texel resolution (1024)
-    let color_grain = hash(floor(uv * 1024.0));
+    // Grain noise locked to actual grid resolution (512) to avoid sub-texel aliasing
+    let color_grain = hash(floor(uv * 512.0));
     let sand_base_color = mat_base_color * (1.0 + (color_grain - 0.5) * 0.025);
 
     // Warm ambient reflection for soft sand look (darker charcoal for Moon Dust)
