@@ -697,7 +697,6 @@ function syncSettings() {
     document.getElementById('walk-size-val').innerText = walkSize.toFixed(3);
 
     // Selects
-    syncMaterialTheme();
     state.set_sandbox_shape(parseInt(document.getElementById('shape-select').value));
     state.set_led_mode(parseInt(document.getElementById('led-mode').value));
 
