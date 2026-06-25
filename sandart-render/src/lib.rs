@@ -1,6 +1,6 @@
 use wgpu;
 
-pub const GRID_SIZE: usize = 1024;
+pub const GRID_SIZE: usize = 512;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]

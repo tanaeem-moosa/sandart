@@ -6,7 +6,7 @@ pub use physics::{ActiveBounds, displace_line, settle_tick};
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
-pub const GRID_SIZE: usize = 1024;
+pub const GRID_SIZE: usize = 512;
 pub const DEFAULT_SAND_HEIGHT: f32 = 0.35;
 
 pub const PROP_WETNESS: usize = 0;

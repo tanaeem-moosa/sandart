@@ -1730,8 +1730,8 @@ mod tests {
 
         // Put several heaps of sand to force movement
         sim.heightmap.data.fill(0.1);
-        for cy in [256, 512, 768] {
-            for cx in [256, 512, 768] {
+        for cy in [GRID_SIZE / 4, GRID_SIZE / 2, (3 * GRID_SIZE) / 4] {
+            for cx in [GRID_SIZE / 4, GRID_SIZE / 2, (3 * GRID_SIZE) / 4] {
                 let c_idx = cy * GRID_SIZE + cx;
                 sim.heightmap.data[c_idx] = 1.0;
             }
