@@ -658,19 +658,28 @@ pub fn settle_tick(
     }
 
     // Sandbox boundary helper scaled to current width and height
+    let w_f = w as f32;
+    let h_f = h as f32;
+    let center_x = w_f / 2.0;
+    let center_y = h_f / 2.0;
+    let r_x = 0.46 * w_f;
+    let r_y = 0.46 * h_f;
+    let r_oval_y = 0.30 * h_f;
+    let r_x_sq = r_x * r_x;
+    let r_oval_y_sq = r_oval_y * r_oval_y;
+
+    let safe_r_x = r_x - 1.5;
+    let safe_r_y = r_y - 1.5;
+    let safe_circle_r_sq = safe_r_x * safe_r_x;
+
     let is_inside = |cx: usize, cy: usize| -> bool {
-        let center_x = w as f32 / 2.0;
-        let center_y = h as f32 / 2.0;
         let dx = cx as f32 - center_x;
         let dy = cy as f32 - center_y;
-        let r_x = 0.46 * w as f32;
-        let r_y = 0.46 * h as f32;
-        let r_oval_y = 0.30 * h as f32;
         match shape {
-            crate::SandboxShape::Circle => dx * dx + dy * dy < r_x * r_x,
+            crate::SandboxShape::Circle => dx * dx + dy * dy < r_x_sq,
             crate::SandboxShape::Square => dx.abs() < r_x && dy.abs() < r_y,
             crate::SandboxShape::Oval => {
-                (dx * dx) / (r_x * r_x) + (dy * dy) / (r_oval_y * r_oval_y) < 1.0
+                (dx * dx) / r_x_sq + (dy * dy) / r_oval_y_sq < 1.0
             }
         }
     };
@@ -699,7 +708,7 @@ pub fn settle_tick(
     let mut flow_occurred = false;
 
     // Helper closure to activate neighbor blocks and copy their heights on demand
-    let mut activate_neighbor = |neighbor_b: usize, flow: f32, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
+    let activate_neighbor = |neighbor_b: usize, flow: f32, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
         if !modified[neighbor_b] {
             let nbx = neighbor_b % cols;
             let nby = neighbor_b / cols;
@@ -737,7 +746,26 @@ pub fn settle_tick(
             for x in start_x..end_x {
                 let center_idx = row_offset + x;
 
-                if !is_inside(x, y) {
+                let dx = x as f32 - center_x;
+                let dy = y as f32 - center_y;
+
+                let (inside, is_safe) = match shape {
+                    crate::SandboxShape::Circle => {
+                        let dist_sq = dx * dx + dy * dy;
+                        (dist_sq < r_x_sq, dist_sq < safe_circle_r_sq)
+                    }
+                    crate::SandboxShape::Square => {
+                        let adx = dx.abs();
+                        let ady = dy.abs();
+                        (adx < r_x && ady < r_y, adx < safe_r_x && ady < safe_r_y)
+                    }
+                    crate::SandboxShape::Oval => {
+                        let oval_val = (dx * dx) / r_x_sq + (dy * dy) / r_oval_y_sq;
+                        (oval_val < 1.0, oval_val < 0.98)
+                    }
+                };
+
+                if !inside {
                     continue;
                 }
 
@@ -748,10 +776,10 @@ pub fn settle_tick(
                     let h_center = heightmap.data[center_idx];
 
                     // Neumann boundary reflection conditions
-                    let h_left = if x > 0 && is_inside(x - 1, y) { heightmap.data[center_idx - 1] } else { h_center };
-                    let h_right = if x + 1 < w && is_inside(x + 1, y) { heightmap.data[center_idx + 1] } else { h_center };
-                    let h_top = if y > 0 && is_inside(x, y - 1) { heightmap.data[center_idx - w] } else { h_center };
-                    let h_bottom = if y + 1 < h && is_inside(x, y + 1) { heightmap.data[center_idx + w] } else { h_center };
+                    let h_left = if is_safe || (x > 0 && is_inside(x - 1, y)) { heightmap.data[center_idx - 1] } else { h_center };
+                    let h_right = if is_safe || (x + 1 < w && is_inside(x + 1, y)) { heightmap.data[center_idx + 1] } else { h_center };
+                    let h_top = if is_safe || (y > 0 && is_inside(x, y - 1)) { heightmap.data[center_idx - w] } else { h_center };
+                    let h_bottom = if is_safe || (y + 1 < h && is_inside(x, y + 1)) { heightmap.data[center_idx + w] } else { h_center };
 
                     let laplacian = h_left + h_right + h_top + h_bottom - 4.0 * h_center;
 
