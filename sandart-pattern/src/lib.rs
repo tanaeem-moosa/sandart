@@ -936,61 +936,46 @@ pub fn generate_dinosaur() -> Vec<Vec2> {
 
 pub fn generate_unicorn() -> Vec<Vec2> {
     let raw_pts = [
-        (0.1, 0.8),       // Horn tip
-        (-0.1, 0.45),     // Horn base / Forehead
-        (-0.15, 0.42),    // Forehead
-        // Eye loop details
-        (-0.15, 0.3), (-0.1, 0.28), (-0.1, 0.32), (-0.15, 0.3),  // Eye loop
-        (-0.25, 0.25),    // Nose bridge
-        // Nostril loop
-        (-0.35, 0.15), (-0.32, 0.1), (-0.3, 0.12),  // Nostril
-        (-0.28, 0.05),    // Mouth
-        (-0.2, 0.03),     // Chin
-        (-0.15, 0.08),    // Jaw
-        (-0.1, -0.05),    // Neck front
-        (-0.15, -0.2),    // Chest
-        // Front Leg 1
-        (-0.18, -0.3),    // Shoulder
-        (-0.22, -0.6),    // Front leg knee/ankle
-        (-0.18, -0.62), (-0.15, -0.62),  // Hoof
-        (-0.12, -0.3),    // Leg back
-        // Front Leg 2 (Background leg)
-        (-0.08, -0.22),   // Background shoulder
-        (-0.12, -0.55),   // Background leg knee
-        (-0.08, -0.57), (-0.05, -0.57),  // Background hoof
-        (-0.02, -0.25),   // Background leg back
-        // Belly
-        (0.05, -0.28),    // Belly line
-        // Back Leg 2 (Background leg)
-        (0.12, -0.25),    // Background hip
-        (0.18, -0.55),    // Background leg ankle
-        (0.14, -0.57), (0.11, -0.57),  // Background hoof
-        (0.08, -0.28),    // Background leg front
-        // Back Leg 1
-        (0.15, -0.3),     // Hip front
-        (0.18, -0.62), (0.22, -0.62),  // Hoof
-        (0.28, -0.6),     // Ankle
-        (0.2, -0.25),     // Thigh
-        // Flank & Rump
-        (0.32, -0.1),     // Flank
-        (0.35, 0.0),      // Rump/Butt
-        // Tail (flowing loops)
-        (0.45, -0.1), (0.5, -0.3), (0.42, -0.4), (0.38, -0.35),  // Tail loop 1
-        (0.48, -0.45), (0.52, -0.55), (0.45, -0.6), (0.4, -0.5), // Tail loop 2
-        (0.35, -0.3), (0.3, -0.1),  // Tail base
-        // Back line
-        (0.15, 0.05),     // Back curve
-        (0.0, 0.12),      // Shoulder
-        // Mane (flowing hair loops)
-        (0.05, 0.15), (0.15, 0.25), (0.08, 0.28), // Mane wave 1
-        (0.12, 0.35), (0.2, 0.4), (0.1, 0.43),    // Mane wave 2
-        (0.15, 0.48), (0.22, 0.5), (0.08, 0.53),  // Mane wave 3
+        // Muzzle / Nose
+        (0.48, 0.18), (0.50, 0.12), (0.47, 0.08), (0.42, 0.09),
+        // Under jaw / Chin
+        (0.36, 0.12), (0.33, 0.15),
+        // Eye loop (curving up inside the head)
+        (0.34, 0.22), (0.38, 0.24), (0.39, 0.21), (0.36, 0.20), (0.34, 0.22),
+        // Forehead / Head top
+        (0.37, 0.27),
+        // Horn (extending up-right from forehead)
+        (0.48, 0.42), (0.40, 0.31),
         // Ear
-        (0.0, 0.45),      // Ear front
-        (0.05, 0.6),      // Ear tip
-        (-0.02, 0.48),    // Ear back
-        (-0.05, 0.48),    // Head back
-        (0.1, 0.8),       // Back to Horn tip
+        (0.39, 0.36), (0.41, 0.46), (0.36, 0.33),
+        // Mane Lock 1 (flowing back)
+        (0.31, 0.34), (0.16, 0.36), (0.28, 0.31),
+        // Mane Lock 2
+        (0.20, 0.30), (0.05, 0.28), (0.18, 0.24),
+        // Mane Lock 3
+        (0.10, 0.22), (-0.05, 0.20), (0.08, 0.17),
+        // Back line / Spine
+        (-0.05, 0.16), (-0.18, 0.13), (-0.26, 0.07),
+        // Tail (flowing loops)
+        (-0.33, 0.05), (-0.30, 0.08), (-0.36, 0.18), (-0.42, 0.08), // Tail Loop 1
+        (-0.35, -0.02), (-0.45, -0.06), (-0.48, -0.15), (-0.39, -0.10), // Tail Loop 2
+        (-0.32, -0.04), (-0.28, -0.05), // Tail base
+        // Butt / Rump
+        (-0.25, 0.01),
+        // Back Leg 1 (outer hind leg, reaching forward/down)
+        (-0.20, -0.08), (-0.15, -0.22), (-0.17, -0.38), (-0.24, -0.52), // Hock to ankle
+        (-0.16, -0.53), (-0.18, -0.49), // Hoof
+        (-0.12, -0.30), (-0.08, -0.14), // Back up thigh/flank
+        // Belly
+        (0.00, -0.12), (0.10, -0.11),
+        // Front Leg 1 (outer front leg, raised/bent)
+        (0.16, -0.13), (0.22, -0.25), (0.16, -0.35), (0.19, -0.38), (0.24, -0.32), (0.26, -0.18), // Bent leg/hoof loop
+        // Chest
+        (0.28, -0.05), (0.31, 0.05), (0.33, 0.11),
+        // Neck front
+        (0.39, 0.15),
+        // Return to muzzle start
+        (0.48, 0.18)
     ];
     raw_pts.iter().map(|&(x, y)| Vec2::new(x * 0.90, y * 0.90)).collect()
 }
