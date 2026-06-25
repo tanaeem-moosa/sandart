@@ -579,15 +579,20 @@ impl WasmSimulationState {
                 active: bounds.active,
             };
             if render_bounds.active {
-                let mut interleaved = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+                let sub_width = bounds.max_x - bounds.min_x + 1;
+                let sub_height = bounds.max_y - bounds.min_y + 1;
+                
+                let mut interleaved = vec![0.0f32; sub_width * sub_height * 4];
                 for y in bounds.min_y..=bounds.max_y {
-                    let row_offset = y * GRID_SIZE;
+                    let src_row_offset = y * GRID_SIZE;
+                    let dest_row_offset = (y - bounds.min_y) * sub_width;
                     for x in bounds.min_x..=bounds.max_x {
-                        let i = row_offset + x;
-                        interleaved[i * 4 + 0] = self.sim.heightmap.data[i];
-                        interleaved[i * 4 + 1] = self.sim.cell_props[i * 4 + sandart_sim::PROP_WETNESS];
-                        interleaved[i * 4 + 2] = self.sim.cell_props[i * 4 + sandart_sim::PROP_GRAIN_SIZE];
-                        interleaved[i * 4 + 3] = 1.0;
+                        let src_idx = src_row_offset + x;
+                        let dest_idx = dest_row_offset + (x - bounds.min_x);
+                        interleaved[dest_idx * 4 + 0] = self.sim.heightmap.data[src_idx];
+                        interleaved[dest_idx * 4 + 1] = self.sim.cell_props[src_idx * 4 + sandart_sim::PROP_WETNESS];
+                        interleaved[dest_idx * 4 + 2] = self.sim.cell_props[src_idx * 4 + sandart_sim::PROP_GRAIN_SIZE];
+                        interleaved[dest_idx * 4 + 3] = 1.0;
                     }
                 }
                 self.renderer.update_heightmap_partial(
@@ -595,9 +600,19 @@ impl WasmSimulationState {
                     &interleaved,
                     render_bounds,
                 );
+
+                let mut colormap_sub = vec![0u8; sub_width * sub_height * 4];
+                for y in bounds.min_y..=bounds.max_y {
+                    let src_row_offset = y * GRID_SIZE * 4;
+                    let dest_row_offset = (y - bounds.min_y) * sub_width * 4;
+                    let bytes_to_copy = sub_width * 4;
+                    colormap_sub[dest_row_offset..(dest_row_offset + bytes_to_copy)].copy_from_slice(
+                        &self.sim.cell_colors[src_row_offset + bounds.min_x * 4..src_row_offset + (bounds.max_x + 1) * 4]
+                    );
+                }
                 self.renderer.update_colormap_partial(
                     &self.queue,
-                    &self.sim.cell_colors,
+                    &colormap_sub,
                     render_bounds,
                 );
             }

@@ -367,7 +367,6 @@ impl HeightmapRenderer {
 
         let sub_width = (bounds.max_x - bounds.min_x + 1) as u32;
         let sub_height = (bounds.max_y - bounds.min_y + 1) as u32;
-        let offset = ((bounds.min_y * GRID_SIZE + bounds.min_x) * 16) as wgpu::BufferAddress;
 
         queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -382,9 +381,9 @@ impl HeightmapRenderer {
             },
             bytemuck::cast_slice(data),
             wgpu::ImageDataLayout {
-                offset,
-                bytes_per_row: Some((GRID_SIZE * 16) as u32),
-                rows_per_image: Some(GRID_SIZE as u32),
+                offset: 0,
+                bytes_per_row: Some((sub_width * 16) as u32),
+                rows_per_image: Some(sub_height),
             },
             wgpu::Extent3d {
                 width: sub_width,
@@ -425,7 +424,6 @@ impl HeightmapRenderer {
 
         let sub_width = (bounds.max_x - bounds.min_x + 1) as u32;
         let sub_height = (bounds.max_y - bounds.min_y + 1) as u32;
-        let offset = ((bounds.min_y * GRID_SIZE + bounds.min_x) * 4) as wgpu::BufferAddress;
 
         queue.write_texture(
             wgpu::ImageCopyTexture {
@@ -440,9 +438,9 @@ impl HeightmapRenderer {
             },
             data,
             wgpu::ImageDataLayout {
-                offset,
-                bytes_per_row: Some((GRID_SIZE * 4) as u32),
-                rows_per_image: Some(GRID_SIZE as u32),
+                offset: 0,
+                bytes_per_row: Some((sub_width * 4) as u32),
+                rows_per_image: Some(sub_height),
             },
             wgpu::Extent3d {
                 width: sub_width,
