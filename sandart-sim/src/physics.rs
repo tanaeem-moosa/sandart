@@ -790,6 +790,44 @@ pub fn settle_tick(
                     let h_new = (h_center + v_new).clamp(0.0, 1.0);
                     temp_heights[center_idx] = h_new;
 
+                    // --- Color diffusion driven by flux ---
+                    // When height flows in from a neighbor, blend that neighbor's color into
+                    // this cell proportionally. A flat undisturbed pool produces zero flux →
+                    // zero color change. Rate scales with wetness: water mixes fast, oil slow.
+                    if is_safe && h_new > h_center {
+                        // Net inflow: sample which neighbors are higher and contributed flux
+                        let flux_l = (h_left  - h_center).max(0.0);
+                        let flux_r = (h_right - h_center).max(0.0);
+                        let flux_t = (h_top   - h_center).max(0.0);
+                        let flux_b = (h_bottom- h_center).max(0.0);
+                        let total_flux = flux_l + flux_r + flux_t + flux_b;
+
+                        if total_flux > 1e-5 {
+                            // mix_rate: how strongly colors blend per unit flux.
+                            // Water (wetness=1.0) → 0.35, VegOil (wetness=0.85) → 0.10
+                            let mix_rate = ((wetness - 0.75) / 0.25).clamp(0.0, 1.0) * 0.30 + 0.05;
+                            let blend = (total_flux * mix_rate).min(0.60);
+
+                            let cb = center_idx * 4;
+                            let lb = (center_idx - 1) * 4;
+                            let rb = (center_idx + 1) * 4;
+                            let tb = (center_idx - w) * 4;
+                            let bb = (center_idx + w) * 4;
+
+                            for ch in 0..3 {
+                                let center_c = cell_colors[cb + ch] as f32;
+                                let neighbor_avg =
+                                    cell_colors[lb + ch] as f32 * flux_l +
+                                    cell_colors[rb + ch] as f32 * flux_r +
+                                    cell_colors[tb + ch] as f32 * flux_t +
+                                    cell_colors[bb + ch] as f32 * flux_b;
+                                let neighbor_avg = neighbor_avg / total_flux;
+                                let mixed = center_c + (neighbor_avg - center_c) * blend;
+                                cell_colors[cb + ch] = mixed.clamp(0.0, 255.0).round() as u8;
+                            }
+                        }
+                    }
+
                     let height_diff = (h_new - h_center).abs();
                     total_flow += height_diff;
 
