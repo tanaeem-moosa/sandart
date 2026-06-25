@@ -58,6 +58,7 @@ async function start() {
 
     // Initial config sync
     syncSettings();
+    syncMaterialTheme(true);
     syncColorTheme();
     updateCamera();
     loadActivePattern();
@@ -611,7 +612,7 @@ function renderPropBar(label, val, maxVal = 1.0, blendVal = null) {
     `;
 }
 
-function syncMaterialTheme() {
+function syncMaterialTheme(resetBuffer = false) {
     const patternSelect = document.getElementById('material-pattern');
     const mat1Select = document.getElementById('material-1');
     const mat2Select = document.getElementById('material-2');
@@ -634,8 +635,10 @@ function syncMaterialTheme() {
 
     if (state) {
         state.set_material_mode(mat1Id);
-        const propData = generateMaterialProps(pattern, mat1Id, mat2Id);
-        state.set_cell_props(propData);
+        if (resetBuffer) {
+            const propData = generateMaterialProps(pattern, mat1Id, mat2Id);
+            state.set_cell_props(propData);
+        }
     }
 }
 
@@ -808,10 +811,21 @@ function setupPanelInput() {
         document.getElementById(id).addEventListener('input', syncSettings);
     });
 
-    const selects = ['material-pattern', 'material-1', 'material-2', 'led-mode'];
+    const selects = ['led-mode'];
     selects.forEach(id => {
         const el = document.getElementById(id);
         if (el) el.addEventListener('change', syncSettings);
+    });
+
+    const matSelects = ['material-pattern', 'material-1', 'material-2'];
+    matSelects.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.addEventListener('change', () => {
+                syncSettings();
+                syncMaterialTheme(true);
+            });
+        }
     });
 
     // Preset Swatches Click Listeners
@@ -853,7 +867,10 @@ function setupPanelInput() {
 
     // Operations buttons
     document.getElementById('btn-reset').addEventListener('click', () => {
-        if (state) state.reset();
+        if (state) {
+            state.reset();
+            syncMaterialTheme(true);
+        }
     });
 
     document.getElementById('btn-ripples').addEventListener('click', () => {

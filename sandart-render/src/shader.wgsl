@@ -399,9 +399,9 @@ fn fs_main(
     let is_metallic = 0.0;
     let is_moon_dust = 0.0;
 
-    var mat_base_color = uniforms.sand_color.rgb;
+    var dry_color = uniforms.sand_color.rgb;
     if (uniforms.color_mode > 0u) {
-        mat_base_color = textureSampleLevel(colormap_tex, heightmap_sampler, uv, 0.0).rgb;
+        dry_color = textureSampleLevel(colormap_tex, heightmap_sampler, uv, 0.0).rgb;
     } else {
         // Continuous color mapping for solid/preset colors based on wetness & grain_size
         let dry_sand = uniforms.sand_color.rgb;
@@ -410,7 +410,6 @@ fn fs_main(
         let moon_dust = vec3<f32>(0.35, 0.35, 0.35);
 
         // Mix dry states based on grain_size
-        var dry_color = dry_sand;
         if (grain_size < 0.15) {
             let t = clamp((grain_size - 0.05) / 0.10, 0.0, 1.0);
             dry_color = mix(fine_powder, moon_dust, t);
@@ -421,49 +420,51 @@ fn fs_main(
             let t = clamp((grain_size - 0.45) / 0.35, 0.0, 1.0);
             dry_color = mix(dry_sand, coarse_sand, t);
         }
+    }
 
-        let snow = vec3<f32>(0.98, 0.98, 1.0);
-        let kinetic_sand = vec3<f32>(0.85, 0.82, 0.77);
-        let wet_sand = vec3<f32>(0.68, 0.62, 0.53);
-        let oobleck = vec3<f32>(0.75, 0.90, 0.30);
-        let buttercream = vec3<f32>(0.95, 0.93, 0.88);
-        let yogurt = vec3<f32>(0.96, 0.94, 0.88);
-        let oil = vec3<f32>(0.50, 0.38, 0.12);
-        let water = vec3<f32>(0.01, 0.10, 0.14);
-        let milk = vec3<f32>(0.95, 0.95, 0.93);
+    let snow = mix(dry_color, vec3<f32>(0.98, 0.98, 1.0), 0.8);
+    let kinetic_sand = dry_color * 0.8;
+    let wet_sand = mix(dry_color * 0.55, vec3<f32>(0.5, 0.45, 0.4), 0.3);
+    let oobleck = mix(dry_color * 0.8, vec3<f32>(0.75, 0.90, 0.30), 0.6);
+    let buttercream = mix(dry_color * 0.9, vec3<f32>(0.95, 0.93, 0.88), 0.7);
+    let yogurt = mix(dry_color * 0.9, vec3<f32>(0.96, 0.94, 0.88), 0.75);
+    let oil = mix(dry_color * 0.4, vec3<f32>(0.60, 0.45, 0.15), 0.5);
+    let water = mix(dry_color * 0.25, vec3<f32>(0.01, 0.10, 0.14), 0.4);
+    let milk = mix(dry_color * 0.9, vec3<f32>(0.95, 0.95, 0.93), 0.8);
 
-        // Blend dry color towards wet colors depending on wetness
-        if (wetness < 0.05) {
-            let t = clamp(wetness / 0.05, 0.0, 1.0);
-            mat_base_color = mix(dry_color, snow, t);
-        } else if (wetness < 0.20) {
-            let t = clamp((wetness - 0.05) / 0.15, 0.0, 1.0);
-            mat_base_color = mix(snow, kinetic_sand, t);
-        } else if (wetness < 0.45) {
-            let t = clamp((wetness - 0.20) / 0.25, 0.0, 1.0);
-            mat_base_color = mix(kinetic_sand, wet_sand, t);
-        } else if (wetness < 0.55) {
-            let t = clamp((wetness - 0.45) / 0.10, 0.0, 1.0);
-            mat_base_color = mix(wet_sand, oobleck, t);
-        } else if (wetness < 0.70) {
-            let t = clamp((wetness - 0.55) / 0.15, 0.0, 1.0);
-            mat_base_color = mix(oobleck, buttercream, t);
-        } else if (wetness < 0.75) {
-            let t = clamp((wetness - 0.70) / 0.05, 0.0, 1.0);
-            mat_base_color = mix(buttercream, yogurt, t);
-        } else if (wetness < 0.85) {
-            let t = clamp((wetness - 0.75) / 0.10, 0.0, 1.0);
-            mat_base_color = mix(yogurt, oil, t);
-        } else if (wetness < 0.90) {
-            let t = clamp((wetness - 0.85) / 0.05, 0.0, 1.0);
-            mat_base_color = mix(oil, water, t);
-        } else if (wetness < 0.95) {
-            let t = clamp((wetness - 0.90) / 0.05, 0.0, 1.0);
-            mat_base_color = mix(water, milk, t);
-        } else {
-            let t = clamp((wetness - 0.95) / 0.05, 0.0, 1.0);
-            mat_base_color = mix(milk, water, t);
-        }
+    var mat_base_color = dry_color;
+
+    // Blend dry color towards wet colors depending on wetness
+    if (wetness < 0.05) {
+        let t = clamp(wetness / 0.05, 0.0, 1.0);
+        mat_base_color = mix(dry_color, snow, t);
+    } else if (wetness < 0.20) {
+        let t = clamp((wetness - 0.05) / 0.15, 0.0, 1.0);
+        mat_base_color = mix(snow, kinetic_sand, t);
+    } else if (wetness < 0.45) {
+        let t = clamp((wetness - 0.20) / 0.25, 0.0, 1.0);
+        mat_base_color = mix(kinetic_sand, wet_sand, t);
+    } else if (wetness < 0.55) {
+        let t = clamp((wetness - 0.45) / 0.10, 0.0, 1.0);
+        mat_base_color = mix(wet_sand, oobleck, t);
+    } else if (wetness < 0.70) {
+        let t = clamp((wetness - 0.55) / 0.15, 0.0, 1.0);
+        mat_base_color = mix(oobleck, buttercream, t);
+    } else if (wetness < 0.75) {
+        let t = clamp((wetness - 0.70) / 0.05, 0.0, 1.0);
+        mat_base_color = mix(buttercream, yogurt, t);
+    } else if (wetness < 0.85) {
+        let t = clamp((wetness - 0.75) / 0.10, 0.0, 1.0);
+        mat_base_color = mix(yogurt, oil, t);
+    } else if (wetness < 0.90) {
+        let t = clamp((wetness - 0.85) / 0.05, 0.0, 1.0);
+        mat_base_color = mix(oil, water, t);
+    } else if (wetness < 0.95) {
+        let t = clamp((wetness - 0.90) / 0.05, 0.0, 1.0);
+        mat_base_color = mix(water, milk, t);
+    } else {
+        let t = clamp((wetness - 0.95) / 0.05, 0.0, 1.0);
+        mat_base_color = mix(milk, water, t);
     }
 
     // 3. Perturb normal with micro-surface grain noise
