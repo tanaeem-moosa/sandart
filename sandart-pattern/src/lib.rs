@@ -936,29 +936,61 @@ pub fn generate_dinosaur() -> Vec<Vec2> {
 
 pub fn generate_unicorn() -> Vec<Vec2> {
     let raw_pts = [
-        (0.1, -0.7),      // Neck bottom start
-        (-0.1, -0.5), (-0.2, -0.3), (-0.25, -0.1), // Chest
-        (-0.3, 0.0), (-0.4, 0.05), (-0.45, 0.12),  // Muzzle
-        (-0.43, 0.18), (-0.38, 0.2), (-0.4, 0.22), // Nostril loop
-        (-0.25, 0.3), (-0.15, 0.38), (-0.1, 0.42), // Nose bridge
-        // Horn (long and pointed with spiral texture)
-        (0.2, 0.8),       // Horn tip
-        (0.1, 0.68), (0.15, 0.69),   // first rib
-        (0.02, 0.56), (0.07, 0.57),   // second rib
-        (-0.06, 0.44), (-0.01, 0.45), // third rib
-        (-0.1, 0.4),      // Horn base
-        (-0.05, 0.45),    // Forehead
+        (0.1, 0.8),       // Horn tip
+        (-0.1, 0.45),     // Horn base / Forehead
+        (-0.15, 0.42),    // Forehead
+        // Eye loop details
+        (-0.15, 0.3), (-0.1, 0.28), (-0.1, 0.32), (-0.15, 0.3),  // Eye loop
+        (-0.25, 0.25),    // Nose bridge
+        // Nostril loop
+        (-0.35, 0.15), (-0.32, 0.1), (-0.3, 0.12),  // Nostril
+        (-0.28, 0.05),    // Mouth
+        (-0.2, 0.03),     // Chin
+        (-0.15, 0.08),    // Jaw
+        (-0.1, -0.05),    // Neck front
+        (-0.15, -0.2),    // Chest
+        // Front Leg 1
+        (-0.18, -0.3),    // Shoulder
+        (-0.22, -0.6),    // Front leg knee/ankle
+        (-0.18, -0.62), (-0.15, -0.62),  // Hoof
+        (-0.12, -0.3),    // Leg back
+        // Front Leg 2 (Background leg)
+        (-0.08, -0.22),   // Background shoulder
+        (-0.12, -0.55),   // Background leg knee
+        (-0.08, -0.57), (-0.05, -0.57),  // Background hoof
+        (-0.02, -0.25),   // Background leg back
+        // Belly
+        (0.05, -0.28),    // Belly line
+        // Back Leg 2 (Background leg)
+        (0.12, -0.25),    // Background hip
+        (0.18, -0.55),    // Background leg ankle
+        (0.14, -0.57), (0.11, -0.57),  // Background hoof
+        (0.08, -0.28),    // Background leg front
+        // Back Leg 1
+        (0.15, -0.3),     // Hip front
+        (0.18, -0.62), (0.22, -0.62),  // Hoof
+        (0.28, -0.6),     // Ankle
+        (0.2, -0.25),     // Thigh
+        // Flank & Rump
+        (0.32, -0.1),     // Flank
+        (0.35, 0.0),      // Rump/Butt
+        // Tail (flowing loops)
+        (0.45, -0.1), (0.5, -0.3), (0.42, -0.4), (0.38, -0.35),  // Tail loop 1
+        (0.48, -0.45), (0.52, -0.55), (0.45, -0.6), (0.4, -0.5), // Tail loop 2
+        (0.35, -0.3), (0.3, -0.1),  // Tail base
+        // Back line
+        (0.15, 0.05),     // Back curve
+        (0.0, 0.12),      // Shoulder
+        // Mane (flowing hair loops)
+        (0.05, 0.15), (0.15, 0.25), (0.08, 0.28), // Mane wave 1
+        (0.12, 0.35), (0.2, 0.4), (0.1, 0.43),    // Mane wave 2
+        (0.15, 0.48), (0.22, 0.5), (0.08, 0.53),  // Mane wave 3
         // Ear
-        (0.0, 0.6), (0.05, 0.7), (-0.02, 0.5),
-        (0.05, 0.4),      // Back of head
-        // Mane waves
-        (0.2, 0.45), (0.12, 0.35),
-        (0.25, 0.3), (0.15, 0.2),
-        (0.28, 0.1), (0.18, 0.0),
-        (0.29, -0.15), (0.19, -0.25),
-        (0.30, -0.4), (0.2, -0.5),
-        (0.15, -0.6),     // Neck back
-        (0.1, -0.7),       // Close loop
+        (0.0, 0.45),      // Ear front
+        (0.05, 0.6),      // Ear tip
+        (-0.02, 0.48),    // Ear back
+        (-0.05, 0.48),    // Head back
+        (0.1, 0.8),       // Back to Horn tip
     ];
     raw_pts.iter().map(|&(x, y)| Vec2::new(x * 0.90, y * 0.90)).collect()
 }
