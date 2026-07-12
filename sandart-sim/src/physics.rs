@@ -766,9 +766,15 @@ pub fn settle_tick(
         let start_y = by * block_size;
         let end_y = ((by + 1) * block_size).min(h);
 
+        let x_len = end_x - start_x;
         for y in start_y..end_y {
             let row_offset = y * w;
-            for x in start_x..end_x {
+            for idx in 0..x_len {
+                let x = if tick_count % 2 == 0 {
+                    start_x + idx
+                } else {
+                    end_x - 1 - idx
+                };
                 let center_idx = row_offset + x;
 
                 let dx = x as f32 - center_x;
