@@ -362,8 +362,8 @@ impl DrawingSimulation {
                             // Upper chamber: filled with sand
                             self.heightmap.data[idx] = noise_hm.data[idx];
                         } else {
-                            // Lower chamber: near-empty
-                            self.heightmap.data[idx] = 0.02;
+                            // Lower chamber: empty
+                            self.heightmap.data[idx] = 0.0;
                         }
                     } else {
                         self.heightmap.data[idx] = 0.0;

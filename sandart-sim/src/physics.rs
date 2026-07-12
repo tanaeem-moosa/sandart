@@ -1057,11 +1057,12 @@ pub fn settle_tick(
                             }
 
                             if flow > 0.0 {
+                                let max_transfer_coeff = if gravity_active { 0.20 } else { 0.40 };
                                 let clamped_flow = if geom_slope > 0.0 {
                                     let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
-                                    flow.min(temp_diff * 0.4).max(0.0)
+                                    flow.min(temp_diff * max_transfer_coeff).max(0.0)
                                 } else {
-                                    let max_src_flow = temp_heights[center_idx] * 0.4;
+                                    let max_src_flow = temp_heights[center_idx] * max_transfer_coeff;
                                     let max_dst_room = (1.5 - temp_heights[neighbor_idx]).max(0.0);
                                     flow.min(max_src_flow).min(max_dst_room).max(0.0)
                                 };
