@@ -5,6 +5,7 @@ let canvas = null;
 let lastTime = 0;
 let isDraggingCamera = false;
 let isDraggingMarble = false;
+let isSandFall = false;
 let mouseX = 0;
 let mouseY = 0;
 let cursorX = 0;
@@ -234,7 +235,7 @@ function updateCamera() {
 
 function setupCanvasInput() {
     canvas.addEventListener('mousedown', (e) => {
-        if (e.shiftKey) {
+        if (e.shiftKey && !isSandFall) {
             // Drag the magnet/marble
             isDraggingMarble = true;
             const pos = getMouseCoordinates(e);
@@ -879,6 +880,86 @@ function setupPanelInput() {
     document.getElementById('btn-load-pattern').addEventListener('click', () => {
         syncSettings();
         loadActivePattern();
+    });
+
+    // Tab switching event listeners
+    const tabSandbox = document.getElementById('tab-sandbox');
+    const tabSandFall = document.getElementById('tab-sandfall');
+    const sandboxMarbles = document.getElementById('sandbox-only-marbles');
+    const sandboxPatterns = document.getElementById('sandbox-only-patterns');
+    const sandfallControls = document.getElementById('sandfall-controls');
+
+    function switchMode(mode) {
+        if (!state) return;
+        if (mode === 'sandbox') {
+            isSandFall = false;
+            tabSandbox.classList.add('active');
+            tabSandFall.classList.remove('active');
+            sandboxMarbles.style.display = 'block';
+            sandboxPatterns.style.display = 'block';
+            sandfallControls.style.display = 'none';
+
+            // Tell WASM to switch to Sandbox mode
+            state.set_simulator_mode(0);
+            
+            // Restore gravity to zero (standard sandbox behavior)
+            state.set_gravity(0.0, 0.0);
+            
+            // Sync settings and patterns
+            syncSettings();
+            loadActivePattern();
+            syncMaterialTheme(true);
+        } else if (mode === 'sandfall') {
+            isSandFall = true;
+            tabSandbox.classList.remove('active');
+            tabSandFall.classList.add('active');
+            sandboxMarbles.style.display = 'none';
+            sandboxPatterns.style.display = 'none';
+            sandfallControls.style.display = 'block';
+
+            // Tell WASM to switch to Sand-fall mode
+            state.set_simulator_mode(1);
+            
+            // Sync gravity and neck width
+            syncSandFallSettings();
+            syncMaterialTheme(true);
+        }
+    }
+
+    tabSandbox.addEventListener('click', () => switchMode('sandbox'));
+    tabSandFall.addEventListener('click', () => switchMode('sandfall'));
+
+    // Flip Hourglass Button
+    document.getElementById('btn-flip').addEventListener('click', () => {
+        if (state && isSandFall) {
+            state.flip_hourglass();
+        }
+    });
+
+    // Gravity Strength Slider
+    const gravitySlider = document.getElementById('gravity-slider');
+    const gravityVal = document.getElementById('gravity-val');
+    const neckSlider = document.getElementById('neck-slider');
+    
+    function syncSandFallSettings() {
+        if (!state) return;
+        const val = parseFloat(gravitySlider.value);
+        gravityVal.innerText = val.toFixed(3);
+        // Force downward gravity (0.0, strength)
+        state.set_gravity(0.0, val);
+
+        const neckVal = parseFloat(neckSlider.value);
+        document.getElementById('neck-val').innerText = neckVal.toFixed(3);
+        state.set_neck_width(neckVal);
+    }
+    gravitySlider.addEventListener('input', syncSandFallSettings);
+
+    // Neck Width Slider
+    neckSlider.addEventListener('input', () => {
+        syncSandFallSettings();
+        // Since changing neck width changes the boundary, reset the simulation to re-initialize the hourglass bed
+        state.reset();
+        syncMaterialTheme(true);
     });
 
     // Toggle Sidebar

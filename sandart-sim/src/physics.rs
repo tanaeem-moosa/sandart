@@ -552,6 +552,8 @@ pub fn settle_tick(
     wave_vel: &mut Vec<f32>,
     shape: crate::SandboxShape,
     tick_count: u32,
+    gravity_dir: glam::Vec2,
+    neck_width: f32,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -681,6 +683,22 @@ pub fn settle_tick(
             crate::SandboxShape::Oval => {
                 (dx * dx) / r_x_sq + (dy * dy) / r_oval_y_sq < 1.0
             }
+            crate::SandboxShape::Hourglass => {
+                let chamber_r = 0.28 * w_f;
+                let chamber_offset = 0.32 * h_f;
+                let neck_hw = neck_width * w_f;
+                let chamber_r_sq = chamber_r * chamber_r;
+
+                let dy_upper = dy + chamber_offset;
+                let in_upper = dx * dx + dy_upper * dy_upper < chamber_r_sq;
+
+                let dy_lower = dy - chamber_offset;
+                let in_lower = dx * dx + dy_lower * dy_lower < chamber_r_sq;
+
+                let in_neck = dx.abs() < neck_hw && dy.abs() < chamber_offset;
+
+                in_upper || in_lower || in_neck
+            }
         }
     };
 
@@ -762,6 +780,33 @@ pub fn settle_tick(
                     crate::SandboxShape::Oval => {
                         let oval_val = (dx * dx) / r_x_sq + (dy * dy) / r_oval_y_sq;
                         (oval_val < 1.0, oval_val < 0.98)
+                    }
+                    crate::SandboxShape::Hourglass => {
+                        let chamber_r = 0.28 * w_f;
+                        let chamber_offset = 0.32 * h_f;
+                        let neck_hw = neck_width * w_f;
+                        let chamber_r_sq = chamber_r * chamber_r;
+
+                        let dy_upper = dy + chamber_offset;
+                        let in_upper = dx * dx + dy_upper * dy_upper < chamber_r_sq;
+
+                        let dy_lower = dy - chamber_offset;
+                        let in_lower = dx * dx + dy_lower * dy_lower < chamber_r_sq;
+
+                        let in_neck = dx.abs() < neck_hw && dy.abs() < chamber_offset;
+
+                        let inside = in_upper || in_lower || in_neck;
+
+                        let safe_chamber_r = chamber_r - 1.5;
+                        let safe_chamber_r_sq = safe_chamber_r * safe_chamber_r;
+                        let safe_neck_hw = (neck_hw - 1.5).max(1.0);
+                        
+                        let safe_in_upper = dx * dx + dy_upper * dy_upper < safe_chamber_r_sq;
+                        let safe_in_lower = dx * dx + dy_lower * dy_lower < safe_chamber_r_sq;
+                        let safe_in_neck = dx.abs() < safe_neck_hw && dy.abs() < chamber_offset;
+                        let is_safe = safe_in_upper || safe_in_lower || safe_in_neck;
+
+                        (inside, is_safe)
                     }
                 };
 
@@ -868,8 +913,8 @@ pub fn settle_tick(
                         threshold_prop
                     };
 
-                    // Fast-path shortcut
-                    if h_center - min_h <= threshold_min {
+                    // Fast-path shortcut (disabled when gravity is active to allow flow on flat beds)
+                    if gravity_dir.length_squared() < 1e-6 && h_center - min_h <= threshold_min {
                         sliding[center_idx] = false;
                         continue;
                     }
@@ -962,11 +1007,23 @@ pub fn settle_tick(
                         closest_marble_vel,
                     );
 
-                    for &neighbor_idx in &neighbors {
+                    const NEIGHBOR_DIRS: [(f32, f32); 4] = [
+                        (-1.0, 0.0), // Left
+                        (1.0, 0.0),  // Right
+                        (0.0, -1.0), // Top
+                        (0.0, 1.0),  // Bottom
+                    ];
+
+                    for (i, &neighbor_idx) in neighbors.iter().enumerate() {
                         let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
 
-                        if geom_slope <= threshold {
+                        let (ndx, ndy) = NEIGHBOR_DIRS[i];
+                        let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
+                        let gravity_push = gravity_dot * 0.05;
+                        let effective_slope = geom_slope + gravity_push;
+
+                        if effective_slope <= threshold {
                             continue;
                         }
 
@@ -976,15 +1033,21 @@ pub fn settle_tick(
                         
                         if rand_val >= lock_chance {
                             let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
-                            let mut flow = (alpha * (geom_slope - threshold) * alpha_noise).max(0.0);
+                            let mut flow = (alpha * (effective_slope - threshold) * alpha_noise).max(0.0);
                             
                             if let Some(q) = quantize_size {
                                 flow = (flow / q).round() * q;
                             }
 
                             if flow > 0.0 {
-                                let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
-                                let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                                let clamped_flow = if geom_slope > 0.0 {
+                                    let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
+                                    flow.min(temp_diff * 0.4).max(0.0)
+                                } else {
+                                    let max_src_flow = temp_heights[center_idx] * 0.4;
+                                    let max_dst_room = (1.5 - temp_heights[neighbor_idx]).max(0.0);
+                                    flow.min(max_src_flow).min(max_dst_room).max(0.0)
+                                };
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                     let nx = neighbor_idx % w;
                                     let ny = neighbor_idx / w;
@@ -1407,6 +1470,8 @@ mod tests {
                 &mut wave_vel,
                 crate::SandboxShape::Circle,
                 i as u32,
+                glam::Vec2::ZERO,
+                0.04,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -1467,6 +1532,8 @@ mod tests {
             &mut wave_vel,
             crate::SandboxShape::Circle,
             0,
+            glam::Vec2::ZERO,
+            0.04,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -1534,6 +1601,8 @@ mod tests {
                 &mut wave_vel,
                 crate::SandboxShape::Circle,
                 0,
+                glam::Vec2::ZERO,
+                0.04,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -1628,6 +1697,8 @@ mod tests {
             &mut wave_vel,
             crate::SandboxShape::Circle,
             0,
+            glam::Vec2::ZERO,
+            0.04,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -1840,5 +1911,123 @@ mod tests {
         assert!(diff_r < 0.008, "Red color mass leaked! diff = {:.5}%, init = {}, final = {}", diff_r * 100.0, init_r, final_r);
         assert!(diff_g < 0.008, "Green color mass leaked! diff = {:.5}%, init = {}, final = {}", diff_g * 100.0, init_g, final_g);
         assert!(diff_b < 0.008, "Blue color mass leaked! diff = {:.5}%, init = {}, final = {}", diff_b * 100.0, init_b, final_b);
+    }
+
+    #[test]
+    fn test_hourglass_boundary_math() {
+        let w_f = 512.0;
+        let h_f = 512.0;
+        let center_x = w_f / 2.0;
+        let center_y = h_f / 2.0;
+        let chamber_r = 0.28 * w_f;
+        let chamber_offset = 0.32 * h_f;
+        let neck_hw = 0.04 * w_f;
+        let chamber_r_sq = chamber_r * chamber_r;
+
+        let is_inside = |cx: usize, cy: usize| -> bool {
+            let dx = cx as f32 - center_x;
+            let dy = cy as f32 - center_y;
+            
+            let dy_upper = dy + chamber_offset;
+            let in_upper = dx * dx + dy_upper * dy_upper < chamber_r_sq;
+
+            let dy_lower = dy - chamber_offset;
+            let in_lower = dx * dx + dy_lower * dy_lower < chamber_r_sq;
+
+            let in_neck = dx.abs() < neck_hw && dy.abs() < chamber_offset;
+
+            in_upper || in_lower || in_neck
+        };
+
+        // Center of upper chamber (256, 256 - 163 = 93)
+        assert!(is_inside(256, 93));
+        // Center of lower chamber (256, 256 + 163 = 419)
+        assert!(is_inside(256, 419));
+        // Inside the neck (256, 256 = center)
+        assert!(is_inside(256, 256));
+        // Completely outside
+        assert!(!is_inside(50, 50));
+        assert!(!is_inside(400, 256));
+    }
+
+    #[test]
+    fn test_gravity_bias_flow() {
+        let mut hm = Heightmap::new(64, 64, 0.35);
+        let mut temp_heights = vec![0.35; 64 * 64];
+        let mut cell_colors = vec![0u8; 64 * 64 * 4];
+        let mut cell_props = get_test_props(MaterialMode::DrySand, 64 * 64);
+        let mut sliding = vec![false; 64 * 64];
+        let mut bounds = ActiveBounds {
+            min_x: 2,
+            max_x: 61,
+            min_y: 2,
+            max_y: 61,
+            active: true,
+        };
+
+        let mut wave_vel = vec![0.0; 64 * 64];
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
+        let mut last_displacements = vec![1.0; 4];
+        let mut last_simulated_ticks = vec![0; 4];
+        
+        // Put gravity pulling downwards (+Y direction) - strong enough to overcome dry sand repose threshold (0.08)
+        let gravity_dir = glam::Vec2::new(0.0, 2.0);
+        
+        let initial_sum: f32 = hm.data.iter().sum();
+
+        // Run 50 ticks of gravity settling
+        for i in 0..50 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345,
+                &mut wave_vel,
+                SandboxShape::Circle,
+                i as u32,
+                gravity_dir,
+                0.04,
+            );
+        }
+
+        let final_sum: f32 = hm.data.iter().sum();
+        // Mass conservation
+        assert!((final_sum - initial_sum).abs() / initial_sum < 1e-4);
+
+        // Sand should have accumulated in the bottom half of the circle
+        let top_half_sum: f32 = hm.data[0..32*64].iter().sum();
+        let bottom_half_sum: f32 = hm.data[32*64..64*64].iter().sum();
+        assert!(bottom_half_sum > top_half_sum, "Sand did not flow downward under gravity!");
+    }
+
+    #[test]
+    fn test_hourglass_flip_swap() {
+        let mut sim = DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::Hourglass;
+        sim.reset();
+
+        let upper_idx = (0.32 * 512.0 - 0.28 * 256.0) as usize; // inside upper chamber
+        let lower_idx = (512 - 1 - upper_idx) * 512 + 256;
+        let upper_pos_idx = upper_idx * 512 + 256;
+
+        // Initially upper chamber has sand, lower is empty
+        assert!(sim.heightmap.data[upper_pos_idx] > 0.1);
+        assert!(sim.heightmap.data[lower_idx] < 0.05);
+
+        // Flip it
+        sim.flip_hourglass();
+
+        // Now lower chamber should have sand, upper empty
+        assert!(sim.heightmap.data[upper_pos_idx] < 0.05);
+        assert!(sim.heightmap.data[lower_idx] > 0.1);
     }
 }

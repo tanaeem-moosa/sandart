@@ -15,10 +15,23 @@ pub const PROP_FLOW_RATE: usize = 2;
 pub const PROP_GRAIN_SIZE: usize = 3;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SimulatorMode {
+    Sandbox,
+    SandFall,
+}
+
+impl Default for SimulatorMode {
+    fn default() -> Self {
+        Self::Sandbox
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SandboxShape {
     Circle,
     Square,
     Oval,
+    Hourglass,
 }
 
 impl Default for SandboxShape {
@@ -128,6 +141,8 @@ pub struct DrawingSimulation {
     pub marble_radius: f32,
     pub material_mode: MaterialMode,
     pub sandbox_shape: SandboxShape,
+    pub gravity_dir: Vec2,
+    pub neck_width: f32,
 
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
@@ -264,6 +279,8 @@ impl DrawingSimulation {
             marble_radius: 0.018,
             material_mode: MaterialMode::default(),
             sandbox_shape: SandboxShape::default(),
+            gravity_dir: Vec2::ZERO,
+            neck_width: 0.04,
             active_blocks,
             last_displacements,
             last_simulated_ticks,
@@ -276,8 +293,13 @@ impl DrawingSimulation {
 
     /// Reset the simulation state.
     pub fn reset(&mut self) {
-        self.heightmap = generate_smooth_noise(54321u32);
-        self.temp_heights.copy_from_slice(&self.heightmap.data);
+        if self.sandbox_shape == SandboxShape::Hourglass {
+            self.heightmap.reset(0.0);
+            self.initialize_hourglass();
+        } else {
+            self.heightmap = generate_smooth_noise(54321u32);
+            self.temp_heights.copy_from_slice(&self.heightmap.data);
+        }
         self.sliding.fill(false);
         self.wave_vel.fill(0.0);
         for chunk in self.cell_colors.chunks_exact_mut(4) {
@@ -305,6 +327,80 @@ impl DrawingSimulation {
         self.last_simulated_ticks.fill(0);
         self.budget_n = 256;
         self.ema_frame_ms = 33.3;
+        self.tick_count = 0;
+    }
+
+    pub fn initialize_hourglass(&mut self) {
+        let w = GRID_SIZE;
+        let h = GRID_SIZE;
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        
+        let w_f = w as f32;
+        let h_f = h as f32;
+        let chamber_r = 0.28 * w_f;
+        let chamber_offset = 0.32 * h_f;
+        let neck_hw = self.neck_width * w_f;
+        let chamber_r_sq = chamber_r * chamber_r;
+
+        let noise_hm = generate_smooth_noise(54321u32);
+        
+        for y in 0..h {
+            let row_offset = y * w;
+            let dy = y as f32 - center_y;
+            for x in 0..w {
+                let dx = x as f32 - center_x;
+
+                // Upper chamber
+                let dy_upper = dy + chamber_offset;
+                let in_upper = dx * dx + dy_upper * dy_upper < chamber_r_sq;
+
+                // Lower chamber
+                let dy_lower = dy - chamber_offset;
+                let in_lower = dx * dx + dy_lower * dy_lower < chamber_r_sq;
+
+                // Neck
+                let in_neck = dx.abs() < neck_hw && dy.abs() < chamber_offset;
+
+                let idx = row_offset + x;
+                if in_upper {
+                    self.heightmap.data[idx] = noise_hm.data[idx];
+                } else if in_lower || in_neck {
+                    self.heightmap.data[idx] = 0.02; // near-empty
+                } else {
+                    self.heightmap.data[idx] = 0.0;
+                }
+            }
+        }
+        self.temp_heights.copy_from_slice(&self.heightmap.data);
+    }
+
+    pub fn flip_hourglass(&mut self) {
+        self.gravity_dir.y = -self.gravity_dir.y;
+
+        let w = self.heightmap.width;
+        let h = self.heightmap.height;
+        for y in 0..h / 2 {
+            let y2 = h - 1 - y;
+            for x in 0..w {
+                let i1 = y * w + x;
+                let i2 = y2 * w + x;
+                self.heightmap.data.swap(i1, i2);
+                self.temp_heights.swap(i1, i2);
+                self.wave_vel.swap(i1, i2);
+                self.sliding.swap(i1, i2);
+
+                for ch in 0..4 {
+                    self.cell_colors.swap(i1 * 4 + ch, i2 * 4 + ch);
+                }
+                for ch in 0..4 {
+                    self.cell_props.swap(i1 * 4 + ch, i2 * 4 + ch);
+                }
+            }
+        }
+
+        self.active_blocks.fill(BlockActivity::Inactive);
+        self.last_displacements.fill(0.5); // Force all blocks to be re-simulated
         self.tick_count = 0;
     }
 
@@ -413,11 +509,36 @@ impl DrawingSimulation {
                     pos
                 }
             }
+            SandboxShape::Hourglass => {
+                let chamber_r = 0.92 - marble_radius;  // normalized coords
+                let chamber_offset = 0.58;             // normalized vertical offset
+                let neck_hw = 0.07 - marble_radius;    // normalized neck half-width
+
+                // Check if in upper chamber, lower chamber, or neck
+                let in_upper = Vec2::new(pos.x, pos.y - chamber_offset).length() < chamber_r;
+                let in_lower = Vec2::new(pos.x, pos.y + chamber_offset).length() < chamber_r;
+                let in_neck = pos.x.abs() < neck_hw && pos.y.abs() < chamber_offset;
+
+                if in_upper || in_lower || in_neck {
+                    pos  // already inside
+                } else {
+                    // Clamp to nearest boundary (upper or lower chamber)
+                    let to_upper = Vec2::new(pos.x, pos.y - chamber_offset);
+                    let to_lower = Vec2::new(pos.x, pos.y + chamber_offset);
+                    if to_upper.length() < to_lower.length() {
+                        let dir = to_upper.normalize_or_zero();
+                        Vec2::new(0.0, chamber_offset) + dir * chamber_r
+                    } else {
+                        let dir = to_lower.normalize_or_zero();
+                        Vec2::new(0.0, -chamber_offset) + dir * chamber_r
+                    }
+                }
+            }
         }
     }
 
     /// Run a physics frame tick.
-    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, material: MaterialMode, shape: SandboxShape, last_frame_time_ms: f32, target_frame_time_ms: f32) {
+    pub fn update(&mut self, dt: f32, targets: &[Option<Vec2>; 5], marble_radius: f32, _material: MaterialMode, shape: SandboxShape, last_frame_time_ms: f32, target_frame_time_ms: f32) {
         // Prevent seed degeneracy (XORShift stuck state at 0)
         if self.seed == 0 {
             self.seed = 98765u32;
@@ -551,7 +672,8 @@ impl DrawingSimulation {
 
         // Run the gravity-driven settling cellular automata tick
         let has_active = self.last_displacements.iter().any(|&x| x > 3e-4)
-            || self.marbles.iter().any(|m| m.was_active);
+            || self.marbles.iter().any(|m| m.was_active)
+            || self.gravity_dir.length_squared() > 1e-6;
         if has_active {
             let mut active_marbles = [physics::ActiveMarbleInfo {
                 pos: Vec2::ZERO,
@@ -588,6 +710,8 @@ impl DrawingSimulation {
                 &mut self.wave_vel,
                 shape,
                 self.tick_count,
+                self.gravity_dir,
+                self.neck_width,
             );
         } else {
             self.active_bounds.active = false;

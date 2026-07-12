@@ -407,6 +407,22 @@
             color: var(--text-muted);
         }
 
+        /* Tab Buttons styling */
+        .tab-btn {
+            background-color: rgba(255,255,255,0.02) !important;
+            border: 1px solid rgba(255,255,255,0.05) !important;
+            color: var(--text-muted) !important;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }
+        .tab-btn.active {
+            background-color: var(--accent-color) !important;
+            color: #0c0d12 !important;
+            border-color: var(--accent-color) !important;
+        }
+
         /* Color inputs */
         .color-row {
             display: flex;
@@ -483,30 +499,38 @@
             <h1>Sands of Time</h1>
             <div class="subtitle">Wasm Simulator v2</div>
 
-            <!-- Marble settings -->
-            <div class="section-title">🔮 Marble Settings</div>
-            <div class="control-group">
-                <div class="label-val">
-                    <label for="speed-slider">Speed</label>
-                    <span id="speed-val" class="val-display">0.50 R/s</span>
-                </div>
-                <input type="range" id="speed-slider" min="0.05" max="2.0" step="0.05" value="0.5">
+            <!-- Mode Selector Tabs -->
+            <div class="mode-tabs" style="display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">
+                <button id="tab-sandbox" class="tab-btn active" style="flex: 1; padding: 8px 12px; font-size: 13px; margin-bottom: 0;">Sandbox</button>
+                <button id="tab-sandfall" class="tab-btn" style="flex: 1; padding: 8px 12px; font-size: 13px; margin-bottom: 0;">Sand-fall</button>
             </div>
 
-            <div class="control-group">
-                <div class="label-val">
-                    <label for="size-slider">Marble Radius</label>
-                    <span id="size-val" class="val-display">0.018 R</span>
+            <!-- Marble settings (Sandbox only) -->
+            <div id="sandbox-only-marbles">
+                <div class="section-title">🔮 Marble Settings</div>
+                <div class="control-group">
+                    <div class="label-val">
+                        <label for="speed-slider">Speed</label>
+                        <span id="speed-val" class="val-display">0.50 R/s</span>
+                    </div>
+                    <input type="range" id="speed-slider" min="0.05" max="2.0" step="0.05" value="0.5">
                 </div>
-                <input type="range" id="size-slider" min="0.015" max="0.045" step="0.001" value="0.018">
-            </div>
 
-            <div class="control-group">
-                <div class="label-val">
-                    <label for="marble-count">Marble Count</label>
-                    <span id="count-val" class="val-display">1</span>
+                <div class="control-group">
+                    <div class="label-val">
+                        <label for="size-slider">Marble Radius</label>
+                        <span id="size-val" class="val-display">0.018 R</span>
+                    </div>
+                    <input type="range" id="size-slider" min="0.015" max="0.045" step="0.001" value="0.018">
                 </div>
-                <input type="range" id="marble-count" min="1" max="5" step="1" value="1">
+
+                <div class="control-group">
+                    <div class="label-val">
+                        <label for="marble-count">Marble Count</label>
+                        <span id="count-val" class="val-display">1</span>
+                    </div>
+                    <input type="range" id="marble-count" min="1" max="5" step="1" value="1">
+                </div>
             </div>
 
             <!-- Simulation preset -->
@@ -561,104 +585,128 @@
             </div>
             <div id="material-properties-preview" class="material-preview-card"></div>
 
-            <div class="control-group">
-                <label for="shape-select">Sandbox Shape</label>
-                <select id="shape-select">
-                    <option value="0">Circle</option>
-                    <option value="1">Square</option>
-                    <option value="2">Oval</option>
-                </select>
+            <div id="sandbox-only-patterns">
+                <div class="control-group">
+                    <label for="shape-select">Sandbox Shape</label>
+                    <select id="shape-select">
+                        <option value="0">Circle</option>
+                        <option value="1">Square</option>
+                        <option value="2">Oval</option>
+                    </select>
+                </div>
+
+                <!-- Pattern generator -->
+                <div class="section-title">📐 Drawing Pattern</div>
+                <div class="control-group">
+                    <label for="pattern-select">Active Pattern</label>
+                    <select id="pattern-select">
+                        <option value="manual">Manual Draw</option>
+                        <option value="spiral">Archimedean Spiral</option>
+                        <option value="lissajous">Lissajous Curve</option>
+                        <option value="rose">Rose Flower Curve</option>
+                        <option value="spirograph">Spirograph (Hypotrochoid)</option>
+                        <option value="gosper">Gosper Space-Filling Curve</option>
+                        <option value="hilbert">Hilbert Space-Filling Curve</option>
+                        <option value="fermat">Fermat Spiral</option>
+                        <option value="sierpinski">Sierpinski Curve</option>
+                        <option value="random_walk">Random Walk</option>
+                        <option value="lemniscate">Lemniscate</option>
+                        <option value="butterfly">Butterfly Curve</option>
+                        <option value="zen_waves">Zen Waves</option>
+                        <option value="zen_mandala">Zen Mandala</option>
+                        <option value="dinosaur">Dinosaur Outline</option>
+                        <option value="unicorn">Unicorn Outline</option>
+                        <option value="clock">Clock Mode</option>
+                    </select>
+                </div>
+
+                <!-- Pattern Parameters (Shown/Hidden dynamically based on selected pattern) -->
+                <div id="spiral-params" class="control-group" style="display: none;">
+                    <div class="label-val">
+                        <label for="spiral-spacing-slider">Spiral Spacing</label>
+                        <span id="spiral-spacing-val" class="val-display">0.030</span>
+                    </div>
+                    <input type="range" id="spiral-spacing-slider" min="0.01" max="0.10" step="0.005" value="0.030">
+                </div>
+
+                <div id="lissajous-params" class="control-group" style="display: none;">
+                    <div class="label-val">
+                        <label for="lissajous-a-slider">Frequency A</label>
+                        <span id="lissajous-a-val" class="val-display">3.00</span>
+                    </div>
+                    <input type="range" id="lissajous-a-slider" min="1" max="12" step="1" value="3">
+                    <div class="label-val" style="margin-top: 8px;">
+                        <label for="lissajous-b-slider">Frequency B</label>
+                        <span id="lissajous-b-val" class="val-display">4.00</span>
+                    </div>
+                    <input type="range" id="lissajous-b-slider" min="1" max="12" step="1" value="4">
+                </div>
+
+                <div id="rose-params" class="control-group" style="display: none;">
+                    <div class="label-val">
+                        <label for="rose-k-slider">Petal Parameter K</label>
+                        <span id="rose-k-val" class="val-display">5.00</span>
+                    </div>
+                    <input type="range" id="rose-k-slider" min="1.0" max="15.0" step="0.5" value="5.0">
+                </div>
+
+                <div id="spirograph-params" class="control-group" style="display: none;">
+                    <div class="label-val">
+                        <label for="spiro-r-slider">Inner Radius R</label>
+                        <span id="spiro-r-val" class="val-display">0.28</span>
+                    </div>
+                    <input type="range" id="spiro-r-slider" min="0.05" max="0.95" step="0.01" value="0.28">
+                    <div class="label-val" style="margin-top: 8px;">
+                        <label for="spiro-d-slider">Pen Offset D</label>
+                        <span id="spiro-d-val" class="val-display">0.20</span>
+                    </div>
+                    <input type="range" id="spiro-d-slider" min="0.05" max="0.95" step="0.01" value="0.20">
+                </div>
+
+                <div id="curve-params" class="control-group" style="display: none;">
+                    <div class="label-val">
+                        <label for="curve-order-slider">Recursion Order (Depth)</label>
+                        <span id="curve-order-val" class="val-display">3</span>
+                    </div>
+                    <input type="range" id="curve-order-slider" min="1" max="6" step="1" value="3">
+                </div>
+
+                <div id="random-walk-params" class="control-group" style="display: none;">
+                    <div class="label-val">
+                        <label for="walk-steps-slider">Step Count</label>
+                        <span id="walk-steps-val" class="val-display">1000</span>
+                    </div>
+                    <input type="range" id="walk-steps-slider" min="100" max="5000" step="100" value="1000">
+                    <div class="label-val" style="margin-top: 8px;">
+                        <label for="walk-size-slider">Step Size</label>
+                        <span id="walk-size-val" class="val-display">0.020</span>
+                    </div>
+                    <input type="range" id="walk-size-slider" min="0.005" max="0.050" step="0.001" value="0.020">
+                </div>
+                <button id="btn-load-pattern" class="primary" style="margin-bottom: 24px;">Load / Restart Pattern</button>
             </div>
 
-            <!-- Pattern generator -->
-            <div class="section-title">📐 Drawing Pattern</div>
-            <div class="control-group">
-                <label for="pattern-select">Active Pattern</label>
-                <select id="pattern-select">
-                    <option value="manual">Manual Draw</option>
-                    <option value="spiral">Archimedean Spiral</option>
-                    <option value="lissajous">Lissajous Curve</option>
-                    <option value="rose">Rose Flower Curve</option>
-                    <option value="spirograph">Spirograph (Hypotrochoid)</option>
-                    <option value="gosper">Gosper Space-Filling Curve</option>
-                    <option value="hilbert">Hilbert Space-Filling Curve</option>
-                    <option value="fermat">Fermat Spiral</option>
-                    <option value="sierpinski">Sierpinski Curve</option>
-                    <option value="random_walk">Random Walk</option>
-                    <option value="lemniscate">Lemniscate</option>
-                    <option value="butterfly">Butterfly Curve</option>
-                    <option value="zen_waves">Zen Waves</option>
-                    <option value="zen_mandala">Zen Mandala</option>
-                    <option value="dinosaur">Dinosaur Outline</option>
-                    <option value="unicorn">Unicorn Outline</option>
-                    <option value="clock">Clock Mode</option>
-                </select>
-            </div>
+            <!-- Sand-fall controls (hidden by default) -->
+            <div id="sandfall-controls" style="display: none; margin-bottom: 24px;">
+                <div class="section-title">⏳ Sand-fall Controls</div>
+                <button id="btn-flip" class="primary">Flip Hourglass</button>
+                
+                <div class="control-group" style="margin-top: 16px;">
+                    <div class="label-val">
+                        <label for="gravity-slider">Gravity Strength</label>
+                        <span id="gravity-val" class="val-display">0.04</span>
+                    </div>
+                    <input type="range" id="gravity-slider" min="0.0" max="0.10" step="0.005" value="0.04">
+                </div>
 
-            <!-- Pattern Parameters (Shown/Hidden dynamically based on selected pattern) -->
-            <div id="spiral-params" class="control-group" style="display: none;">
-                <div class="label-val">
-                    <label for="spiral-spacing-slider">Spiral Spacing</label>
-                    <span id="spiral-spacing-val" class="val-display">0.030</span>
+                <div class="control-group">
+                    <div class="label-val">
+                        <label for="neck-slider">Neck Width</label>
+                        <span id="neck-val" class="val-display">0.04</span>
+                    </div>
+                    <input type="range" id="neck-slider" min="0.02" max="0.12" step="0.005" value="0.04">
                 </div>
-                <input type="range" id="spiral-spacing-slider" min="0.01" max="0.10" step="0.005" value="0.030">
             </div>
-
-            <div id="lissajous-params" class="control-group" style="display: none;">
-                <div class="label-val">
-                    <label for="lissajous-a-slider">Frequency A</label>
-                    <span id="lissajous-a-val" class="val-display">3.00</span>
-                </div>
-                <input type="range" id="lissajous-a-slider" min="1" max="12" step="1" value="3">
-                <div class="label-val" style="margin-top: 8px;">
-                    <label for="lissajous-b-slider">Frequency B</label>
-                    <span id="lissajous-b-val" class="val-display">4.00</span>
-                </div>
-                <input type="range" id="lissajous-b-slider" min="1" max="12" step="1" value="4">
-            </div>
-
-            <div id="rose-params" class="control-group" style="display: none;">
-                <div class="label-val">
-                    <label for="rose-k-slider">Petal Parameter K</label>
-                    <span id="rose-k-val" class="val-display">5.00</span>
-                </div>
-                <input type="range" id="rose-k-slider" min="1.0" max="15.0" step="0.5" value="5.0">
-            </div>
-
-            <div id="spirograph-params" class="control-group" style="display: none;">
-                <div class="label-val">
-                    <label for="spiro-r-slider">Inner Radius R</label>
-                    <span id="spiro-r-val" class="val-display">0.28</span>
-                </div>
-                <input type="range" id="spiro-r-slider" min="0.05" max="0.95" step="0.01" value="0.28">
-                <div class="label-val" style="margin-top: 8px;">
-                    <label for="spiro-d-slider">Pen Offset D</label>
-                    <span id="spiro-d-val" class="val-display">0.20</span>
-                </div>
-                <input type="range" id="spiro-d-slider" min="0.05" max="0.95" step="0.01" value="0.20">
-            </div>
-
-            <div id="curve-params" class="control-group" style="display: none;">
-                <div class="label-val">
-                    <label for="curve-order-slider">Recursion Order (Depth)</label>
-                    <span id="curve-order-val" class="val-display">3</span>
-                </div>
-                <input type="range" id="curve-order-slider" min="1" max="6" step="1" value="3">
-            </div>
-
-            <div id="random-walk-params" class="control-group" style="display: none;">
-                <div class="label-val">
-                    <label for="walk-steps-slider">Step Count</label>
-                    <span id="walk-steps-val" class="val-display">1000</span>
-                </div>
-                <input type="range" id="walk-steps-slider" min="100" max="5000" step="100" value="1000">
-                <div class="label-val" style="margin-top: 8px;">
-                    <label for="walk-size-slider">Step Size</label>
-                    <span id="walk-size-val" class="val-display">0.020</span>
-                </div>
-                <input type="range" id="walk-size-slider" min="0.005" max="0.050" step="0.001" value="0.020">
-            </div>
-            <button id="btn-load-pattern" class="primary" style="margin-bottom: 24px;">Load / Restart Pattern</button>
 
             <!-- Operations -->
             <div class="section-title">⚙️ Operations</div>

@@ -6,7 +6,7 @@ use js_sys;
 use web_sys;
 use wasm_bindgen::JsCast;
 
-use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape};
+use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape, SimulatorMode};
 use sandart_render::{HeightmapRenderer, CameraUniforms, LightingUniforms, MarbleUniform};
 use sandart_pattern::{PlaybackController, PlaybackState, parse_gcode, parse_thr};
 
@@ -22,6 +22,7 @@ pub struct WasmSimulationState {
     full_upload_needed: bool,
 
     // Config state
+    simulator_mode: SimulatorMode,
     marble_count: u32,
     material_mode: MaterialMode,
     sandbox_shape: SandboxShape,
@@ -162,6 +163,7 @@ impl WasmSimulationState {
             queue,
             surface_config,
             full_upload_needed: true,
+            simulator_mode: SimulatorMode::Sandbox,
             marble_count: 1,
             material_mode: MaterialMode::DrySand,
             sandbox_shape: SandboxShape::Circle,
@@ -203,41 +205,49 @@ impl WasmSimulationState {
     pub fn step(&mut self, dt: f32, cursor_x: f32, cursor_y: f32, shift_pressed: bool, last_frame_time_ms: f32, target_frame_time_ms: f32) {
         self.elapsed_time += dt;
 
-        if self.pattern_mode == "Clock" {
-            let date = js_sys::Date::new_0();
-            let m = date.get_minutes();
-
-            if m != self.clock_minute {
-                self.sim.reset();
-                self.full_upload_needed = true;
-                self.clock_minute = m;
-                self.load_preset_pattern("clock");
-            }
-        }
+        let shape = if self.simulator_mode == SimulatorMode::SandFall {
+            SandboxShape::Hourglass
+        } else {
+            self.sandbox_shape
+        };
 
         let mut targets = [None; 5];
 
-        if self.pattern_mode == "Manual" {
-            let mut target_pos = None;
-            if shift_pressed {
-                target_pos = Some(glam::Vec2::new(cursor_x, cursor_y));
+        if self.simulator_mode == SimulatorMode::Sandbox {
+            if self.pattern_mode == "Clock" {
+                let date = js_sys::Date::new_0();
+                let m = date.get_minutes();
+
+                if m != self.clock_minute {
+                    self.sim.reset();
+                    self.full_upload_needed = true;
+                    self.clock_minute = m;
+                    self.load_preset_pattern("clock");
+                }
             }
-            targets[0] = target_pos;
-        } else {
-            if self.playback.state == PlaybackState::Playing {
-                let positions = [
-                    self.sim.marbles[0].pos,
-                    self.sim.marbles[1].pos,
-                    self.sim.marbles[2].pos,
-                    self.sim.marbles[3].pos,
-                    self.sim.marbles[4].pos,
-                ];
-                targets = self.playback.step_playback_all(
-                    &positions,
-                    self.marble_count as usize,
-                    self.speed,
-                    dt,
-                );
+
+            if self.pattern_mode == "Manual" {
+                let mut target_pos = None;
+                if shift_pressed {
+                    target_pos = Some(glam::Vec2::new(cursor_x, cursor_y));
+                }
+                targets[0] = target_pos;
+            } else {
+                if self.playback.state == PlaybackState::Playing {
+                    let positions = [
+                        self.sim.marbles[0].pos,
+                        self.sim.marbles[1].pos,
+                        self.sim.marbles[2].pos,
+                        self.sim.marbles[3].pos,
+                        self.sim.marbles[4].pos,
+                    ];
+                    targets = self.playback.step_playback_all(
+                        &positions,
+                        self.marble_count as usize,
+                        self.speed,
+                        dt,
+                    );
+                }
             }
         }
 
@@ -246,17 +256,46 @@ impl WasmSimulationState {
             &targets,
             self.marble_size,
             self.material_mode,
-            self.sandbox_shape,
+            shape,
             last_frame_time_ms,
             target_frame_time_ms,
         );
     }
 
     pub fn reset(&mut self) {
+        if self.simulator_mode == SimulatorMode::SandFall {
+            self.sim.sandbox_shape = SandboxShape::Hourglass;
+        } else {
+            self.sim.sandbox_shape = self.sandbox_shape;
+        }
         self.sim.reset();
         self.full_upload_needed = true;
         self.playback.state = PlaybackState::Stopped;
         self.playback.current_indices = [0; 5];
+    }
+
+    pub fn set_simulator_mode(&mut self, mode: u32) {
+        self.simulator_mode = match mode {
+            0 => SimulatorMode::Sandbox,
+            1 => SimulatorMode::SandFall,
+            _ => SimulatorMode::Sandbox,
+        };
+        self.reset();
+    }
+
+    pub fn set_gravity(&mut self, x: f32, y: f32) {
+        self.sim.gravity_dir = glam::Vec2::new(x, y);
+    }
+
+    pub fn flip_hourglass(&mut self) {
+        if self.simulator_mode == SimulatorMode::SandFall {
+            self.sim.flip_hourglass();
+            self.full_upload_needed = true;
+        }
+    }
+
+    pub fn set_neck_width(&mut self, width: f32) {
+        self.sim.neck_width = width;
     }
 
     pub fn draw_ripples(&mut self) {
@@ -302,6 +341,7 @@ impl WasmSimulationState {
             0 => SandboxShape::Circle,
             1 => SandboxShape::Square,
             2 => SandboxShape::Oval,
+            3 => SandboxShape::Hourglass,
             _ => SandboxShape::Circle,
         };
     }
@@ -646,6 +686,12 @@ impl WasmSimulationState {
             };
         }
 
+        let (render_shape, render_marble_count) = if self.simulator_mode == SimulatorMode::SandFall {
+            (3u32, 0u32)
+        } else {
+            (self.sandbox_shape as u32, self.marble_count)
+        };
+
         let current_uniforms = LightingUniforms {
             light_dir: current_light_dir,
             light_color: self.led_color,
@@ -654,9 +700,9 @@ impl WasmSimulationState {
             shadow_enabled: if self.shadows_enabled { 1 } else { 0 },
             led_mode: self.led_mode,
             time: self.elapsed_time,
-            marble_count: self.marble_count,
+            marble_count: render_marble_count,
             material_mode: self.material_mode as u32,
-            sandbox_shape: self.sandbox_shape as u32,
+            sandbox_shape: render_shape,
             color_mode: self.color_mode,
             marbles: current_marbles,
         };

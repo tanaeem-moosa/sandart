@@ -190,6 +190,34 @@ fn fs_main(
         // Project light dir onto ellipse perimeter (a = 0.468, b = 0.305)
         let scale = 1.0 / sqrt((dir_light.x * dir_light.x) / (0.468 * 0.468) + (dir_light.y * dir_light.y) / (0.305 * 0.305));
         led_center = dir_light * scale + 0.5;
+    } else if (uniforms.sandbox_shape == 3u) { // Hourglass
+        let u = uv.x - 0.5;
+        let v = uv.y - 0.5;
+        let chamber_r = 0.28;
+        let chamber_offset = 0.32;
+        let neck_hw = 0.04;
+
+        let d_upper = sqrt(u * u + (v + chamber_offset) * (v + chamber_offset));
+        let d_lower = sqrt(u * u + (v - chamber_offset) * (v - chamber_offset));
+
+        let in_neck_region = abs(u) < neck_hw && abs(v) < chamber_offset;
+        let inside = (d_upper < chamber_r) || (d_lower < chamber_r) || in_neck_region;
+
+        if (!inside) {
+            in_casing = true;
+            let in_upper_led = d_upper >= chamber_r && d_upper < (chamber_r + 0.015);
+            let in_lower_led = d_lower >= chamber_r && d_lower < (chamber_r + 0.015);
+            let in_neck_led = abs(u) >= neck_hw && abs(u) < (neck_hw + 0.015) && abs(v) < chamber_offset;
+
+            let is_near_upper_circle = in_upper_led && (v + chamber_offset < 0.0 || abs(u) >= neck_hw);
+            let is_near_lower_circle = in_lower_led && (v - chamber_offset > 0.0 || abs(u) >= neck_hw);
+            let is_near_neck_wall = in_neck_led;
+
+            if (is_near_upper_circle || is_near_lower_circle || is_near_neck_wall) {
+                in_led = true;
+            }
+        }
+        led_center = dir_light * 0.468 + 0.5;
     } else { // Circle (0u)
         let d_circle = distance(uv, vec2<f32>(0.5, 0.5));
         if (d_circle >= 0.46) {
