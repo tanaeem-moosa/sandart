@@ -694,27 +694,30 @@ impl DrawingSimulation {
                 }
             }
 
-            settle_tick(
-                &mut self.heightmap,
-                &mut self.temp_heights,
-                &mut self.cell_colors,
-                &mut self.cell_props,
-                &mut self.sliding,
-                &mut self.active_bounds,
-                &mut self.active_blocks,
-                &mut self.last_displacements,
-                &mut self.last_simulated_ticks,
-                self.budget_n,
-                self.block_size,
-                &active_marbles[..active_count],
-                time_seed,
-                &mut self.wave_vel,
-                shape,
-                self.tick_count,
-                self.gravity_dir,
-                self.neck_width,
-                self.hourglass_curve,
-            );
+            let iterations = if self.gravity_dir.length_squared() > 1e-6 { 2 } else { 1 };
+            for iter in 0..iterations {
+                settle_tick(
+                    &mut self.heightmap,
+                    &mut self.temp_heights,
+                    &mut self.cell_colors,
+                    &mut self.cell_props,
+                    &mut self.sliding,
+                    &mut self.active_bounds,
+                    &mut self.active_blocks,
+                    &mut self.last_displacements,
+                    &mut self.last_simulated_ticks,
+                    self.budget_n,
+                    self.block_size,
+                    &active_marbles[..active_count],
+                    time_seed + iter as u32,
+                    &mut self.wave_vel,
+                    shape,
+                    self.tick_count + iter as u32,
+                    self.gravity_dir,
+                    self.neck_width,
+                    self.hourglass_curve,
+                );
+            }
         } else {
             self.active_bounds.active = false;
         }
