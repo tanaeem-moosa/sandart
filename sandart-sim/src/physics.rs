@@ -175,6 +175,7 @@ fn get_ca_params(
     higher_neighbors: usize,
     sliding_active: bool,
     closest_marble_vel: f32,
+    gravity_active: bool,
 ) -> (f32, f32, f32, Option<f32>) {
     // Oobleck shear-thickening
     if wetness >= 0.50 && wetness < 0.65 {
@@ -186,8 +187,8 @@ fn get_ca_params(
         return (threshold, alpha, lock_chance, None);
     }
 
-    // Quantization size
-    let quantize_size = if wetness < 0.30 {
+    // Quantization size (disable during gravity settling to let sand slide smoothly)
+    let quantize_size = if wetness < 0.30 && !gravity_active {
         if grain_size >= 0.60 {
             Some(0.035)
         } else if grain_size >= 0.40 {
@@ -201,15 +202,22 @@ fn get_ca_params(
         None
     };
 
-    // Hysteresis threshold
-    let threshold = if wetness < 0.15 && sliding_active {
+    // Hysteresis threshold (lower repose threshold during gravity settling for natural sliding/funneling)
+    let mut threshold = if wetness < 0.15 && sliding_active {
         0.5 * threshold_prop
     } else {
         threshold_prop
     };
 
-    // Flow rate (alpha)
-    let alpha = flow_rate_prop;
+    if gravity_active {
+        threshold *= 0.35; // Lower friction/repose angle in Sand-fall mode for realistic fluid flow
+    }
+
+    // Flow rate (alpha) (faster settling when gravity is pulling sand down)
+    let mut alpha = flow_rate_prop;
+    if gravity_active {
+        alpha = (alpha * 1.5).min(0.8);
+    }
 
     // Lock chance
     let lock_chance = if wetness < 0.05 {
@@ -554,6 +562,7 @@ pub fn settle_tick(
     tick_count: u32,
     gravity_dir: glam::Vec2,
     neck_width: f32,
+    hourglass_curve: f32,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -691,7 +700,7 @@ pub fn settle_tick(
                 let dy_abs = dy.abs();
                 if dy_abs < chamber_h {
                     let t = dy_abs / chamber_h;
-                    let allowed_hw = neck_hw + t * (max_hw - neck_hw);
+                    let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
                     dx.abs() < allowed_hw
                 } else {
                     false
@@ -787,7 +796,7 @@ pub fn settle_tick(
                         let dy_abs = dy.abs();
                         if dy_abs < chamber_h {
                             let t = dy_abs / chamber_h;
-                            let allowed_hw = neck_hw + t * (max_hw - neck_hw);
+                            let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
                             let inside = dx.abs() < allowed_hw;
                             
                             let safe_allowed_hw = (allowed_hw - 1.5).max(1.0);
@@ -986,6 +995,8 @@ pub fn settle_tick(
                         0.0
                     };
 
+                    let gravity_active = gravity_dir.length_squared() > 1e-6;
+
                     let (threshold, alpha, lock_chance, quantize_size) = get_ca_params(
                         wetness,
                         threshold_prop,
@@ -994,6 +1005,7 @@ pub fn settle_tick(
                         higher_neighbors,
                         sliding[center_idx],
                         closest_marble_vel,
+                        gravity_active,
                     );
 
                     const NEIGHBOR_DIRS: [(f32, f32); 4] = [
@@ -1009,7 +1021,23 @@ pub fn settle_tick(
 
                         let (ndx, ndy) = NEIGHBOR_DIRS[i];
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
-                        let gravity_push = gravity_dot * 4.0;
+                        
+                        // Downward pull
+                        let mut gravity_push = gravity_dot * 4.0;
+                        
+                        // Stochastic sideways dispersion/splashing
+                        let gravity_len = gravity_dir.length();
+                        if gravity_len > 1e-6 {
+                            let perp_x = -gravity_dir.y;
+                            let perp_y = gravity_dir.x;
+                            let perp_dot = (ndx * perp_x + ndy * perp_y).abs();
+                            
+                            let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
+                            let dispersion_noise = rand_val as f32 / 255.0;
+                            
+                            gravity_push += perp_dot * 2.0 * dispersion_noise;
+                        }
+                        
                         let effective_slope = geom_slope + gravity_push;
 
                         if effective_slope <= threshold {
@@ -1461,6 +1489,7 @@ mod tests {
                 i as u32,
                 glam::Vec2::ZERO,
                 0.04,
+                1.0,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -1523,6 +1552,7 @@ mod tests {
             0,
             glam::Vec2::ZERO,
             0.04,
+            1.0,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -1592,6 +1622,7 @@ mod tests {
                 0,
                 glam::Vec2::ZERO,
                 0.04,
+                1.0,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -1688,6 +1719,7 @@ mod tests {
             0,
             glam::Vec2::ZERO,
             0.04,
+            1.0,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -1986,6 +2018,7 @@ mod tests {
                 i as u32,
                 gravity_dir,
                 0.04,
+                1.0,
             );
         }
 

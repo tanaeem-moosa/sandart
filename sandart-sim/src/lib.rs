@@ -143,6 +143,7 @@ pub struct DrawingSimulation {
     pub sandbox_shape: SandboxShape,
     pub gravity_dir: Vec2,
     pub neck_width: f32,
+    pub hourglass_curve: f32,
 
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
@@ -281,6 +282,7 @@ impl DrawingSimulation {
             sandbox_shape: SandboxShape::default(),
             gravity_dir: Vec2::ZERO,
             neck_width: 0.04,
+            hourglass_curve: 1.0,
             active_blocks,
             last_displacements,
             last_simulated_ticks,
@@ -354,7 +356,7 @@ impl DrawingSimulation {
                 let dy_abs = dy.abs();
                 if dy_abs < chamber_h {
                     let t = dy_abs / chamber_h;
-                    let allowed_hw = neck_hw + t * (max_hw - neck_hw);
+                    let allowed_hw = neck_hw + t.powf(self.hourglass_curve) * (max_hw - neck_hw);
                     if dx.abs() < allowed_hw {
                         if dy < 0.0 {
                             // Upper chamber: filled with sand
@@ -711,6 +713,7 @@ impl DrawingSimulation {
                 self.tick_count,
                 self.gravity_dir,
                 self.neck_width,
+                self.hourglass_curve,
             );
         } else {
             self.active_bounds.active = false;

@@ -23,6 +23,10 @@ struct LightingUniforms {
     material_mode: u32,
     sandbox_shape: u32,
     color_mode: u32,
+    neck_width: f32,
+    hourglass_curve: f32,
+    _pad1: f32,
+    _pad2: f32,
     marbles: array<MarbleUniform, 5>,
 };
 
@@ -195,7 +199,7 @@ fn fs_main(
         let v = uv.y - 0.5;
         let chamber_h = 0.40;
         let max_hw = 0.35;
-        let neck_hw = 0.04;
+        let neck_hw = uniforms.neck_width;
 
         let v_abs = abs(v);
         var inside = false;
@@ -203,7 +207,7 @@ fn fs_main(
         
         if (v_abs < chamber_h) {
             let t = v_abs / chamber_h;
-            allowed_hw = neck_hw + t * (max_hw - neck_hw);
+            allowed_hw = neck_hw + pow(t, uniforms.hourglass_curve) * (max_hw - neck_hw);
             inside = abs(u) < allowed_hw;
         }
 

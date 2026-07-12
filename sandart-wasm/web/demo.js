@@ -940,6 +940,7 @@ function setupPanelInput() {
     const gravitySlider = document.getElementById('gravity-slider');
     const gravityVal = document.getElementById('gravity-val');
     const neckSlider = document.getElementById('neck-slider');
+    const curvatureSlider = document.getElementById('curvature-slider');
     
     function syncSandFallSettings() {
         if (!state) return;
@@ -951,6 +952,10 @@ function setupPanelInput() {
         const neckVal = parseFloat(neckSlider.value);
         document.getElementById('neck-val').innerText = neckVal.toFixed(3);
         state.set_neck_width(neckVal);
+
+        const curveVal = parseFloat(curvatureSlider.value);
+        document.getElementById('curvature-val').innerText = curveVal.toFixed(1);
+        state.set_hourglass_curve(curveVal);
     }
     gravitySlider.addEventListener('input', syncSandFallSettings);
 
@@ -958,6 +963,14 @@ function setupPanelInput() {
     neckSlider.addEventListener('input', () => {
         syncSandFallSettings();
         // Since changing neck width changes the boundary, reset the simulation to re-initialize the hourglass bed
+        state.reset();
+        syncMaterialTheme(true);
+    });
+
+    // Curvature Slider
+    curvatureSlider.addEventListener('input', () => {
+        syncSandFallSettings();
+        // Since changing curvature changes the boundary, reset the simulation to re-initialize the hourglass bed
         state.reset();
         syncMaterialTheme(true);
     });

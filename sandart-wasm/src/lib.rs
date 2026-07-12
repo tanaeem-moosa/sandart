@@ -298,6 +298,10 @@ impl WasmSimulationState {
         self.sim.neck_width = width;
     }
 
+    pub fn set_hourglass_curve(&mut self, curve: f32) {
+        self.sim.hourglass_curve = curve;
+    }
+
     pub fn draw_ripples(&mut self) {
         self.sim.heightmap.generate_ripples();
         self.full_upload_needed = true;
@@ -704,6 +708,10 @@ impl WasmSimulationState {
             material_mode: self.material_mode as u32,
             sandbox_shape: render_shape,
             color_mode: self.color_mode,
+            neck_width: self.sim.neck_width,
+            hourglass_curve: self.sim.hourglass_curve,
+            _pad1: 0.0,
+            _pad2: 0.0,
             marbles: current_marbles,
         };
         self.renderer.update_uniforms(&self.queue, &current_uniforms);

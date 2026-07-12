@@ -46,6 +46,10 @@ pub struct LightingUniforms {
     pub material_mode: u32,    // active material preset (0 to 8)
     pub sandbox_shape: u32,    // active sandbox shape (0 = Circle, 1 = Square, 2 = Oval)
     pub color_mode: u32,       // active color mode (0 = Solid, 1 = Gradient/Pattern)
+    pub neck_width: f32,       // user-controlled neck width
+    pub hourglass_curve: f32,  // user-controlled hourglass shape curvature
+    pub _pad1: f32,
+    pub _pad2: f32,
     pub marbles: [MarbleUniform; 5], // array of up to 5 marbles
 }
 
@@ -937,5 +941,5 @@ mod tests {
 }
 
 // Compile-time layout/size verification assertions for WebGPU uniform alignments
-const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 160);
+const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 176);
 const _: () = assert!(std::mem::size_of::<CameraUniforms>() == 80);
