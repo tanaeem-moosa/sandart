@@ -160,6 +160,12 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_hilbert_order(this.__wbg_ptr, order);
     }
     /**
+     * @param {number} curve
+     */
+    set_hourglass_curve(curve) {
+        wasm.wasmsimulationstate_set_hourglass_curve(this.__wbg_ptr, curve);
+    }
+    /**
      * @param {number} r
      * @param {number} d
      */
