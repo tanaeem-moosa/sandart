@@ -595,6 +595,8 @@ pub fn settle_tick(
         active_blocks.resize(expected_len, crate::BlockActivity::Inactive);
     }
 
+    let gravity_active = gravity_dir.length_squared() > 1e-6;
+
     // Constants from the design doc
     const MUST_SIMULATE_THRESHOLD: f32 = 0.1;
     const MAX_STALENESS: u32 = 30;
@@ -605,18 +607,25 @@ pub fn settle_tick(
     let mut stale_simulate = Vec::new();
     let mut rest_candidates = Vec::new();
 
-    for b in 0..expected_len {
-        let displacement = last_displacements[b];
-        let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
-
-        if displacement >= MUST_SIMULATE_THRESHOLD {
+    if gravity_active {
+        // Under gravity, always simulate all blocks to ensure continuous smooth flow and settling
+        for b in 0..expected_len {
             must_simulate.push(b);
-        } else if staleness >= MAX_STALENESS {
-            stale_simulate.push(b);
-        } else if displacement > 0.0 {
-            // Priority function: staleness * displacement
-            let priority = (staleness as f32) * displacement;
-            rest_candidates.push((b, priority));
+        }
+    } else {
+        for b in 0..expected_len {
+            let displacement = last_displacements[b];
+            let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
+
+            if displacement >= MUST_SIMULATE_THRESHOLD {
+                must_simulate.push(b);
+            } else if staleness >= MAX_STALENESS {
+                stale_simulate.push(b);
+            } else if displacement > 0.0 {
+                // Priority function: staleness * displacement
+                let priority = (staleness as f32) * displacement;
+                rest_candidates.push((b, priority));
+            }
         }
     }
 
