@@ -193,27 +193,26 @@ fn fs_main(
     } else if (uniforms.sandbox_shape == 3u) { // Hourglass
         let u = uv.x - 0.5;
         let v = uv.y - 0.5;
-        let chamber_r = 0.28;
-        let chamber_offset = 0.32;
+        let chamber_h = 0.40;
+        let max_hw = 0.35;
         let neck_hw = 0.04;
 
-        let d_upper = sqrt(u * u + (v + chamber_offset) * (v + chamber_offset));
-        let d_lower = sqrt(u * u + (v - chamber_offset) * (v - chamber_offset));
-
-        let in_neck_region = abs(u) < neck_hw && abs(v) < chamber_offset;
-        let inside = (d_upper < chamber_r) || (d_lower < chamber_r) || in_neck_region;
+        let v_abs = abs(v);
+        var inside = false;
+        var allowed_hw = 0.0;
+        
+        if (v_abs < chamber_h) {
+            let t = v_abs / chamber_h;
+            allowed_hw = neck_hw + t * (max_hw - neck_hw);
+            inside = abs(u) < allowed_hw;
+        }
 
         if (!inside) {
             in_casing = true;
-            let in_upper_led = d_upper >= chamber_r && d_upper < (chamber_r + 0.015);
-            let in_lower_led = d_lower >= chamber_r && d_lower < (chamber_r + 0.015);
-            let in_neck_led = abs(u) >= neck_hw && abs(u) < (neck_hw + 0.015) && abs(v) < chamber_offset;
-
-            let is_near_upper_circle = in_upper_led && (v + chamber_offset < 0.0 || abs(u) >= neck_hw);
-            let is_near_lower_circle = in_lower_led && (v - chamber_offset > 0.0 || abs(u) >= neck_hw);
-            let is_near_neck_wall = in_neck_led;
-
-            if (is_near_upper_circle || is_near_lower_circle || is_near_neck_wall) {
+            let near_top_bottom = v_abs >= chamber_h && v_abs < (chamber_h + 0.015) && abs(u) < (max_hw + 0.015);
+            let near_side_walls = v_abs < chamber_h && abs(u) >= allowed_hw && abs(u) < (allowed_hw + 0.015);
+            
+            if (near_top_bottom || near_side_walls) {
                 in_led = true;
             }
         }
@@ -440,7 +439,8 @@ fn fs_main(
     ));
 
     // 2. Define material presets and grain configurations using continuous property mapping
-    let sparkles_fade = clamp(1.0 - wetness / 0.3, 0.0, 1.0);
+    let empty_blend = clamp(h_center / 0.06, 0.0, 1.0);
+    let sparkles_fade = clamp(1.0 - wetness / 0.3, 0.0, 1.0) * empty_blend;
     let sparkles_intensity = mix(2.0, 18.0, grain_size) * sparkles_fade;
     let sparkles_threshold = clamp(mix(0.998, 0.990, grain_size) + (1.0 - sparkles_fade) * 0.01, 0.990, 1.0);
     let sparkles_power = mix(500.0, 250.0, grain_size);
@@ -520,6 +520,9 @@ fn fs_main(
         let t = clamp((wetness - 0.95) / 0.05, 0.0, 1.0);
         mat_base_color = mix(milk, water, t);
     }
+
+    // Empty sandbed reveals dark table bed
+    mat_base_color = mix(vec3<f32>(0.05, 0.05, 0.06), mat_base_color, empty_blend);
 
     // 3. Perturb normal with micro-surface grain noise
     let grain_noise = hash(uv * grain_scale);

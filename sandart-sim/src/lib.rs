@@ -338,10 +338,9 @@ impl DrawingSimulation {
         
         let w_f = w as f32;
         let h_f = h as f32;
-        let chamber_r = 0.28 * w_f;
-        let chamber_offset = 0.32 * h_f;
+        let chamber_h = 0.40 * h_f;
+        let max_hw = 0.35 * w_f;
         let neck_hw = self.neck_width * w_f;
-        let chamber_r_sq = chamber_r * chamber_r;
 
         let noise_hm = generate_smooth_noise(54321u32);
         
@@ -350,23 +349,23 @@ impl DrawingSimulation {
             let dy = y as f32 - center_y;
             for x in 0..w {
                 let dx = x as f32 - center_x;
-
-                // Upper chamber
-                let dy_upper = dy + chamber_offset;
-                let in_upper = dx * dx + dy_upper * dy_upper < chamber_r_sq;
-
-                // Lower chamber
-                let dy_lower = dy - chamber_offset;
-                let in_lower = dx * dx + dy_lower * dy_lower < chamber_r_sq;
-
-                // Neck
-                let in_neck = dx.abs() < neck_hw && dy.abs() < chamber_offset;
-
                 let idx = row_offset + x;
-                if in_upper {
-                    self.heightmap.data[idx] = noise_hm.data[idx];
-                } else if in_lower || in_neck {
-                    self.heightmap.data[idx] = 0.02; // near-empty
+
+                let dy_abs = dy.abs();
+                if dy_abs < chamber_h {
+                    let t = dy_abs / chamber_h;
+                    let allowed_hw = neck_hw + t * (max_hw - neck_hw);
+                    if dx.abs() < allowed_hw {
+                        if dy < 0.0 {
+                            // Upper chamber: filled with sand
+                            self.heightmap.data[idx] = noise_hm.data[idx];
+                        } else {
+                            // Lower chamber: near-empty
+                            self.heightmap.data[idx] = 0.02;
+                        }
+                    } else {
+                        self.heightmap.data[idx] = 0.0;
+                    }
                 } else {
                     self.heightmap.data[idx] = 0.0;
                 }

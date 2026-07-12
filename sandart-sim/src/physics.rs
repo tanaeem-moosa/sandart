@@ -684,20 +684,18 @@ pub fn settle_tick(
                 (dx * dx) / r_x_sq + (dy * dy) / r_oval_y_sq < 1.0
             }
             crate::SandboxShape::Hourglass => {
-                let chamber_r = 0.28 * w_f;
-                let chamber_offset = 0.32 * h_f;
+                let chamber_h = 0.40 * h_f;
+                let max_hw = 0.35 * w_f;
                 let neck_hw = neck_width * w_f;
-                let chamber_r_sq = chamber_r * chamber_r;
 
-                let dy_upper = dy + chamber_offset;
-                let in_upper = dx * dx + dy_upper * dy_upper < chamber_r_sq;
-
-                let dy_lower = dy - chamber_offset;
-                let in_lower = dx * dx + dy_lower * dy_lower < chamber_r_sq;
-
-                let in_neck = dx.abs() < neck_hw && dy.abs() < chamber_offset;
-
-                in_upper || in_lower || in_neck
+                let dy_abs = dy.abs();
+                if dy_abs < chamber_h {
+                    let t = dy_abs / chamber_h;
+                    let allowed_hw = neck_hw + t * (max_hw - neck_hw);
+                    dx.abs() < allowed_hw
+                } else {
+                    false
+                }
             }
         }
     };
@@ -782,31 +780,22 @@ pub fn settle_tick(
                         (oval_val < 1.0, oval_val < 0.98)
                     }
                     crate::SandboxShape::Hourglass => {
-                        let chamber_r = 0.28 * w_f;
-                        let chamber_offset = 0.32 * h_f;
+                        let chamber_h = 0.40 * h_f;
+                        let max_hw = 0.35 * w_f;
                         let neck_hw = neck_width * w_f;
-                        let chamber_r_sq = chamber_r * chamber_r;
 
-                        let dy_upper = dy + chamber_offset;
-                        let in_upper = dx * dx + dy_upper * dy_upper < chamber_r_sq;
-
-                        let dy_lower = dy - chamber_offset;
-                        let in_lower = dx * dx + dy_lower * dy_lower < chamber_r_sq;
-
-                        let in_neck = dx.abs() < neck_hw && dy.abs() < chamber_offset;
-
-                        let inside = in_upper || in_lower || in_neck;
-
-                        let safe_chamber_r = chamber_r - 1.5;
-                        let safe_chamber_r_sq = safe_chamber_r * safe_chamber_r;
-                        let safe_neck_hw = (neck_hw - 1.5).max(1.0);
-                        
-                        let safe_in_upper = dx * dx + dy_upper * dy_upper < safe_chamber_r_sq;
-                        let safe_in_lower = dx * dx + dy_lower * dy_lower < safe_chamber_r_sq;
-                        let safe_in_neck = dx.abs() < safe_neck_hw && dy.abs() < chamber_offset;
-                        let is_safe = safe_in_upper || safe_in_lower || safe_in_neck;
-
-                        (inside, is_safe)
+                        let dy_abs = dy.abs();
+                        if dy_abs < chamber_h {
+                            let t = dy_abs / chamber_h;
+                            let allowed_hw = neck_hw + t * (max_hw - neck_hw);
+                            let inside = dx.abs() < allowed_hw;
+                            
+                            let safe_allowed_hw = (allowed_hw - 1.5).max(1.0);
+                            let is_safe = dx.abs() < safe_allowed_hw && dy_abs < (chamber_h - 1.5);
+                            (inside, is_safe)
+                        } else {
+                            (false, false)
+                        }
                     }
                 };
 
@@ -1020,7 +1009,7 @@ pub fn settle_tick(
 
                         let (ndx, ndy) = NEIGHBOR_DIRS[i];
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
-                        let gravity_push = gravity_dot * 0.05;
+                        let gravity_push = gravity_dot * 4.0;
                         let effective_slope = geom_slope + gravity_push;
 
                         if effective_slope <= threshold {
@@ -1919,35 +1908,36 @@ mod tests {
         let h_f = 512.0;
         let center_x = w_f / 2.0;
         let center_y = h_f / 2.0;
-        let chamber_r = 0.28 * w_f;
-        let chamber_offset = 0.32 * h_f;
+        let chamber_h = 0.40 * h_f;
+        let max_hw = 0.35 * w_f;
         let neck_hw = 0.04 * w_f;
-        let chamber_r_sq = chamber_r * chamber_r;
 
         let is_inside = |cx: usize, cy: usize| -> bool {
             let dx = cx as f32 - center_x;
             let dy = cy as f32 - center_y;
             
-            let dy_upper = dy + chamber_offset;
-            let in_upper = dx * dx + dy_upper * dy_upper < chamber_r_sq;
-
-            let dy_lower = dy - chamber_offset;
-            let in_lower = dx * dx + dy_lower * dy_lower < chamber_r_sq;
-
-            let in_neck = dx.abs() < neck_hw && dy.abs() < chamber_offset;
-
-            in_upper || in_lower || in_neck
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let allowed_hw = neck_hw + t * (max_hw - neck_hw);
+                dx.abs() < allowed_hw
+            } else {
+                false
+            }
         };
 
-        // Center of upper chamber (256, 256 - 163 = 93)
-        assert!(is_inside(256, 93));
-        // Center of lower chamber (256, 256 + 163 = 419)
-        assert!(is_inside(256, 419));
+        // Center of upper chamber (256, 156)
+        assert!(is_inside(256, 156));
+        // Center of lower chamber (256, 356)
+        assert!(is_inside(256, 356));
         // Inside the neck (256, 256 = center)
         assert!(is_inside(256, 256));
-        // Completely outside
-        assert!(!is_inside(50, 50));
-        assert!(!is_inside(400, 256));
+        // Inside upper chamber but offset horizontally
+        assert!(is_inside(256 + 50, 156));
+        // Outside chamber horizontally
+        assert!(!is_inside(256 + 150, 156));
+        // Completely outside vertically
+        assert!(!is_inside(256, 20));
     }
 
     #[test]
@@ -1970,8 +1960,8 @@ mod tests {
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
         
-        // Put gravity pulling downwards (+Y direction) - strong enough to overcome dry sand repose threshold (0.08)
-        let gravity_dir = glam::Vec2::new(0.0, 2.0);
+        // Put gravity pulling downwards (+Y direction) - matching UI default strength (0.04)
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
         
         let initial_sum: f32 = hm.data.iter().sum();
 
