@@ -946,18 +946,27 @@ pub fn settle_tick(
 
                     let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
                     
-                    let neighbors = [
-                        center_idx - 1, // Left
-                        center_idx + 1, // Right
-                        center_idx - w, // Top
-                        center_idx + w, // Bottom
-                    ];
+                    let neighbors_info = if (tick_count + x as u32 + y as u32) % 2 == 0 {
+                        [
+                            (center_idx - 1, -1.0, 0.0), // Left
+                            (center_idx + 1, 1.0, 0.0),  // Right
+                            (center_idx - w, 0.0, -1.0), // Top
+                            (center_idx + w, 0.0, 1.0),  // Bottom
+                        ]
+                    } else {
+                        [
+                            (center_idx + 1, 1.0, 0.0),  // Right
+                            (center_idx - 1, -1.0, 0.0), // Left
+                            (center_idx - w, 0.0, -1.0), // Top
+                            (center_idx + w, 0.0, 1.0),  // Bottom
+                        ]
+                    };
 
                     let mut cell_flowed = false;
 
                     // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
                     let mut avalanche_checked = false;
-                    for &neighbor_idx in &neighbors {
+                    for &(neighbor_idx, _, _) in &neighbors_info {
                         let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
 
@@ -994,7 +1003,7 @@ pub fn settle_tick(
 
                     // Cell-invariant properties
                     let mut higher_neighbors = 0;
-                    for &n_idx in &neighbors {
+                    for &(n_idx, _, _) in &neighbors_info {
                         if heightmap.data[n_idx] >= h_center - 1e-4 {
                             higher_neighbors += 1;
                         }
@@ -1035,18 +1044,10 @@ pub fn settle_tick(
                         gravity_active,
                     );
 
-                    const NEIGHBOR_DIRS: [(f32, f32); 4] = [
-                        (-1.0, 0.0), // Left
-                        (1.0, 0.0),  // Right
-                        (0.0, -1.0), // Top
-                        (0.0, 1.0),  // Bottom
-                    ];
-
-                    for (i, &neighbor_idx) in neighbors.iter().enumerate() {
+                    for &(neighbor_idx, ndx, ndy) in &neighbors_info {
                         let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
 
-                        let (ndx, ndy) = NEIGHBOR_DIRS[i];
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
                         
                         // Downward pull
@@ -2080,5 +2081,85 @@ mod tests {
         // Now lower chamber should have sand, upper empty
         assert!(sim.heightmap.data[upper_pos_idx] < 0.05);
         assert!(sim.heightmap.data[lower_idx] > 0.1);
+    }
+
+    #[test]
+    fn test_hourglass_statistical_symmetry() {
+        // Initialize a symmetric grid with sand concentrated in the middle column
+        let w = 64;
+        let h = 64;
+        let mut hm = Heightmap::new(w, h, 0.0);
+        
+        // Put a single block of sand at the top middle
+        for y in 2..20 {
+            for x in 30..34 {
+                hm.data[y * w + x] = 1.0;
+            }
+        }
+
+        let mut temp_heights = hm.data.clone();
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds {
+            min_x: 2,
+            max_x: 61,
+            min_y: 2,
+            max_y: 61,
+            active: true,
+        };
+
+        let mut wave_vel = vec![0.0; w * h];
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
+        let mut last_displacements = vec![1.0; 4];
+        let mut last_simulated_ticks = vec![0; 4];
+        
+        // Downward gravity
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // Run 40 ticks of gravity settling
+        for i in 0..40 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345 + i as u32,
+                &mut wave_vel,
+                SandboxShape::Circle,
+                i as u32,
+                gravity_dir,
+                0.04,
+                1.0,
+            );
+        }
+
+        // Measure center of mass along X axis
+        let mut total_mass = 0.0f32;
+        let mut weighted_x = 0.0f32;
+        for y in 0..h {
+            for x in 0..w {
+                let val = hm.data[y * w + x];
+                if val > 0.0 {
+                    total_mass += val;
+                    weighted_x += (x as f32) * val;
+                }
+            }
+        }
+
+        let center_of_mass_x = weighted_x / total_mass;
+        let geometric_center_x = (w as f32 - 1.0) / 2.0; // 31.5
+
+        // Center of mass should be extremely close to the geometric center (perfect symmetry)
+        let bias = (center_of_mass_x - geometric_center_x).abs();
+        assert!(bias < 0.25, "Found horizontal symmetry bias: {}", bias);
     }
 }
