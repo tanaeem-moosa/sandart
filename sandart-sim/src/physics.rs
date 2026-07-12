@@ -763,7 +763,13 @@ pub fn settle_tick(
     };
 
     // 2. Continuous per-cell solver (loop over active blocks)
-    for b in 0..expected_len {
+    let b_len = expected_len;
+    for idx_b in 0..b_len {
+        let b = if tick_count % 2 == 0 {
+            idx_b
+        } else {
+            b_len - 1 - idx_b
+        };
         if !will_simulate[b] {
             continue;
         }
@@ -776,7 +782,13 @@ pub fn settle_tick(
         let end_y = ((by + 1) * block_size).min(h);
 
         let x_len = end_x - start_x;
-        for y in (start_y..end_y).rev() {
+        let y_len = end_y - start_y;
+        for idy in 0..y_len {
+            let y = if tick_count % 2 == 0 {
+                end_y - 1 - idy
+            } else {
+                start_y + idy
+            };
             let row_offset = y * w;
             for idx in 0..x_len {
                 let x = if tick_count % 2 == 0 {
