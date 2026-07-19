@@ -377,8 +377,6 @@ impl DrawingSimulation {
     }
 
     pub fn flip_hourglass(&mut self) {
-        self.gravity_dir.y = -self.gravity_dir.y;
-
         let w = self.heightmap.width;
         let h = self.heightmap.height;
         for y in 0..h / 2 {

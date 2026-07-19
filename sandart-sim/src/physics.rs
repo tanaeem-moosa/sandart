@@ -209,14 +209,22 @@ fn get_ca_params(
         threshold_prop
     };
 
-    if gravity_active {
-        threshold *= 0.35; // Lower friction/repose angle in Sand-fall mode for realistic fluid flow
-    }
-
     // Flow rate (alpha) (faster settling when gravity is pulling sand down)
     let mut alpha = flow_rate_prop;
+
     if gravity_active {
-        alpha = (alpha * 1.5).min(0.8);
+        threshold *= 0.35; // Lower friction/repose angle in Sand-fall mode for realistic fluid flow
+
+        // Liquid materials (wetness >= 0.75) normally use the wave solver and
+        // have threshold=0.0 / flow_rate=0.0. Under gravity, they are routed
+        // through the CA solver instead, so we need to give them positive
+        // flow parameters to enable draining.
+        if wetness >= 0.75 {
+            threshold = 0.0; // Liquids flow at any height difference
+            alpha = 0.50;    // Fast flow rate for liquid viscosity
+        } else {
+            alpha = (alpha * 1.5).min(0.8);
+        }
     }
 
     // Lock chance
@@ -841,7 +849,7 @@ pub fn settle_tick(
 
                 let wetness = cell_props[center_idx * 4 + PROP_WETNESS];
 
-                if wetness >= 0.75 {
+                if wetness >= 0.75 && !gravity_active {
                     // --- Wave propagation (Liquid behavior) ---
                     let h_center = heightmap.data[center_idx];
 
@@ -1050,8 +1058,12 @@ pub fn settle_tick(
 
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
                         
-                        // Downward pull
-                        let mut gravity_push = gravity_dot * 4.0;
+                        // Downward pull (liquid has no friction/repose angle, so it flows much faster)
+                        let mut gravity_push = if wetness >= 0.75 {
+                            gravity_dot * 40.0
+                        } else {
+                            gravity_dot * 4.0
+                        };
                         
                         // Stochastic sideways dispersion/splashing
                         let gravity_len = gravity_dir.length();
@@ -1085,7 +1097,13 @@ pub fn settle_tick(
                             }
 
                             if flow > 0.0 {
-                                let max_transfer_coeff = if gravity_active { 0.20 } else { 0.40 };
+                                let max_transfer_coeff = if !gravity_active {
+                                    0.40
+                                } else if wetness >= 0.75 {
+                                    0.40 // Liquids flow freely under gravity
+                                } else {
+                                    0.20 // Sand uses lower coeff to prevent wave oscillations
+                                };
                                 let clamped_flow = if geom_slope > 0.0 {
                                     let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
                                     flow.min(temp_diff * max_transfer_coeff).max(0.0)
@@ -2061,26 +2079,138 @@ mod tests {
         assert!(bottom_half_sum > top_half_sum, "Sand did not flow downward under gravity!");
     }
 
+
     #[test]
-    fn test_hourglass_flip_swap() {
-        let mut sim = DrawingSimulation::new();
-        sim.sandbox_shape = SandboxShape::Hourglass;
-        sim.reset();
+    fn test_hourglass_flow_after_flip() {
+        let w = 64;
+        let h = 64;
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        let chamber_h = 0.40 * h as f32;
+        let max_hw = 0.35 * w as f32;
+        let neck_hw = 0.15 * w as f32; // Wide neck to speed up test flow
+        let hourglass_curve = 0.6;
 
-        let upper_idx = (0.32 * 512.0 - 0.28 * 256.0) as usize; // inside upper chamber
-        let lower_idx = (512 - 1 - upper_idx) * 512 + 256;
-        let upper_pos_idx = upper_idx * 512 + 256;
+        let mut hm = Heightmap::new(w, h, 0.0);
 
-        // Initially upper chamber has sand, lower is empty
-        assert!(sim.heightmap.data[upper_pos_idx] > 0.1);
-        assert!(sim.heightmap.data[lower_idx] < 0.05);
+        // Fill only a shallow layer in the upper chamber just above the neck
+        for y in 0..h {
+            let dy = y as f32 - center_y;
+            let dy_abs = dy.abs();
+            for x in 0..w {
+                let dx = x as f32 - center_x;
+                if dy_abs < chamber_h {
+                    let t = dy_abs / chamber_h;
+                    let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                    if dx.abs() < allowed_hw && dy < 0.0 && dy > -6.0 {
+                        hm.data[y * w + x] = 1.0;
+                    }
+                }
+            }
+        }
 
-        // Flip it
-        sim.flip_hourglass();
+        let mut temp_heights = hm.data.clone();
+        let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds {
+            min_x: 2,
+            max_x: 61,
+            min_y: 2,
+            max_y: 61,
+            active: true,
+        };
 
-        // Now lower chamber should have sand, upper empty
-        assert!(sim.heightmap.data[upper_pos_idx] < 0.05);
-        assert!(sim.heightmap.data[lower_idx] > 0.1);
+        let mut wave_vel = vec![0.0; w * h];
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
+        let mut last_displacements = vec![1.0; 4];
+        let mut last_simulated_ticks = vec![0; 4];
+
+        // Downward gravity
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let initial_top_sum: f32 = hm.data[0..32 * w].iter().sum();
+        let initial_bottom_sum: f32 = hm.data[32 * w..].iter().sum();
+        assert!(initial_top_sum > 10.0);
+        assert_eq!(initial_bottom_sum, 0.0);
+
+        // Run 500 ticks to let almost all sand flow downward into the bottom chamber
+        for i in 0..500 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345 + i as u32,
+                &mut wave_vel,
+                SandboxShape::Hourglass,
+                i as u32,
+                gravity_dir,
+                0.15,
+                hourglass_curve,
+            );
+        }
+
+        let mid_top_sum: f32 = hm.data[0..32 * w].iter().sum();
+        let mid_bottom_sum: f32 = hm.data[32 * w..].iter().sum();
+
+        // Sand should have flowed downward into the bottom chamber
+        assert!(mid_bottom_sum > initial_top_sum * 0.40, "Not enough sand flowed to bottom! bottom_sum={}, init_top={}", mid_bottom_sum, initial_top_sum);
+        assert!(mid_top_sum < initial_top_sum * 0.60);
+
+        // Swap heights vertically (simulate flip)
+        for y in 0..h / 2 {
+            let y2 = h - 1 - y;
+            for x in 0..w {
+                hm.data.swap(y * w + x, y2 * w + x);
+                temp_heights.swap(y * w + x, y2 * w + x);
+            }
+        }
+
+        let post_flip_top_sum: f32 = hm.data[0..32 * w].iter().sum();
+        let post_flip_bottom_sum: f32 = hm.data[32 * w..].iter().sum();
+
+        // After flip, sand is back in the top chamber (allow tiny epsilon for floating point swap ordering)
+        assert!((post_flip_top_sum - mid_bottom_sum).abs() < 1e-4, "Top sum mismatch: {} vs {}", post_flip_top_sum, mid_bottom_sum);
+        assert!((post_flip_bottom_sum - mid_top_sum).abs() < 1e-4, "Bottom sum mismatch: {} vs {}", post_flip_bottom_sum, mid_top_sum);
+
+        // Run another 500 ticks with downward gravity
+        for i in 0..500 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345 + 500 + i as u32,
+                &mut wave_vel,
+                SandboxShape::Hourglass,
+                (500 + i) as u32,
+                gravity_dir,
+                0.15,
+                hourglass_curve,
+            );
+        }
+
+        let final_bottom_sum: f32 = hm.data[32 * w..].iter().sum();
+
+        // Sand should have flowed downward again
+        assert!(final_bottom_sum > post_flip_bottom_sum + (post_flip_top_sum * 0.40), "Sand did not flow downward after flip! init_bottom={}, final_bottom={}, post_flip_top={}", post_flip_bottom_sum, final_bottom_sum, post_flip_top_sum);
     }
 
     #[test]
@@ -2161,5 +2291,91 @@ mod tests {
         // Center of mass should be extremely close to the geometric center (perfect symmetry)
         let bias = (center_of_mass_x - geometric_center_x).abs();
         assert!(bias < 0.25, "Found horizontal symmetry bias: {}", bias);
+    }
+
+    #[test]
+    fn test_liquid_gravity_flows_downward() {
+        // Verify that the wave-propagation solver (wetness >= 0.75) moves liquid
+        // downward under gravity, not upward.
+        let w = 64;
+        let h = 64;
+        let center_x = w as f32 / 2.0; // 32
+        let center_y = h as f32 / 2.0; // 32
+        let r = 0.46 * w as f32;       // 29.44
+        let r_sq = r * r;
+
+        let mut hm = Heightmap::new(w, h, 0.0);
+
+        // Fill only the top half of the circle with liquid
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 - center_x;
+                let dy = y as f32 - center_y;
+                if dx * dx + dy * dy < r_sq && dy < -2.0 {
+                    // Upper half of circle (dy < 0 means above center)
+                    hm.data[y * w + x] = 0.8;
+                }
+            }
+        }
+
+        let mut temp_heights = hm.data.clone();
+        // Use Water material (wetness=1.0)
+        let mut cell_props = get_test_props(MaterialMode::Water, w * h);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds {
+            min_x: 2,
+            max_x: 61,
+            min_y: 2,
+            max_y: 61,
+            active: true,
+        };
+
+        let mut wave_vel = vec![0.0; w * h];
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
+        let mut last_displacements = vec![1.0; 4];
+        let mut last_simulated_ticks = vec![0; 4];
+
+        // Downward gravity
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let initial_top_sum: f32 = hm.data[0..32 * w].iter().sum();
+        let initial_bottom_sum: f32 = hm.data[32 * w..].iter().sum();
+        assert!(initial_top_sum > initial_bottom_sum, "Initial state should have more liquid on top");
+
+        // Run 500 ticks of gravity settling (liquid CA is slower than wave)
+        for i in 0..500 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345 + i as u32,
+                &mut wave_vel,
+                SandboxShape::Circle,
+                i as u32,
+                gravity_dir,
+                0.04,
+                1.0,
+            );
+        }
+
+        // After settling under gravity, the bottom half should have MORE liquid
+        // than the top half (liquid flows downward)
+        let final_top_sum: f32 = hm.data[0..32 * w].iter().sum();
+        let final_bottom_sum: f32 = hm.data[32 * w..].iter().sum();
+        assert!(
+            final_bottom_sum > final_top_sum,
+            "Liquid should flow downward under gravity! top={}, bottom={}",
+            final_top_sum, final_bottom_sum
+        );
     }
 }

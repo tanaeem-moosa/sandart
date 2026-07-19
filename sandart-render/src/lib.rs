@@ -574,6 +574,10 @@ mod tests {
                 material_mode: 0,
                 sandbox_shape: 0,
                 color_mode: 0,
+                neck_width: 0.005,
+                hourglass_curve: 0.6,
+                _pad1: 0.0,
+                _pad2: 0.0,
                 marbles: [
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
@@ -848,6 +852,10 @@ mod tests {
                     material_mode: mat_mode,
                     sandbox_shape: 0, // Circle
                     color_mode: 0,
+                    neck_width: 0.005,
+                    hourglass_curve: 0.6,
+                    _pad1: 0.0,
+                    _pad2: 0.0,
                     marbles: [
                         MarbleUniform { pos: [m_x, m_y], radius: 0.018, z_pos: m_z },
                         MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },

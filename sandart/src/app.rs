@@ -825,11 +825,13 @@ impl eframe::App for SandArtApp {
                             crate::config::SandboxShape::Circle => "Circle",
                             crate::config::SandboxShape::Square => "Square",
                             crate::config::SandboxShape::Oval => "Oval",
+                            crate::config::SandboxShape::Hourglass => "Hourglass",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Circle, "Circle");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Square, "Square");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Oval, "Oval");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Hourglass, "Hourglass");
                         });
 
                     ui.add_space(12.0);
@@ -1011,6 +1013,10 @@ impl eframe::App for SandArtApp {
                 material_mode: self.config.material_mode as u32,
                 sandbox_shape: self.config.sandbox_shape as u32,
                 color_mode: 0,
+                neck_width: self.sim.neck_width,
+                hourglass_curve: self.sim.hourglass_curve,
+                _pad1: 0.0,
+                _pad2: 0.0,
                 marbles: [
                     crate::renderer::MarbleUniform {
                         pos: [self.sim.marbles[0].pos.x, self.sim.marbles[0].pos.y],
@@ -1150,6 +1156,11 @@ impl eframe::App for SandArtApp {
             }
 
             // Run simulation tick
+            if self.config.sandbox_shape == crate::config::SandboxShape::Hourglass {
+                self.sim.gravity_dir = glam::Vec2::new(0.0, 0.04);
+            } else {
+                self.sim.gravity_dir = glam::Vec2::ZERO;
+            }
             self.sim.update(self.dt, &targets, self.config.marble_size, self.config.material_mode, self.config.sandbox_shape, self.dt * 1000.0, self.dt * 1000.0);
 
             // Direct GPU update (zero-mutex, zero-CPU-to-CPU copies)
