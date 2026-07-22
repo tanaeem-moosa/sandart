@@ -1104,15 +1104,30 @@ pub fn settle_tick(
                                 } else {
                                     0.20 // Sand uses lower coeff to prevent wave oscillations
                                 };
-                                let clamped_flow = if geom_slope > 0.0 {
+                                let src_h = temp_heights[center_idx];
+                                let mut clamped_flow = if geom_slope > 0.0 {
                                     let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
-                                    flow.min(temp_diff * max_transfer_coeff).max(0.0)
+                                    if src_h <= 0.003 {
+                                        flow.min(temp_diff).max(0.0)
+                                    } else {
+                                        flow.min(temp_diff * max_transfer_coeff).max(0.0)
+                                    }
                                 } else {
-                                    let max_src_flow = temp_heights[center_idx] * max_transfer_coeff;
+                                    let max_src_flow = if src_h <= 0.003 {
+                                        src_h
+                                    } else {
+                                        src_h * max_transfer_coeff
+                                    };
                                     let max_dst_room = (1.5 - temp_heights[neighbor_idx]).max(0.0);
                                     flow.min(max_src_flow).min(max_dst_room).max(0.0)
                                 };
-                                if clamped_flow > FLOW_INACTIVE_THRESHOLD {
+
+                                // Clean sweep for tiny residual amounts to prevent Zeno's paradox trapping
+                                if clamped_flow <= FLOW_INACTIVE_THRESHOLD && src_h > 0.0 && src_h <= 0.001 && flow > 0.0 {
+                                    clamped_flow = src_h;
+                                }
+
+                                if clamped_flow > FLOW_INACTIVE_THRESHOLD || (src_h <= 0.001 && clamped_flow > 0.0) {
                                     let nx = neighbor_idx % w;
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
@@ -2377,5 +2392,64 @@ mod tests {
             "Liquid should flow downward under gravity! top={}, bottom={}",
             final_top_sum, final_bottom_sum
         );
+    }
+
+    #[test]
+    fn test_residual_sand_drains_to_zero() {
+        let w = 64;
+        let h = 64;
+        let mut hm = Heightmap::new(w, h, 0.0);
+
+        // Put a single small residual sand pixel at (32, 10)
+        let src_idx = 10 * w + 32;
+        hm.data[src_idx] = 0.002;
+
+        let mut temp_heights = hm.data.clone();
+        let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds {
+            min_x: 2,
+            max_x: 61,
+            min_y: 2,
+            max_y: 61,
+            active: true,
+        };
+
+        let mut wave_vel = vec![0.0; w * h];
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
+        let mut last_displacements = vec![1.0; 4];
+        let mut last_simulated_ticks = vec![0; 4];
+
+        // Downward gravity
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // Run 20 ticks of gravity settling
+        for i in 0..20 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345 + i as u32,
+                &mut wave_vel,
+                SandboxShape::Circle,
+                i as u32,
+                gravity_dir,
+                0.04,
+                1.0,
+            );
+        }
+
+        // The source pixel should be cleanly zero (0.0) without leaving residual ghost height trapped
+        assert_eq!(hm.data[src_idx], 0.0, "Residual sand was trapped! h={}", hm.data[src_idx]);
     }
 }
