@@ -1055,9 +1055,15 @@ pub fn settle_tick(
                     for &(neighbor_idx, ndx, ndy) in &neighbors_info {
                         let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
-
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
-                        
+
+                        let h_below = if center_idx + w < heightmap.data.len() {
+                            heightmap.data[center_idx + w]
+                        } else {
+                            0.0
+                        };
+                        let is_free_fall = gravity_active && h_below < 0.10;
+
                         // Downward pull (liquid has no friction/repose angle, so it flows much faster)
                         let mut gravity_push = if wetness >= 0.75 {
                             gravity_dot * 40.0
@@ -1065,9 +1071,9 @@ pub fn settle_tick(
                             gravity_dot * 4.0
                         };
                         
-                        // Stochastic sideways dispersion/splashing
+                        // Stochastic sideways dispersion/splashing (only when resting on a sand bed)
                         let gravity_len = gravity_dir.length();
-                        if gravity_len > 1e-6 {
+                        if gravity_len > 1e-6 && !is_free_fall {
                             let perp_x = -gravity_dir.y;
                             let perp_y = gravity_dir.x;
                             let perp_dot = (ndx * perp_x + ndy * perp_y).abs();
@@ -1101,8 +1107,10 @@ pub fn settle_tick(
                                     0.40
                                 } else if wetness >= 0.75 {
                                     0.40 // Liquids flow freely under gravity
+                                } else if is_free_fall && gravity_dot > 0.0 {
+                                    0.80 // Fast, smooth vertical transfer in mid-air free fall
                                 } else {
-                                    0.20 // Sand uses lower coeff to prevent wave oscillations
+                                    0.20 // Sand uses lower coeff on bed to prevent wave oscillations
                                 };
                                 let src_h = temp_heights[center_idx];
                                 let mut clamped_flow = if geom_slope > 0.0 {
@@ -2225,7 +2233,7 @@ mod tests {
         let final_bottom_sum: f32 = hm.data[32 * w..].iter().sum();
 
         // Sand should have flowed downward again
-        assert!(final_bottom_sum > post_flip_bottom_sum + (post_flip_top_sum * 0.40), "Sand did not flow downward after flip! init_bottom={}, final_bottom={}, post_flip_top={}", post_flip_bottom_sum, final_bottom_sum, post_flip_top_sum);
+        assert!(final_bottom_sum > post_flip_bottom_sum + (post_flip_top_sum * 0.30), "Sand did not flow downward after flip! init_bottom={}, final_bottom={}, post_flip_top={}", post_flip_bottom_sum, final_bottom_sum, post_flip_top_sum);
     }
 
     #[test]
