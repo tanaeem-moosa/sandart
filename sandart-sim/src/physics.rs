@@ -187,8 +187,10 @@ fn get_ca_params(
         return (threshold, alpha, lock_chance, None);
     }
 
-    // Quantization size (disable during gravity settling to let sand slide smoothly)
-    let quantize_size = if wetness < 0.30 && !gravity_active {
+    // Quantization size (droplet beading for liquids under gravity, discrete grains in sandbox)
+    let quantize_size = if wetness >= 0.75 && gravity_active {
+        Some(0.025) // Droplet/bead quantization for liquids under gravity
+    } else if wetness < 0.30 && !gravity_active {
         if grain_size >= 0.60 {
             Some(0.035)
         } else if grain_size >= 0.40 {
@@ -1071,17 +1073,25 @@ pub fn settle_tick(
                             gravity_dot * 4.0
                         };
                         
-                        // Stochastic sideways dispersion/splashing (only when resting on a sand bed)
+                        // Stochastic sideways dispersion/splashing (controlled for free-fall droplets)
                         let gravity_len = gravity_dir.length();
-                        if gravity_len > 1e-6 && !is_free_fall {
-                            let perp_x = -gravity_dir.y;
-                            let perp_y = gravity_dir.x;
-                            let perp_dot = (ndx * perp_x + ndy * perp_y).abs();
-                            
-                            let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
-                            let dispersion_noise = rand_val as f32 / 255.0;
-                            
-                            gravity_push += perp_dot * 2.0 * dispersion_noise;
+                        if gravity_len > 1e-6 {
+                            if !is_free_fall {
+                                let perp_x = -gravity_dir.y;
+                                let perp_y = gravity_dir.x;
+                                let perp_dot = (ndx * perp_x + ndy * perp_y).abs();
+                                let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
+                                let dispersion_noise = rand_val as f32 / 255.0;
+                                gravity_push += perp_dot * 2.0 * dispersion_noise;
+                            } else if wetness >= 0.75 {
+                                // Gentle droplet bulb dispersion for liquids in free fall
+                                let perp_x = -gravity_dir.y;
+                                let perp_y = gravity_dir.x;
+                                let perp_dot = (ndx * perp_x + ndy * perp_y).abs();
+                                let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
+                                let dispersion_noise = rand_val as f32 / 255.0;
+                                gravity_push += perp_dot * 0.4 * dispersion_noise;
+                            }
                         }
                         
                         let effective_slope = geom_slope + gravity_push;
@@ -1106,7 +1116,11 @@ pub fn settle_tick(
                                 let max_transfer_coeff = if !gravity_active {
                                     0.40
                                 } else if wetness >= 0.75 {
-                                    0.40 // Liquids flow freely under gravity
+                                    if is_free_fall && gravity_dot > 0.0 {
+                                        0.50 // Elongated droplet teardrop transfer
+                                    } else {
+                                        0.40 // Liquids flow freely under gravity
+                                    }
                                 } else if is_free_fall && gravity_dot > 0.0 {
                                     0.80 // Fast, smooth vertical transfer in mid-air free fall
                                 } else {
