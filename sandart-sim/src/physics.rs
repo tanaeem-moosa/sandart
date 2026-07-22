@@ -1155,9 +1155,9 @@ pub fn settle_tick(
                                     let max_dst_room = (1.5 - temp_heights[neighbor_idx]).max(0.0);
                                     flow.min(max_src_flow).min(max_dst_room).max(0.0)
                                 };
-
-                                // Clean sweep for tiny residual amounts to prevent Zeno's paradox trapping
-                                if clamped_flow <= FLOW_INACTIVE_THRESHOLD && src_h > 0.0 && src_h <= 0.001 && flow > 0.0 {
+                                
+                                // Clean sweep for tiny residual amounts to prevent Zeno's paradox trapping & floating grains
+                                if (clamped_flow <= FLOW_INACTIVE_THRESHOLD || is_free_fall) && src_h > 0.0 && src_h <= 0.010 && flow > 0.0 {
                                     clamped_flow = src_h;
                                 }
 

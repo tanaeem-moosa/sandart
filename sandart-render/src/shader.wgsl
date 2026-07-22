@@ -771,26 +771,28 @@ fn fs_main(
     // Combine shading: ambient + diffuse + rim light + sparkles
     let final_lighting = ambient + diffuse + rim_color + vec3<f32>(directional_sparkle * m_brightness);
     
+    // Blend with dark table floor based on sand thickness (height)
+    // Opacity fades smoothly to 0 for height < 0.005 so tiny residual specs are completely invisible
+    let sand_opacity = smoothstep(0.005, 0.035, h_center);
+    let table_color = vec3<f32>(0.02, 0.02, 0.03);
+    
     var sand_shaded = vec3<f32>(0.0);
     if (is_metallic > 0.5) {
         // Metallic reflection: multiply reflect by base color
-        sand_shaded = sand_base_color * final_lighting + specular_reflect * mat_base_color;
+        sand_shaded = sand_base_color * final_lighting + specular_reflect * mat_base_color * sand_opacity;
     } else {
         // Dielectric reflection: additive specular
-        sand_shaded = sand_base_color * final_lighting + specular_reflect;
+        sand_shaded = sand_base_color * final_lighting + specular_reflect * sand_opacity;
     }
 
-    // Blend with dark table floor based on sand thickness (height)
-    // Opacity rises quickly so a thin sand layer (>= 0.05 height) is fully opaque sand.
-    let sand_opacity = smoothstep(0.0, 0.05, h_center);
-    let table_color = vec3<f32>(0.02, 0.02, 0.03);
     var final_color = mix(table_color, sand_shaded, sand_opacity);
 
     if (wetness >= 0.75) {
         let absorption = 1.0 - exp(-h_center * 12.0);
         let liquid_refracted = mix(table_color, mat_base_color, absorption);
         let liquid_factor = (wetness - 0.75) / 0.25;
-        final_color = mix(final_color, liquid_refracted + specular_reflect, liquid_factor);
+        let liquid_shaded = mix(final_color, liquid_refracted + specular_reflect * sand_opacity, liquid_factor);
+        final_color = mix(table_color, liquid_shaded, sand_opacity);
     }
 
     return vec4<f32>(final_color, 1.0);
