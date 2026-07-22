@@ -719,11 +719,7 @@ pub fn settle_tick(
                 let dy_abs = dy.abs();
                 if dy_abs < chamber_h {
                     let t = dy_abs / chamber_h;
-                    let mut allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
-                    if t > 0.70 {
-                        let dome = (1.0 - ((t - 0.70) / 0.30).powi(2)).max(0.0).sqrt();
-                        allowed_hw *= dome;
-                    }
+                    let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
                     dx.abs() < allowed_hw
                 } else {
                     false
@@ -837,11 +833,7 @@ pub fn settle_tick(
                         let dy_abs = dy.abs();
                         if dy_abs < chamber_h {
                             let t = dy_abs / chamber_h;
-                            let mut allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
-                            if t > 0.70 {
-                                let dome = (1.0 - ((t - 0.70) / 0.30).powi(2)).max(0.0).sqrt();
-                                allowed_hw *= dome;
-                            }
+                            let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
                             let inside = dx.abs() < allowed_hw;
                             
                             let safe_allowed_hw = (allowed_hw - 1.5).max(1.0);
@@ -964,7 +956,23 @@ pub fn settle_tick(
 
                     let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
                     
-                    let neighbors_info = if (tick_count + x as u32 + y as u32) % 2 == 0 {
+                    let neighbors_info = if gravity_active && gravity_dir.y > 0.0 {
+                        if (tick_count + x as u32 + y as u32) % 2 == 0 {
+                            [
+                                (center_idx + w, 0.0, 1.0),  // Bottom (Gravity first)
+                                (center_idx - 1, -1.0, 0.0), // Left
+                                (center_idx + 1, 1.0, 0.0),  // Right
+                                (center_idx - w, 0.0, -1.0), // Top
+                            ]
+                        } else {
+                            [
+                                (center_idx + w, 0.0, 1.0),  // Bottom (Gravity first)
+                                (center_idx + 1, 1.0, 0.0),  // Right
+                                (center_idx - 1, -1.0, 0.0), // Left
+                                (center_idx - w, 0.0, -1.0), // Top
+                            ]
+                        }
+                    } else if (tick_count + x as u32 + y as u32) % 2 == 0 {
                         [
                             (center_idx - 1, -1.0, 0.0), // Left
                             (center_idx + 1, 1.0, 0.0),  // Right
@@ -984,7 +992,12 @@ pub fn settle_tick(
 
                     // A. Absolute gravity-avalanche collapse safety check (to prevent spikes)
                     let mut avalanche_checked = false;
-                    for &(neighbor_idx, _, _) in &neighbors_info {
+                    for &(neighbor_idx, ndx, ndy) in &neighbors_info {
+                        let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
+                        if gravity_active && gravity_dot < -0.01 {
+                            continue;
+                        }
+
                         let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
 
@@ -1014,7 +1027,7 @@ pub fn settle_tick(
                             avalanche_checked = true;
                         }
                     }
-                    if avalanche_checked {
+                    if !gravity_active && avalanche_checked {
                         sliding[center_idx] = cell_flowed;
                         continue;
                     }
@@ -1066,13 +1079,19 @@ pub fn settle_tick(
                         let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
+                        
+                        // Under gravity, sand cannot flow upwards against gravity
+                        if gravity_active && gravity_dot < -0.01 {
+                            continue;
+                        }
 
-                        let h_below = if center_idx + w < heightmap.data.len() {
-                            heightmap.data[center_idx + w]
+                        let h_below = if center_idx + w < temp_heights.len() {
+                            temp_heights[center_idx + w]
                         } else {
                             0.0
                         };
-                        let is_free_fall = gravity_active && h_below < 0.10;
+                        let is_below_inside = y + 1 < h && is_inside(x, y + 1);
+                        let is_free_fall = gravity_active && is_below_inside && h_below < 0.10;
 
                         // Downward pull (liquid has no friction/repose angle, so it flows much faster)
                         let mut gravity_push = if wetness >= 0.75 {
@@ -1108,11 +1127,12 @@ pub fn settle_tick(
                             continue;
                         }
 
-                        // C. Stochastic locking and sliding condition
+                        // C. Stochastic locking and sliding condition (bypass locking in free fall)
                         let flow_seed = (seed ^ (neighbor_idx as u32).wrapping_mul(997)) & 0xFFFF;
                         let rand_val = flow_seed as f32 / 65535.0;
+                        let effective_lock_chance = if is_free_fall { 0.0 } else { lock_chance };
                         
-                        if rand_val >= lock_chance {
+                        if rand_val >= effective_lock_chance {
                             let alpha_noise = if gravity_active {
                                 1.0 + (rand_val - 0.5) * 0.10 // Smooth laminar flow under gravity (+/- 5%)
                             } else {
@@ -2485,5 +2505,121 @@ mod tests {
 
         // The source pixel should be cleanly zero (0.0) without leaving residual ghost height trapped
         assert_eq!(hm.data[src_idx], 0.0, "Residual sand was trapped! h={}", hm.data[src_idx]);
+    }
+
+    #[test]
+    fn test_no_floating_sand_under_gravity() {
+        let w = 64;
+        let h = 64;
+        let mut hm = Heightmap::new(w, h, 0.0);
+
+        // Fill random sand in upper chamber inside hourglass boundary
+        let center_x = 32.0;
+        let center_y = 32.0;
+        let chamber_h = 0.40 * 64.0;
+        let max_hw = 0.35 * 64.0;
+        let neck_hw = 0.04 * 64.0;
+
+        for y in 5..30 {
+            let dy = y as f32 - center_y;
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let allowed_hw = neck_hw + t.powf(0.6) * (max_hw - neck_hw);
+                for x in 2..62 {
+                    let dx = x as f32 - center_x;
+                    if dx.abs() < allowed_hw {
+                        let idx = y * w + x;
+                        let pseudo_rand = ((x * 17 + y * 31) % 100) as f32 / 100.0;
+                        hm.data[idx] = pseudo_rand * 0.8;
+                    }
+                }
+            }
+        }
+
+        let mut temp_heights = hm.data.clone();
+        let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds {
+            min_x: 2,
+            max_x: 61,
+            min_y: 2,
+            max_y: 61,
+            active: true,
+        };
+
+        let mut wave_vel = vec![0.0; w * h];
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
+        let mut last_displacements = vec![1.0; 4];
+        let mut last_simulated_ticks = vec![0; 4];
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // Run gravity settling until all falling sand completes landing and flow reaches zero
+        for i in 0..2000 {
+            let flow = settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345 + i as u32,
+                &mut wave_vel,
+                SandboxShape::Hourglass,
+                i as u32,
+                gravity_dir,
+                0.04,
+                0.6,
+            );
+            if i > 200 && flow == 0.0 {
+                break;
+            }
+        }
+
+        // Verify no cell with sand (h > 0.005) has an empty cell (h_below == 0.0) directly below it in mid-air
+        for y in 2..60 {
+            for x in 2..62 {
+                let idx = y * w + x;
+                let idx_below = (y + 1) * w + x;
+                let h_curr = hm.data[idx];
+                let h_below = hm.data[idx_below];
+
+                let center_x = 32.0;
+                let center_y = 32.0;
+                let chamber_h = 0.40 * 64.0;
+                let max_hw = 0.35 * 64.0;
+                let neck_hw = 0.04 * 64.0;
+
+                let is_in = |cx: usize, cy: usize| -> bool {
+                    let dx = cx as f32 - center_x;
+                    let dy = cy as f32 - center_y;
+                    let dy_abs = dy.abs();
+                    if dy_abs < chamber_h {
+                        let t = dy_abs / chamber_h;
+                        let allowed_hw = neck_hw + t.powf(0.6) * (max_hw - neck_hw);
+                        dx.abs() < allowed_hw
+                    } else {
+                        false
+                    }
+                };
+
+                if is_in(x, y) && h_curr > 0.005 && is_in(x, y + 1) && h_below == 0.0 {
+                    println!("Column x={}:", x);
+                    for py in 0..15 {
+                        let p_idx = py * w + x;
+                        println!("y={}: h={} inside={}", py, hm.data[p_idx], is_in(x, py));
+                    }
+                    panic!("Found floating sand inside container at ({}, {}) with h={} and empty air below!", x, y, h_curr);
+                }
+            }
+        }
     }
 }

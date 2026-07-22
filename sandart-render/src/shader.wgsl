@@ -208,10 +208,6 @@ fn fs_main(
         if (v_abs < chamber_h) {
             let t = v_abs / chamber_h;
             allowed_hw = neck_hw + pow(t, uniforms.hourglass_curve) * (max_hw - neck_hw);
-            if (t > 0.70) {
-                let dome = sqrt(max(0.0, 1.0 - pow((t - 0.70) / 0.30, 2.0)));
-                allowed_hw = allowed_hw * dome;
-            }
             inside = abs(u) < allowed_hw;
         }
 

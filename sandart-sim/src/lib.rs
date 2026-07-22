@@ -354,11 +354,7 @@ impl DrawingSimulation {
                 let dy_abs = dy.abs();
                 if dy_abs < chamber_h {
                     let t = dy_abs / chamber_h;
-                    let mut allowed_hw = neck_hw + t.powf(self.hourglass_curve) * (max_hw - neck_hw);
-                    if t > 0.70 {
-                        let dome = (1.0 - ((t - 0.70) / 0.30).powi(2)).max(0.0).sqrt();
-                        allowed_hw *= dome;
-                    }
+                    let allowed_hw = neck_hw + t.powf(self.hourglass_curve) * (max_hw - neck_hw);
                     if dx.abs() < allowed_hw {
                         if dy < 0.0 {
                             // Upper chamber: filled with smooth sand/water (0.80 height / 80% capacity)
