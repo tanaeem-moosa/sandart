@@ -343,8 +343,6 @@ impl DrawingSimulation {
         let chamber_h = 0.40 * h_f;
         let max_hw = 0.35 * w_f;
         let neck_hw = self.neck_width * w_f;
-
-        let noise_hm = generate_smooth_noise(54321u32);
         
         for y in 0..h {
             let row_offset = y * w;
@@ -356,11 +354,15 @@ impl DrawingSimulation {
                 let dy_abs = dy.abs();
                 if dy_abs < chamber_h {
                     let t = dy_abs / chamber_h;
-                    let allowed_hw = neck_hw + t.powf(self.hourglass_curve) * (max_hw - neck_hw);
+                    let mut allowed_hw = neck_hw + t.powf(self.hourglass_curve) * (max_hw - neck_hw);
+                    if t > 0.70 {
+                        let dome = (1.0 - ((t - 0.70) / 0.30).powi(2)).max(0.0).sqrt();
+                        allowed_hw *= dome;
+                    }
                     if dx.abs() < allowed_hw {
                         if dy < 0.0 {
-                            // Upper chamber: filled with sand/water (0.80 height / 80% capacity so lower chamber fits 100%)
-                            self.heightmap.data[idx] = 0.80 + (noise_hm.data[idx] - DEFAULT_SAND_HEIGHT) * 0.15;
+                            // Upper chamber: filled with smooth sand/water (0.80 height / 80% capacity)
+                            self.heightmap.data[idx] = 0.80;
                         } else {
                             // Lower chamber: empty
                             self.heightmap.data[idx] = 0.0;

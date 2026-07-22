@@ -208,6 +208,10 @@ fn fs_main(
         if (v_abs < chamber_h) {
             let t = v_abs / chamber_h;
             allowed_hw = neck_hw + pow(t, uniforms.hourglass_curve) * (max_hw - neck_hw);
+            if (t > 0.70) {
+                let dome = sqrt(max(0.0, 1.0 - pow((t - 0.70) / 0.30, 2.0)));
+                allowed_hw = allowed_hw * dome;
+            }
             inside = abs(u) < allowed_hw;
         }
 
@@ -451,7 +455,7 @@ fn fs_main(
     let rim_mult = mix(0.40, 0.15, clamp(wetness, 0.0, 1.0));
     let roughness = clamp(mix(1.0 - 0.2 * grain_size, 0.05, wetness), 0.05, 1.0);
     let grain_fade = clamp(1.0 - wetness / 0.5, 0.0, 1.0);
-    let grain_strength = mix(0.0, 0.55, grain_size) * grain_fade;
+    let grain_strength = mix(0.0, 0.55, grain_size) * grain_fade * empty_blend;
     let grain_scale = mix(3500.0, 300.0, grain_size);
     let is_metallic = 0.0;
     let is_moon_dust = 0.0;

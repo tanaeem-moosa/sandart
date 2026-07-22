@@ -719,7 +719,11 @@ pub fn settle_tick(
                 let dy_abs = dy.abs();
                 if dy_abs < chamber_h {
                     let t = dy_abs / chamber_h;
-                    let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                    let mut allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                    if t > 0.70 {
+                        let dome = (1.0 - ((t - 0.70) / 0.30).powi(2)).max(0.0).sqrt();
+                        allowed_hw *= dome;
+                    }
                     dx.abs() < allowed_hw
                 } else {
                     false
@@ -833,7 +837,11 @@ pub fn settle_tick(
                         let dy_abs = dy.abs();
                         if dy_abs < chamber_h {
                             let t = dy_abs / chamber_h;
-                            let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                            let mut allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                            if t > 0.70 {
+                                let dome = (1.0 - ((t - 0.70) / 0.30).powi(2)).max(0.0).sqrt();
+                                allowed_hw *= dome;
+                            }
                             let inside = dx.abs() < allowed_hw;
                             
                             let safe_allowed_hw = (allowed_hw - 1.5).max(1.0);
