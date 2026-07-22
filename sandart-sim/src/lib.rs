@@ -359,8 +359,8 @@ impl DrawingSimulation {
                     let allowed_hw = neck_hw + t.powf(self.hourglass_curve) * (max_hw - neck_hw);
                     if dx.abs() < allowed_hw {
                         if dy < 0.0 {
-                            // Upper chamber: filled with sand (1.0 height / 100% capacity)
-                            self.heightmap.data[idx] = 1.0 + (noise_hm.data[idx] - DEFAULT_SAND_HEIGHT) * 0.2;
+                            // Upper chamber: filled with sand/water (0.80 height / 80% capacity so lower chamber fits 100%)
+                            self.heightmap.data[idx] = 0.80 + (noise_hm.data[idx] - DEFAULT_SAND_HEIGHT) * 0.15;
                         } else {
                             // Lower chamber: empty
                             self.heightmap.data[idx] = 0.0;
