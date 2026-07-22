@@ -1113,7 +1113,11 @@ pub fn settle_tick(
                         let rand_val = flow_seed as f32 / 65535.0;
                         
                         if rand_val >= lock_chance {
-                            let alpha_noise = 1.0 + (rand_val - 0.5) * 0.8; // +/- 40% flow rate noise
+                            let alpha_noise = if gravity_active {
+                                1.0 + (rand_val - 0.5) * 0.10 // Smooth laminar flow under gravity (+/- 5%)
+                            } else {
+                                1.0 + (rand_val - 0.5) * 0.80 // Natural stochastic noise in sandbox carving (+/- 40%)
+                            };
                             let mut flow = (alpha * (effective_slope - threshold) * alpha_noise).max(0.0);
                             
                             if let Some(q) = quantize_size {
