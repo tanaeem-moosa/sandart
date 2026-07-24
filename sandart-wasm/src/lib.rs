@@ -263,11 +263,7 @@ impl WasmSimulationState {
     }
 
     pub fn reset(&mut self) {
-        if self.simulator_mode == SimulatorMode::SandFall {
-            self.sim.sandbox_shape = SandboxShape::Hourglass;
-        } else {
-            self.sim.sandbox_shape = self.sandbox_shape;
-        }
+        self.sim.sandbox_shape = self.sandbox_shape;
         self.sim.reset();
         self.full_upload_needed = true;
         self.playback.state = PlaybackState::Stopped;
@@ -710,7 +706,7 @@ impl WasmSimulationState {
         }
 
         let (render_shape, render_marble_count) = if self.simulator_mode == SimulatorMode::SandFall {
-            (3u32, 0u32)
+            (self.sandbox_shape as u32, 0u32)
         } else {
             (self.sandbox_shape as u32, self.marble_count)
         };
