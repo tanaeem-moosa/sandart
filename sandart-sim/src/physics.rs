@@ -818,9 +818,34 @@ pub fn settle_tick(
     let mut rest_candidates = Vec::new();
 
     if gravity_active {
-        // Under gravity, always simulate all blocks to ensure continuous smooth flow and settling
+        // Under gravity, simulate blocks that contain sand height or active flow displacement
         for b in 0..expected_len {
-            must_simulate.push(b);
+            let bx = b % cols;
+            let by = b / cols;
+            let start_x = bx * block_size;
+            let end_x = ((bx + 1) * block_size).min(w);
+            let start_y = by * block_size;
+            let end_y = ((by + 1) * block_size).min(h);
+
+            let displacement = last_displacements[b];
+            let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
+
+            let mut block_has_sand = displacement > 1e-4 || staleness >= MAX_STALENESS;
+            if !block_has_sand {
+                'scan: for y in start_y..end_y {
+                    let offset = y * w;
+                    for x in start_x..end_x {
+                        if heightmap.data[offset + x] > 1e-4 {
+                            block_has_sand = true;
+                            break 'scan;
+                        }
+                    }
+                }
+            }
+
+            if block_has_sand {
+                must_simulate.push(b);
+            }
         }
     } else {
         for b in 0..expected_len {
