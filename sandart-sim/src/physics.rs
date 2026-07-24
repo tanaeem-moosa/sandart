@@ -230,7 +230,9 @@ fn get_ca_params(
     }
 
     // Lock chance
-    let lock_chance = if wetness < 0.05 {
+    let lock_chance = if gravity_active {
+        0.05 // Low locking under gravity so sand avalanches smoothly into a natural hill
+    } else if wetness < 0.05 {
         if flow_rate_prop >= 0.21 {
             // DrySand / CoarseSand stochastic locking
             if higher_neighbors >= 3 { 0.80 } else { 0.10 }
@@ -1100,24 +1102,21 @@ pub fn settle_tick(
                             gravity_dot * 4.0
                         };
                         
-                        // Stochastic sideways dispersion/splashing (controlled for free-fall droplets)
+                        // Stochastic sideways dispersion/splashing (always scatter a little laterally)
                         let gravity_len = gravity_dir.length();
                         if gravity_len > 1e-6 {
+                            let perp_x = -gravity_dir.y;
+                            let perp_y = gravity_dir.x;
+                            let perp_dot = (ndx * perp_x + ndy * perp_y).abs();
+                            let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
+                            let dispersion_noise = rand_val as f32 / 255.0;
+
                             if !is_free_fall {
-                                let perp_x = -gravity_dir.y;
-                                let perp_y = gravity_dir.x;
-                                let perp_dot = (ndx * perp_x + ndy * perp_y).abs();
-                                let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
-                                let dispersion_noise = rand_val as f32 / 255.0;
-                                gravity_push += perp_dot * 2.0 * dispersion_noise;
-                            } else if wetness >= 0.75 {
-                                // Gentle droplet bulb dispersion for liquids in free fall
-                                let perp_x = -gravity_dir.y;
-                                let perp_y = gravity_dir.x;
-                                let perp_dot = (ndx * perp_x + ndy * perp_y).abs();
-                                let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
-                                let dispersion_noise = rand_val as f32 / 255.0;
-                                gravity_push += perp_dot * 0.4 * dispersion_noise;
+                                // Lateral avalanche dispersion on bed heap to form a natural tall sand hill
+                                gravity_push += perp_dot * 3.5 * dispersion_noise;
+                            } else {
+                                // Always randomly scatter a little laterally in free fall for natural stream flow
+                                gravity_push += perp_dot * 0.8 * dispersion_noise;
                             }
                         }
                         
