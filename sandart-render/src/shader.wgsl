@@ -194,12 +194,12 @@ fn fs_main(
         // Project light dir onto ellipse perimeter (a = 0.468, b = 0.305)
         let scale = 1.0 / sqrt((dir_light.x * dir_light.x) / (0.468 * 0.468) + (dir_light.y * dir_light.y) / (0.305 * 0.305));
         led_center = dir_light * scale + 0.5;
-    } else if (uniforms.sandbox_shape == 3u) { // Hourglass
+    } else if (uniforms.sandbox_shape >= 3u) { // Hourglass variants (3u = Standard, 4u = MultiStage, 5u = Galton, 6u = Staircase, 7u = Cave, 8u = MultiNeck)
         let u = uv.x - 0.5;
         let v = uv.y - 0.5;
         let chamber_h = 0.40;
         let max_hw = 0.35;
-        let neck_hw = uniforms.neck_width;
+        let neck_hw = select(uniforms.neck_width * 3.5, uniforms.neck_width, uniforms.sandbox_shape != 8u);
 
         let v_abs = abs(v);
         var inside = false;
@@ -209,6 +209,49 @@ fn fs_main(
             let t = v_abs / chamber_h;
             allowed_hw = neck_hw + pow(t, uniforms.hourglass_curve) * (max_hw - neck_hw);
             inside = abs(u) < allowed_hw;
+
+            // Galton Board pegs (5u)
+            if (uniforms.sandbox_shape == 5u && v > 0.03 && v < 0.35) {
+                let row = i32((v - 0.03) / 0.043);
+                let row_y = 0.03 + f32(row) * 0.043;
+                if (abs(v - row_y) < 0.010) {
+                    let count = row + 1;
+                    let spacing = 0.039;
+                    let start_x = -f32(count - 1) * spacing * 0.5;
+                    for (var i = 0; i < count; i = i + 1) {
+                        let peg_x = start_x + f32(i) * spacing;
+                        let pdx = u - peg_x;
+                        let pdy = v - row_y;
+                        if (pdx * pdx + pdy * pdy < 0.000085) {
+                            inside = false;
+                        }
+                    }
+                }
+            }
+            // Staircase Cascade steps (6u)
+            if (uniforms.sandbox_shape == 6u && v > -0.30 && v < 0.30) {
+                let step = i32((v + 0.30) / 0.078);
+                let step_y = -0.30 + f32(step) * 0.078;
+                if (abs(v - step_y) < 0.006) {
+                    let is_left = step % 2 == 0;
+                    if (is_left && u < -0.02 && u > -allowed_hw + 0.03) {
+                        inside = false;
+                    } else if (!is_left && u > 0.02 && u < allowed_hw - 0.03) {
+                        inside = false;
+                    }
+                }
+            }
+            // Procedural Cave Stalactites (7u)
+            if (uniforms.sandbox_shape == 7u && v > -0.32 && v < 0.32) {
+                let cave_val = abs(sin(u * 30.0) + cos(v * 40.0) + sin(u * 15.0 + v * 20.0));
+                if (cave_val > 1.45 && abs(u) > 0.015) {
+                    inside = false;
+                }
+            }
+            // MultiNeck Center Barrier (8u)
+            if (uniforms.sandbox_shape == 8u && v_abs < 0.016 && abs(u) < 0.008) {
+                inside = false;
+            }
         }
 
         if (!inside) {

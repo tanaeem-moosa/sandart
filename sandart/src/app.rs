@@ -826,12 +826,22 @@ impl eframe::App for SandArtApp {
                             crate::config::SandboxShape::Square => "Square",
                             crate::config::SandboxShape::Oval => "Oval",
                             crate::config::SandboxShape::Hourglass => "Hourglass",
+                            crate::config::SandboxShape::MultiStageHourglass => "Serpentine 3-Stage Hourglass",
+                            crate::config::SandboxShape::GaltonBoard => "Galton Board (Pascal Peg Grid)",
+                            crate::config::SandboxShape::StaircaseCascade => "Staircase Cascade (Plinko)",
+                            crate::config::SandboxShape::ProceduralFunnel => "Procedural Cave Funnel",
+                            crate::config::SandboxShape::MultiNeckHourglass => "Multi-Neck Hourglass",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Circle, "Circle");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Square, "Square");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Oval, "Oval");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Hourglass, "Hourglass");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::MultiStageHourglass, "Serpentine 3-Stage Hourglass");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::GaltonBoard, "Galton Board (Pascal Peg Grid)");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::StaircaseCascade, "Staircase Cascade (Plinko)");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::ProceduralFunnel, "Procedural Cave Funnel");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::MultiNeckHourglass, "Multi-Neck Hourglass");
                         });
 
                     ui.add_space(12.0);
@@ -1156,7 +1166,15 @@ impl eframe::App for SandArtApp {
             }
 
             // Run simulation tick
-            if self.config.sandbox_shape == crate::config::SandboxShape::Hourglass {
+            if matches!(
+                self.config.sandbox_shape,
+                crate::config::SandboxShape::Hourglass
+                    | crate::config::SandboxShape::MultiStageHourglass
+                    | crate::config::SandboxShape::GaltonBoard
+                    | crate::config::SandboxShape::StaircaseCascade
+                    | crate::config::SandboxShape::ProceduralFunnel
+                    | crate::config::SandboxShape::MultiNeckHourglass
+            ) {
                 self.sim.gravity_dir = glam::Vec2::new(0.0, 0.04);
             } else {
                 self.sim.gravity_dir = glam::Vec2::ZERO;

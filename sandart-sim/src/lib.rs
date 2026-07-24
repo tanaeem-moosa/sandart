@@ -32,6 +32,11 @@ pub enum SandboxShape {
     Square,
     Oval,
     Hourglass,
+    MultiStageHourglass,
+    GaltonBoard,
+    StaircaseCascade,
+    ProceduralFunnel,
+    MultiNeckHourglass,
 }
 
 impl Default for SandboxShape {
@@ -295,7 +300,15 @@ impl DrawingSimulation {
 
     /// Reset the simulation state.
     pub fn reset(&mut self) {
-        if self.sandbox_shape == SandboxShape::Hourglass {
+        if matches!(
+            self.sandbox_shape,
+            SandboxShape::Hourglass
+                | SandboxShape::MultiStageHourglass
+                | SandboxShape::GaltonBoard
+                | SandboxShape::StaircaseCascade
+                | SandboxShape::ProceduralFunnel
+                | SandboxShape::MultiNeckHourglass
+        ) {
             self.heightmap.reset(0.0);
             self.initialize_hourglass();
         } else {
@@ -543,7 +556,12 @@ impl DrawingSimulation {
                     pos
                 }
             }
-            SandboxShape::Hourglass => {
+            SandboxShape::Hourglass
+            | SandboxShape::MultiStageHourglass
+            | SandboxShape::GaltonBoard
+            | SandboxShape::StaircaseCascade
+            | SandboxShape::ProceduralFunnel
+            | SandboxShape::MultiNeckHourglass => {
                 let chamber_r = 0.92 - marble_radius;  // normalized coords
                 let chamber_offset = 0.58;             // normalized vertical offset
                 let neck_hw = 0.07 - marble_radius;    // normalized neck half-width

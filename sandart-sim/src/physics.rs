@@ -554,6 +554,196 @@ pub fn displace_line(
     }
 }
 
+pub fn eval_sandbox_shape(
+    cx: usize,
+    cy: usize,
+    w: usize,
+    h: usize,
+    shape: crate::SandboxShape,
+    neck_width: f32,
+    hourglass_curve: f32,
+) -> (bool, bool) {
+    let center_x = w as f32 / 2.0;
+    let center_y = h as f32 / 2.0;
+    let dx = cx as f32 - center_x;
+    let dy = cy as f32 - center_y;
+    let w_f = w as f32;
+    let h_f = h as f32;
+
+    let r_x = 0.46 * w_f;
+    let r_y = 0.46 * h_f;
+    let r_x_sq = r_x * r_x;
+    let r_oval_y_sq = (0.35 * h_f) * (0.35 * h_f);
+    let safe_r_x = r_x - 1.5;
+    let safe_r_y = r_y - 1.5;
+    let safe_circle_r_sq = safe_r_x * safe_r_x;
+
+    match shape {
+        crate::SandboxShape::Circle => {
+            let dist_sq = dx * dx + dy * dy;
+            (dist_sq < r_x_sq, dist_sq < safe_circle_r_sq)
+        }
+        crate::SandboxShape::Square => {
+            let adx = dx.abs();
+            let ady = dy.abs();
+            (adx < r_x && ady < r_y, adx < safe_r_x && ady < safe_r_y)
+        }
+        crate::SandboxShape::Oval => {
+            let oval_val = (dx * dx) / r_x_sq + (dy * dy) / r_oval_y_sq;
+            (oval_val < 1.0, oval_val < 0.98)
+        }
+        crate::SandboxShape::Hourglass => {
+            let chamber_h = 0.40 * h_f;
+            let max_hw = 0.35 * w_f;
+            let neck_hw = neck_width * w_f;
+
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                let inside = dx.abs() < allowed_hw;
+                let safe_allowed_hw = (allowed_hw - 1.5).max(1.0);
+                let is_safe = dx.abs() < safe_allowed_hw && dy_abs < (chamber_h - 1.5);
+                (inside, is_safe)
+            } else {
+                (false, false)
+            }
+        }
+        crate::SandboxShape::MultiStageHourglass => {
+            let chamber_h = 0.42 * h_f;
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let max_hw = 0.35 * w_f;
+                let neck_hw = (neck_width * w_f).max(3.0);
+                
+                let neck_x_offset = if dy < -0.14 * h_f {
+                    -0.12 * w_f
+                } else if dy < 0.14 * h_f {
+                    0.12 * w_f
+                } else {
+                    0.0
+                };
+                let stage_t = (((dy + 0.42 * h_f) % (0.28 * h_f)) / (0.28 * h_f)).clamp(0.0, 1.0);
+                let allowed_hw = neck_hw + (stage_t - 0.5).abs() * 2.0 * (max_hw - neck_hw);
+                let dx_local = dx - neck_x_offset;
+                let inside = dx_local.abs() < allowed_hw;
+                let is_safe = dx_local.abs() < (allowed_hw - 1.5).max(1.0);
+                (inside, is_safe)
+            } else {
+                (false, false)
+            }
+        }
+        crate::SandboxShape::GaltonBoard => {
+            let chamber_h = 0.40 * h_f;
+            let max_hw = 0.35 * w_f;
+            let neck_hw = neck_width * w_f;
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                if dx.abs() >= allowed_hw {
+                    return (false, false);
+                }
+                
+                if dy > 15.0 && dy < 0.35 * h_f {
+                    let row = ((dy - 15.0) / 22.0) as i32;
+                    let peg_radius_sq = 4.5 * 4.5;
+                    let row_y = 15.0 + row as f32 * 22.0;
+                    if (dy - row_y).abs() < 5.0 {
+                        let count = row + 1;
+                        let spacing = 20.0;
+                        let start_x = - (count as f32 - 1.0) * spacing * 0.5;
+                        for i in 0..count {
+                            let peg_x = start_x + i as f32 * spacing;
+                            let pdx = dx - peg_x;
+                            let pdy = dy - row_y;
+                            if pdx * pdx + pdy * pdy < peg_radius_sq {
+                                return (false, false);
+                            }
+                        }
+                    }
+                }
+                let is_safe = dx.abs() < (allowed_hw - 1.5).max(1.0) && dy_abs < (chamber_h - 1.5);
+                (true, is_safe)
+            } else {
+                (false, false)
+            }
+        }
+        crate::SandboxShape::StaircaseCascade => {
+            let chamber_h = 0.40 * h_f;
+            let max_hw = 0.35 * w_f;
+            let neck_hw = neck_width * w_f;
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                if dx.abs() >= allowed_hw {
+                    return (false, false);
+                }
+                if dy > -0.30 * h_f && dy < 0.30 * h_f {
+                    let step = ((dy + 0.30 * h_f) / 40.0) as i32;
+                    let step_y = -0.30 * h_f + step as f32 * 40.0;
+                    if (dy - step_y).abs() < 3.0 {
+                        let is_left_shelf = step % 2 == 0;
+                        if is_left_shelf && dx < -10.0 && dx > -allowed_hw + 15.0 {
+                            return (false, false);
+                        } else if !is_left_shelf && dx > 10.0 && dx < allowed_hw - 15.0 {
+                            return (false, false);
+                        }
+                    }
+                }
+                let is_safe = dx.abs() < (allowed_hw - 1.5).max(1.0) && dy_abs < (chamber_h - 1.5);
+                (true, is_safe)
+            } else {
+                (false, false)
+            }
+        }
+        crate::SandboxShape::ProceduralFunnel => {
+            let chamber_h = 0.40 * h_f;
+            let max_hw = 0.35 * w_f;
+            let neck_hw = neck_width * w_f;
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                if dx.abs() >= allowed_hw {
+                    return (false, false);
+                }
+                if dy > -0.32 * h_f && dy < 0.32 * h_f {
+                    let cave_val = ((dx * 0.06).sin() + (dy * 0.08).cos() + (dx * 0.03 + dy * 0.04).sin()).abs();
+                    if cave_val > 1.45 && dx.abs() > 8.0 {
+                        return (false, false);
+                    }
+                }
+                let is_safe = dx.abs() < (allowed_hw - 1.5).max(1.0) && dy_abs < (chamber_h - 1.5);
+                (true, is_safe)
+            } else {
+                (false, false)
+            }
+        }
+        crate::SandboxShape::MultiNeckHourglass => {
+            let chamber_h = 0.40 * h_f;
+            let max_hw = 0.35 * w_f;
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let neck_hw = neck_width * w_f;
+                let allowed_hw = neck_hw * 3.5 + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                if dx.abs() >= allowed_hw {
+                    return (false, false);
+                }
+                if dy_abs < 8.0 && dx.abs() < 4.0 {
+                    return (false, false);
+                }
+                let is_safe = dx.abs() < (allowed_hw - 1.5).max(1.0) && dy_abs < (chamber_h - 1.5);
+                (true, is_safe)
+            } else {
+                (false, false)
+            }
+        }
+    }
+}
+
 /// Perform a single gravity flow/settling iteration inside the active bounding box.
 pub fn settle_tick(
     heightmap: &mut Heightmap,
@@ -690,44 +880,10 @@ pub fn settle_tick(
     }
 
     // Sandbox boundary helper scaled to current width and height
-    let w_f = w as f32;
-    let h_f = h as f32;
-    let center_x = w_f / 2.0;
-    let center_y = h_f / 2.0;
-    let r_x = 0.46 * w_f;
-    let r_y = 0.46 * h_f;
-    let r_oval_y = 0.30 * h_f;
-    let r_x_sq = r_x * r_x;
-    let r_oval_y_sq = r_oval_y * r_oval_y;
-
-    let safe_r_x = r_x - 1.5;
-    let safe_r_y = r_y - 1.5;
-    let safe_circle_r_sq = safe_r_x * safe_r_x;
-
+    let _w_f = w as f32;
+    let _h_f = h as f32;
     let is_inside = |cx: usize, cy: usize| -> bool {
-        let dx = cx as f32 - center_x;
-        let dy = cy as f32 - center_y;
-        match shape {
-            crate::SandboxShape::Circle => dx * dx + dy * dy < r_x_sq,
-            crate::SandboxShape::Square => dx.abs() < r_x && dy.abs() < r_y,
-            crate::SandboxShape::Oval => {
-                (dx * dx) / r_x_sq + (dy * dy) / r_oval_y_sq < 1.0
-            }
-            crate::SandboxShape::Hourglass => {
-                let chamber_h = 0.40 * h_f;
-                let max_hw = 0.35 * w_f;
-                let neck_hw = neck_width * w_f;
-
-                let dy_abs = dy.abs();
-                if dy_abs < chamber_h {
-                    let t = dy_abs / chamber_h;
-                    let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
-                    dx.abs() < allowed_hw
-                } else {
-                    false
-                }
-            }
-        }
+        eval_sandbox_shape(cx, cy, w, h, shape, neck_width, hourglass_curve).0
     };
 
     let mut modified = will_simulate.clone();
@@ -802,42 +958,7 @@ pub fn settle_tick(
                 };
                 let center_idx = row_offset + x;
 
-                let dx = x as f32 - center_x;
-                let dy = y as f32 - center_y;
-
-                let (inside, is_safe) = match shape {
-                    crate::SandboxShape::Circle => {
-                        let dist_sq = dx * dx + dy * dy;
-                        (dist_sq < r_x_sq, dist_sq < safe_circle_r_sq)
-                    }
-                    crate::SandboxShape::Square => {
-                        let adx = dx.abs();
-                        let ady = dy.abs();
-                        (adx < r_x && ady < r_y, adx < safe_r_x && ady < safe_r_y)
-                    }
-                    crate::SandboxShape::Oval => {
-                        let oval_val = (dx * dx) / r_x_sq + (dy * dy) / r_oval_y_sq;
-                        (oval_val < 1.0, oval_val < 0.98)
-                    }
-                    crate::SandboxShape::Hourglass => {
-                        let chamber_h = 0.40 * h_f;
-                        let max_hw = 0.35 * w_f;
-                        let neck_hw = neck_width * w_f;
-
-                        let dy_abs = dy.abs();
-                        if dy_abs < chamber_h {
-                            let t = dy_abs / chamber_h;
-                            let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
-                            let inside = dx.abs() < allowed_hw;
-                            
-                            let safe_allowed_hw = (allowed_hw - 1.5).max(1.0);
-                            let is_safe = dx.abs() < safe_allowed_hw && dy_abs < (chamber_h - 1.5);
-                            (inside, is_safe)
-                        } else {
-                            (false, false)
-                        }
-                    }
-                };
+                let (inside, is_safe) = eval_sandbox_shape(x, y, w, h, shape, neck_width, hourglass_curve);
 
                 if !inside {
                     continue;

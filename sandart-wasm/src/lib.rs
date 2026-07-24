@@ -346,6 +346,11 @@ impl WasmSimulationState {
             1 => SandboxShape::Square,
             2 => SandboxShape::Oval,
             3 => SandboxShape::Hourglass,
+            4 => SandboxShape::MultiStageHourglass,
+            5 => SandboxShape::GaltonBoard,
+            6 => SandboxShape::StaircaseCascade,
+            7 => SandboxShape::ProceduralFunnel,
+            8 => SandboxShape::MultiNeckHourglass,
             _ => SandboxShape::Circle,
         };
     }
