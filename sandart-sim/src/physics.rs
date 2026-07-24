@@ -732,43 +732,16 @@ pub fn settle_tick(
 
     let mut modified = will_simulate.clone();
 
-    // 1. Copy active blocks scheduled to run this frame from heightmap to temp buffer
-    for b in 0..expected_len {
-        if will_simulate[b] {
-            let bx = b % cols;
-            let by = b / cols;
-            let start_x = bx * block_size;
-            let end_x = ((bx + 1) * block_size).min(w);
-            let start_y = by * block_size;
-            let end_y = ((by + 1) * block_size).min(h);
-            for y in start_y..end_y {
-                let offset = y * w;
-                temp_heights[offset + start_x..offset + end_x]
-                    .copy_from_slice(&heightmap.data[offset + start_x..offset + end_x]);
-            }
-        }
-    }
+    // 1. Copy heightmap to working buffer at start of frame
+    temp_heights.copy_from_slice(&heightmap.data);
 
     let mut total_flow = 0.0f32;
     let mut next_displacements = vec![0.0f32; expected_len];
     let mut flow_occurred = false;
 
-    // Helper closure to activate neighbor blocks and copy their heights on demand
-    let activate_neighbor = |neighbor_b: usize, flow: f32, temp_heights: &mut Vec<f32>, heightmap: &crate::grid::Heightmap, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
-        if !modified[neighbor_b] {
-            let nbx = neighbor_b % cols;
-            let nby = neighbor_b / cols;
-            let start_x = nbx * block_size;
-            let end_x = ((nbx + 1) * block_size).min(w);
-            let start_y = nby * block_size;
-            let end_y = ((nby + 1) * block_size).min(h);
-            for y in start_y..end_y {
-                let offset = y * w;
-                temp_heights[offset + start_x..offset + end_x]
-                    .copy_from_slice(&heightmap.data[offset + start_x..offset + end_x]);
-            }
-            modified[neighbor_b] = true;
-        }
+    // Helper closure to activate neighbor blocks without mid-frame buffer overwrites
+    let activate_neighbor = |neighbor_b: usize, flow: f32, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
+        modified[neighbor_b] = true;
         if next_displacements[neighbor_b] < flow {
             next_displacements[neighbor_b] = flow;
         }
@@ -935,11 +908,11 @@ pub fn settle_tick(
                     if v_new.abs() > 3e-4 || (h_new - crate::DEFAULT_SAND_HEIGHT).abs() > 1e-4 {
                         flow_occurred = true;
                         let flow_val = v_new.abs().max((h_new - crate::DEFAULT_SAND_HEIGHT).abs());
-                        activate_neighbor(b, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements);
-                        if bx > 0 { activate_neighbor(b - 1, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
-                        if bx + 1 < cols { activate_neighbor(b + 1, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
-                        if by > 0 { activate_neighbor(b - cols, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
-                        if by + 1 < rows { activate_neighbor(b + cols, flow_val, temp_heights, heightmap, &mut modified, &mut next_displacements); }
+                        activate_neighbor(b, flow_val, &mut modified, &mut next_displacements);
+                        if bx > 0 { activate_neighbor(b - 1, flow_val, &mut modified, &mut next_displacements); }
+                        if bx + 1 < cols { activate_neighbor(b + 1, flow_val, &mut modified, &mut next_displacements); }
+                        if by > 0 { activate_neighbor(b - cols, flow_val, &mut modified, &mut next_displacements); }
+                        if by + 1 < rows { activate_neighbor(b + cols, flow_val, &mut modified, &mut next_displacements); }
                     }
                 } else {
                     // --- Cellular Automata (Sand settling behavior) ---
@@ -1038,8 +1011,8 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-                                    activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                                    activate_neighbor(b, clamped_flow, &mut modified, &mut next_displacements);
+                                    activate_neighbor(neighbor_b, clamped_flow, &mut modified, &mut next_displacements);
 
                                     advect_properties(cell_colors, cell_props, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                     temp_heights[center_idx] -= clamped_flow;
@@ -1218,8 +1191,8 @@ pub fn settle_tick(
                                     let ny = neighbor_idx / w;
                                     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
                                     
-                                    activate_neighbor(b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
-                                    activate_neighbor(neighbor_b, clamped_flow, temp_heights, heightmap, &mut modified, &mut next_displacements);
+                                    activate_neighbor(b, clamped_flow, &mut modified, &mut next_displacements);
+                                    activate_neighbor(neighbor_b, clamped_flow, &mut modified, &mut next_displacements);
 
                                     advect_properties(cell_colors, cell_props, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
                                     temp_heights[center_idx] -= clamped_flow;
