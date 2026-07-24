@@ -206,9 +206,17 @@ fn fs_main(
         var allowed_hw = 0.0;
         
         if (v_abs < chamber_h) {
-            let t = v_abs / chamber_h;
-            allowed_hw = neck_hw + pow(t, uniforms.hourglass_curve) * (max_hw - neck_hw);
-            inside = abs(u) < allowed_hw;
+            if (uniforms.sandbox_shape == 4u) {
+                let neck_offset = select(0.0, select(-0.12, 0.12, v >= -0.14 && v < 0.14), v < -0.14);
+                let stage_t = clamp(((v + 0.42) % 0.28) / 0.28, 0.0, 1.0);
+                allowed_hw = neck_hw + abs(stage_t - 0.5) * 2.0 * (max_hw - neck_hw);
+                let u_local = u - neck_offset;
+                inside = abs(u_local) < allowed_hw;
+            } else {
+                let t = v_abs / chamber_h;
+                allowed_hw = neck_hw + pow(t, uniforms.hourglass_curve) * (max_hw - neck_hw);
+                inside = abs(u) < allowed_hw;
+            }
 
             // Galton Board pegs (5u)
             if (uniforms.sandbox_shape == 5u && v > 0.03 && v < 0.35) {

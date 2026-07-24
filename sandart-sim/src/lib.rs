@@ -348,35 +348,26 @@ impl DrawingSimulation {
     pub fn initialize_hourglass(&mut self) {
         let w = GRID_SIZE;
         let h = GRID_SIZE;
-        let center_x = w as f32 / 2.0;
         let center_y = h as f32 / 2.0;
-        
-        let w_f = w as f32;
-        let h_f = h as f32;
-        let chamber_h = 0.40 * h_f;
-        let max_hw = 0.35 * w_f;
-        let neck_hw = self.neck_width * w_f;
         
         for y in 0..h {
             let row_offset = y * w;
             let dy = y as f32 - center_y;
             for x in 0..w {
-                let dx = x as f32 - center_x;
                 let idx = row_offset + x;
+                let (inside, _) = physics::eval_sandbox_shape(
+                    x, y, w, h,
+                    self.sandbox_shape,
+                    self.neck_width,
+                    self.hourglass_curve,
+                );
 
-                let dy_abs = dy.abs();
-                if dy_abs < chamber_h {
-                    let t = dy_abs / chamber_h;
-                    let allowed_hw = neck_hw + t.powf(self.hourglass_curve) * (max_hw - neck_hw);
-                    if dx.abs() < allowed_hw {
-                        if dy < 0.0 {
-                            // Upper chamber: filled with smooth sand/water (1.00 height / 100% capacity)
-                            self.heightmap.data[idx] = 1.00;
-                        } else {
-                            // Lower chamber: empty
-                            self.heightmap.data[idx] = 0.0;
-                        }
+                if inside {
+                    if dy < 0.0 {
+                        // Upper chamber: filled with smooth sand (1.00 height / 100% capacity)
+                        self.heightmap.data[idx] = 1.00;
                     } else {
+                        // Lower chamber: empty
                         self.heightmap.data[idx] = 0.0;
                     }
                 } else {
@@ -415,31 +406,16 @@ impl DrawingSimulation {
         }
 
         // Clean up any sand outside the shape boundary so no specs stay trapped outside/above ceiling
-        let w_f = w as f32;
-        let h_f = h as f32;
-        let center_x = w_f / 2.0;
-        let center_y = h_f / 2.0;
-        let chamber_h = 0.40 * h_f;
-        let max_hw = 0.35 * w_f;
-        let neck_hw = self.neck_width * w_f;
-
         for y in 0..h {
-            let dy = y as f32 - center_y;
-            let dy_abs = dy.abs();
-            if dy_abs < chamber_h {
-                let t = dy_abs / chamber_h;
-                let allowed_hw = neck_hw + t.powf(self.hourglass_curve) * (max_hw - neck_hw);
-                for x in 0..w {
-                    let dx = x as f32 - center_x;
-                    let idx = y * w + x;
-                    if dx.abs() >= allowed_hw {
-                        self.heightmap.data[idx] = 0.0;
-                        self.temp_heights[idx] = 0.0;
-                    }
-                }
-            } else {
-                for x in 0..w {
-                    let idx = y * w + x;
+            for x in 0..w {
+                let idx = y * w + x;
+                let (inside, _) = physics::eval_sandbox_shape(
+                    x, y, w, h,
+                    self.sandbox_shape,
+                    self.neck_width,
+                    self.hourglass_curve,
+                );
+                if !inside {
                     self.heightmap.data[idx] = 0.0;
                     self.temp_heights[idx] = 0.0;
                 }
