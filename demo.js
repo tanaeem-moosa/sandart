@@ -843,8 +843,21 @@ function setupPanelInput() {
     });
 
     document.getElementById('shape-select').addEventListener('change', () => {
-        syncSettings();
-        loadActivePattern();
+        if (!state) return;
+        const shapeVal = parseInt(document.getElementById('shape-select').value);
+        state.set_sandbox_shape(shapeVal);
+        if (shapeVal >= 3) {
+            if (!isSandFall) {
+                switchMode('sandfall');
+            } else {
+                state.reset_simulation();
+            }
+        } else {
+            syncSettings();
+            if (!isSandFall) {
+                loadActivePattern();
+            }
+        }
     });
 
     document.getElementById('pattern-select').addEventListener('change', () => {
