@@ -1096,16 +1096,6 @@ pub fn settle_tick(
                         } else {
                             gravity_dot * 4.0
                         };
-
-                        // Inward funnel acceleration towards neck center for upper chamber sand (dy < 0)
-                        if gravity_active && dy < 0.0 {
-                            let center_x_sym = (w as f32 - 1.0) / 2.0;
-                            let to_center_dir = (center_x_sym - x as f32).signum();
-                            let inward_dot = ndx * to_center_dir;
-                            if inward_dot > 0.0 {
-                                gravity_push += inward_dot * 2.0;
-                            }
-                        }
                         
                         // Stochastic sideways dispersion/splashing (always scatter a little laterally)
                         let gravity_len = gravity_dir.length();
