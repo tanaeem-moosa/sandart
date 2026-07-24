@@ -796,22 +796,14 @@ pub fn settle_tick(
         let x_len = end_x - start_x;
         let y_len = end_y - start_y;
         for idy in 0..y_len {
-            let y = if gravity_active && gravity_dir.y > 0.0 {
-                start_y + idy
-            } else if tick_count % 2 == 0 {
+            let y = if tick_count % 2 == 0 {
                 end_y - 1 - idy
             } else {
                 start_y + idy
             };
             let row_offset = y * w;
             for idx in 0..x_len {
-                let x = if gravity_active {
-                    if (tick_count + y as u32) % 2 == 0 {
-                        start_x + idx
-                    } else {
-                        end_x - 1 - idx
-                    }
-                } else if tick_count % 2 == 0 {
+                let x = if tick_count % 2 == 0 {
                     start_x + idx
                 } else {
                     end_x - 1 - idx
@@ -967,7 +959,7 @@ pub fn settle_tick(
                     let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
                     
                     let neighbors_info = if gravity_active && gravity_dir.y > 0.0 {
-                        if (tick_count + y as u32) % 2 == 0 {
+                        if (tick_count + x as u32 + y as u32) % 2 == 0 {
                             [
                                 (center_idx + w, 0.0, 1.0),  // Bottom (Gravity first)
                                 (center_idx - 1, -1.0, 0.0), // Left
