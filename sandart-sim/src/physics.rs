@@ -928,17 +928,13 @@ pub fn settle_tick(
                         continue;
                     }
 
-                    let h_center = if gravity_active {
-                        temp_heights[center_idx]
-                    } else {
-                        heightmap.data[center_idx]
-                    };
+                    let h_center = heightmap.data[center_idx];
 
                     // Load neighbor heights and find minimum
-                    let h_left = if gravity_active { temp_heights[center_idx - 1] } else { heightmap.data[center_idx - 1] };
-                    let h_right = if gravity_active { temp_heights[center_idx + 1] } else { heightmap.data[center_idx + 1] };
-                    let h_top = if gravity_active { temp_heights[center_idx - w] } else { heightmap.data[center_idx - w] };
-                    let h_bottom = if gravity_active { temp_heights[center_idx + w] } else { heightmap.data[center_idx + w] };
+                    let h_left = heightmap.data[center_idx - 1];
+                    let h_right = heightmap.data[center_idx + 1];
+                    let h_top = heightmap.data[center_idx - w];
+                    let h_bottom = heightmap.data[center_idx + w];
 
                     let min_h = h_left.min(h_right).min(h_top).min(h_bottom);
 
@@ -1002,7 +998,7 @@ pub fn settle_tick(
                             continue;
                         }
 
-                        let h_neighbor = if gravity_active { temp_heights[neighbor_idx] } else { heightmap.data[neighbor_idx] };
+                        let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
 
                         if geom_slope > 0.20 {
@@ -1039,8 +1035,7 @@ pub fn settle_tick(
                     // Cell-invariant properties
                     let mut higher_neighbors = 0;
                     for &(n_idx, _, _) in &neighbors_info {
-                        let h_n = if gravity_active { temp_heights[n_idx] } else { heightmap.data[n_idx] };
-                        if h_n >= h_center - 1e-4 {
+                        if heightmap.data[n_idx] >= h_center - 1e-4 {
                             higher_neighbors += 1;
                         }
                     }
@@ -1079,7 +1074,7 @@ pub fn settle_tick(
                     );
 
                     for &(neighbor_idx, ndx, ndy) in &neighbors_info {
-                        let h_neighbor = if gravity_active { temp_heights[neighbor_idx] } else { heightmap.data[neighbor_idx] };
+                        let h_neighbor = heightmap.data[neighbor_idx];
                         let geom_slope = h_center - h_neighbor;
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
                         

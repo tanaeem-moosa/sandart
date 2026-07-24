@@ -412,28 +412,26 @@ fn fs_main(
     // For dry materials, use the standard 1-texel finite difference.
     var dh_dx: f32;
     var dh_dy: f32;
-    let depth_factor = 28.0;
-    // 3-tap Sobel normal filtering for smooth heightmap shading without scanline artifacts
-    let u_prev = clamp((index.x - 0.5) / tex_size, 0.0, 1.0);
-    let u_next = clamp((index.x + 2.5) / tex_size, 0.0, 1.0);
-    let v_prev = clamp((index.y - 0.5) / tex_size, 0.0, 1.0);
-    let v_next = clamp((index.y + 2.5) / tex_size, 0.0, 1.0);
-    let hL0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_prev, v0), 0.0).r;
-    let hL1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_prev, v1), 0.0).r;
-    let hR0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_next, v0), 0.0).r;
-    let hR1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_next, v1), 0.0).r;
-    let hB0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v_prev), 0.0).r;
-    let hB1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v_prev), 0.0).r;
-    let hT0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v_next), 0.0).r;
-    let hT1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v_next), 0.0).r;
-
+    let depth_factor = 14.0;
     let is_water = step(0.85, wetness);
     if (is_water > 0.5) {
+        let u_prev = clamp((index.x - 0.5) / tex_size, 0.0, 1.0);
+        let u_next = clamp((index.x + 2.5) / tex_size, 0.0, 1.0);
+        let v_prev = clamp((index.y - 0.5) / tex_size, 0.0, 1.0);
+        let v_next = clamp((index.y + 2.5) / tex_size, 0.0, 1.0);
+        let hL0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_prev, v0), 0.0).r;
+        let hL1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_prev, v1), 0.0).r;
+        let hR0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_next, v0), 0.0).r;
+        let hR1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u_next, v1), 0.0).r;
+        let hB0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v_prev), 0.0).r;
+        let hB1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v_prev), 0.0).r;
+        let hT0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v_next), 0.0).r;
+        let hT1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v_next), 0.0).r;
         dh_dx = (mix(hR0, hR1, f.y) - mix(hL0, hL1, f.y)) * 0.5 + (h10 - h00) * 0.5;
         dh_dy = (mix(hT0, hT1, f.x) - mix(hB0, hB1, f.x)) * 0.5 + (h01 - h00) * 0.5;
     } else {
-        dh_dx = (mix(hR0, hR1, f.y) - mix(hL0, hL1, f.y)) * 0.25 + mix(h10 - h00, h11 - h01, f.y) * 0.5;
-        dh_dy = (mix(hT0, hT1, f.x) - mix(hB0, hB1, f.x)) * 0.25 + mix(h01 - h00, h11 - h10, f.x) * 0.5;
+        dh_dx = mix(h10 - h00, h11 - h01, f.y);
+        dh_dy = mix(h01 - h00, h11 - h10, f.x);
     }
 
     var normal = normalize(vec3<f32>(
