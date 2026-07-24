@@ -204,10 +204,11 @@ fn fs_main(
         let v_abs = abs(v);
         var inside = false;
         var allowed_hw = 0.0;
+        var neck_offset = 0.0;
         
         if (v_abs < chamber_h) {
             if (uniforms.sandbox_shape == 4u) {
-                let neck_offset = select(select(0.0, 0.12, v < 0.14), -0.12, v < -0.14);
+                neck_offset = select(select(0.0, 0.12, v < 0.14), -0.12, v < -0.14);
                 let stage_t = clamp(((v + 0.42) % 0.28) / 0.28, 0.0, 1.0);
                 allowed_hw = neck_hw + abs(stage_t - 0.5) * 2.0 * (max_hw - neck_hw);
                 let u_local = u - neck_offset;
@@ -265,8 +266,9 @@ fn fs_main(
 
         if (!inside) {
             in_casing = true;
-            let near_top_bottom = v_abs >= chamber_h && v_abs < (chamber_h + 0.015) && abs(u) < (max_hw + 0.015);
-            let near_side_walls = v_abs < chamber_h && abs(u) >= allowed_hw && abs(u) < (allowed_hw + 0.015);
+            let u_casing = u - neck_offset;
+            let near_top_bottom = v_abs >= chamber_h && v_abs < (chamber_h + 0.015) && abs(u_casing) < (max_hw + 0.015);
+            let near_side_walls = v_abs < chamber_h && abs(u_casing) >= allowed_hw && abs(u_casing) < (allowed_hw + 0.015);
             
             if (near_top_bottom || near_side_walls) {
                 in_led = true;
