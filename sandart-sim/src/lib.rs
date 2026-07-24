@@ -1107,4 +1107,41 @@ mod tests {
         assert!(diff_red < 0.005, "Multi-marble Red color mass leaked! diff = {:.5}%, initial = {}, final = {}", diff_red * 100.0, initial_red, final_red);
         assert!(diff_green < 0.005, "Multi-marble Green color mass leaked! diff = {:.5}%, initial = {}, final = {}", diff_green * 100.0, initial_green, final_green);
     }
+
+    #[test]
+    fn test_serpentine_no_sand_leaking() {
+        let mut sim = super::DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::MultiStageHourglass;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.initialize_hourglass();
+
+        let initial_mass: f32 = sim.heightmap.data.iter().sum();
+        assert!(initial_mass > 0.0, "MultiStageHourglass should be initialized with sand in Stage 1");
+
+        let targets = [None; 5];
+        // Run gravity simulation for 500 ticks across all 3 stages
+        for _ in 0..500 {
+            sim.update(
+                0.016,
+                &targets,
+                0.08,
+                MaterialMode::DrySand,
+                SandboxShape::MultiStageHourglass,
+                16.0,
+                16.0,
+            );
+        }
+
+        let final_mass: f32 = sim.heightmap.data.iter().sum();
+        let mass_err = (final_mass - initial_mass).abs() / initial_mass;
+
+        // Verify 100.0000% sand mass conservation with ZERO leaks out of bounds
+        assert!(
+            mass_err < 0.0001,
+            "Serpentine sandbox leaked sand mass under gravity! Init={:.4}, Final={:.4}, Error={:.6}",
+            initial_mass,
+            final_mass,
+            mass_err
+        );
+    }
 }

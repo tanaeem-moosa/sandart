@@ -208,9 +208,28 @@ fn fs_main(
         
         if (v_abs < chamber_h) {
             if (uniforms.sandbox_shape == 4u) {
-                neck_offset = select(select(0.0, 0.12, v < 0.14), -0.12, v < -0.14);
-                let stage_t = clamp(((v + 0.42) % 0.28) / 0.28, 0.0, 1.0);
-                allowed_hw = neck_hw + abs(stage_t - 0.5) * 2.0 * (max_hw - neck_hw);
+                var start_center = 0.0;
+                var end_center = 0.0;
+                var stage_v0 = 0.0;
+
+                if (v > 0.14) {
+                    start_center = -0.12;
+                    end_center = -0.12;
+                    stage_v0 = 0.42;
+                } else if (v > -0.14) {
+                    start_center = -0.12;
+                    end_center = 0.12;
+                    stage_v0 = 0.14;
+                } else {
+                    start_center = 0.12;
+                    end_center = 0.0;
+                    stage_v0 = -0.14;
+                }
+
+                let t = clamp((stage_v0 - v) / 0.28, 0.0, 1.0);
+                neck_offset = start_center + t * (end_center - start_center);
+                allowed_hw = neck_hw + (1.0 - t) * (max_hw - neck_hw);
+
                 let u_local = u - neck_offset;
                 inside = abs(u_local) < allowed_hw;
             } else {

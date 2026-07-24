@@ -619,27 +619,28 @@ pub fn eval_sandbox_shape(
         }
         crate::SandboxShape::MultiStageHourglass => {
             let chamber_h = 0.42 * h_f;
-            let dy_abs = dy.abs();
-            if dy_abs < chamber_h {
-                let max_hw = 0.35 * w_f;
-                let neck_hw = (neck_width * w_f).max(3.0);
-                
-                let neck_x_offset = if dy < -0.14 * h_f {
-                    -0.12 * w_f
-                } else if dy < 0.14 * h_f {
-                    0.12 * w_f
-                } else {
-                    0.0
-                };
-                let stage_t = (((dy + 0.42 * h_f) % (0.28 * h_f)) / (0.28 * h_f)).clamp(0.0, 1.0);
-                let allowed_hw = neck_hw + (stage_t - 0.5).abs() * 2.0 * (max_hw - neck_hw);
-                let dx_local = dx - neck_x_offset;
-                let inside = dx_local.abs() < allowed_hw;
-                let is_safe = dx_local.abs() < (allowed_hw - 1.5).max(1.0);
-                (inside, is_safe)
-            } else {
-                (false, false)
+            if dy.abs() >= chamber_h {
+                return (false, false);
             }
+            let max_hw = 0.35 * w_f;
+            let neck_hw = (neck_width * w_f).max(3.0);
+
+            let (start_center, end_center, stage_y0) = if dy < -0.14 * h_f {
+                (-0.12 * w_f, -0.12 * w_f, -0.42 * h_f)
+            } else if dy < 0.14 * h_f {
+                (-0.12 * w_f, 0.12 * w_f, -0.14 * h_f)
+            } else {
+                (0.12 * w_f, 0.0, 0.14 * h_f)
+            };
+
+            let t = ((dy - stage_y0) / (0.28 * h_f)).clamp(0.0, 1.0);
+            let center_x = start_center + t * (end_center - start_center);
+            let allowed_hw = neck_hw + (1.0 - t) * (max_hw - neck_hw);
+
+            let dx_local = dx - center_x;
+            let inside = dx_local.abs() < allowed_hw;
+            let is_safe = dx_local.abs() < (allowed_hw - 1.5).max(1.0);
+            (inside, is_safe)
         }
         crate::SandboxShape::GaltonBoard => {
             let chamber_h = 0.40 * h_f;
