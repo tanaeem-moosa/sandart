@@ -846,19 +846,11 @@ function setupPanelInput() {
         if (!state) return;
         const shapeVal = parseInt(document.getElementById('shape-select').value);
         state.set_sandbox_shape(shapeVal);
-        if (shapeVal >= 3) {
-            if (!isSandFall) {
-                switchMode('sandfall');
-            } else {
-                state.reset_simulation();
-            }
+        if (isSandFall) {
+            state.reset_simulation();
         } else {
-            if (isSandFall) {
-                switchMode('sandbox');
-            } else {
-                syncSettings();
-                loadActivePattern();
-            }
+            syncSettings();
+            loadActivePattern();
         }
     });
 
