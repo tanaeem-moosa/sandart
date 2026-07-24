@@ -775,9 +775,20 @@ pub fn settle_tick(
     };
 
     // 2. Continuous per-cell solver (loop over active blocks)
+    let gravity_active = gravity_dir.length_squared() > 1e-6;
     let b_len = expected_len;
     for idx_b in 0..b_len {
-        let b = if tick_count % 2 == 0 {
+        let b = if gravity_active && gravity_dir.y > 0.0 {
+            // Under downward gravity, process blocks top-to-bottom so falling sand advects across block boundaries without trapping
+            let by = idx_b / cols;
+            let bx_idx = idx_b % cols;
+            let bx = if (tick_count + by as u32) % 2 == 0 {
+                bx_idx
+            } else {
+                cols - 1 - bx_idx
+            };
+            by * cols + bx
+        } else if tick_count % 2 == 0 {
             idx_b
         } else {
             b_len - 1 - idx_b
@@ -793,19 +804,25 @@ pub fn settle_tick(
         let start_y = by * block_size;
         let end_y = ((by + 1) * block_size).min(h);
 
-        let gravity_active = gravity_dir.length_squared() > 1e-6;
-
         let x_len = end_x - start_x;
         let y_len = end_y - start_y;
         for idy in 0..y_len {
-            let y = if tick_count % 2 == 0 {
+            let y = if gravity_active && gravity_dir.y > 0.0 {
+                start_y + idy
+            } else if tick_count % 2 == 0 {
                 end_y - 1 - idy
             } else {
                 start_y + idy
             };
             let row_offset = y * w;
             for idx in 0..x_len {
-                let x = if tick_count % 2 == 0 {
+                let x = if gravity_active {
+                    if (tick_count + y as u32) % 2 == 0 {
+                        start_x + idx
+                    } else {
+                        end_x - 1 - idx
+                    }
+                } else if tick_count % 2 == 0 {
                     start_x + idx
                 } else {
                     end_x - 1 - idx
@@ -932,13 +949,17 @@ pub fn settle_tick(
                         continue;
                     }
 
-                    let h_center = heightmap.data[center_idx];
+                    let h_center = if gravity_active {
+                        temp_heights[center_idx].max(heightmap.data[center_idx])
+                    } else {
+                        heightmap.data[center_idx]
+                    };
 
                     // Load neighbor heights and find minimum
-                    let h_left = heightmap.data[center_idx - 1];
-                    let h_right = heightmap.data[center_idx + 1];
-                    let h_top = heightmap.data[center_idx - w];
-                    let h_bottom = heightmap.data[center_idx + w];
+                    let h_left = if gravity_active { temp_heights[center_idx - 1].max(heightmap.data[center_idx - 1]) } else { heightmap.data[center_idx - 1] };
+                    let h_right = if gravity_active { temp_heights[center_idx + 1].max(heightmap.data[center_idx + 1]) } else { heightmap.data[center_idx + 1] };
+                    let h_top = if gravity_active { temp_heights[center_idx - w].max(heightmap.data[center_idx - w]) } else { heightmap.data[center_idx - w] };
+                    let h_bottom = if gravity_active { temp_heights[center_idx + w].max(heightmap.data[center_idx + w]) } else { heightmap.data[center_idx + w] };
 
                     let min_h = h_left.min(h_right).min(h_top).min(h_bottom);
 
@@ -1002,7 +1023,7 @@ pub fn settle_tick(
                             continue;
                         }
 
-                        let h_neighbor = heightmap.data[neighbor_idx];
+                        let h_neighbor = if gravity_active { temp_heights[neighbor_idx].max(heightmap.data[neighbor_idx]) } else { heightmap.data[neighbor_idx] };
                         let geom_slope = h_center - h_neighbor;
 
                         if geom_slope > 0.20 {
@@ -1039,7 +1060,8 @@ pub fn settle_tick(
                     // Cell-invariant properties
                     let mut higher_neighbors = 0;
                     for &(n_idx, _, _) in &neighbors_info {
-                        if heightmap.data[n_idx] >= h_center - 1e-4 {
+                        let h_n = if gravity_active { temp_heights[n_idx].max(heightmap.data[n_idx]) } else { heightmap.data[n_idx] };
+                        if h_n >= h_center - 1e-4 {
                             higher_neighbors += 1;
                         }
                     }
@@ -1078,7 +1100,7 @@ pub fn settle_tick(
                     );
 
                     for &(neighbor_idx, ndx, ndy) in &neighbors_info {
-                        let h_neighbor = heightmap.data[neighbor_idx];
+                        let h_neighbor = if gravity_active { temp_heights[neighbor_idx].max(heightmap.data[neighbor_idx]) } else { heightmap.data[neighbor_idx] };
                         let geom_slope = h_center - h_neighbor;
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
                         
@@ -1088,7 +1110,7 @@ pub fn settle_tick(
                         }
 
                         let h_below = if center_idx + w < temp_heights.len() {
-                            temp_heights[center_idx + w]
+                            temp_heights[center_idx + w].max(heightmap.data[center_idx + w])
                         } else {
                             0.0
                         };
@@ -2700,6 +2722,98 @@ mod tests {
                     panic!("Found floating sand inside container at ({}, {}) with h={} and empty air below!", x, y, h_curr);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_falling_stream_no_block_boundary_density_spikes() {
+        let w = 512;
+        let h = 512;
+        let block_size = 32;
+        let cols = w / block_size;
+        let rows = h / block_size;
+
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        let chamber_h = 0.40 * h as f32;
+        let max_hw = 0.35 * w as f32;
+        let neck_hw = 0.005 * w as f32;
+        let hourglass_curve = 0.6;
+
+        let mut hm = Heightmap::new(w, h, 0.0);
+
+        // Fill upper chamber (y < center_y) up to 0.50 capacity
+        for y in 0..h {
+            let dy = y as f32 - center_y;
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                for x in 0..w {
+                    let dx = x as f32 - center_x;
+                    if dx.abs() < allowed_hw && dy < -4.0 && dy > -0.50 * chamber_h {
+                        hm.data[y * w + x] = 0.5;
+                    }
+                }
+            }
+        }
+
+        let mut temp_heights = hm.data.clone();
+        let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: w - 1,
+            min_y: 0,
+            max_y: h - 1,
+            active: true,
+        };
+
+        let mut wave_vel = vec![0.0; w * h];
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
+        let mut last_displacements = vec![1.0; cols * rows];
+        let mut last_simulated_ticks = vec![0; cols * rows];
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // Run simulation for 80 ticks
+        for i in 0..80 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                i as u32,
+                &mut wave_vel,
+                SandboxShape::Hourglass,
+                i as u32,
+                gravity_dir,
+                hourglass_curve,
+                0.005,
+            );
+        }
+
+        // Print heights at block boundaries along stream center x=256
+        let stream_x = 256;
+        println!("--- Stream Height Profile at 32-pixel Block Boundaries ---");
+        for by in 8..15 {
+            let boundary_y = by * 32;
+            let h_prev = hm.data[(boundary_y - 1) * w + stream_x];
+            let h_bound = hm.data[boundary_y * w + stream_x];
+            let h_next = hm.data[(boundary_y + 1) * w + stream_x];
+            println!(
+                "Boundary y={}: y-1={:.4}, y_bound={:.4}, y+1={:.4}",
+                boundary_y, h_prev, h_bound, h_next
+            );
         }
     }
 }
