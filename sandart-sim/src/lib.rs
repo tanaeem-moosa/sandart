@@ -362,12 +362,18 @@ impl DrawingSimulation {
                     self.hourglass_curve,
                 );
 
+                let fill_threshold = if self.sandbox_shape == SandboxShape::MultiStageHourglass {
+                    -0.14 * h as f32
+                } else {
+                    0.0
+                };
+
                 if inside {
-                    if dy < 0.0 {
+                    if dy < fill_threshold {
                         // Upper chamber: filled with smooth sand (1.00 height / 100% capacity)
                         self.heightmap.data[idx] = 1.00;
                     } else {
-                        // Lower chamber: empty
+                        // Lower chamber / lower stages: empty
                         self.heightmap.data[idx] = 0.0;
                     }
                 } else {

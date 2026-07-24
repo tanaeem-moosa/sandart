@@ -207,7 +207,7 @@ fn fs_main(
         
         if (v_abs < chamber_h) {
             if (uniforms.sandbox_shape == 4u) {
-                let neck_offset = select(0.0, select(-0.12, 0.12, v >= -0.14 && v < 0.14), v < -0.14);
+                let neck_offset = select(select(0.0, 0.12, v < 0.14), -0.12, v < -0.14);
                 let stage_t = clamp(((v + 0.42) % 0.28) / 0.28, 0.0, 1.0);
                 allowed_hw = neck_hw + abs(stage_t - 0.5) * 2.0 * (max_hw - neck_hw);
                 let u_local = u - neck_offset;
@@ -219,18 +219,19 @@ fn fs_main(
             }
 
             // Galton Board pegs (5u)
-            if (uniforms.sandbox_shape == 5u && v > 0.03 && v < 0.35) {
-                let row = i32((v - 0.03) / 0.043);
-                let row_y = 0.03 + f32(row) * 0.043;
-                if (abs(v - row_y) < 0.010) {
-                    let count = row + 1;
-                    let spacing = 0.039;
-                    let start_x = -f32(count - 1) * spacing * 0.5;
+            if (uniforms.sandbox_shape == 5u && v > 0.015 && v < 0.38) {
+                let row = i32((v - 0.015) / 0.0264);
+                let row_y = 0.015 + f32(row) * 0.0264;
+                if (abs(v - row_y) < 0.006) {
+                    let count = row + 3;
+                    let spacing = 0.0264;
+                    let offset_x = select(0.0, 0.0132, row % 2 == 1);
+                    let start_x = -f32(count - 1) * spacing * 0.5 + offset_x;
                     for (var i = 0; i < count; i = i + 1) {
                         let peg_x = start_x + f32(i) * spacing;
                         let pdx = u - peg_x;
                         let pdy = v - row_y;
-                        if (pdx * pdx + pdy * pdy < 0.000085) {
+                        if (pdx * pdx + pdy * pdy < 0.000030) {
                             inside = false;
                         }
                     }

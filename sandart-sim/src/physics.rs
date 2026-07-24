@@ -653,14 +653,15 @@ pub fn eval_sandbox_shape(
                     return (false, false);
                 }
                 
-                if dy > 15.0 && dy < 0.35 * h_f {
-                    let row = ((dy - 15.0) / 22.0) as i32;
-                    let peg_radius_sq = 4.5 * 4.5;
-                    let row_y = 15.0 + row as f32 * 22.0;
-                    if (dy - row_y).abs() < 5.0 {
-                        let count = row + 1;
-                        let spacing = 20.0;
-                        let start_x = - (count as f32 - 1.0) * spacing * 0.5;
+                if dy > 8.0 && dy < 0.38 * h_f {
+                    let row = ((dy - 8.0) / 13.5) as i32;
+                    let peg_radius_sq = 2.8 * 2.8;
+                    let row_y = 8.0 + row as f32 * 13.5;
+                    if (dy - row_y).abs() < 3.2 {
+                        let count = row + 3;
+                        let spacing = 13.5;
+                        let offset_x = if row % 2 == 1 { 6.75 } else { 0.0 };
+                        let start_x = - (count as f32 - 1.0) * spacing * 0.5 + offset_x;
                         for i in 0..count {
                             let peg_x = start_x + i as f32 * spacing;
                             let pdx = dx - peg_x;
