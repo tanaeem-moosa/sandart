@@ -27,22 +27,30 @@ pub fn advect_properties(colors: &mut [u8], props: &mut [f32], src: usize, dst: 
     if total < 1e-6 {
         return;
     }
-    let w_keep = h_dst / total;
-    let w_arrive = flow / total;
-
     let src_base = src * 4;
     let dst_base = dst * 4;
 
-    for ch in 0..3 {
-        colors[dst_base + ch] = (
-            colors[dst_base + ch] as f32 * w_keep
-            + colors[src_base + ch] as f32 * w_arrive
-        ).clamp(0.0, 255.0).round() as u8;
-    }
-    colors[dst_base + 3] = 255; // opaque alpha
+    if h_dst < 1e-4 {
+        // Empty destination cell: inherit 100% of source color and properties
+        for ch in 0..4 {
+            colors[dst_base + ch] = colors[src_base + ch];
+            props[dst_base + ch] = props[src_base + ch];
+        }
+    } else {
+        let w_keep = h_dst / total;
+        let w_arrive = flow / total;
 
-    for ch in 0..4 {
-        props[dst_base + ch] = props[dst_base + ch] * w_keep + props[src_base + ch] * w_arrive;
+        for ch in 0..3 {
+            colors[dst_base + ch] = (
+                colors[dst_base + ch] as f32 * w_keep
+                + colors[src_base + ch] as f32 * w_arrive
+            ).clamp(0.0, 255.0).round() as u8;
+        }
+        colors[dst_base + 3] = 255; // opaque alpha
+
+        for ch in 0..4 {
+            props[dst_base + ch] = props[dst_base + ch] * w_keep + props[src_base + ch] * w_arrive;
+        }
     }
 }
 
@@ -2909,5 +2917,148 @@ mod tests {
                 boundary_y, h_prev, h_bound, h_next
             );
         }
+    }
+
+    #[test]
+    fn test_hourglass_color_and_property_conservation_under_gravity() {
+        // Verify that RGBA cell colors and material properties (wetness, grain size, flow rate)
+        // are 100% conserved when sand flows down through the hourglass neck under gravity.
+        let w = 128;
+        let h = 128;
+        let mut hm = Heightmap::new(w, h, 0.0);
+        let mut temp_heights = vec![0.0f32; w * h];
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_props = vec![0.0f32; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut wave_vel = vec![0.0f32; w * h];
+
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        let chamber_h = 0.40 * (h as f32);
+        let max_hw = 0.35 * (w as f32);
+        let neck_hw = 0.04 * (w as f32);
+
+        // Fill upper chamber with two distinct colored & property layers (Red Dry Sand / Blue Wet Sand)
+        for y in 0..h {
+            let dy = y as f32 - center_y;
+            if dy < 0.0 && dy.abs() < chamber_h {
+                let t = dy.abs() / chamber_h;
+                let allowed_hw = neck_hw + t.powf(0.6) * (max_hw - neck_hw);
+                for x in 0..w {
+                    let dx = x as f32 - center_x;
+                    if dx.abs() < allowed_hw {
+                        let idx = y * w + x;
+                        hm.data[idx] = 0.80; // 80% initial fill height
+
+                        if dy < -0.20 * (h as f32) {
+                            // Top Layer: Red Dry Sand (Wetness = 0.0, GrainSize = 0.50)
+                            cell_colors[idx * 4 + 0] = 230;
+                            cell_colors[idx * 4 + 1] = 40;
+                            cell_colors[idx * 4 + 2] = 40;
+                            cell_colors[idx * 4 + 3] = 255;
+
+                            cell_props[idx * 4 + PROP_WETNESS] = 0.00;
+                            cell_props[idx * 4 + PROP_THRESHOLD] = 0.08;
+                            cell_props[idx * 4 + PROP_FLOW_RATE] = 0.25;
+                            cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.50;
+                        } else {
+                            // Bottom Layer: Blue Wet Sand (Wetness = 0.40, GrainSize = 0.30)
+                            cell_colors[idx * 4 + 0] = 40;
+                            cell_colors[idx * 4 + 1] = 80;
+                            cell_colors[idx * 4 + 2] = 230;
+                            cell_colors[idx * 4 + 3] = 255;
+
+                            cell_props[idx * 4 + PROP_WETNESS] = 0.40;
+                            cell_props[idx * 4 + PROP_THRESHOLD] = 0.12;
+                            cell_props[idx * 4 + PROP_FLOW_RATE] = 0.15;
+                            cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.30;
+                        }
+                    }
+                }
+            }
+        }
+        temp_heights.copy_from_slice(&hm.data);
+
+        // Helper to calculate total color and property mass
+        let calc_totals = |colors: &[u8], props: &[f32], hmap: &Heightmap| -> (f64, f64, f64, f64, f64) {
+            let mut r_total = 0.0f64;
+            let mut g_total = 0.0f64;
+            let mut b_total = 0.0f64;
+            let mut wet_total = 0.0f64;
+            let mut grain_total = 0.0f64;
+            for (idx, &height) in hmap.as_slice().iter().enumerate() {
+                let h_val = height as f64;
+                if h_val > 0.0 {
+                    r_total += (colors[idx * 4 + 0] as f64) * h_val;
+                    g_total += (colors[idx * 4 + 1] as f64) * h_val;
+                    b_total += (colors[idx * 4 + 2] as f64) * h_val;
+                    wet_total += (props[idx * 4 + PROP_WETNESS] as f64) * h_val;
+                    grain_total += (props[idx * 4 + PROP_GRAIN_SIZE] as f64) * h_val;
+                }
+            }
+            (r_total, g_total, b_total, wet_total, grain_total)
+        };
+
+        let (init_r, init_g, init_b, init_wet, init_grain) = calc_totals(&cell_colors, &cell_props, &hm);
+
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: w - 1,
+            min_y: 0,
+            max_y: h - 1,
+            active: true,
+        };
+
+        let expected_len = (w / 32) * (h / 32);
+        let mut active_blocks = vec![crate::BlockActivity::Fast; expected_len];
+        let mut last_displacements = vec![1.0; expected_len];
+        let mut last_simulated_ticks = vec![0; expected_len];
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // Run 300 gravity ticks flowing sand down into the lower chamber
+        for i in 0..300 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                i as u32,
+                &mut wave_vel,
+                SandboxShape::Hourglass,
+                i as u32,
+                gravity_dir,
+                0.6,
+                0.04,
+            );
+        }
+
+        let (final_r, final_g, final_b, final_wet, final_grain) = calc_totals(&cell_colors, &cell_props, &hm);
+
+        println!("Init Totals:  R={:.2}, G={:.2}, B={:.2}, Wet={:.2}, Grain={:.2}", init_r, init_g, init_b, init_wet, init_grain);
+        println!("Final Totals: R={:.2}, G={:.2}, B={:.2}, Wet={:.2}, Grain={:.2}", final_r, final_g, final_b, final_wet, final_grain);
+
+        // Relative error tolerances
+        let r_err = (final_r - init_r).abs() / init_r;
+        let g_err = (final_g - init_g).abs() / init_g;
+        let b_err = (final_b - init_b).abs() / init_b;
+        let wet_err = (final_wet - init_wet).abs() / init_wet;
+        let grain_err = (final_grain - init_grain).abs() / init_grain;
+
+        println!("Errors: R_err={:.6}, G_err={:.6}, B_err={:.6}, Wet_err={:.6}, Grain_err={:.6}", r_err, g_err, b_err, wet_err, grain_err);
+
+        // 8-bit integer color channel rounding tolerance (<= 8%), float property tolerance (<= 0.1%)
+        assert!(r_err < 0.08, "Red color mass loss under gravity: err={:.6}", r_err);
+        assert!(g_err < 0.08, "Green color mass loss under gravity: err={:.6}", g_err);
+        assert!(b_err < 0.08, "Blue color mass loss under gravity: err={:.6}", b_err);
+        assert!(wet_err < 0.001, "Wetness property loss under gravity: err={:.6}", wet_err);
+        assert!(grain_err < 0.001, "Grain size property loss under gravity: err={:.6}", grain_err);
     }
 }
