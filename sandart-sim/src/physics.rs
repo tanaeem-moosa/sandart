@@ -928,13 +928,17 @@ pub fn settle_tick(
                         continue;
                     }
 
-                    let h_center = heightmap.data[center_idx];
+                    let h_center = if gravity_active {
+                        temp_heights[center_idx]
+                    } else {
+                        heightmap.data[center_idx]
+                    };
 
                     // Load neighbor heights and find minimum
-                    let h_left = heightmap.data[center_idx - 1];
-                    let h_right = heightmap.data[center_idx + 1];
-                    let h_top = heightmap.data[center_idx - w];
-                    let h_bottom = heightmap.data[center_idx + w];
+                    let h_left = if gravity_active { temp_heights[center_idx - 1] } else { heightmap.data[center_idx - 1] };
+                    let h_right = if gravity_active { temp_heights[center_idx + 1] } else { heightmap.data[center_idx + 1] };
+                    let h_top = if gravity_active { temp_heights[center_idx - w] } else { heightmap.data[center_idx - w] };
+                    let h_bottom = if gravity_active { temp_heights[center_idx + w] } else { heightmap.data[center_idx + w] };
 
                     let min_h = h_left.min(h_right).min(h_top).min(h_bottom);
 
@@ -998,7 +1002,7 @@ pub fn settle_tick(
                             continue;
                         }
 
-                        let h_neighbor = heightmap.data[neighbor_idx];
+                        let h_neighbor = if gravity_active { temp_heights[neighbor_idx] } else { heightmap.data[neighbor_idx] };
                         let geom_slope = h_center - h_neighbor;
 
                         if geom_slope > 0.20 {
@@ -1035,7 +1039,8 @@ pub fn settle_tick(
                     // Cell-invariant properties
                     let mut higher_neighbors = 0;
                     for &(n_idx, _, _) in &neighbors_info {
-                        if heightmap.data[n_idx] >= h_center - 1e-4 {
+                        let h_n = if gravity_active { temp_heights[n_idx] } else { heightmap.data[n_idx] };
+                        if h_n >= h_center - 1e-4 {
                             higher_neighbors += 1;
                         }
                     }
@@ -1062,8 +1067,6 @@ pub fn settle_tick(
                         0.0
                     };
 
-                    let gravity_active = gravity_dir.length_squared() > 1e-6;
-
                     let (threshold, alpha, lock_chance, quantize_size) = get_ca_params(
                         wetness,
                         threshold_prop,
@@ -1076,7 +1079,7 @@ pub fn settle_tick(
                     );
 
                     for &(neighbor_idx, ndx, ndy) in &neighbors_info {
-                        let h_neighbor = heightmap.data[neighbor_idx];
+                        let h_neighbor = if gravity_active { temp_heights[neighbor_idx] } else { heightmap.data[neighbor_idx] };
                         let geom_slope = h_center - h_neighbor;
                         let gravity_dot = ndx * gravity_dir.x + ndy * gravity_dir.y;
                         
@@ -2446,6 +2449,86 @@ mod tests {
             "Liquid should flow downward under gravity! top={}, bottom={}",
             final_top_sum, final_bottom_sum
         );
+    }
+
+    #[test]
+    fn test_hourglass_full_drainage() {
+        let w = 64;
+        let h = 64;
+        let mut hm = Heightmap::new(w, h, 0.0);
+
+        let center_x = 32.0;
+        let center_y = 32.0;
+        let chamber_h = 0.40 * 64.0;
+        let max_hw = 0.35 * 64.0;
+        let neck_hw = 0.04 * 64.0;
+
+        for y in 0..64 {
+            let dy = y as f32 - center_y;
+            let dy_abs = dy.abs();
+            if dy_abs < chamber_h {
+                let t = dy_abs / chamber_h;
+                let allowed_hw = neck_hw + t.powf(0.60) * (max_hw - neck_hw);
+                for x in 0..64 {
+                    let dx = x as f32 - center_x;
+                    if dx.abs() < allowed_hw && dy < 0.0 {
+                        let idx = y * w + x;
+                        hm.data[idx] = 0.55;
+                    }
+                }
+            }
+        }
+
+        let mut temp_heights = hm.data.clone();
+        let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds {
+            min_x: 0,
+            max_x: 63,
+            min_y: 0,
+            max_y: 63,
+            active: true,
+        };
+
+        let mut wave_vel = vec![0.0; w * h];
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
+        let mut last_displacements = vec![1.0; 4];
+        let mut last_simulated_ticks = vec![0; 4];
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        for i in 0..1000 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345 + i as u32,
+                &mut wave_vel,
+                SandboxShape::Hourglass,
+                i as u32,
+                gravity_dir,
+                0.04,
+                0.60,
+            );
+        }
+
+        println!("--- Sand around neck (y=30..36) ---");
+        for y in 30..36 {
+            for x in 28..36 {
+                let idx = y * w + x;
+                println!("y={:2}, x={:2}: h={:.4}", y, x, hm.data[idx]);
+            }
+        }
     }
 
     #[test]
