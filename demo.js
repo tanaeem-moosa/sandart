@@ -853,8 +853,10 @@ function setupPanelInput() {
                 state.reset_simulation();
             }
         } else {
-            syncSettings();
-            if (!isSandFall) {
+            if (isSandFall) {
+                switchMode('sandbox');
+            } else {
+                syncSettings();
                 loadActivePattern();
             }
         }
