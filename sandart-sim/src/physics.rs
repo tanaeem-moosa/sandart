@@ -887,11 +887,20 @@ pub fn settle_tick(
         active_blocks[b] = crate::BlockActivity::Medium;
     }
 
-    // Sandbox boundary helper scaled to current width and height
-    let _w_f = w as f32;
-    let _h_f = h as f32;
+    // Precompute shape boundary masks once per frame to eliminate redundant math / powf calls in cell loops
+    let mut shape_inside = vec![false; w * h];
+    let mut safe_inside = vec![false; w * h];
+    for y in 0..h {
+        let offset = y * w;
+        for x in 0..w {
+            let (in_b, safe_b) = eval_sandbox_shape(x, y, w, h, shape, neck_width, hourglass_curve);
+            shape_inside[offset + x] = in_b;
+            safe_inside[offset + x] = safe_b;
+        }
+    }
+
     let is_inside = |cx: usize, cy: usize| -> bool {
-        eval_sandbox_shape(cx, cy, w, h, shape, neck_width, hourglass_curve).0
+        shape_inside[cy * w + cx]
     };
 
     let mut modified = will_simulate.clone();
@@ -966,7 +975,8 @@ pub fn settle_tick(
                 };
                 let center_idx = row_offset + x;
 
-                let (inside, is_safe) = eval_sandbox_shape(x, y, w, h, shape, neck_width, hourglass_curve);
+                let inside = shape_inside[center_idx];
+                let is_safe = safe_inside[center_idx];
 
                 if !inside {
                     continue;
