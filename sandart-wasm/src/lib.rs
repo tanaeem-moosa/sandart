@@ -341,7 +341,7 @@ impl WasmSimulationState {
     }
 
     pub fn set_sandbox_shape(&mut self, shape: u32) {
-        self.sandbox_shape = match shape {
+        let new_shape = match shape {
             0 => SandboxShape::Circle,
             1 => SandboxShape::Square,
             2 => SandboxShape::Oval,
@@ -353,6 +353,20 @@ impl WasmSimulationState {
             8 => SandboxShape::MultiNeckHourglass,
             _ => SandboxShape::Circle,
         };
+        self.sandbox_shape = new_shape;
+        self.sim.sandbox_shape = new_shape;
+        if matches!(
+            new_shape,
+            SandboxShape::Hourglass
+                | SandboxShape::MultiStageHourglass
+                | SandboxShape::GaltonBoard
+                | SandboxShape::StaircaseCascade
+                | SandboxShape::ProceduralFunnel
+                | SandboxShape::MultiNeckHourglass
+        ) {
+            self.sim.reset();
+        }
+        self.full_upload_needed = true;
     }
 
     pub fn set_marble_count(&mut self, count: u32) {

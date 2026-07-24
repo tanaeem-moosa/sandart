@@ -817,50 +817,19 @@ pub fn settle_tick(
     let mut stale_simulate = Vec::new();
     let mut rest_candidates = Vec::new();
 
-    if gravity_active {
-        // Under gravity, simulate blocks that contain sand height or active flow displacement
-        for b in 0..expected_len {
-            let bx = b % cols;
-            let by = b / cols;
-            let start_x = bx * block_size;
-            let end_x = ((bx + 1) * block_size).min(w);
-            let start_y = by * block_size;
-            let end_y = ((by + 1) * block_size).min(h);
+    let active_threshold = if gravity_active { 1e-4 } else { MUST_SIMULATE_THRESHOLD };
+    for b in 0..expected_len {
+        let displacement = last_displacements[b];
+        let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
 
-            let displacement = last_displacements[b];
-            let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
-
-            let mut block_has_sand = displacement > 1e-4 || staleness >= MAX_STALENESS;
-            if !block_has_sand {
-                'scan: for y in start_y..end_y {
-                    let offset = y * w;
-                    for x in start_x..end_x {
-                        if heightmap.data[offset + x] > 1e-4 {
-                            block_has_sand = true;
-                            break 'scan;
-                        }
-                    }
-                }
-            }
-
-            if block_has_sand {
-                must_simulate.push(b);
-            }
-        }
-    } else {
-        for b in 0..expected_len {
-            let displacement = last_displacements[b];
-            let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
-
-            if displacement >= MUST_SIMULATE_THRESHOLD {
-                must_simulate.push(b);
-            } else if staleness >= MAX_STALENESS {
-                stale_simulate.push(b);
-            } else if displacement > 0.0 {
-                // Priority function: staleness * displacement
-                let priority = (staleness as f32) * displacement;
-                rest_candidates.push((b, priority));
-            }
+        if displacement >= active_threshold {
+            must_simulate.push(b);
+        } else if staleness >= MAX_STALENESS {
+            stale_simulate.push(b);
+        } else if displacement > 0.0 {
+            // Priority function: staleness * displacement
+            let priority = (staleness as f32) * displacement;
+            rest_candidates.push((b, priority));
         }
     }
 
