@@ -1157,7 +1157,7 @@ pub fn settle_tick(
                                         0.40 // Liquids flow freely under gravity
                                     }
                                 } else if is_free_fall && gravity_dot > 0.0 {
-                                    0.80 // Fast, smooth vertical transfer in mid-air free fall
+                                    1.00 // Smooth 100% vertical transfer in mid-air free fall (no periodic blob cuts)
                                 } else {
                                     0.20 // Sand uses lower coeff on bed to prevent wave oscillations
                                 };
