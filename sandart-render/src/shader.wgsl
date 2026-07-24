@@ -440,8 +440,8 @@ fn fs_main(
         1.0
     ));
 
-    // 2. Define material presets and grain configurations using continuous property mapping
-    let empty_blend = clamp(h_center / 0.06, 0.0, 1.0);
+    // Smooth opacity blend (h_center >= 0.003 is 100% opaque sand color)
+    let empty_blend = clamp(h_center / 0.003, 0.0, 1.0);
     let sparkles_fade = clamp(1.0 - wetness / 0.3, 0.0, 1.0) * empty_blend;
     let sparkles_intensity = mix(2.0, 18.0, grain_size) * sparkles_fade;
     let sparkles_threshold = clamp(mix(0.998, 0.990, grain_size) + (1.0 - sparkles_fade) * 0.01, 0.990, 1.0);
