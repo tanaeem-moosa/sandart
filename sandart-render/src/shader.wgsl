@@ -238,16 +238,19 @@ fn fs_main(
                     }
                 }
             }
-            // Staircase Cascade steps (6u)
-            if (uniforms.sandbox_shape == 6u && v > -0.30 && v < 0.30) {
-                let step = i32((v + 0.30) / 0.078);
-                let step_y = -0.30 + f32(step) * 0.078;
-                if (abs(v - step_y) < 0.006) {
-                    let is_left = step % 2 == 0;
-                    if (is_left && u < -0.02 && u > -allowed_hw + 0.03) {
-                        inside = false;
-                    } else if (!is_left && u > 0.02 && u < allowed_hw - 0.03) {
-                        inside = false;
+            // Staircase Cascade sloped shelves (6u)
+            if (uniforms.sandbox_shape == 6u && abs(u) < 0.42 && abs(v) < 0.42) {
+                for (var k = 0; k < 4; k = k + 1) {
+                    let v_k = -0.24 + f32(k) * 0.16;
+                    let slope = select(-0.15, 0.15, k % 2 == 0);
+                    let v_shelf = v_k + u * slope;
+                    if (abs(v - v_shelf) < 0.008) {
+                        let is_left_attached = k % 2 == 0;
+                        if (is_left_attached && u < 0.22) {
+                            inside = false;
+                        } else if (!is_left_attached && u > -0.22) {
+                            inside = false;
+                        }
                     }
                 }
             }

@@ -679,33 +679,29 @@ pub fn eval_sandbox_shape(
             }
         }
         crate::SandboxShape::StaircaseCascade => {
-            let chamber_h = 0.40 * h_f;
-            let max_hw = 0.35 * w_f;
-            let neck_hw = neck_width * w_f;
-            let dy_abs = dy.abs();
-            if dy_abs < chamber_h {
-                let t = dy_abs / chamber_h;
-                let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
-                if dx.abs() >= allowed_hw {
-                    return (false, false);
-                }
-                if dy > -0.30 * h_f && dy < 0.30 * h_f {
-                    let step = ((dy + 0.30 * h_f) / 40.0) as i32;
-                    let step_y = -0.30 * h_f + step as f32 * 40.0;
-                    if (dy - step_y).abs() < 3.0 {
-                        let is_left_shelf = step % 2 == 0;
-                        if is_left_shelf && dx < -10.0 && dx > -allowed_hw + 15.0 {
-                            return (false, false);
-                        } else if !is_left_shelf && dx > 10.0 && dx < allowed_hw - 15.0 {
-                            return (false, false);
-                        }
+            let max_hw = 0.42 * w_f;
+            let max_hh = 0.42 * h_f;
+            if dx.abs() >= max_hw || dy.abs() >= max_hh {
+                return (false, false);
+            }
+
+            // 4 alternating sloped stair shelves
+            for k in 0..4 {
+                let y_k = -0.24 * h_f + k as f32 * 0.16 * h_f;
+                let slope = if k % 2 == 0 { 0.15 } else { -0.15 };
+                let y_shelf = y_k + dx * slope;
+                if (dy - y_shelf).abs() < 4.0 {
+                    let is_left_attached = k % 2 == 0;
+                    if is_left_attached && dx < 0.22 * w_f {
+                        return (false, false);
+                    } else if !is_left_attached && dx > -0.22 * w_f {
+                        return (false, false);
                     }
                 }
-                let is_safe = dx.abs() < (allowed_hw - 1.5).max(1.0) && dy_abs < (chamber_h - 1.5);
-                (true, is_safe)
-            } else {
-                (false, false)
             }
+
+            let is_safe = dx.abs() < (max_hw - 2.0) && dy.abs() < (max_hh - 2.0);
+            (true, is_safe)
         }
         crate::SandboxShape::ProceduralFunnel => {
             let chamber_h = 0.40 * h_f;

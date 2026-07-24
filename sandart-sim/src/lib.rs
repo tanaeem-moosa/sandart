@@ -364,6 +364,8 @@ impl DrawingSimulation {
 
                 let fill_threshold = if self.sandbox_shape == SandboxShape::MultiStageHourglass {
                     -0.14 * h as f32
+                } else if self.sandbox_shape == SandboxShape::StaircaseCascade {
+                    -0.26 * h as f32
                 } else {
                     0.0
                 };
