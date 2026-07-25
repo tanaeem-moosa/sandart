@@ -1,6 +1,7 @@
 @group(0) @binding(0) var heightmap_tex: texture_2d<f32>;
 @group(0) @binding(1) var heightmap_sampler: sampler;
 @group(0) @binding(4) var colormap_tex: texture_2d<f32>;
+@group(0) @binding(5) var shape_mask_tex: texture_2d<u32>;
 
 const PI: f32 = 3.14159265359;
 const Z_SCALE: f32 = 0.009; // Unified heightmap displacement scale
@@ -162,151 +163,18 @@ fn fs_main(
     let dist = distance(uv, center);
     let m_brightness = select(uniforms.light_brightness, select(uniforms.light_brightness * 0.22, uniforms.light_brightness * 0.05, uniforms.led_mode == 4u), uniforms.led_mode == 3u || uniforms.led_mode == 4u);
     
-    // Determine casing and LED channel based on the shape
-    var in_casing = false;
-    var in_led = false;
-    var led_center = vec2<f32>(0.5, 0.5);
-    
+    // Determine casing and LED channel from the precomputed shape mask texture
+    // Mask values: 0 = OUTSIDE (wall/casing), 1 = INSIDE (safe), 2 = BOUNDARY (inside, near wall → LED strip)
+    let mask_coord = vec2<i32>(i32(uv.x * 512.0), i32(uv.y * 512.0));
+    let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(511)), 0).r;
+
+    var in_casing = mask_val == 0u;
+    // LED strip: boundary cells (mask=2) OR outside cells adjacent to inside cells
+    var in_led = mask_val == 2u;
+
     let angle_light = atan2(uniforms.light_dir.y, uniforms.light_dir.x);
     let dir_light = vec2<f32>(cos(angle_light), -sin(angle_light));
-
-    if (uniforms.sandbox_shape == 1u) { // Square
-        let d_max = max(abs(uv.x - 0.5), abs(uv.y - 0.5));
-        if (d_max >= 0.46) {
-            in_casing = true;
-            if (d_max < 0.475) {
-                in_led = true;
-            }
-        }
-        // Project light dir onto square perimeter (half-width 0.468)
-        let scale = 0.468 / max(abs(dir_light.x), abs(dir_light.y));
-        led_center = dir_light * scale + 0.5;
-    } else if (uniforms.sandbox_shape == 2u) { // Oval
-        let u = uv.x - 0.5;
-        let v = uv.y - 0.5;
-        let d_oval = sqrt((u * u) / (0.46 * 0.46) + (v * v) / (0.30 * 0.30));
-        if (d_oval >= 1.0) {
-            in_casing = true;
-            if (d_oval < 1.032) {
-                in_led = true;
-            }
-        }
-        // Project light dir onto ellipse perimeter (a = 0.468, b = 0.305)
-        let scale = 1.0 / sqrt((dir_light.x * dir_light.x) / (0.468 * 0.468) + (dir_light.y * dir_light.y) / (0.305 * 0.305));
-        led_center = dir_light * scale + 0.5;
-    } else if (uniforms.sandbox_shape >= 3u) { // Hourglass variants (3u = Standard, 4u = MultiStage, 5u = Galton, 6u = Staircase, 7u = Cave, 8u = MultiNeck)
-        let u = uv.x - 0.5;
-        let v = uv.y - 0.5;
-        let chamber_h = 0.40;
-        let max_hw = 0.35;
-        let neck_hw = select(uniforms.neck_width * 3.5, uniforms.neck_width, uniforms.sandbox_shape != 8u);
-
-        let v_abs = abs(v);
-        var inside = false;
-        var allowed_hw = 0.0;
-        var neck_offset = 0.0;
-        
-        if (v_abs < chamber_h) {
-            if (uniforms.sandbox_shape == 4u) {
-                var start_center = 0.0;
-                var end_center = 0.0;
-                var stage_v0 = 0.0;
-
-                if (v > 0.14) {
-                    start_center = -0.12;
-                    end_center = -0.12;
-                    stage_v0 = 0.42;
-                } else if (v > -0.14) {
-                    start_center = -0.12;
-                    end_center = 0.12;
-                    stage_v0 = 0.14;
-                } else {
-                    start_center = 0.12;
-                    end_center = 0.0;
-                    stage_v0 = -0.14;
-                }
-
-                let t = clamp((stage_v0 - v) / 0.28, 0.0, 1.0);
-                neck_offset = start_center + t * (end_center - start_center);
-                allowed_hw = neck_hw + (1.0 - t) * (max_hw - neck_hw);
-
-                let u_local = u - neck_offset;
-                inside = abs(u_local) < allowed_hw;
-            } else {
-                let t = v_abs / chamber_h;
-                allowed_hw = neck_hw + pow(t, uniforms.hourglass_curve) * (max_hw - neck_hw);
-                inside = abs(u) < allowed_hw;
-            }
-
-            // Galton Board pegs (5u)
-            if (uniforms.sandbox_shape == 5u && v > 0.015 && v < 0.38) {
-                let row = i32((v - 0.015) / 0.0264);
-                let row_y = 0.015 + f32(row) * 0.0264;
-                if (abs(v - row_y) < 0.006) {
-                    let count = row + 3;
-                    let spacing = 0.0264;
-                    let offset_x = select(0.0, 0.0132, row % 2 == 1);
-                    let start_x = -f32(count - 1) * spacing * 0.5 + offset_x;
-                    for (var i = 0; i < count; i = i + 1) {
-                        let peg_x = start_x + f32(i) * spacing;
-                        let pdx = u - peg_x;
-                        let pdy = v - row_y;
-                        if (pdx * pdx + pdy * pdy < 0.000030) {
-                            inside = false;
-                        }
-                    }
-                }
-            }
-            // Staircase Cascade sloped shelves (6u)
-            if (uniforms.sandbox_shape == 6u && abs(u) < 0.42 && abs(v) < 0.42) {
-                for (var k = 0; k < 4; k = k + 1) {
-                    let v_k = -0.24 + f32(k) * 0.16;
-                    let slope = select(-0.15, 0.15, k % 2 == 0);
-                    let v_shelf = v_k + u * slope;
-                    if (abs(v - v_shelf) < 0.008) {
-                        let is_left_attached = k % 2 == 0;
-                        if (is_left_attached && u < 0.22) {
-                            inside = false;
-                        } else if (!is_left_attached && u > -0.22) {
-                            inside = false;
-                        }
-                    }
-                }
-            }
-            // Procedural Cave Stalactites (7u)
-            if (uniforms.sandbox_shape == 7u && v > -0.32 && v < 0.32) {
-                let cave_val = abs(sin(u * 30.0) + cos(v * 40.0) + sin(u * 15.0 + v * 20.0));
-                if (cave_val > 1.45 && abs(u) > 0.015) {
-                    inside = false;
-                }
-            }
-            // MultiNeck Center Barrier (8u)
-            if (uniforms.sandbox_shape == 8u && v_abs < 0.016 && abs(u) < 0.008) {
-                inside = false;
-            }
-        }
-
-        if (!inside) {
-            in_casing = true;
-            let u_casing = u - neck_offset;
-            let near_top_bottom = v_abs >= chamber_h && v_abs < (chamber_h + 0.015) && abs(u_casing) < (max_hw + 0.015);
-            let near_side_walls = v_abs < chamber_h && abs(u_casing) >= allowed_hw && abs(u_casing) < (allowed_hw + 0.015);
-            
-            if (near_top_bottom || near_side_walls) {
-                in_led = true;
-            }
-        }
-        led_center = dir_light * 0.468 + 0.5;
-    } else { // Circle (0u)
-        let d_circle = distance(uv, vec2<f32>(0.5, 0.5));
-        if (d_circle >= 0.46) {
-            in_casing = true;
-            if (d_circle < 0.475) {
-                in_led = true;
-            }
-        }
-        led_center = dir_light * 0.468 + 0.5;
-    }
+    var led_center = dir_light * 0.468 + 0.5;
 
     if (in_casing) {
         if (in_led) {

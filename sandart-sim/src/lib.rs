@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 pub const GRID_SIZE: usize = 512;
 pub const DEFAULT_SAND_HEIGHT: f32 = 0.35;
 
+/// Shape mask cell values: the single source of truth for container geometry.
+pub const MASK_OUTSIDE: u8 = 0;
+pub const MASK_INSIDE: u8 = 1;
+pub const MASK_BOUNDARY: u8 = 2;
+
 pub const PROP_WETNESS: usize = 0;
 pub const PROP_THRESHOLD: usize = 1;
 pub const PROP_FLOW_RATE: usize = 2;
@@ -150,6 +155,13 @@ pub struct DrawingSimulation {
     pub neck_width: f32,
     pub hourglass_curve: f32,
 
+    /// Precomputed shape mask grid (GRID_SIZE * GRID_SIZE).
+    /// Values: MASK_OUTSIDE (0) = wall, MASK_INSIDE (1) = playable interior,
+    /// MASK_BOUNDARY (2) = inside but adjacent to a wall cell.
+    pub shape_mask: Vec<u8>,
+    /// Set to true when the shape_mask has been regenerated and needs GPU re-upload.
+    pub shape_mask_dirty: bool,
+
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
     /// Max displacement observed in each block during the last time it was simulated.
@@ -262,7 +274,7 @@ impl DrawingSimulation {
         let budget_n = 256;
         let ema_frame_ms = 33.3;
 
-        Self {
+        let mut sim = Self {
             heightmap,
             temp_heights,
             cell_colors,
@@ -288,6 +300,8 @@ impl DrawingSimulation {
             gravity_dir: Vec2::ZERO,
             neck_width: 0.005,
             hourglass_curve: 0.6,
+            shape_mask: vec![MASK_OUTSIDE; GRID_SIZE * GRID_SIZE],
+            shape_mask_dirty: true,
             active_blocks,
             last_displacements,
             last_simulated_ticks,
@@ -295,11 +309,66 @@ impl DrawingSimulation {
             ema_frame_ms,
             block_size,
             tick_count: 0,
+        };
+        sim.generate_shape_mask();
+        sim
+    }
+
+    /// Regenerate the shape mask from the current sandbox_shape, neck_width, and hourglass_curve.
+    /// Call this whenever these parameters change. Sets shape_mask_dirty for GPU re-upload.
+    pub fn generate_shape_mask(&mut self) {
+        let w = GRID_SIZE;
+        let h = GRID_SIZE;
+
+        // Pass 1: Evaluate inside/safe for every cell using the existing physics evaluator
+        for y in 0..h {
+            let offset = y * w;
+            for x in 0..w {
+                let (inside, _safe) = physics::eval_sandbox_shape(
+                    x, y, w, h,
+                    self.sandbox_shape,
+                    self.neck_width,
+                    self.hourglass_curve,
+                );
+                self.shape_mask[offset + x] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
+            }
         }
+
+        // Pass 2: Mark boundary cells - any INSIDE cell with at least one OUTSIDE neighbor
+        // We need a temporary copy to avoid read/write conflict
+        let snapshot = self.shape_mask.clone();
+        for y in 0..h {
+            let offset = y * w;
+            for x in 0..w {
+                if snapshot[offset + x] == MASK_INSIDE {
+                    let has_outside_neighbor =
+                        (x == 0 || snapshot[offset + x - 1] == MASK_OUTSIDE) ||
+                        (x + 1 >= w || snapshot[offset + x + 1] == MASK_OUTSIDE) ||
+                        (y == 0 || snapshot[(y - 1) * w + x] == MASK_OUTSIDE) ||
+                        (y + 1 >= h || snapshot[(y + 1) * w + x] == MASK_OUTSIDE);
+                    if has_outside_neighbor {
+                        self.shape_mask[offset + x] = MASK_BOUNDARY;
+                    }
+                }
+            }
+        }
+
+        self.shape_mask_dirty = true;
+    }
+
+    /// Return a pointer to the shape mask data for WASM/GPU access.
+    pub fn shape_mask_ptr(&self) -> *const u8 {
+        self.shape_mask.as_ptr()
+    }
+
+    /// Return the length of the shape mask data.
+    pub fn shape_mask_len(&self) -> usize {
+        self.shape_mask.len()
     }
 
     /// Reset the simulation state.
     pub fn reset(&mut self) {
+        self.generate_shape_mask();
         if matches!(
             self.sandbox_shape,
             SandboxShape::Hourglass
@@ -355,12 +424,7 @@ impl DrawingSimulation {
             let dy = y as f32 - center_y;
             for x in 0..w {
                 let idx = row_offset + x;
-                let (inside, _) = physics::eval_sandbox_shape(
-                    x, y, w, h,
-                    self.sandbox_shape,
-                    self.neck_width,
-                    self.hourglass_curve,
-                );
+                let inside = self.shape_mask[idx] != MASK_OUTSIDE;
 
                 let fill_threshold = if self.sandbox_shape == SandboxShape::MultiStageHourglass {
                     -0.14 * h as f32
@@ -417,13 +481,7 @@ impl DrawingSimulation {
         for y in 0..h {
             for x in 0..w {
                 let idx = y * w + x;
-                let (inside, _) = physics::eval_sandbox_shape(
-                    x, y, w, h,
-                    self.sandbox_shape,
-                    self.neck_width,
-                    self.hourglass_curve,
-                );
-                if !inside {
+                if self.shape_mask[idx] == MASK_OUTSIDE {
                     self.heightmap.data[idx] = 0.0;
                     self.temp_heights[idx] = 0.0;
                 }
@@ -746,11 +804,9 @@ impl DrawingSimulation {
                     &active_marbles[..active_count],
                     time_seed + iter as u32,
                     &mut self.wave_vel,
-                    shape,
+                    &self.shape_mask,
                     self.tick_count + iter as u32,
                     self.gravity_dir,
-                    self.neck_width,
-                    self.hourglass_curve,
                 );
             }
         } else {

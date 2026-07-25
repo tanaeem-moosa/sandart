@@ -73,6 +73,7 @@ pub struct HeightmapRenderer {
     pub pipeline: wgpu::RenderPipeline,
     pub heightmap_texture: wgpu::Texture,
     pub colormap_texture: wgpu::Texture,
+    pub shape_mask_texture: wgpu::Texture,
     pub bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
     pub camera_buffer: wgpu::Buffer,
@@ -170,6 +171,21 @@ impl HeightmapRenderer {
         let colormap_texture_view =
             colormap_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Create shape mask texture (GRID_SIZE x GRID_SIZE R8Uint)
+        let shape_mask_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shape_mask_texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let shape_mask_texture_view =
+            shape_mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         // 2. Create heightmap sampler (using Nearest filtering for portable R32Float manual bilinear interpolation in shader)
         let heightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("heightmap_sampler"),
@@ -248,6 +264,16 @@ impl HeightmapRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -275,6 +301,10 @@ impl HeightmapRenderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&colormap_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&shape_mask_texture_view),
                 },
             ],
         });
@@ -331,6 +361,7 @@ impl HeightmapRenderer {
             pipeline,
             heightmap_texture,
             colormap_texture,
+            shape_mask_texture,
             bind_group,
             uniform_buffer,
             camera_buffer,
@@ -353,6 +384,29 @@ impl HeightmapRenderer {
             wgpu::ImageDataLayout {
                 offset: 0,
                 bytes_per_row: Some((GRID_SIZE * 16) as u32),
+                rows_per_image: Some(GRID_SIZE as u32),
+            },
+            wgpu::Extent3d {
+                width: GRID_SIZE as u32,
+                height: GRID_SIZE as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Upload the shape mask (R8Uint) to GPU. Call when shape changes.
+    pub fn update_shape_mask(&mut self, queue: &wgpu::Queue, data: &[u8]) {
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.shape_mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(GRID_SIZE as u32), // 1 byte per pixel for R8Uint
                 rows_per_image: Some(GRID_SIZE as u32),
             },
             wgpu::Extent3d {

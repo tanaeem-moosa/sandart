@@ -292,10 +292,12 @@ impl WasmSimulationState {
 
     pub fn set_neck_width(&mut self, width: f32) {
         self.sim.neck_width = width;
+        self.sim.generate_shape_mask();
     }
 
     pub fn set_hourglass_curve(&mut self, curve: f32) {
         self.sim.hourglass_curve = curve;
+        self.sim.generate_shape_mask();
     }
 
     pub fn draw_ripples(&mut self) {
@@ -361,6 +363,8 @@ impl WasmSimulationState {
                 | SandboxShape::MultiNeckHourglass
         ) {
             self.sim.reset();
+        } else {
+            self.sim.generate_shape_mask();
         }
         self.full_upload_needed = true;
     }
@@ -615,6 +619,11 @@ impl WasmSimulationState {
         let view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+
+        if self.sim.shape_mask_dirty {
+            self.renderer.update_shape_mask(&self.queue, &self.sim.shape_mask);
+            self.sim.shape_mask_dirty = false;
+        }
 
         // Update GPU heightmap and colormap
         if self.full_upload_needed {

@@ -766,11 +766,9 @@ pub fn settle_tick(
     active_marbles: &[ActiveMarbleInfo],
     time_seed: u32,
     wave_vel: &mut Vec<f32>,
-    shape: crate::SandboxShape,
+    shape_mask: &[u8],
     tick_count: u32,
     gravity_dir: glam::Vec2,
-    neck_width: f32,
-    hourglass_curve: f32,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -879,20 +877,10 @@ pub fn settle_tick(
         active_blocks[b] = crate::BlockActivity::Medium;
     }
 
-    // Precompute shape boundary masks once per frame to eliminate redundant math / powf calls in cell loops
-    let mut shape_inside = vec![false; w * h];
-    let mut safe_inside = vec![false; w * h];
-    for y in 0..h {
-        let offset = y * w;
-        for x in 0..w {
-            let (in_b, safe_b) = eval_sandbox_shape(x, y, w, h, shape, neck_width, hourglass_curve);
-            shape_inside[offset + x] = in_b;
-            safe_inside[offset + x] = safe_b;
-        }
-    }
-
+    // Use precomputed shape mask instead of per-frame eval_sandbox_shape
+    // shape_mask values: 0 = OUTSIDE (wall), 1 = INSIDE (safe), 2 = BOUNDARY (inside, near wall)
     let is_inside = |cx: usize, cy: usize| -> bool {
-        shape_inside[cy * w + cx]
+        shape_mask[cy * w + cx] != crate::MASK_OUTSIDE
     };
 
     let mut modified = will_simulate.clone();
@@ -967,8 +955,9 @@ pub fn settle_tick(
                 };
                 let center_idx = row_offset + x;
 
-                let inside = shape_inside[center_idx];
-                let is_safe = safe_inside[center_idx];
+                let mask_val = shape_mask[center_idx];
+                let inside = mask_val != crate::MASK_OUTSIDE;
+                let is_safe = mask_val == crate::MASK_INSIDE;
 
                 if !inside {
                     continue;
@@ -1422,6 +1411,42 @@ mod tests {
         props
     }
 
+    /// Generate a shape mask for testing. Uses eval_sandbox_shape to build the mask
+    /// with proper INSIDE/BOUNDARY/OUTSIDE classification.
+    fn make_test_mask(
+        w: usize,
+        h: usize,
+        shape: SandboxShape,
+        neck_width: f32,
+        hourglass_curve: f32,
+    ) -> Vec<u8> {
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        // Pass 1: inside/outside
+        for y in 0..h {
+            for x in 0..w {
+                let (inside, _) = eval_sandbox_shape(x, y, w, h, shape, neck_width, hourglass_curve);
+                mask[y * w + x] = if inside { crate::MASK_INSIDE } else { crate::MASK_OUTSIDE };
+            }
+        }
+        // Pass 2: mark boundary cells
+        let snapshot = mask.clone();
+        for y in 0..h {
+            for x in 0..w {
+                if snapshot[y * w + x] == crate::MASK_INSIDE {
+                    let has_outside =
+                        (x == 0 || snapshot[y * w + x - 1] == crate::MASK_OUTSIDE) ||
+                        (x + 1 >= w || snapshot[y * w + x + 1] == crate::MASK_OUTSIDE) ||
+                        (y == 0 || snapshot[(y - 1) * w + x] == crate::MASK_OUTSIDE) ||
+                        (y + 1 >= h || snapshot[(y + 1) * w + x] == crate::MASK_OUTSIDE);
+                    if has_outside {
+                        mask[y * w + x] = crate::MASK_BOUNDARY;
+                    }
+                }
+            }
+        }
+        mask
+    }
+
     #[test]
     fn test_draw_point_out_of_bounds() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
@@ -1711,6 +1736,7 @@ mod tests {
         let mut flow_occurred = false;
         let mut sliding = vec![false; 512 * 512];
 
+        let mask = make_test_mask(512, 512, crate::SandboxShape::Circle, 0.04, 1.0);
         for i in 0..10 {
             let flow = settle_tick(
                 &mut hm,
@@ -1727,11 +1753,9 @@ mod tests {
                 &[],
                 12345,
                 &mut wave_vel,
-                crate::SandboxShape::Circle,
+                &mask,
                 i as u32,
                 glam::Vec2::ZERO,
-                0.04,
-                1.0,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -1775,6 +1799,7 @@ mod tests {
         let budget_n = 256;
         let mut sliding = vec![false; 512 * 512];
 
+        let mask = make_test_mask(512, 512, crate::SandboxShape::Circle, 0.04, 1.0);
         let flow = settle_tick(
             &mut hm,
             &mut temp_heights,
@@ -1790,11 +1815,9 @@ mod tests {
             &[],
             12345,
             &mut wave_vel,
-            crate::SandboxShape::Circle,
+            &mask,
             0,
             glam::Vec2::ZERO,
-            0.04,
-            1.0,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -1845,6 +1868,7 @@ mod tests {
             let mut last_displacements = vec![1.0; 4];
             let mut last_simulated_ticks = vec![0; 4];
             let budget_n = 256;
+            let mask = make_test_mask(64, 64, crate::SandboxShape::Circle, 0.04, 1.0);
             let flow = settle_tick(
                 &mut hm,
                 &mut temp_heights,
@@ -1860,11 +1884,9 @@ mod tests {
                 &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1, vel_vec: Vec2::new(0.1, 0.0) }],
                 9999,
                 &mut wave_vel,
-                crate::SandboxShape::Circle,
+                &mask,
                 0,
                 glam::Vec2::ZERO,
-                0.04,
-                1.0,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -1941,6 +1963,7 @@ mod tests {
         let mut last_displacements = vec![1.0; 16];
         let mut last_simulated_ticks = vec![0; 16];
 
+        let mask = make_test_mask(128, 128, crate::SandboxShape::Circle, 0.04, 1.0);
         // Settle a bit to trigger flows
         let flow = settle_tick(
             &mut hm,
@@ -1957,11 +1980,9 @@ mod tests {
             &[],
             12345,
             &mut wave_vel,
-            crate::SandboxShape::Circle,
+            &mask,
             0,
             glam::Vec2::ZERO,
-            0.04,
-            1.0,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -2239,6 +2260,7 @@ mod tests {
         
         let initial_sum: f32 = hm.data.iter().sum();
 
+        let mask = make_test_mask(64, 64, SandboxShape::Circle, 0.04, 1.0);
         // Run 50 ticks of gravity settling
         for i in 0..50 {
             settle_tick(
@@ -2256,11 +2278,9 @@ mod tests {
                 &[],
                 12345,
                 &mut wave_vel,
-                SandboxShape::Circle,
+                &mask,
                 i as u32,
                 gravity_dir,
-                0.04,
-                1.0,
             );
         }
 
@@ -2329,6 +2349,7 @@ mod tests {
         assert!(initial_top_sum > 10.0);
         assert_eq!(initial_bottom_sum, 0.0);
 
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, hourglass_curve);
         // Run 500 ticks to let almost all sand flow downward into the bottom chamber
         for i in 0..500 {
             settle_tick(
@@ -2346,11 +2367,9 @@ mod tests {
                 &[],
                 12345 + i as u32,
                 &mut wave_vel,
-                SandboxShape::Hourglass,
+                &mask,
                 i as u32,
                 gravity_dir,
-                0.15,
-                hourglass_curve,
             );
         }
 
@@ -2394,11 +2413,9 @@ mod tests {
                 &[],
                 12345 + 500 + i as u32,
                 &mut wave_vel,
-                SandboxShape::Hourglass,
+                &mask,
                 (500 + i) as u32,
                 gravity_dir,
-                0.15,
-                hourglass_curve,
             );
         }
 
@@ -2442,6 +2459,7 @@ mod tests {
         // Downward gravity
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
         // Run 40 ticks of gravity settling
         for i in 0..40 {
             settle_tick(
@@ -2459,11 +2477,9 @@ mod tests {
                 &[],
                 12345 + i as u32,
                 &mut wave_vel,
-                SandboxShape::Circle,
+                &mask,
                 i as u32,
                 gravity_dir,
-                0.04,
-                1.0,
             );
         }
 
@@ -2538,6 +2554,7 @@ mod tests {
         let initial_bottom_sum: f32 = hm.data[32 * w..].iter().sum();
         assert!(initial_top_sum > initial_bottom_sum, "Initial state should have more liquid on top");
 
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
         // Run 500 ticks of gravity settling (liquid CA is slower than wave)
         for i in 0..500 {
             settle_tick(
@@ -2555,11 +2572,9 @@ mod tests {
                 &[],
                 12345 + i as u32,
                 &mut wave_vel,
-                SandboxShape::Circle,
+                &mask,
                 i as u32,
                 gravity_dir,
-                0.04,
-                1.0,
             );
         }
 
@@ -2621,6 +2636,7 @@ mod tests {
 
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.04, 0.60);
         for i in 0..1000 {
             settle_tick(
                 &mut hm,
@@ -2637,11 +2653,9 @@ mod tests {
                 &[],
                 12345 + i as u32,
                 &mut wave_vel,
-                SandboxShape::Hourglass,
+                &mask,
                 i as u32,
                 gravity_dir,
-                0.04,
-                0.60,
             );
         }
 
@@ -2684,6 +2698,7 @@ mod tests {
         // Downward gravity
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
         // Run 20 ticks of gravity settling
         for i in 0..20 {
             settle_tick(
@@ -2701,11 +2716,9 @@ mod tests {
                 &[],
                 12345 + i as u32,
                 &mut wave_vel,
-                SandboxShape::Circle,
+                &mask,
                 i as u32,
                 gravity_dir,
-                0.04,
-                1.0,
             );
         }
 
@@ -2762,6 +2775,7 @@ mod tests {
 
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.04, 0.6);
         // Run gravity settling until all falling sand completes landing and flow reaches zero
         for i in 0..2000 {
             let flow = settle_tick(
@@ -2779,11 +2793,9 @@ mod tests {
                 &[],
                 12345 + i as u32,
                 &mut wave_vel,
-                SandboxShape::Hourglass,
+                &mask,
                 i as u32,
                 gravity_dir,
-                0.04,
-                0.6,
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -2881,6 +2893,7 @@ mod tests {
 
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
+        let mask = make_test_mask(512, 512, SandboxShape::Hourglass, hourglass_curve, 0.005);
         // Run simulation for 80 ticks
         for i in 0..80 {
             settle_tick(
@@ -2898,11 +2911,9 @@ mod tests {
                 &[],
                 i as u32,
                 &mut wave_vel,
-                SandboxShape::Hourglass,
+                &mask,
                 i as u32,
                 gravity_dir,
-                hourglass_curve,
-                0.005,
             );
         }
 
@@ -3017,6 +3028,7 @@ mod tests {
         let mut last_simulated_ticks = vec![0; expected_len];
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.6, 0.04);
         // Run 300 gravity ticks flowing sand down into the lower chamber
         for i in 0..300 {
             settle_tick(
@@ -3034,11 +3046,9 @@ mod tests {
                 &[],
                 i as u32,
                 &mut wave_vel,
-                SandboxShape::Hourglass,
+                &mask,
                 i as u32,
                 gravity_dir,
-                0.6,
-                0.04,
             );
         }
 
