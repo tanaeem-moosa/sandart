@@ -562,6 +562,15 @@ pub fn displace_line(
     }
 }
 
+/// Deterministic pseudo-random float in [0, 1) from an integer seed. Used to give
+/// procedurally-generated shape features (staircase steps, etc.) organic variation
+/// while staying stable across repeated shape_mask regenerations.
+fn step_hash(n: u32) -> f32 {
+    let h = n.wrapping_mul(2654435761).wrapping_add(0x9E3779B9);
+    let h = h ^ (h >> 15);
+    (h % 10000) as f32 / 10000.0
+}
+
 pub fn eval_sandbox_shape(
     cx: usize,
     cy: usize,
@@ -634,8 +643,13 @@ pub fn eval_sandbox_shape(
             };
 
             let t = ((dy - stage_y0) / (0.28 * h_f)).clamp(0.0, 1.0);
-            let center_x = start_center + t * (end_center - start_center);
-            let allowed_hw = neck_hw + (1.0 - t) * (max_hw - neck_hw);
+            // Smoothstep easing (zero derivative at t=0 and t=1) gives each stage's
+            // center-line a gentle S-curve, and keeps the slope continuous across stage
+            // boundaries so the three chambers join in a smooth serpentine flow instead
+            // of the sharp angular kinks a plain linear blend produces.
+            let t_curve = t * t * (3.0 - 2.0 * t);
+            let center_x = start_center + t_curve * (end_center - start_center);
+            let allowed_hw = neck_hw + (1.0 - t_curve) * (max_hw - neck_hw);
 
             let dx_local = dx - center_x;
             let inside = dx_local.abs() < allowed_hw;
@@ -654,14 +668,14 @@ pub fn eval_sandbox_shape(
                     return (false, false);
                 }
                 
-                if dy > 8.0 && dy < 0.38 * h_f {
-                    let row = ((dy - 8.0) / 13.5) as i32;
-                    let peg_radius_sq = 2.8 * 2.8;
-                    let row_y = 8.0 + row as f32 * 13.5;
-                    if (dy - row_y).abs() < 3.2 {
+                if dy > 6.0 && dy < 0.38 * h_f {
+                    let spacing = 8.0;
+                    let row = ((dy - 6.0) / spacing) as i32;
+                    let peg_radius_sq = 1.8 * 1.8;
+                    let row_y = 6.0 + row as f32 * spacing;
+                    if (dy - row_y).abs() < 2.0 {
                         let count = row + 3;
-                        let spacing = 13.5;
-                        let offset_x = if row % 2 == 1 { 6.75 } else { 0.0 };
+                        let offset_x = if row % 2 == 1 { spacing * 0.5 } else { 0.0 };
                         let start_x = - (count as f32 - 1.0) * spacing * 0.5 + offset_x;
                         for i in 0..count {
                             let peg_x = start_x + i as f32 * spacing;
@@ -686,16 +700,35 @@ pub fn eval_sandbox_shape(
                 return (false, false);
             }
 
-            // 4 alternating sloped stair shelves
-            for k in 0..4 {
-                let y_k = -0.24 * h_f + k as f32 * 0.16 * h_f;
-                let slope = if k % 2 == 0 { 0.15 } else { -0.15 };
+            // Procedurally-varied alternating sloped stair shelves: more steps than the
+            // original fixed 4, each with a slightly randomized slope (deterministic per
+            // step index) plus a randomized gap ("hole") sand can filter straight through,
+            // in addition to the usual open side at the end of each shelf.
+            let step_count: i32 = 8;
+            let attach_limit = 0.20 * w_f;
+            let y_start = -0.36 * h_f;
+            let step_spacing = 0.72 * h_f / (step_count as f32 - 1.0);
+
+            for k in 0..step_count {
+                let y_k = y_start + k as f32 * step_spacing;
+                let slope_mag = 0.10 + 0.10 * step_hash(k as u32 * 3);
+                let slope = if k % 2 == 0 { slope_mag } else { -slope_mag };
                 let y_shelf = y_k + dx * slope;
-                if (dy - y_shelf).abs() < 4.0 {
+                if (dy - y_shelf).abs() < 3.5 {
                     let is_left_attached = k % 2 == 0;
-                    if is_left_attached && dx < 0.22 * w_f {
+
+                    let (span_lo, span_hi) = if is_left_attached {
+                        (-max_hw + 4.0, attach_limit - 4.0)
+                    } else {
+                        (-attach_limit + 4.0, max_hw - 4.0)
+                    };
+                    let hole_center = span_lo + step_hash(k as u32 * 3 + 1) * (span_hi - span_lo);
+                    let hole_width = (0.05 + 0.05 * step_hash(k as u32 * 3 + 2)) * w_f;
+                    let in_hole = (dx - hole_center).abs() < hole_width * 0.5;
+
+                    if is_left_attached && dx < attach_limit && !in_hole {
                         return (false, false);
-                    } else if !is_left_attached && dx > -0.22 * w_f {
+                    } else if !is_left_attached && dx > -attach_limit && !in_hole {
                         return (false, false);
                     }
                 }
@@ -716,8 +749,15 @@ pub fn eval_sandbox_shape(
                     return (false, false);
                 }
                 if dy > -0.32 * h_f && dy < 0.32 * h_f {
-                    let cave_val = ((dx * 0.06).sin() + (dy * 0.08).cos() + (dx * 0.03 + dy * 0.04).sin()).abs();
-                    if cave_val > 1.45 && dx.abs() > 8.0 {
+                    // Higher-frequency, 4-octave noise than before packs in more, smaller
+                    // stalactite/stalagmite obstacles instead of a few large blobby ones.
+                    let cave_val = (
+                        (dx * 0.14).sin()
+                        + (dy * 0.16).cos()
+                        + (dx * 0.05 + dy * 0.07).sin()
+                        + (dx * 0.24 - dy * 0.21).cos()
+                    ).abs();
+                    if cave_val > 1.35 && dx.abs() > 6.0 {
                         return (false, false);
                     }
                 }
@@ -728,20 +768,27 @@ pub fn eval_sandbox_shape(
             }
         }
         crate::SandboxShape::MultiNeckHourglass => {
+            // Two genuinely separate necks, spread wide apart, rather than one center
+            // opening barely split by a small barrier. Each neck is its own mini funnel
+            // (same taper shape as the classic Hourglass); their wide tops overlap near
+            // the chamber walls to form a single continuous top/bottom chamber, and they
+            // pull apart into two distinct openings approaching the pinch line, forming a
+            // "W" (draining) / "M" (refilling) silhouette.
             let chamber_h = 0.40 * h_f;
-            let max_hw = 0.35 * w_f;
+            let max_hw = 0.30 * w_f;
+            let neck_offset = 0.15 * w_f;
             let dy_abs = dy.abs();
             if dy_abs < chamber_h {
                 let t = dy_abs / chamber_h;
                 let neck_hw = neck_width * w_f;
-                let allowed_hw = neck_hw * 3.5 + t.powf(hourglass_curve) * (max_hw - neck_hw);
-                if dx.abs() >= allowed_hw {
+                let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
+                let dist_left = (dx + neck_offset).abs();
+                let dist_right = (dx - neck_offset).abs();
+                if dist_left >= allowed_hw && dist_right >= allowed_hw {
                     return (false, false);
                 }
-                if dy_abs < 8.0 && dx.abs() < 4.0 {
-                    return (false, false);
-                }
-                let is_safe = dx.abs() < (allowed_hw - 1.5).max(1.0) && dy_abs < (chamber_h - 1.5);
+                let safe_hw = (allowed_hw - 1.5).max(1.0);
+                let is_safe = (dist_left < safe_hw || dist_right < safe_hw) && dy_abs < (chamber_h - 1.5);
                 (true, is_safe)
             } else {
                 (false, false)
@@ -3072,5 +3119,145 @@ mod tests {
         assert!(b_err < 0.08, "Blue color mass loss under gravity: err={:.6}", b_err);
         assert!(wet_err < 0.001, "Wetness property loss under gravity: err={:.6}", wet_err);
         assert!(grain_err < 0.001, "Grain size property loss under gravity: err={:.6}", grain_err);
+    }
+
+    #[test]
+    fn test_concentric_rings_eventually_all_drain_through_neck() {
+        // Paint the upper chamber with rings centered on the neck (matching the UI's
+        // "Concentric Rings" color pattern: sandart-wasm/web/demo.js generateColormap).
+        // Ring 0 (nearest the neck) is green; odd rings are yellow.
+        let w = 128;
+        let h = 128;
+        let mut hm = Heightmap::new(w, h, 0.0);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let cell_props_mode = get_test_props(MaterialMode::DrySand, w * h);
+        let mut cell_props = cell_props_mode;
+
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        let chamber_h = 0.40 * h as f32;
+        let max_hw = 0.35 * w as f32;
+        let neck_hw = 0.04 * w as f32;
+        let ring_width = 8.0; // cells; proportionally matches the UI's 32px/512
+
+        let mut initial_green_mass = 0.0f64;
+        let mut initial_yellow_mass = 0.0f64;
+
+        for y in 0..h {
+            let dy = y as f32 - center_y;
+            if dy < 0.0 && dy.abs() < chamber_h {
+                let t = dy.abs() / chamber_h;
+                let allowed_hw = neck_hw + t.powf(0.6) * (max_hw - neck_hw);
+                for x in 0..w {
+                    let dx = x as f32 - center_x;
+                    if dx.abs() < allowed_hw {
+                        let idx = y * w + x;
+                        hm.data[idx] = 0.60;
+
+                        let dist = (dx * dx + dy * dy).sqrt();
+                        let ring_even = ((dist / ring_width) as i64) % 2 == 0;
+                        if ring_even {
+                            // Green
+                            cell_colors[idx * 4 + 0] = 34;
+                            cell_colors[idx * 4 + 1] = 139;
+                            cell_colors[idx * 4 + 2] = 34;
+                            cell_colors[idx * 4 + 3] = 255;
+                            initial_green_mass += hm.data[idx] as f64;
+                        } else {
+                            // Yellow
+                            cell_colors[idx * 4 + 0] = 255;
+                            cell_colors[idx * 4 + 1] = 215;
+                            cell_colors[idx * 4 + 2] = 0;
+                            cell_colors[idx * 4 + 3] = 255;
+                            initial_yellow_mass += hm.data[idx] as f64;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(initial_green_mass > 0.0 && initial_yellow_mass > 0.0, "Test setup should paint both colors");
+
+        let mut temp_heights = hm.data.clone();
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
+        let mut wave_vel = vec![0.0; w * h];
+        let expected_len = (w / 32) * (h / 32);
+        let mut active_blocks = vec![crate::BlockActivity::Fast; expected_len];
+        let mut last_displacements = vec![1.0; expected_len];
+        let mut last_simulated_ticks = vec![0; expected_len];
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.04, 0.60);
+
+        // Measure the height-weighted AVERAGE color strictly below the neck (lower chamber).
+        // Pure ring paint is (34,139,34) green / (255,215,0) yellow; as sand mixes en route
+        // to the neck, individual cells take on blended, in-between hues rather than staying
+        // categorically one or the other. Tracking the weighted average RGB (and derived R:G
+        // ratio, 0.0 = pure green, 1.0 = pure yellow) shows that drift directly.
+        let measure_lower_chamber_avg = |colors: &[u8], hmap: &Heightmap| -> (f64, f64, f64, f64) {
+            let mut r_sum = 0.0f64;
+            let mut g_sum = 0.0f64;
+            let mut b_sum = 0.0f64;
+            let mut mass = 0.0f64;
+            for y in (center_y as usize)..h {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    let hgt = hmap.data[idx] as f64;
+                    if hgt <= 0.0 {
+                        continue;
+                    }
+                    r_sum += colors[idx * 4 + 0] as f64 * hgt;
+                    g_sum += colors[idx * 4 + 1] as f64 * hgt;
+                    b_sum += colors[idx * 4 + 2] as f64 * hgt;
+                    mass += hgt;
+                }
+            }
+            if mass <= 0.0 {
+                return (0.0, 0.0, 0.0, 0.0);
+            }
+            let avg_r = r_sum / mass;
+            let avg_g = g_sum / mass;
+            let avg_b = b_sum / mass;
+            // 0.0 at pure green (34,139,34), 1.0 at pure yellow (255,215,0), interpolating on R and B.
+            let yellow_frac = (((avg_r - 34.0) / (255.0 - 34.0)) + ((34.0 - avg_b) / 34.0)) / 2.0;
+            (avg_r, avg_g, avg_b, yellow_frac)
+        };
+
+        for i in 0..4000u32 {
+            settle_tick(
+                &mut hm,
+                &mut temp_heights,
+                &mut cell_colors,
+                &mut cell_props,
+                &mut sliding,
+                &mut bounds,
+                &mut active_blocks,
+                &mut last_displacements,
+                &mut last_simulated_ticks,
+                256,
+                32,
+                &[],
+                12345 + i,
+                &mut wave_vel,
+                &mask,
+                i,
+                gravity_dir,
+            );
+
+            if i % 500 == 0 || i == 3999 {
+                let (r, g, b, yellow_frac) = measure_lower_chamber_avg(&cell_colors, &hm);
+                println!("tick {:5}: lower-chamber avg color = ({:.1}, {:.1}, {:.1})  yellow_frac={:.3}",
+                    i, r, g, b, yellow_frac);
+            }
+        }
+
+        let (final_r, final_g, final_b, final_yellow_frac) = measure_lower_chamber_avg(&cell_colors, &hm);
+        println!("FINAL: lower-chamber avg color = ({:.1}, {:.1}, {:.1})  yellow_frac={:.3}", final_r, final_g, final_b, final_yellow_frac);
+        assert!(
+            final_yellow_frac > 0.05,
+            "Lower chamber's average color never drifted toward yellow at all: yellow_frac={:.3}",
+            final_yellow_frac
+        );
     }
 }

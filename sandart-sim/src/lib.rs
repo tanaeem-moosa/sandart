@@ -415,6 +415,10 @@ impl DrawingSimulation {
     }
 
     pub fn initialize_hourglass(&mut self) {
+        // Self-sufficient: regenerate the mask here rather than trusting callers to have
+        // done so already for the current sandbox_shape/neck_width/hourglass_curve.
+        self.generate_shape_mask();
+
         let w = GRID_SIZE;
         let h = GRID_SIZE;
         let center_y = h as f32 / 2.0;
