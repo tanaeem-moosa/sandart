@@ -896,6 +896,9 @@ function setupPanelInput() {
     const sandboxPatterns = document.getElementById('sandbox-only-patterns');
     const sandfallControls = document.getElementById('sandfall-controls');
 
+    const shapeSelect = document.getElementById('shape-select');
+    const shapeGroupSandfall = document.getElementById('shape-group-sandfall');
+
     function switchMode(mode) {
         if (!state) return;
         if (mode === 'sandbox') {
@@ -906,12 +909,20 @@ function setupPanelInput() {
             sandboxPatterns.style.display = 'block';
             sandfallControls.style.display = 'none';
 
+            // Sandbox mode is a flat pattern-drawing bed - funnel/hourglass shapes only make
+            // sense with gravity, so hide them here rather than let the user pick a broken combo.
+            shapeGroupSandfall.hidden = true;
+            if (parseInt(shapeSelect.value) >= 3) {
+                shapeSelect.value = '0';
+                state.set_sandbox_shape(0);
+            }
+
             // Tell WASM to switch to Sandbox mode
             state.set_simulator_mode(0);
-            
+
             // Restore gravity to zero (standard sandbox behavior)
             state.set_gravity(0.0, 0.0);
-            
+
             // Sync settings and patterns
             syncSettings();
             loadActivePattern();
@@ -924,9 +935,12 @@ function setupPanelInput() {
             sandboxPatterns.style.display = 'none';
             sandfallControls.style.display = 'block';
 
+            // All shapes (funnels and flat beds alike) work under gravity in Sand-fall mode.
+            shapeGroupSandfall.hidden = false;
+
             // Tell WASM to switch to Sand-fall mode
             state.set_simulator_mode(1);
-            
+
             // Sync gravity and neck width
             syncSandFallSettings();
             syncMaterialTheme(true);

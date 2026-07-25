@@ -588,15 +588,19 @@
             <div class="control-group">
                 <label for="shape-select">Container & Sandbox Shape</label>
                 <select id="shape-select">
-                    <option value="3" selected>Classic Hourglass</option>
-                    <option value="4">Serpentine 3-Stage Hourglass</option>
-                    <option value="5">Galton Board (Pascal Peg Grid)</option>
-                    <option value="6">Staircase Cascade (Plinko Baffles)</option>
-                    <option value="7">Procedural Cave Funnel</option>
-                    <option value="8">Multi-Neck Hourglass</option>
-                    <option value="0">Circle</option>
-                    <option value="1">Square</option>
-                    <option value="2">Oval</option>
+                    <optgroup label="⭕ Flat Sandbox Beds" id="shape-group-flat">
+                        <option value="0" selected>Circle</option>
+                        <option value="1">Square</option>
+                        <option value="2">Oval</option>
+                    </optgroup>
+                    <optgroup label="⏳ Sand-fall Funnels" id="shape-group-sandfall" hidden>
+                        <option value="3">Classic Hourglass</option>
+                        <option value="4">Serpentine 3-Stage Hourglass</option>
+                        <option value="5">Galton Board (Pascal Peg Grid)</option>
+                        <option value="6">Staircase Cascade (Plinko Baffles)</option>
+                        <option value="7">Procedural Cave Funnel</option>
+                        <option value="8">Multi-Neck Hourglass</option>
+                    </optgroup>
                 </select>
             </div>
 

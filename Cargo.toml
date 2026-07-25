@@ -13,3 +13,13 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# The CA solver in sandart-sim runs thousands of ticks per test; at the default
+# opt-level=0, `cargo test` (no --release) makes that ~7x slower than necessary.
+# Optimize just the hot crate and its numeric dependency, keep debug assertions
+# and everything else at dev defaults.
+[profile.dev.package.sandart-sim]
+opt-level = 3
+
+[profile.dev.package.glam]
+opt-level = 3
