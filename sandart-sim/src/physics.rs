@@ -157,6 +157,23 @@ fn add_sand_with_limit_properties(
     }
 }
 
+/// Continuous "how liquid is this cell" weight in [0, 1], derived from `wetness` via a
+/// smoothstep ramp centered on the `wetness >= 0.75` branch cut used to select the wave solver
+/// (`physics.rs` `settle_tick`, `if wetness >= 0.75 && !gravity_active`).
+///
+/// That branch selection itself stays a hard binary switch (Sandbox liquids must keep going
+/// through the wave solver, and that fork is out of scope for this phase). `liquidity` is used
+/// instead to interpolate the *continuous* CA parameters (droplet quantization, threshold/alpha,
+/// gravity_push strength, transfer coefficient, and cell capacity) so that a cell whose `wetness`
+/// drifts a hair across 0.75 under property advection (see `advect_properties`) does not suddenly
+/// flip between "flows like liquid" and "frozen solid" parameters (defect C5). At the extremes
+/// (wetness <= 0.65 or >= 0.85) this reproduces the exact pre-existing granular/liquid parameter
+/// values, so materials that never approach the cut are bit-identical to before.
+fn liquidity(wetness: f32) -> f32 {
+    let t = ((wetness - 0.65) / (0.85 - 0.65)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 fn wave_params(wetness: f32) -> (f32, f32) {
     if wetness <= 0.75 {
         (0.08, 0.76)
@@ -195,8 +212,14 @@ fn get_ca_params(
         return (threshold, alpha, lock_chance, None);
     }
 
-    // Quantization size (droplet beading for liquids under gravity, discrete grains in sandbox)
-    let quantize_size = if wetness >= 0.75 && gravity_active {
+    // Continuous liquid weight for this cell (see `liquidity` doc comment). Used below to blend
+    // the granular and liquid CA parameters instead of hard-switching on `wetness >= 0.75`.
+    let liquidity = liquidity(wetness);
+
+    // Quantization size (droplet beading for liquids under gravity, discrete grains in sandbox).
+    // Gated on `liquidity > 0.0` (wetness > 0.65) rather than the hard `wetness >= 0.75` cut, so
+    // a cell drifting across the old cut doesn't flip discretely between "beaded" and "smooth".
+    let quantize_size = if liquidity > 0.0 && gravity_active {
         Some(0.025) // Droplet/bead quantization for liquids under gravity
     } else if wetness < 0.30 && !gravity_active {
         if grain_size >= 0.60 {
@@ -229,12 +252,19 @@ fn get_ca_params(
         // have threshold=0.0 / flow_rate=0.0. Under gravity, they are routed
         // through the CA solver instead, so we need to give them positive
         // flow parameters to enable draining.
-        if wetness >= 0.75 {
-            threshold = 0.0; // Liquids flow at any height difference
-            alpha = 0.50;    // Fast flow rate for liquid viscosity
-        } else {
-            alpha = (alpha * 1.5).min(0.8);
-        }
+        //
+        // Blended by `liquidity` instead of a hard `wetness >= 0.75` switch (C5): the granular
+        // branch below gives `alpha = flow_rate * 1.5`, which is exactly 0.0 for a liquid preset
+        // (flow_rate_prop == 0.0 for Water/Milk/etc, and Yogurt sits right on the old cut with
+        // flow_rate 0.08). A cell that drifts a hair below 0.75 under property advection used to
+        // fall wholesale into that near-zero-alpha branch and freeze solid. Blending the two
+        // candidate (threshold, alpha) pairs by `liquidity` means a drift of +/-0.0001 in wetness
+        // only perturbs the *blend weight* by a similarly tiny amount, not the whole regime.
+        let granular_alpha = (alpha * 1.5).min(0.8);
+        let liquid_threshold = 0.0; // Liquids flow at any height difference
+        let liquid_alpha = 0.50;    // Fast flow rate for liquid viscosity
+        threshold = threshold * (1.0 - liquidity) + liquid_threshold * liquidity;
+        alpha = granular_alpha * (1.0 - liquidity) + liquid_alpha * liquidity;
     }
 
     // Lock chance
@@ -797,6 +827,56 @@ pub fn eval_sandbox_shape(
     }
 }
 
+/// Mark a neighbor block as modified (needing redraw/copy-back this frame) and bump its
+/// next-frame displacement estimate, without touching the buffer belonging to the block
+/// currently being simulated (which would corrupt a block that hasn't run yet this frame).
+fn activate_neighbor(neighbor_b: usize, flow: f32, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>) {
+    modified[neighbor_b] = true;
+    if next_displacements[neighbor_b] < flow {
+        next_displacements[neighbor_b] = flow;
+    }
+}
+
+/// Apply a mass transfer of `flow` from `center_idx` to `neighbor_idx`: activates both the
+/// source and destination blocks, advects color and material properties, updates
+/// `temp_heights`, and accumulates the per-tick bookkeeping (`total_flow`, `cell_flowed`,
+/// `flow_occurred`). This is the body shared by the two flow sites in the granular CA path
+/// (the avalanche-collapse safety check and the main slope-driven flow below it) — they differ
+/// only in the guard condition that decides whether to call this at all, so the guard stays at
+/// each call site rather than being folded in here.
+#[allow(clippy::too_many_arguments)]
+fn try_move(
+    b: usize,
+    center_idx: usize,
+    neighbor_idx: usize,
+    flow: f32,
+    w: usize,
+    block_size: usize,
+    cols: usize,
+    temp_heights: &mut [f32],
+    cell_colors: &mut [u8],
+    cell_props: &mut [f32],
+    modified: &mut Vec<bool>,
+    next_displacements: &mut Vec<f32>,
+    total_flow: &mut f32,
+    cell_flowed: &mut bool,
+    flow_occurred: &mut bool,
+) {
+    let nx = neighbor_idx % w;
+    let ny = neighbor_idx / w;
+    let neighbor_b = (ny / block_size) * cols + (nx / block_size);
+
+    activate_neighbor(b, flow, modified, next_displacements);
+    activate_neighbor(neighbor_b, flow, modified, next_displacements);
+
+    advect_properties(cell_colors, cell_props, center_idx, neighbor_idx, flow, temp_heights[neighbor_idx]);
+    temp_heights[center_idx] -= flow;
+    temp_heights[neighbor_idx] += flow;
+    *total_flow += flow;
+    *cell_flowed = true;
+    *flow_occurred = true;
+}
+
 /// Perform a single gravity flow/settling iteration inside the active bounding box.
 pub fn settle_tick(
     heightmap: &mut Heightmap,
@@ -938,14 +1018,6 @@ pub fn settle_tick(
     let mut total_flow = 0.0f32;
     let mut next_displacements = vec![0.0f32; expected_len];
     let mut flow_occurred = false;
-
-    // Helper closure to activate neighbor blocks without mid-frame buffer overwrites
-    let activate_neighbor = |neighbor_b: usize, flow: f32, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>| {
-        modified[neighbor_b] = true;
-        if next_displacements[neighbor_b] < flow {
-            next_displacements[neighbor_b] = flow;
-        }
-    };
 
     // 2. Continuous per-cell solver (loop over active blocks)
     let gravity_active = gravity_dir.length_squared() > 1e-6;
@@ -1089,6 +1161,14 @@ pub fn settle_tick(
                         continue;
                     }
 
+                    // Continuous liquid weight for this cell (see `liquidity` doc comment).
+                    // Computed once per center cell and reused by both the avalanche safety
+                    // valve below and the main neighbor flow loop further down, so the acceptor
+                    // capacity (C1, incompressibility) is enforced consistently everywhere a
+                    // neighbor can receive mass in a single tick.
+                    let cell_liquidity = liquidity(wetness);
+                    let cell_capacity = 1.5 * (1.0 - cell_liquidity) + 1.0 * cell_liquidity;
+
                     let h_center = if gravity_active {
                         temp_heights[center_idx].max(heightmap.data[center_idx])
                     } else {
@@ -1172,21 +1252,19 @@ pub fn settle_tick(
                                 let current_temp_center = temp_heights[center_idx];
                                 let current_temp_neighbor = temp_heights[neighbor_idx];
                                 let temp_diff = current_temp_center - current_temp_neighbor;
-                                let clamped_flow = flow.min(temp_diff * 0.4).max(0.0);
+                                // Same acceptor capacity as the main flow loop below (C1): this
+                                // avalanche safety valve bypasses the normal threshold/alpha flow
+                                // computation entirely, so without this clamp it could push a
+                                // liquid neighbor above the incompressibility cap on its own.
+                                let max_dst_room = (cell_capacity - current_temp_neighbor).max(0.0);
+                                let clamped_flow = flow.min(temp_diff * 0.4).min(max_dst_room).max(0.0);
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD {
-                                    let nx = neighbor_idx % w;
-                                    let ny = neighbor_idx / w;
-                                    let neighbor_b = (ny / block_size) * cols + (nx / block_size);
-                                    
-                                    activate_neighbor(b, clamped_flow, &mut modified, &mut next_displacements);
-                                    activate_neighbor(neighbor_b, clamped_flow, &mut modified, &mut next_displacements);
-
-                                    advect_properties(cell_colors, cell_props, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
-                                    temp_heights[center_idx] -= clamped_flow;
-                                    temp_heights[neighbor_idx] += clamped_flow;
-                                    total_flow += clamped_flow;
-                                    cell_flowed = true;
-                                    flow_occurred = true;
+                                    try_move(
+                                        b, center_idx, neighbor_idx, clamped_flow, w, block_size, cols,
+                                        temp_heights, cell_colors, cell_props,
+                                        &mut modified, &mut next_displacements,
+                                        &mut total_flow, &mut cell_flowed, &mut flow_occurred,
+                                    );
                                 }
                             }
                             avalanche_checked = true;
@@ -1239,6 +1317,9 @@ pub fn settle_tick(
                         gravity_active,
                     );
 
+                    // `cell_liquidity` / `cell_capacity` computed above (right after the CA
+                    // branch was entered); reused below to blend the gravity_push multiplier,
+                    // the transfer coefficient, and the acceptor cell capacity.
                     for &(neighbor_idx, ndx, ndy) in &neighbors_info {
                         let h_neighbor = if gravity_active { temp_heights[neighbor_idx].max(heightmap.data[neighbor_idx]) } else { heightmap.data[neighbor_idx] };
                         let geom_slope = h_center - h_neighbor;
@@ -1257,11 +1338,14 @@ pub fn settle_tick(
                         let is_below_inside = y + 1 < h && is_inside(x, y + 1);
                         let is_free_fall = gravity_active && is_below_inside && h_below < 0.10;
 
-                        // Downward pull (liquid has no friction/repose angle, so it flows much faster)
-                        let mut gravity_push = if wetness >= 0.75 {
-                            gravity_dot * 40.0
-                        } else {
-                            gravity_dot * 4.0
+                        // Downward pull (liquid has no friction/repose angle, so it flows much faster).
+                        // Blended by `cell_liquidity` rather than a hard `wetness >= 0.75` switch (C5)
+                        // so this multiplier doesn't jump discontinuously as wetness drifts under
+                        // property advection.
+                        let mut gravity_push = {
+                            let sand_mult = 4.0;
+                            let liquid_mult = 40.0;
+                            gravity_dot * (sand_mult * (1.0 - cell_liquidity) + liquid_mult * cell_liquidity)
                         };
                         
                         // Stochastic sideways dispersion/splashing (always scatter a little laterally)
@@ -1306,57 +1390,71 @@ pub fn settle_tick(
                             }
 
                             if flow > 0.0 {
+                                // Blended by `cell_liquidity` rather than a hard `wetness >= 0.75`
+                                // switch (C5), so the coefficient doesn't jump discontinuously as
+                                // wetness drifts across the old cut under property advection.
                                 let max_transfer_coeff = if !gravity_active {
                                     0.40
-                                } else if wetness >= 0.75 {
-                                    if is_free_fall && gravity_dot > 0.0 {
+                                } else {
+                                    let liquid_coeff = if is_free_fall && gravity_dot > 0.0 {
                                         0.50 // Elongated droplet teardrop transfer
                                     } else {
                                         0.40 // Liquids flow freely under gravity
-                                    }
-                                } else if is_free_fall && gravity_dot > 0.0 {
-                                    let rand_ff = ((seed ^ (neighbor_idx as u32).wrapping_mul(1543)) & 0xFFFF) as f32 / 65535.0;
-                                    0.80 + 0.20 * rand_ff // Random transfer between 80% and 100% in mid-air free fall
-                                } else {
-                                    0.20 // Sand uses lower coeff on bed to prevent wave oscillations
+                                    };
+                                    let granular_coeff = if is_free_fall && gravity_dot > 0.0 {
+                                        let rand_ff = ((seed ^ (neighbor_idx as u32).wrapping_mul(1543)) & 0xFFFF) as f32 / 65535.0;
+                                        0.80 + 0.20 * rand_ff // Random transfer between 80% and 100% in mid-air free fall
+                                    } else {
+                                        0.20 // Sand uses lower coeff on bed to prevent wave oscillations
+                                    };
+                                    granular_coeff * (1.0 - cell_liquidity) + liquid_coeff * cell_liquidity
                                 };
+                                // Acceptor cell capacity (incompressibility, C1). `cell_capacity`
+                                // (computed once above, per center cell) is 1.5 for granular
+                                // materials (unchanged, load-bearing for sand-pile height tests)
+                                // and interpolates down to 1.0 for liquids via `cell_liquidity`, so
+                                // there is no hard cut. Applied to BOTH branches below (not just the
+                                // "push into an equal/higher neighbor" case) because within a single
+                                // tick a cell can receive inflow from more than one neighbor; without
+                                // a capacity check on the downhill (geom_slope > 0) branch too,
+                                // several simultaneous donors could each independently push a liquid
+                                // neighbor a little past 1.0 even though none of them individually
+                                // looked like overpacking.
+                                let max_dst_room = (cell_capacity - temp_heights[neighbor_idx]).max(0.0);
+
                                 let src_h = temp_heights[center_idx];
                                 let mut clamped_flow = if geom_slope > 0.0 {
                                     let temp_diff = temp_heights[center_idx] - temp_heights[neighbor_idx];
-                                    if src_h <= 0.003 {
+                                    let flow_capped = if src_h <= 0.003 {
                                         flow.min(temp_diff).max(0.0)
                                     } else {
                                         flow.min(temp_diff * max_transfer_coeff).max(0.0)
-                                    }
+                                    };
+                                    flow_capped.min(max_dst_room)
                                 } else {
                                     let max_src_flow = if src_h <= 0.003 {
                                         src_h
                                     } else {
                                         src_h * max_transfer_coeff
                                     };
-                                    let max_dst_room = (1.5 - temp_heights[neighbor_idx]).max(0.0);
                                     flow.min(max_src_flow).min(max_dst_room).max(0.0)
                                 };
                                 
-                                // Clean sweep for tiny residual amounts to prevent Zeno's paradox trapping & floating grains
+                                // Clean sweep for tiny residual amounts to prevent Zeno's paradox trapping & floating grains.
+                                // Still respects the acceptor capacity (C1): this override previously bypassed
+                                // max_dst_room entirely, which let a liquid neighbor already at capacity get pushed
+                                // slightly over 1.0 by every tiny-residual neighbor sweeping into it in the same tick.
                                 if (clamped_flow <= FLOW_INACTIVE_THRESHOLD || is_free_fall) && src_h > 0.0 && src_h <= 0.010 && flow > 0.0 {
-                                    clamped_flow = src_h;
+                                    clamped_flow = src_h.min(max_dst_room);
                                 }
 
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD || (src_h <= 0.001 && clamped_flow > 0.0) {
-                                    let nx = neighbor_idx % w;
-                                    let ny = neighbor_idx / w;
-                                    let neighbor_b = (ny / block_size) * cols + (nx / block_size);
-                                    
-                                    activate_neighbor(b, clamped_flow, &mut modified, &mut next_displacements);
-                                    activate_neighbor(neighbor_b, clamped_flow, &mut modified, &mut next_displacements);
-
-                                    advect_properties(cell_colors, cell_props, center_idx, neighbor_idx, clamped_flow, temp_heights[neighbor_idx]);
-                                    temp_heights[center_idx] -= clamped_flow;
-                                    temp_heights[neighbor_idx] += clamped_flow;
-                                    total_flow += clamped_flow;
-                                    cell_flowed = true;
-                                    flow_occurred = true;
+                                    try_move(
+                                        b, center_idx, neighbor_idx, clamped_flow, w, block_size, cols,
+                                        temp_heights, cell_colors, cell_props,
+                                        &mut modified, &mut next_displacements,
+                                        &mut total_flow, &mut cell_flowed, &mut flow_occurred,
+                                    );
                                 }
                             }
                         }
@@ -1492,6 +1590,76 @@ mod tests {
             }
         }
         mask
+    }
+
+    /// Bundles the many mutable buffers settle_tick needs so the liquid-gravity
+    /// characterisation tests below don't have to repeat ~10 lines of boilerplate
+    /// allocation each. Used only by the L1-L10 tests added in Phase 0.
+    struct TestSim {
+        hm: Heightmap,
+        temp_heights: Vec<f32>,
+        cell_colors: Vec<u8>,
+        cell_props: Vec<f32>,
+        sliding: Vec<bool>,
+        bounds: ActiveBounds,
+        active_blocks: Vec<crate::BlockActivity>,
+        last_displacements: Vec<f32>,
+        last_simulated_ticks: Vec<u32>,
+        wave_vel: Vec<f32>,
+        mask: Vec<u8>,
+        block_size: usize,
+        tick_count: u32,
+    }
+
+    impl TestSim {
+        fn new(w: usize, h: usize, props: Vec<f32>, mask: Vec<u8>, block_size: usize) -> Self {
+            let cols = (w + block_size - 1) / block_size;
+            let rows = (h + block_size - 1) / block_size;
+            let expected_len = cols * rows;
+            TestSim {
+                hm: Heightmap::new(w, h, 0.0),
+                temp_heights: vec![0.0; w * h],
+                cell_colors: vec![0u8; w * h * 4],
+                cell_props: props,
+                sliding: vec![false; w * h],
+                bounds: ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true },
+                active_blocks: vec![crate::BlockActivity::Inactive; expected_len],
+                last_displacements: vec![1.0; expected_len],
+                last_simulated_ticks: vec![0; expected_len],
+                wave_vel: vec![0.0; w * h],
+                mask,
+                block_size,
+                tick_count: 0,
+            }
+        }
+
+        fn tick(&mut self, gravity_dir: glam::Vec2, budget_n: usize) -> f32 {
+            let flow = settle_tick(
+                &mut self.hm,
+                &mut self.temp_heights,
+                &mut self.cell_colors,
+                &mut self.cell_props,
+                &mut self.sliding,
+                &mut self.bounds,
+                &mut self.active_blocks,
+                &mut self.last_displacements,
+                &mut self.last_simulated_ticks,
+                budget_n,
+                self.block_size,
+                &[],
+                12345u32.wrapping_add(self.tick_count),
+                &mut self.wave_vel,
+                &self.mask,
+                self.tick_count,
+                gravity_dir,
+            );
+            self.tick_count += 1;
+            flow
+        }
+
+        fn mass(&self) -> f64 {
+            self.hm.data.iter().map(|&v| v as f64).sum()
+        }
     }
 
     #[test]
@@ -2636,8 +2804,594 @@ mod tests {
         );
     }
 
+    // =========================================================================================
+    // Phase 0 characterisation tests (liquid-gravity overhaul safety net).
+    //
+    // L1-L3 and L5-L10 encode the *intended* correct behaviour for liquids under gravity and
+    // are marked #[ignore] because they FAIL on today's code — that failure is the point: they
+    // are the target later phases must turn green. L4 encodes an invariant that already holds
+    // today (mass conservation of the CA gravity path) and is kept active as a regression guard.
+    //
+    // See scratchpad/liquid-gravity-proposal.md for the full diagnosis (defects C1-C9) this
+    // suite is built against. Do NOT tune constants in physics.rs to make any of the ignored
+    // tests below pass — that is explicitly out of scope for Phase 0.
+    // =========================================================================================
+
+    #[test]
+    #[ignore = "Phase 2 target: a settled liquid pool should have a flat surface (per-column \
+                surface-row max-min <= 1) with at most one partially-filled cell per column. \
+                Measured today: surface spread = 47 rows (min=10, max=57) across 61 columns, \
+                and up to 37 partially-filled cells in a single column — the 'flat' surface is \
+                actually a smeared multi-row ramp caused by the unconditional lateral dispersion \
+                noise (C2, physics.rs:1276-1282)."]
+    fn test_liquid_pool_levels_flat_in_closed_box() {
+        // A closed 64x64 box, Water poured into a 12-wide x 56-tall column, settled under
+        // downward gravity for a long time. In a correct liquid solver this becomes a flat
+        // pool with a single clean surface row per column.
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, 32);
+        for y in 4..60 {
+            for x in 6..18 {
+                sim.hm.data[y * w + x] = 1.0;
+            }
+        }
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        for _ in 0..1500 {
+            sim.tick(gravity_dir, 256);
+        }
+
+        // Scan the WHOLE box, not just the original pour columns, since liquid disperses
+        // sideways well beyond its starting footprint (C2).
+        let mut surface_rows = Vec::new();
+        let mut max_partial_in_a_column = 0;
+        for x in 0..w {
+            let mut surface_row: Option<usize> = None;
+            let mut partial_count = 0;
+            for y in 0..h {
+                let val = sim.hm.data[y * w + x];
+                if val > 0.5 && surface_row.is_none() {
+                    surface_row = Some(y);
+                }
+                if val > 0.02 && val < 0.98 {
+                    partial_count += 1;
+                }
+            }
+            if let Some(sr) = surface_row {
+                surface_rows.push(sr);
+            }
+            max_partial_in_a_column = max_partial_in_a_column.max(partial_count);
+        }
+        let min_row = *surface_rows.iter().min().unwrap();
+        let max_row = *surface_rows.iter().max().unwrap();
+        let spread = max_row - min_row;
+        println!(
+            "test_liquid_pool_levels_flat_in_closed_box: surface spread={} (min={}, max={}), \
+             n_columns={}, max_partial_in_a_column={}",
+            spread, min_row, max_row, surface_rows.len(), max_partial_in_a_column
+        );
+
+        // Measured today: spread=47, max_partial_in_a_column=37.
+        assert!(spread <= 1, "Pool surface is not flat: spread={} rows", spread);
+        assert!(
+            max_partial_in_a_column <= 1,
+            "Column has {} partially-filled cells, expected at most 1 (a single meniscus row)",
+            max_partial_in_a_column
+        );
+    }
+
+    #[test]
+    // Phase 1 (C1 fix): liquid cells must respect CELL_CAPACITY = 1.0 (no cell above 1.0 + 1e-3)
+    // and the occupied-cell footprint (h > 0.5) must be within 5% of the initial pour, i.e. no
+    // phantom compression/shrinkage. Was ignored before Phase 1: max h = 1.502198 (cells packed
+    // to the CA's 1.5 cap), occupied count 672 -> 466 (-30.65%). After the liquid-only capacity
+    // fix (physics.rs get_ca_params / settle_tick, gated on `liquidity(wetness)`): max h = 1.0,
+    // shrink = -0.30% (footprint grew slightly, well within tolerance).
+    fn test_liquid_is_incompressible() {
+        // Same pool as test_liquid_pool_levels_flat_in_closed_box: a closed box, Water poured
+        // into a column, settled under gravity. A real (incompressible) liquid can never exceed
+        // fill fraction 1.0 per cell, and settling should not make cells "disappear" (shrink the
+        // occupied footprint) since mass is conserved.
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, 32);
+        for y in 4..60 {
+            for x in 6..18 {
+                sim.hm.data[y * w + x] = 1.0;
+            }
+        }
+        let initial_occupied: usize = 12 * 56;
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        for _ in 0..1500 {
+            sim.tick(gravity_dir, 256);
+        }
+
+        let max_h = sim.hm.data.iter().cloned().fold(0.0f32, f32::max);
+        let final_occupied = sim.hm.data.iter().filter(|&&v| v > 0.5).count();
+        let shrink_pct = 100.0 * (initial_occupied as f64 - final_occupied as f64) / initial_occupied as f64;
+        println!(
+            "test_liquid_is_incompressible: max_h={:.6}, occupied init={} final={} shrink={:.2}%",
+            max_h, initial_occupied, final_occupied, shrink_pct
+        );
+
+        // Measured today: max_h=1.502198, shrink=30.65%.
+        assert!(sim.hm.data.iter().all(|&v| v <= 1.0 + 1e-3), "Cell exceeded capacity: max_h={:.6}", max_h);
+        assert!(
+            shrink_pct.abs() < 5.0,
+            "Occupied footprint changed by {:.2}%, expected within 5% (incompressible liquid)",
+            shrink_pct
+        );
+    }
+
+    #[test]
+    #[ignore = "Phase 2 target: a narrow 4-cell-wide liquid source should fall as a coherent \
+                stream (mid-air cross-section width <= 8, peak fill h >= 0.5), not disperse \
+                into a wide, thin smear. Measured today: width=19, peak_h=0.3166 after 40 ticks \
+                (for comparison DrySand under identical conditions stays much narrower: \
+                width=11, peak_h=0.1096) — the unconditional lateral dispersion term (C2) makes \
+                the liquid stream WORSE than sand's, the opposite of the intended look."]
+    fn test_liquid_stream_stays_coherent() {
+        // A 64x96 box with a 4-cell-wide continuous source (a "tap") pouring at the top.
+        // A coherent stream should stay narrow as it falls; today's dispersion noise
+        // scatters it into a wide, thin sheet instead.
+        let w = 64;
+        let h = 96;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, 32);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        for _ in 0..40 {
+            for y in 6..10 {
+                for x in 30..34 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+            sim.tick(gravity_dir, 256);
+        }
+
+        // Densest (widest) row and peak fill anywhere in the mid-air band, well clear of the
+        // source (y=6..10) and the box floor (box bottom is around y=92).
+        let mut max_width = 0usize;
+        let mut peak_h = 0.0f32;
+        for y in 15..70 {
+            let mut min_x = None;
+            let mut max_x = None;
+            for x in 0..w {
+                let val = sim.hm.data[y * w + x];
+                if val > 0.05 {
+                    if min_x.is_none() { min_x = Some(x); }
+                    max_x = Some(x);
+                    peak_h = peak_h.max(val);
+                }
+            }
+            if let (Some(mn), Some(mx)) = (min_x, max_x) {
+                max_width = max_width.max(mx - mn + 1);
+            }
+        }
+        println!("test_liquid_stream_stays_coherent: max_width={}, peak_h={:.4}", max_width, peak_h);
+
+        // Measured today: max_width=19, peak_h=0.3166.
+        assert!(max_width <= 8, "Stream cross-section too wide: {} cells", max_width);
+        assert!(peak_h >= 0.5, "Stream peak fill too low: {:.4}", peak_h);
+    }
+
+    #[test]
+    fn test_liquid_mass_conserved_under_gravity() {
+        // Regression guard (Phase 0): this invariant already holds today and must keep holding
+        // through every later phase. Water poured into the upper chamber of an hourglass,
+        // 2000 gravity ticks, total mass must be conserved.
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, 32);
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        for y in 0..h {
+            let dy = y as f32 - center_y;
+            if dy < 0.0 && dy > -6.0 {
+                for x in 0..w {
+                    let dx = x as f32 - center_x;
+                    if dx.abs() < 22.4 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+            }
+        }
+        let initial_mass = sim.mass();
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        for _ in 0..2000 {
+            sim.tick(gravity_dir, 256);
+        }
+        let final_mass = sim.mass();
+        let rel_err = (final_mass - initial_mass).abs() / initial_mass;
+        println!(
+            "test_liquid_mass_conserved_under_gravity: init={:.6} final={:.6} rel_err={:.8}",
+            initial_mass, final_mass, rel_err
+        );
+        // Measured today: rel_err ~= 1.2e-6.
+        assert!(rel_err < 1e-4, "Mass not conserved under gravity: rel_err={:.8}", rel_err);
+    }
+
+    #[test]
+    #[ignore = "Phase 5 target: the sandbox wave solver must conserve mass even when the block \
+                LOD scheduler only simulates a fraction of blocks per tick. Measured today \
+                (128x128 Water 'dome', gravity=0, budget_n=4 of 16 blocks, 600 ticks): \
+                rel_err = +13.85% (mass INCREASES, not decreases). Note: this disagrees with the \
+                liquid-gravity-proposal.md design doc, which reports -1.345% (a decrease) for a \
+                similar but not identical setup — direction and magnitude differ in this \
+                reproduction, but the underlying defect (C7: physics.rs:1025-1032's per-cell \
+                Laplacian only conserves mass if every block updates in the same pass, and \
+                will_simulate[b] at physics.rs:969 breaks that) is confirmed either way: mass is \
+                very much not conserved under partial-block LOD."]
+    fn test_liquid_mass_conserved_in_sandbox_under_lod() {
+        let w = 128;
+        let h = 128;
+        let block_size = 32; // 4x4 = 16 blocks
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, block_size);
+        assert_eq!(sim.active_blocks.len(), 16, "Expected 16 blocks at 128x128 with block_size=32");
+
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        for y in 0..h {
+            for x in 0..w {
+                let dx = x as f32 - center_x;
+                let dy = y as f32 - center_y;
+                if dx * dx + dy * dy < 20.0 * 20.0 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+        }
+        let initial_mass = sim.mass();
+        // Sandbox mode: gravity = 0 (routes wetness >= 0.75 through the wave solver), and a
+        // throttled budget so only 4 of 16 blocks simulate per tick.
+        for _ in 0..600 {
+            sim.tick(glam::Vec2::ZERO, 4);
+        }
+        let final_mass = sim.mass();
+        let rel_err = (final_mass - initial_mass) / initial_mass;
+        println!(
+            "test_liquid_mass_conserved_in_sandbox_under_lod: init={:.6} final={:.6} rel_err={:.6}",
+            initial_mass, final_mass, rel_err
+        );
+        assert!(rel_err.abs() < 1e-4, "Mass not conserved under partial-block LOD: rel_err={:.6}", rel_err);
+    }
+
+    #[test]
+    #[ignore = "Phase 4 target: toggling gravity to zero mid-simulation must not destroy mass \
+                (today's slider can reach 0.0 in Sand-fall mode: demo.js:710). Measured today \
+                (hourglass Water, 60 ticks at g=(0,0.04) then 300 ticks at g=(0,0)): \
+                rel_err = +9.75% (mass INCREASES). Note: this disagrees with the \
+                liquid-gravity-proposal.md design doc, which reports -21.5% (a decrease) for a \
+                similar setup — direction and magnitude differ in this reproduction (likely \
+                because the wave solver's clamp(0.0, 1.0) at physics.rs:1031 is asymmetric: an \
+                undershoot below 0 is floored to 0 without removing the corresponding mass from \
+                a neighbor, which can net ADD mass over many ticks of reflection off the \
+                hourglass walls) — but the underlying defect (C6/C7: the gravity-active wave \
+                path is not mass-conservative) is confirmed either way."]
+    fn test_liquid_survives_gravity_toggle() {
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, 32);
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        for y in 0..h {
+            let dy = y as f32 - center_y;
+            if dy < 0.0 && dy > -6.0 {
+                for x in 0..w {
+                    let dx = x as f32 - center_x;
+                    if dx.abs() < 22.4 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+            }
+        }
+        let initial_mass = sim.mass();
+        for _ in 0..60 {
+            sim.tick(glam::Vec2::new(0.0, 0.04), 256);
+        }
+        for _ in 0..300 {
+            sim.tick(glam::Vec2::ZERO, 256);
+        }
+        let final_mass = sim.mass();
+        let rel_err = (final_mass - initial_mass).abs() / initial_mass;
+        println!(
+            "test_liquid_survives_gravity_toggle: init={:.6} final={:.6} rel_err={:.6}",
+            initial_mass, final_mass, rel_err
+        );
+        assert!(rel_err < 1e-3, "Mass not conserved across a gravity toggle: rel_err={:.6}", rel_err);
+    }
+
+    #[test]
+    #[ignore = "Phase 1 target: Water, CalmWater, Milk and VegOil should behave measurably \
+                differently under gravity (different viscosity/flow character). Measured today: \
+                identical pour, 800 gravity ticks, all four materials produce bit-identical \
+                centroids to 5 decimal places: (32.02833, 51.50852), mass=975.19975 — matches \
+                the design doc's claim exactly. Cause (C4): get_ca_params (physics.rs:232-234) \
+                collapses every wetness >= 0.75 material to the same (threshold=0.0, \
+                alpha=0.50), and wave_params (the only place that distinguishes them) is never \
+                reached once gravity is active."]
+    fn test_liquid_presets_are_distinguishable_under_gravity() {
+        let w = 64;
+        let h = 64;
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        let r_sq = (0.46 * w as f32) * (0.46 * w as f32);
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let mut centroids = Vec::new();
+        for mat in [MaterialMode::Water, MaterialMode::CalmWater, MaterialMode::Milk, MaterialMode::VegetableOil] {
+            let props = get_test_props(mat, w * h);
+            let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
+            for y in 0..h {
+                for x in 0..w {
+                    let dx = x as f32 - center_x;
+                    let dy = y as f32 - center_y;
+                    if dx * dx + dy * dy < r_sq && dy < -2.0 {
+                        sim.hm.data[y * w + x] = 0.8;
+                    }
+                }
+            }
+            for _ in 0..800 {
+                sim.tick(gravity_dir, 256);
+            }
+            let mut total = 0.0f64;
+            let mut wx = 0.0f64;
+            let mut wy = 0.0f64;
+            for y in 0..h {
+                for x in 0..w {
+                    let val = sim.hm.data[y * w + x] as f64;
+                    if val > 0.0 {
+                        total += val;
+                        wx += x as f64 * val;
+                        wy += y as f64 * val;
+                    }
+                }
+            }
+            let centroid = (wx / total, wy / total);
+            println!("test_liquid_presets_are_distinguishable_under_gravity: {:?} centroid={:?}", mat, centroid);
+            centroids.push((mat, centroid));
+        }
+
+        // Pairwise centroid separation: at least one pair should differ by more than 0.5 cells.
+        let mut max_sep = 0.0f64;
+        for i in 0..centroids.len() {
+            for j in (i + 1)..centroids.len() {
+                let (ax, ay) = centroids[i].1;
+                let (bx, by) = centroids[j].1;
+                let sep = ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt();
+                max_sep = max_sep.max(sep);
+            }
+        }
+        println!("test_liquid_presets_are_distinguishable_under_gravity: max pairwise centroid separation={:.6}", max_sep);
+        // Measured today: max_sep = 0.0 (bit-identical).
+        assert!(max_sep > 0.5, "All liquid presets produced statistically identical results under gravity: max_sep={:.6}", max_sep);
+    }
+
+    #[test]
+    // Phase 1 (C5 fix): the wetness >= 0.75 liquid/granular branch cut must be stable under
+    // property advection — two runs seeded a hair on either side of 0.75 should agree closely,
+    // not diverge catastrophically. Was ignored before Phase 1: wetness=0.7499 settled near
+    // centroid y=41.18, wetness=0.7501 near centroid y=51.50 — a ~16% difference relative to the
+    // 64-row grid. Cause: advect_properties blends with weights that don't sum to exactly 1.0 in
+    // f32, and cells that drifted to wetness < 0.75 fell wholesale into the granular branch where
+    // alpha = flow_rate * 1.5 = 0.0 for a Yogurt-like material (flow_rate=0.08 here), freezing
+    // solid instead of flowing. Fixed by replacing the hard `wetness >= 0.75` parameter switch in
+    // get_ca_params with a `liquidity(wetness)` smoothstep blend of the granular and liquid
+    // (threshold, alpha) pairs, so a drift of a few 1e-4 in wetness only perturbs the blend
+    // weight by a similarly tiny amount. After the fix: rel_diff ~= 0.00018 (vs required < 0.01).
+    fn test_wetness_classification_is_stable_under_advection() {
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        let r_sq = (0.46 * w as f32) * (0.46 * w as f32);
+
+        let mut centroids_y = Vec::new();
+        for wetness in [0.7499f32, 0.7501f32] {
+            let mut props = vec![0.0f32; w * h * 4];
+            for chunk in props.chunks_exact_mut(4) {
+                chunk[PROP_WETNESS] = wetness;
+                chunk[PROP_THRESHOLD] = 0.0;
+                chunk[PROP_FLOW_RATE] = 0.08;
+                chunk[PROP_GRAIN_SIZE] = 0.08;
+            }
+            let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
+            for y in 0..h {
+                for x in 0..w {
+                    let dx = x as f32 - center_x;
+                    let dy = y as f32 - center_y;
+                    if dx * dx + dy * dy < r_sq && dy < -2.0 {
+                        sim.hm.data[y * w + x] = 0.8;
+                    }
+                }
+            }
+            for _ in 0..800 {
+                sim.tick(gravity_dir, 256);
+            }
+            let mut total = 0.0f64;
+            let mut wy = 0.0f64;
+            for y in 0..h {
+                for x in 0..w {
+                    let val = sim.hm.data[y * w + x] as f64;
+                    if val > 0.0 {
+                        total += val;
+                        wy += y as f64 * val;
+                    }
+                }
+            }
+            let centroid_y = wy / total;
+            println!("test_wetness_classification_is_stable_under_advection: wetness={} centroid_y={:.5}", wetness, centroid_y);
+            centroids_y.push(centroid_y);
+        }
+
+        let diff = (centroids_y[0] - centroids_y[1]).abs();
+        let rel_diff = diff / h as f64;
+        println!("test_wetness_classification_is_stable_under_advection: |diff|={:.5} rel_diff={:.5}", diff, rel_diff);
+        // Measured today: rel_diff ~= 0.16 (16%).
+        assert!(
+            rel_diff < 0.01,
+            "wetness=0.7499 and wetness=0.7501 diverge by {:.2}% of grid height, expected < 1%",
+            rel_diff * 100.0
+        );
+    }
+
+    #[test]
+    #[ignore = "Phase 2/3 target: liquid should have essentially no angle of repose (settles \
+                flat, spread <= 1 row) while granular DrySand should retain a real heap (spread \
+                >= 8 rows) under identical pour conditions — this is the user's core complaint. \
+                Measured today (continuous point-source pour, 400 ticks pouring + 600 ticks \
+                settling): Water spread=1 (already flat, min=54 max=55) but DrySand spread=7 \
+                (min=52 max=59) — DrySand falls just short of the 8-row bar too. That is a \
+                second, distinct finding: under Sand-fall gravity mode DrySand's own repose \
+                angle is weaker than expected (get_ca_params halves the threshold again via \
+                'threshold *= 0.35' at physics.rs:226, and lock_chance drops to a flat 0.05 at \
+                physics.rs:241-242 'for smooth avalanching'), so even dry sand piles flatter \
+                than a real angle of repose would allow."]
+    fn test_liquid_has_no_angle_of_repose() {
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let mut spreads = Vec::new();
+        for mat in [MaterialMode::Water, MaterialMode::DrySand] {
+            let props = get_test_props(mat, w * h);
+            let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
+            // Continuous point-source pour near the top center (like a tap), so enough mass
+            // accumulates for DrySand to build a real angle-of-repose cone rather than a
+            // single blob settling flat by construction.
+            for _ in 0..400 {
+                for y in 4..8 {
+                    for x in 30..34 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                sim.tick(gravity_dir, 256);
+            }
+            // Let it settle without further pouring.
+            for _ in 0..600 {
+                sim.tick(gravity_dir, 256);
+            }
+
+            let mut surface_rows = Vec::new();
+            for x in 6..58 {
+                for y in 0..h {
+                    if sim.hm.data[y * w + x] > 0.05 {
+                        surface_rows.push(y);
+                        break;
+                    }
+                }
+            }
+            let spread = if surface_rows.is_empty() {
+                0
+            } else {
+                surface_rows.iter().max().unwrap() - surface_rows.iter().min().unwrap()
+            };
+            println!("test_liquid_has_no_angle_of_repose: {:?} spread={}", mat, spread);
+            spreads.push(spread);
+        }
+
+        // Measured today: Water spread=1, DrySand spread=7.
+        assert!(spreads[0] <= 1, "Liquid (Water) should settle nearly flat: spread={}", spreads[0]);
+        assert!(spreads[1] >= 8, "DrySand should retain a real heap: spread={}", spreads[1]);
+    }
+
+    #[test]
+    #[ignore = "Phase 3 target: a liquid blob impacting a floor should splash — spreading \
+                laterally beyond its original width AND moving at least 1 row upward against \
+                gravity. Measured today: lateral spread does happen (width 8 -> 30 within 10 \
+                ticks of impact, via the same dispersion noise as C2) but upward movement is \
+                impossible BY CONSTRUCTION: physics.rs:1162 and physics.rs:1248 both `continue` \
+                whenever `gravity_active && gravity_dot < -0.01`, i.e. no cell may ever flow \
+                against gravity in Sand-fall mode. min_row_after (59) never goes above \
+                top_row_at_impact (50)."]
+    fn test_liquid_splashes_on_impact() {
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, 32);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // A compact blob close to the floor.
+        for y in 50..54 {
+            for x in 28..36 {
+                sim.hm.data[y * w + x] = 1.0;
+            }
+        }
+        let initial_width = 36 - 28;
+
+        let mut top_row_at_impact = None;
+        for _ in 0..60 {
+            sim.tick(gravity_dir, 256);
+            if top_row_at_impact.is_some() {
+                continue;
+            }
+            // Detect impact: material reaches near the floor (y=58 or 59).
+            let touching_floor = (20..44).any(|x| sim.hm.data[58 * w + x] > 0.05 || sim.hm.data[59 * w + x] > 0.05);
+            if touching_floor {
+                let min_row = (0..h)
+                    .find(|&y| (20..44).any(|x| sim.hm.data[y * w + x] > 0.05))
+                    .expect("material must exist somewhere once it's touching the floor");
+                top_row_at_impact = Some(min_row);
+            }
+        }
+        let top_at_impact = top_row_at_impact.expect("blob never reached the floor within 60 ticks");
+
+        for _ in 0..10 {
+            sim.tick(gravity_dir, 256);
+        }
+
+        let mut min_x = w;
+        let mut max_x = 0;
+        let mut min_row_after = h;
+        for y in 0..h {
+            for x in 0..w {
+                if sim.hm.data[y * w + x] > 0.05 {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                    min_row_after = min_row_after.min(y);
+                }
+            }
+        }
+        let width_after = max_x.saturating_sub(min_x) + 1;
+        let lateral_spread = width_after > initial_width;
+        let upward_move = min_row_after < top_at_impact;
+        println!(
+            "test_liquid_splashes_on_impact: width_after={} (initial={}), min_row_after={} \
+             (top_at_impact={}), lateral_spread={}, upward_move={}",
+            width_after, initial_width, min_row_after, top_at_impact, lateral_spread, upward_move
+        );
+
+        // Measured today: lateral_spread=true, upward_move=false (structurally impossible).
+        assert!(lateral_spread, "Blob did not spread laterally beyond its original width on impact");
+        assert!(upward_move, "Blob did not move upward at all on impact (min_row_after={}, top_at_impact={})", min_row_after, top_at_impact);
+    }
+
     #[test]
     fn test_hourglass_full_drainage() {
+        // Fill the upper chamber of an hourglass with DrySand and let it settle under gravity
+        // for long enough to reach a steady state, then verify (a) mass is conserved and
+        // (b) the large majority of the sand has drained through the neck into the lower
+        // chamber. This does NOT assert the upper chamber reaches exactly zero: measured today,
+        // a residual pile (~13% of total mass) permanently rests in the upper chamber above the
+        // neck once the local slope drops below the (gravity-reduced) repose threshold, and
+        // upper-chamber mass is observed to plateau (stop changing tick-over-tick) well before
+        // 3000 ticks — i.e. "drainage" reaches a stable end state, just not a literally empty
+        // upper chamber. That residual-pile behavior is plausible for granular material and is
+        // NOT something Phase 0 should "fix"; this test only pins down that it doesn't regress.
         let w = 64;
         let h = 64;
         let mut hm = Heightmap::new(w, h, 0.0);
@@ -2663,6 +3417,7 @@ mod tests {
                 }
             }
         }
+        let initial_mass: f64 = hm.data.iter().map(|&v| v as f64).sum();
 
         let mut temp_heights = hm.data.clone();
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
@@ -2684,7 +3439,7 @@ mod tests {
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
         let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.04, 0.60);
-        for i in 0..1000 {
+        for i in 0..3000u32 {
             settle_tick(
                 &mut hm,
                 &mut temp_heights,
@@ -2698,10 +3453,10 @@ mod tests {
                 256,
                 32,
                 &[],
-                12345 + i as u32,
+                12345u32.wrapping_add(i),
                 &mut wave_vel,
                 &mask,
-                i as u32,
+                i,
                 gravity_dir,
             );
         }
@@ -2713,6 +3468,24 @@ mod tests {
                 println!("y={:2}, x={:2}: h={:.4}", y, x, hm.data[idx]);
             }
         }
+
+        let final_mass: f64 = hm.data.iter().map(|&v| v as f64).sum();
+        let final_lower_mass: f64 = hm.data[32 * w..].iter().map(|&v| v as f64).sum();
+        let mass_err = (final_mass - initial_mass).abs() / initial_mass;
+        let drained_frac = final_lower_mass / initial_mass;
+        println!(
+            "test_hourglass_full_drainage: init_mass={:.6} final_mass={:.6} mass_err={:.8} \
+             final_lower_mass={:.6} drained_frac={:.4}",
+            initial_mass, final_mass, mass_err, final_lower_mass, drained_frac
+        );
+
+        // Measured today: mass_err ~= 1.1e-7, drained_frac ~= 0.869 (86.9%).
+        assert!(mass_err < 1e-4, "Mass not conserved during drainage: mass_err={:.8}", mass_err);
+        assert!(
+            drained_frac > 0.75,
+            "Less than 75% of the sand drained into the lower chamber: drained_frac={:.4}",
+            drained_frac
+        );
     }
 
     #[test]
@@ -2977,6 +3750,42 @@ mod tests {
                 boundary_y, h_prev, h_bound, h_next
             );
         }
+
+        // Classify EVERY consecutive-row height difference down the whole stream column as
+        // either "at a block boundary" (the lower row index is a multiple of block_size, i.e.
+        // this step crosses the seam between two 32px blocks copied back independently at
+        // physics.rs:1372-1386) or "interior" (both rows are inside the same block). If the
+        // block-based LOD/copy-back scheme were introducing density spikes specifically at
+        // block seams, the boundary population's worst case would be anomalously large compared
+        // to the interior population's worst case (which already reflects the stream's normal
+        // leading-edge/settling discontinuities).
+        let mut max_boundary_jump = 0.0f32;
+        let mut max_interior_jump = 0.0f32;
+        for y in 1..h {
+            let h_prev = hm.data[(y - 1) * w + stream_x];
+            let h_curr = hm.data[y * w + stream_x];
+            let jump = (h_curr - h_prev).abs();
+            if y % block_size == 0 {
+                max_boundary_jump = max_boundary_jump.max(jump);
+            } else {
+                max_interior_jump = max_interior_jump.max(jump);
+            }
+        }
+        println!(
+            "max_boundary_jump={:.5} max_interior_jump={:.5} ratio={:.3}",
+            max_boundary_jump, max_interior_jump, max_boundary_jump / max_interior_jump.max(1e-6)
+        );
+
+        // Measured today: max_boundary_jump=0.14356, max_interior_jump=0.38460 (ratio 0.373) —
+        // boundary-adjacent jumps are actually SMALLER than the worst interior jump, i.e. no
+        // block-seam-specific spike. Generous margin (2x) to absorb run-to-run tuning changes
+        // that don't touch the LOD/copy-back mechanism itself.
+        assert!(
+            max_boundary_jump <= max_interior_jump * 2.0,
+            "Block-boundary height jump ({:.5}) is anomalously large relative to the worst \
+             interior jump ({:.5}) — possible density spike at a 32px block seam",
+            max_boundary_jump, max_interior_jump
+        );
     }
 
     #[test]
@@ -3260,4 +4069,5 @@ mod tests {
             final_yellow_frac
         );
     }
+
 }
