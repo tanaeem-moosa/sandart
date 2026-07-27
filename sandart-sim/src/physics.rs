@@ -22,7 +22,7 @@ pub struct ActiveMarbleInfo {
 use crate::{PROP_WETNESS, PROP_THRESHOLD, PROP_FLOW_RATE, PROP_GRAIN_SIZE};
 
 /// Advect color and properties from src cell to dst cell based on the flow amount and dst cell's height before arrival
-pub fn advect_properties(colors: &mut [u8], props: &mut [f32], src: usize, dst: usize, flow: f32, h_dst: f32) {
+pub fn advect_properties(colors: &mut [f32], props: &mut [f32], src: usize, dst: usize, flow: f32, h_dst: f32) {
     let total = h_dst + flow;
     if total < 1e-6 {
         return;
@@ -42,11 +42,11 @@ pub fn advect_properties(colors: &mut [u8], props: &mut [f32], src: usize, dst: 
 
         for ch in 0..3 {
             colors[dst_base + ch] = (
-                colors[dst_base + ch] as f32 * w_keep
-                + colors[src_base + ch] as f32 * w_arrive
-            ).clamp(0.0, 255.0).round() as u8;
+                colors[dst_base + ch] * w_keep
+                + colors[src_base + ch] * w_arrive
+            ).clamp(0.0, 255.0);
         }
-        colors[dst_base + 3] = 255; // opaque alpha
+        colors[dst_base + 3] = 255.0; // opaque alpha
 
         for ch in 0..4 {
             props[dst_base + ch] = props[dst_base + ch] * w_keep + props[src_base + ch] * w_arrive;
@@ -58,7 +58,7 @@ pub fn advect_properties(colors: &mut [u8], props: &mut [f32], src: usize, dst: 
 /// and distributing any excess volume to its available 4-way neighbors, with properties advection.
 fn add_sand_with_limit_properties(
     heightmap: &mut Heightmap,
-    cell_colors: &mut [u8],
+    cell_colors: &mut [f32],
     cell_props: &mut [f32],
     src_idx: usize,
     idx: usize,
@@ -260,7 +260,7 @@ fn flux_edge(
     weight: f32,
     v_e: &mut f32,
     temp_heights: &mut [f32],
-    cell_colors: &mut [u8],
+    cell_colors: &mut [f32],
     cell_props: &mut [f32],
     modified: &mut Vec<bool>,
     next_displacements: &mut Vec<f32>,
@@ -437,7 +437,7 @@ fn get_ca_params(
 /// and depositing the displaced volume into the surrounding ridge area.
 pub fn displace_line(
     heightmap: &mut Heightmap,
-    cell_colors: &mut [u8],
+    cell_colors: &mut [f32],
     cell_props: &mut [f32],
     start: Vec2,
     end: Vec2,
@@ -994,7 +994,7 @@ fn try_move(
     block_size: usize,
     cols: usize,
     temp_heights: &mut [f32],
-    cell_colors: &mut [u8],
+    cell_colors: &mut [f32],
     cell_props: &mut [f32],
     modified: &mut Vec<bool>,
     next_displacements: &mut Vec<f32>,
@@ -1021,7 +1021,7 @@ fn try_move(
 pub fn settle_tick(
     heightmap: &mut Heightmap,
     temp_heights: &mut Vec<f32>,
-    cell_colors: &mut Vec<u8>,
+    cell_colors: &mut Vec<f32>,
     cell_props: &mut Vec<f32>,
     sliding: &mut Vec<bool>,
     active_bounds: &mut ActiveBounds,
@@ -1895,7 +1895,7 @@ mod tests {
     struct TestSim {
         hm: Heightmap,
         temp_heights: Vec<f32>,
-        cell_colors: Vec<u8>,
+        cell_colors: Vec<f32>,
         cell_props: Vec<f32>,
         sliding: Vec<bool>,
         bounds: ActiveBounds,
@@ -1917,7 +1917,7 @@ mod tests {
             TestSim {
                 hm: Heightmap::new(w, h, 0.0),
                 temp_heights: vec![0.0; w * h],
-                cell_colors: vec![0u8; w * h * 4],
+                cell_colors: vec![0.0f32; w * h * 4],
                 cell_props: props,
                 sliding: vec![false; w * h],
                 bounds: ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true },
@@ -1965,7 +1965,7 @@ mod tests {
     #[test]
     fn test_draw_point_out_of_bounds() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -1995,7 +1995,7 @@ mod tests {
     #[test]
     fn test_draw_point_partial_overlap() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -2030,7 +2030,7 @@ mod tests {
     #[test]
     fn test_draw_line_interpolation() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -2071,7 +2071,7 @@ mod tests {
     #[test]
     fn test_draw_point_extreme_coordinates_overflow() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -2098,7 +2098,7 @@ mod tests {
     #[test]
     fn test_multipass_carving() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::DrySand, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -2143,7 +2143,7 @@ mod tests {
     #[test]
     fn test_volume_conservation() {
         let mut hm = Heightmap::new(512, 512, 0.4);
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -2173,7 +2173,7 @@ mod tests {
     #[test]
     fn test_draw_line_extreme_coordinates_overflow() {
         let mut hm = Heightmap::new(512, 512, crate::DEFAULT_SAND_HEIGHT);
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -2196,7 +2196,7 @@ mod tests {
     #[test]
     fn test_volume_conservation_with_saturation() {
         let mut hm = Heightmap::new(512, 512, 0.70);
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -2227,7 +2227,7 @@ mod tests {
     fn test_settling_flow_and_volume_conservation() {
         let mut hm = Heightmap::new(512, 512, 0.5);
         let mut temp_heights = vec![0.5; 512 * 512];
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
 
         let center_idx = 256 * 512 + 256;
@@ -2298,7 +2298,7 @@ mod tests {
     fn test_settling_deactivation() {
         let mut hm = Heightmap::new(512, 512, 0.5);
         let mut temp_heights = vec![0.5; 512 * 512];
-        let mut cell_colors = vec![0u8; 512 * 512 * 4];
+        let mut cell_colors = vec![0.0f32; 512 * 512 * 4];
         let mut cell_props = get_test_props(crate::MaterialMode::ButterCream, 512 * 512);
 
         let mut bounds = ActiveBounds {
@@ -2366,7 +2366,7 @@ mod tests {
         for &mat in &materials {
             let mut hm = Heightmap::new(64, 64, 0.5);
             let mut temp_heights = vec![0.5; 64 * 64];
-            let mut cell_colors = vec![0u8; 64 * 64 * 4];
+            let mut cell_colors = vec![0.0f32; 64 * 64 * 4];
             let mut cell_props = get_test_props(mat, 64 * 64);
             let mut sliding = vec![false; 64 * 64];
             let mut bounds = ActiveBounds {
@@ -2421,7 +2421,7 @@ mod tests {
         let center_idx = 64 * 128 + 64;
         hm.data[center_idx] = 1.0;
 
-        let mut cell_colors = vec![0u8; 128 * 128 * 4];
+        let mut cell_colors = vec![0.0f32; 128 * 128 * 4];
         let mut cell_props = vec![0.0f32; 128 * 128 * 4];
         // Initialize cell_colors and cell_props with a mixed striped pattern
         for y in 0..128 {
@@ -2433,26 +2433,26 @@ mod tests {
                     cell_props[idx * 4 + PROP_FLOW_RATE] = 0.25;
                     cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.45;
 
-                    cell_colors[idx * 4 + 0] = 200; // Reddish DrySand
-                    cell_colors[idx * 4 + 1] = 100;
-                    cell_colors[idx * 4 + 2] = 50;
-                    cell_colors[idx * 4 + 3] = 255;
+                    cell_colors[idx * 4 + 0] = 200.0; // Reddish DrySand
+                    cell_colors[idx * 4 + 1] = 100.0;
+                    cell_colors[idx * 4 + 2] = 50.0;
+                    cell_colors[idx * 4 + 3] = 255.0;
                 } else {
                     cell_props[idx * 4 + PROP_WETNESS] = 0.45;
                     cell_props[idx * 4 + PROP_THRESHOLD] = 0.14;
                     cell_props[idx * 4 + PROP_FLOW_RATE] = 0.08;
                     cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.40;
 
-                    cell_colors[idx * 4 + 0] = 50; // Bluish WetSand
-                    cell_colors[idx * 4 + 1] = 100;
-                    cell_colors[idx * 4 + 2] = 200;
-                    cell_colors[idx * 4 + 3] = 255;
+                    cell_colors[idx * 4 + 0] = 50.0; // Bluish WetSand
+                    cell_colors[idx * 4 + 1] = 100.0;
+                    cell_colors[idx * 4 + 2] = 200.0;
+                    cell_colors[idx * 4 + 3] = 255.0;
                 }
             }
         }
 
         // Calculate initial total colors (Red, Green, Blue masses)
-        let calculate_color_masses = |colors: &[u8], hmap: &Heightmap| -> (f64, f64, f64) {
+        let calculate_color_masses = |colors: &[f32], hmap: &Heightmap| -> (f64, f64, f64) {
             let mut r_mass = 0.0f64;
             let mut g_mass = 0.0f64;
             let mut b_mass = 0.0f64;
@@ -2524,15 +2524,15 @@ mod tests {
 
     #[test]
     fn test_advect_properties_weighted() {
-        let mut cell_colors = vec![0u8; 8];
+        let mut cell_colors = vec![0.0f32; 8];
         let mut cell_props = vec![0.0f32; 8];
 
         // Cell 0: Red, Wet Sand-ish
-        cell_colors[0..4].copy_from_slice(&[200, 100, 50, 255]);
+        cell_colors[0..4].copy_from_slice(&[200.0, 100.0, 50.0, 255.0]);
         cell_props[0..4].copy_from_slice(&[0.5, 0.1, 0.15, 0.3]);
 
         // Cell 1: Blue, Dry Sand-ish
-        cell_colors[4..8].copy_from_slice(&[50, 100, 200, 255]);
+        cell_colors[4..8].copy_from_slice(&[50.0, 100.0, 200.0, 255.0]);
         cell_props[4..8].copy_from_slice(&[0.0, 0.08, 0.25, 0.45]);
 
         // Advect from 0 to 1 with flow = 0.2, and dst height h_dst = 0.2
@@ -2542,9 +2542,9 @@ mod tests {
         // Red = (50 * 0.5 + 200 * 0.5) = 125
         // Green = 100
         // Blue = (200 * 0.5 + 50 * 0.5) = 125
-        assert_eq!(cell_colors[4], 125);
-        assert_eq!(cell_colors[5], 100);
-        assert_eq!(cell_colors[6], 125);
+        assert_eq!(cell_colors[4], 125.0);
+        assert_eq!(cell_colors[5], 100.0);
+        assert_eq!(cell_colors[6], 125.0);
 
         // Expected properties (weighted average):
         // wetness = (0.0 * 0.5 + 0.5 * 0.5) = 0.25
@@ -2560,7 +2560,7 @@ mod tests {
     #[test]
     fn test_displace_line_advects() {
         let mut hm = Heightmap::new(128, 128, 0.5);
-        let mut cell_colors = vec![100u8; 128 * 128 * 4];
+        let mut cell_colors = vec![100.0f32; 128 * 128 * 4];
         let mut cell_props = vec![0.5f32; 128 * 128 * 4];
         let mut active_bounds = ActiveBounds {
             min_x: 0,
@@ -2574,7 +2574,7 @@ mod tests {
         for y in 60..68 {
             for x in 60..68 {
                 let idx = y * 128 + x;
-                cell_colors[idx * 4 + 0] = 200;
+                cell_colors[idx * 4 + 0] = 200.0;
                 cell_props[idx * 4 + PROP_WETNESS] = 0.1;
             }
         }
@@ -2598,7 +2598,7 @@ mod tests {
                 let idx = y * 128 + x;
                 // Exclude the starting zone
                 if (x < 60 || x >= 68) || (y < 60 || y >= 68) {
-                    if cell_colors[idx * 4 + 0] != 100 || cell_props[idx * 4 + PROP_WETNESS] != 0.5 {
+                    if cell_colors[idx * 4 + 0] != 100.0 || cell_props[idx * 4 + PROP_WETNESS] != 0.5 {
                         changed = true;
                         break;
                     }
@@ -2613,6 +2613,8 @@ mod tests {
         let mut sim = DrawingSimulation::new();
         // Set up alternating stripes of DrySand and WetSand properties, and mixed colors
         let mut cell_props = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+        // This buffer goes through the external set_cell_colors(&[u8]) API below, so it
+        // stays u8 (not the internal f32 source of truth) — it's exercising the boundary.
         let mut cell_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
         for y in 0..GRID_SIZE {
             for x in 0..GRID_SIZE {
@@ -2762,7 +2764,7 @@ mod tests {
     fn test_gravity_bias_flow() {
         let mut hm = Heightmap::new(64, 64, 0.35);
         let mut temp_heights = vec![0.35; 64 * 64];
-        let mut cell_colors = vec![0u8; 64 * 64 * 4];
+        let mut cell_colors = vec![0.0f32; 64 * 64 * 4];
         let mut cell_props = get_test_props(MaterialMode::DrySand, 64 * 64);
         let mut sliding = vec![false; 64 * 64];
         let mut bounds = ActiveBounds {
@@ -2851,7 +2853,7 @@ mod tests {
 
         let mut temp_heights = hm.data.clone();
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
         let mut bounds = ActiveBounds {
             min_x: 2,
@@ -2968,7 +2970,7 @@ mod tests {
         }
 
         let mut temp_heights = hm.data.clone();
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
         let mut sliding = vec![false; w * h];
         let mut bounds = ActiveBounds {
@@ -3062,7 +3064,7 @@ mod tests {
         let mut temp_heights = hm.data.clone();
         // Use Water material (wetness=1.0)
         let mut cell_props = get_test_props(MaterialMode::Water, w * h);
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
         let mut bounds = ActiveBounds {
             min_x: 2,
@@ -3761,7 +3763,7 @@ mod tests {
 
         let mut temp_heights = hm.data.clone();
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -3842,7 +3844,7 @@ mod tests {
 
         let mut temp_heights = hm.data.clone();
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
         let mut bounds = ActiveBounds {
             min_x: 2,
@@ -3922,7 +3924,7 @@ mod tests {
 
         let mut temp_heights = hm.data.clone();
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
         let mut bounds = ActiveBounds {
             min_x: 2,
@@ -4042,7 +4044,7 @@ mod tests {
 
         let mut temp_heights = hm.data.clone();
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
         let mut bounds = ActiveBounds {
             min_x: 0,
@@ -4144,7 +4146,7 @@ mod tests {
         let h = 128;
         let mut hm = Heightmap::new(w, h, 0.0);
         let mut temp_heights = vec![0.0f32; w * h];
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut cell_props = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
         let mut edge_vel_h = vec![0.0f32; w * h];
@@ -4170,10 +4172,10 @@ mod tests {
 
                         if dy < -0.20 * (h as f32) {
                             // Top Layer: Red Dry Sand (Wetness = 0.0, GrainSize = 0.50)
-                            cell_colors[idx * 4 + 0] = 230;
-                            cell_colors[idx * 4 + 1] = 40;
-                            cell_colors[idx * 4 + 2] = 40;
-                            cell_colors[idx * 4 + 3] = 255;
+                            cell_colors[idx * 4 + 0] = 230.0;
+                            cell_colors[idx * 4 + 1] = 40.0;
+                            cell_colors[idx * 4 + 2] = 40.0;
+                            cell_colors[idx * 4 + 3] = 255.0;
 
                             cell_props[idx * 4 + PROP_WETNESS] = 0.00;
                             cell_props[idx * 4 + PROP_THRESHOLD] = 0.08;
@@ -4181,10 +4183,10 @@ mod tests {
                             cell_props[idx * 4 + PROP_GRAIN_SIZE] = 0.50;
                         } else {
                             // Bottom Layer: Blue Wet Sand (Wetness = 0.40, GrainSize = 0.30)
-                            cell_colors[idx * 4 + 0] = 40;
-                            cell_colors[idx * 4 + 1] = 80;
-                            cell_colors[idx * 4 + 2] = 230;
-                            cell_colors[idx * 4 + 3] = 255;
+                            cell_colors[idx * 4 + 0] = 40.0;
+                            cell_colors[idx * 4 + 1] = 80.0;
+                            cell_colors[idx * 4 + 2] = 230.0;
+                            cell_colors[idx * 4 + 3] = 255.0;
 
                             cell_props[idx * 4 + PROP_WETNESS] = 0.40;
                             cell_props[idx * 4 + PROP_THRESHOLD] = 0.12;
@@ -4198,7 +4200,7 @@ mod tests {
         temp_heights.copy_from_slice(&hm.data);
 
         // Helper to calculate total color and property mass
-        let calc_totals = |colors: &[u8], props: &[f32], hmap: &Heightmap| -> (f64, f64, f64, f64, f64) {
+        let calc_totals = |colors: &[f32], props: &[f32], hmap: &Heightmap| -> (f64, f64, f64, f64, f64) {
             let mut r_total = 0.0f64;
             let mut g_total = 0.0f64;
             let mut b_total = 0.0f64;
@@ -4270,12 +4272,16 @@ mod tests {
         let wet_err = (final_wet - init_wet).abs() / init_wet;
         let grain_err = (final_grain - init_grain).abs() / init_grain;
 
-        println!("Errors: R_err={:.6}, G_err={:.6}, B_err={:.6}, Wet_err={:.6}, Grain_err={:.6}", r_err, g_err, b_err, wet_err, grain_err);
+        println!("Errors: R_err={:.9}, G_err={:.9}, B_err={:.9}, Wet_err={:.9}, Grain_err={:.9}", r_err, g_err, b_err, wet_err, grain_err);
 
-        // 8-bit integer color channel rounding tolerance (<= 8%), float property tolerance (<= 0.1%)
-        assert!(r_err < 0.08, "Red color mass loss under gravity: err={:.6}", r_err);
-        assert!(g_err < 0.08, "Green color mass loss under gravity: err={:.6}", g_err);
-        assert!(b_err < 0.08, "Blue color mass loss under gravity: err={:.6}", b_err);
+        // Colors now advect through the f32 source of truth (`cell_colors_f32`), the same
+        // weighted blend used for properties, with no per-tick rounding to u8. Measured
+        // R/G/B error over these 300 ticks is ~1e-7 to 1e-9 (vs. up to 7.4% when colors were
+        // blended and rounded to u8 directly on every tick) — the same float accumulation
+        // error floor as the property channels below, so the same tolerance applies.
+        assert!(r_err < 0.001, "Red color mass loss under gravity: err={:.6}", r_err);
+        assert!(g_err < 0.001, "Green color mass loss under gravity: err={:.6}", g_err);
+        assert!(b_err < 0.001, "Blue color mass loss under gravity: err={:.6}", b_err);
         assert!(wet_err < 0.001, "Wetness property loss under gravity: err={:.6}", wet_err);
         assert!(grain_err < 0.001, "Grain size property loss under gravity: err={:.6}", grain_err);
     }
@@ -4288,7 +4294,7 @@ mod tests {
         let w = 128;
         let h = 128;
         let mut hm = Heightmap::new(w, h, 0.0);
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let cell_props_mode = get_test_props(MaterialMode::DrySand, w * h);
         let mut cell_props = cell_props_mode;
 
@@ -4317,17 +4323,17 @@ mod tests {
                         let ring_even = ((dist / ring_width) as i64) % 2 == 0;
                         if ring_even {
                             // Green
-                            cell_colors[idx * 4 + 0] = 34;
-                            cell_colors[idx * 4 + 1] = 139;
-                            cell_colors[idx * 4 + 2] = 34;
-                            cell_colors[idx * 4 + 3] = 255;
+                            cell_colors[idx * 4 + 0] = 34.0;
+                            cell_colors[idx * 4 + 1] = 139.0;
+                            cell_colors[idx * 4 + 2] = 34.0;
+                            cell_colors[idx * 4 + 3] = 255.0;
                             initial_green_mass += hm.data[idx] as f64;
                         } else {
                             // Yellow
-                            cell_colors[idx * 4 + 0] = 255;
-                            cell_colors[idx * 4 + 1] = 215;
-                            cell_colors[idx * 4 + 2] = 0;
-                            cell_colors[idx * 4 + 3] = 255;
+                            cell_colors[idx * 4 + 0] = 255.0;
+                            cell_colors[idx * 4 + 1] = 215.0;
+                            cell_colors[idx * 4 + 2] = 0.0;
+                            cell_colors[idx * 4 + 3] = 255.0;
                             initial_yellow_mass += hm.data[idx] as f64;
                         }
                     }
@@ -4355,7 +4361,7 @@ mod tests {
         // to the neck, individual cells take on blended, in-between hues rather than staying
         // categorically one or the other. Tracking the weighted average RGB (and derived R:G
         // ratio, 0.0 = pure green, 1.0 = pure yellow) shows that drift directly.
-        let measure_lower_chamber_avg = |colors: &[u8], hmap: &Heightmap| -> (f64, f64, f64, f64) {
+        let measure_lower_chamber_avg = |colors: &[f32], hmap: &Heightmap| -> (f64, f64, f64, f64) {
             let mut r_sum = 0.0f64;
             let mut g_sum = 0.0f64;
             let mut b_sum = 0.0f64;
@@ -4451,7 +4457,7 @@ mod tests {
         }
         let mut temp_heights = hm.data.clone();
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
-        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut cell_colors = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];

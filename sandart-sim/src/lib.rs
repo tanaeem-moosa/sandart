@@ -123,8 +123,19 @@ pub struct DrawingSimulation {
     pub heightmap: Heightmap,
     /// Pre-allocated temp buffer for double-buffering settling flows.
     pub temp_heights: Vec<f32>,
-    /// Per-cell RGBA color buffer. Advected during CA settling and displacement.
+    /// Per-cell RGBA color buffer, derived from `cell_colors_f32`. This is a render/upload
+    /// view only — external consumers (sandart-wasm, the native app) read it for GPU upload
+    /// and for `set_cell_colors`'s external `&[u8]` contract. It is NOT the simulation's
+    /// source of truth for color and must be regenerated (via `sync_cell_colors_u8`) any
+    /// time `cell_colors_f32` changes.
     pub cell_colors: Vec<u8>,
+    /// Per-cell RGBA color buffer in f32, RGBA interleaved, same `GRID_SIZE*GRID_SIZE*4`
+    /// layout as `cell_colors`. This is the simulation's source of truth: `advect_properties`
+    /// and all solver paths blend colors here without ever rounding to u8, so small flows
+    /// (sub-1-LSB contributions) are no longer discarded the way they were when colors were
+    /// blended directly in u8. `cell_colors` (u8) is regenerated from this buffer for
+    /// external consumption; it is never blended directly.
+    pub cell_colors_f32: Vec<f32>,
     /// Per-cell physics & render properties. Advected with height.
     /// Layout: [wetness, threshold, flow_rate, grain_size] interleaved.
     pub cell_props: Vec<f32>,
@@ -254,13 +265,14 @@ impl DrawingSimulation {
         let sliding = vec![false; GRID_SIZE * GRID_SIZE];
         let edge_vel_h = vec![0.0f32; GRID_SIZE * GRID_SIZE];
         let edge_vel_v = vec![0.0f32; GRID_SIZE * GRID_SIZE];
-        let mut cell_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
-        for chunk in cell_colors.chunks_exact_mut(4) {
-            chunk[0] = 210;
-            chunk[1] = 180;
-            chunk[2] = 140;
-            chunk[3] = 255;
+        let mut cell_colors_f32 = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+        for chunk in cell_colors_f32.chunks_exact_mut(4) {
+            chunk[0] = 210.0;
+            chunk[1] = 180.0;
+            chunk[2] = 140.0;
+            chunk[3] = 255.0;
         }
+        let cell_colors = cell_colors_f32.iter().map(|&v| v.clamp(0.0, 255.0).round() as u8).collect();
         let mut cell_props = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
         // Initialize with default DrySand preset
         for chunk in cell_props.chunks_exact_mut(4) {
@@ -283,6 +295,7 @@ impl DrawingSimulation {
             heightmap,
             temp_heights,
             cell_colors,
+            cell_colors_f32,
             cell_props,
             marble_pos: Vec2::ZERO,
             prev_marble_pos: Vec2::ZERO,
@@ -372,6 +385,21 @@ impl DrawingSimulation {
         self.shape_mask.len()
     }
 
+    /// Regenerate the `u8` render/upload view (`cell_colors`) from the `f32` simulation
+    /// source of truth (`cell_colors_f32`). Must be called any time `cell_colors_f32` is
+    /// mutated and `cell_colors` may subsequently be read by an external consumer (GPU
+    /// upload in sandart-wasm, the native renderer, or a test reading `sim.cell_colors`
+    /// directly). This is a straightforward full-buffer regeneration; if it ever shows up
+    /// as a measurable per-frame cost, the natural place to narrow it to only the cells
+    /// that changed is alongside the block-activity bookkeeping (`will_simulate` /
+    /// `last_displacements` in `physics::settle_tick`), regenerating only the rows/blocks
+    /// marked active for the tick instead of the whole grid.
+    fn sync_cell_colors_u8(&mut self) {
+        for (dst, &src) in self.cell_colors.iter_mut().zip(self.cell_colors_f32.iter()) {
+            *dst = src.clamp(0.0, 255.0).round() as u8;
+        }
+    }
+
     /// Reset the simulation state.
     pub fn reset(&mut self) {
         self.generate_shape_mask();
@@ -393,12 +421,13 @@ impl DrawingSimulation {
         self.sliding.fill(false);
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
-        for chunk in self.cell_colors.chunks_exact_mut(4) {
-            chunk[0] = 210;
-            chunk[1] = 180;
-            chunk[2] = 140;
-            chunk[3] = 255;
+        for chunk in self.cell_colors_f32.chunks_exact_mut(4) {
+            chunk[0] = 210.0;
+            chunk[1] = 180.0;
+            chunk[2] = 140.0;
+            chunk[3] = 255.0;
         }
+        self.sync_cell_colors_u8();
         self.apply_preset(self.material_mode);
         self.marble_pos = Vec2::ZERO;
         self.prev_marble_pos = Vec2::ZERO;
@@ -481,6 +510,7 @@ impl DrawingSimulation {
 
                 for ch in 0..4 {
                     self.cell_colors.swap(i1 * 4 + ch, i2 * 4 + ch);
+                    self.cell_colors_f32.swap(i1 * 4 + ch, i2 * 4 + ch);
                 }
                 for ch in 0..4 {
                     self.cell_props.swap(i1 * 4 + ch, i2 * 4 + ch);
@@ -543,6 +573,12 @@ impl DrawingSimulation {
     pub fn set_cell_colors(&mut self, rgba_data: &[u8]) {
         let len = self.cell_colors.len().min(rgba_data.len());
         self.cell_colors[..len].copy_from_slice(&rgba_data[..len]);
+        // This is the entry point for externally-supplied colors (u8), so the f32 source of
+        // truth must be brought into agreement too, or the next advection event would blend
+        // against stale f32 values and the just-set u8 colors would be overwritten.
+        for i in 0..len {
+            self.cell_colors_f32[i] = self.cell_colors[i] as f32;
+        }
     }
 
     /// Copy per-cell properties from a custom buffer
@@ -566,13 +602,14 @@ impl DrawingSimulation {
     pub fn draw_point(&mut self, pos: Vec2, radius: f32) {
         displace_line(
             &mut self.heightmap,
-            &mut self.cell_colors,
+            &mut self.cell_colors_f32,
             &mut self.cell_props,
             pos,
             pos,
             radius,
             &mut self.active_bounds,
         );
+        self.sync_cell_colors_u8();
     }
 
     /// Draw a line between start and end using interpolation to prevent gaps.
@@ -580,13 +617,14 @@ impl DrawingSimulation {
     pub fn draw_line(&mut self, start: Vec2, end: Vec2, radius: f32) {
         displace_line(
             &mut self.heightmap,
-            &mut self.cell_colors,
+            &mut self.cell_colors_f32,
             &mut self.cell_props,
             start,
             end,
             radius,
             &mut self.active_bounds,
         );
+        self.sync_cell_colors_u8();
     }
 
     fn clamp_to_sandbox(pos: Vec2, shape: SandboxShape, marble_radius: f32) -> Vec2 {
@@ -733,7 +771,7 @@ impl DrawingSimulation {
 
                     displace_line(
                         &mut self.heightmap,
-                        &mut self.cell_colors,
+                        &mut self.cell_colors_f32,
                         &mut self.cell_props,
                         self.marbles[j].prev_pos,
                         self.marbles[j].pos,
@@ -746,7 +784,7 @@ impl DrawingSimulation {
                     self.marbles[j].vel = Vec2::ZERO;
                     displace_line(
                         &mut self.heightmap,
-                        &mut self.cell_colors,
+                        &mut self.cell_colors_f32,
                         &mut self.cell_props,
                         clamped_target,
                         clamped_target,
@@ -811,7 +849,7 @@ impl DrawingSimulation {
                 settle_tick(
                     &mut self.heightmap,
                     &mut self.temp_heights,
-                    &mut self.cell_colors,
+                    &mut self.cell_colors_f32,
                     &mut self.cell_props,
                     &mut self.sliding,
                     &mut self.active_bounds,
@@ -855,6 +893,12 @@ impl DrawingSimulation {
                 self.budget_n = (self.budget_n + BUDGET_STEP_UP).min(budget_max);
             }
         }
+
+        // Regenerate the u8 render/upload view once per tick, after every displace_line and
+        // settle_tick call above has finished mutating cell_colors_f32. This is the primary
+        // external read path (sandart-wasm's render() reads self.sim.cell_colors for GPU
+        // upload right after update() returns), so it must be fresh before returning here.
+        self.sync_cell_colors_u8();
     }
 }
 
