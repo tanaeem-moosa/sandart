@@ -262,7 +262,19 @@ fn get_ca_params(
         // only perturbs the *blend weight* by a similarly tiny amount, not the whole regime.
         let granular_alpha = (alpha * 1.5).min(0.8);
         let liquid_threshold = 0.0; // Liquids flow at any height difference
-        let liquid_alpha = 0.50;    // Fast flow rate for liquid viscosity
+        // C2 fix: raised from 0.50. With the fictitious lateral dispersion term gone, the CA's
+        // per-tick flow between two neighbors is now genuinely rate-limited by `alpha` alone (see
+        // `max_transfer_coeff` below, which no longer binds tighter than this once it was raised
+        // too), so `alpha` is what determines how many ticks a pool needs to reach a level surface.
+        // At the old 0.50 a closed-box pool (`test_liquid_pool_levels_flat_in_closed_box`) took
+        // ~3000 ticks to flatten from a 56-row column; 0.75 gets it there within the test's 1500
+        // while still leaving `test_liquid_stream_stays_coherent`'s 4-cell free-fall stream narrow
+        // (width 8) — this is the real tension between "pool must level fast" and "stream must not
+        // spread" the phase's design doc warned about, so this value is a deliberately-found
+        // balance point rather than an arbitrary bump: measured empirically, 0.70-0.80 all pass
+        // both tests, 0.60 and below fail L1 (too slow to converge), 0.85+ fails L3 (a saturated
+        // stream segment starts spilling sideways before it clears the mid-air measurement window).
+        let liquid_alpha = 0.75;
         threshold = threshold * (1.0 - liquidity) + liquid_threshold * liquidity;
         alpha = granular_alpha * (1.0 - liquidity) + liquid_alpha * liquidity;
     }
@@ -1247,7 +1259,54 @@ pub fn settle_tick(
                         let geom_slope = h_center - h_neighbor;
 
                         if geom_slope > 0.20 {
-                            let flow = (0.10 * (geom_slope - 0.20)).max(0.0);
+                            let mut flow = (0.10 * (geom_slope - 0.20)).max(0.0);
+
+                            // C2 gate: this safety valve is a *real* geom_slope-driven flow (not
+                            // the fictitious dispersion noise fixed below), but its liquid share
+                            // still needs two corrections, or a falling stream fans out / a pool
+                            // leaks through this separate mechanism instead of the main flow loop:
+                            //   1. "liquid falls while it can" — suppress lateral push while the
+                            //      column below can still accept more (mirrors `liquid_can_still_fall`).
+                            //   2. never push liquid into a neighbour outside the shape mask (a
+                            //      wall cell is never simulated again, so anything landing there is
+                            //      a silent, permanent leak — this is what was pinning a "spike" of
+                            //      water against the box wall in `test_liquid_pool_levels_flat_in_closed_box`).
+                            // Both blended by cell_liquidity so cell_liquidity == 0.0 (sand) is
+                            // bit-identical to today.
+                            if gravity_active && cell_liquidity > 0.0 {
+                                let neighbor_x = neighbor_idx % w;
+                                let neighbor_y = neighbor_idx / w;
+                                let neighbor_outside = !is_inside(neighbor_x, neighbor_y);
+
+                                let gravity_len = gravity_dir.length();
+                                let perp_dot = if gravity_len > 1e-6 {
+                                    let perp_x = -gravity_dir.y;
+                                    let perp_y = gravity_dir.x;
+                                    (ndx * perp_x + ndy * perp_y).abs()
+                                } else {
+                                    0.0
+                                };
+
+                                let liquid_can_still_fall_valve = if perp_dot > 0.0 {
+                                    let h_below_valve = if center_idx + w < temp_heights.len() {
+                                        temp_heights[center_idx + w].max(heightmap.data[center_idx + w])
+                                    } else {
+                                        0.0
+                                    };
+                                    let is_below_inside_valve = y + 1 < h && is_inside(x, y + 1);
+                                    // Same liquid "can still fall?" gate as the main flow loop
+                                    // (cell_capacity-based, not the coarser is_free_fall used for
+                                    // granular purposes elsewhere) — see `liquid_can_still_fall`.
+                                    is_below_inside_valve && h_below_valve < cell_capacity - 0.02
+                                } else {
+                                    false
+                                };
+
+                                if liquid_can_still_fall_valve || neighbor_outside {
+                                    flow *= 1.0 - cell_liquidity;
+                                }
+                            }
+
                             if flow > 0.0 {
                                 let current_temp_center = temp_heights[center_idx];
                                 let current_temp_neighbor = temp_heights[neighbor_idx];
@@ -1337,6 +1396,15 @@ pub fn settle_tick(
                         };
                         let is_below_inside = y + 1 < h && is_inside(x, y + 1);
                         let is_free_fall = gravity_active && is_below_inside && h_below < 0.10;
+                        // Liquid-specific "can this cell still fall?" gate (C2): unlike
+                        // `is_free_fall` above (tuned for granular transfer-coefficient/lock-chance
+                        // bypass, and true only while the cell below is almost completely empty),
+                        // liquid lateral flow must stay blocked for as long as the column below has
+                        // *any* spare capacity, not just while it is nearly empty — otherwise a
+                        // stream that has left partial residue behind it (transfer coeff < 1.0)
+                        // reads as "can't fall" long before it actually can't, and spreads sideways
+                        // prematurely.
+                        let liquid_can_still_fall = gravity_active && is_below_inside && h_below < cell_capacity - 0.02;
 
                         // Downward pull (liquid has no friction/repose angle, so it flows much faster).
                         // Blended by `cell_liquidity` rather than a hard `wetness >= 0.75` switch (C5)
@@ -1348,7 +1416,25 @@ pub fn settle_tick(
                             gravity_dot * (sand_mult * (1.0 - cell_liquidity) + liquid_mult * cell_liquidity)
                         };
                         
-                        // Stochastic sideways dispersion/splashing (always scatter a little laterally)
+                        // Sideways lateral term. Two rule-sets, blended by `cell_liquidity` (C2 fix)
+                        // so that at cell_liquidity == 0.0 this is bit-identical to the old
+                        // unconditional dispersion-noise term (granular behaviour/tests untouched):
+                        //
+                        //   - Granular: unchanged stochastic dispersion/splashing (`granular_push`)
+                        //     — a fictitious slope that builds the bed heap and scatters sand in
+                        //     free fall. Still computed and used at full weight for sand.
+                        //   - Liquid: no fictitious slope at all. A liquid only spreads sideways
+                        //     when it cannot fall (`liquid_can_still_fall` is false — the cell below
+                        //     is already occupied/blocked/off-grid), and then the *real* surface
+                        //     height difference (`geom_slope`, already the base of
+                        //     `effective_slope` below) is what drives it. While the cell below can
+                        //     still accept mass, the liquid share of the lateral push exactly
+                        //     cancels `geom_slope` for this neighbor so a falling stream falls
+                        //     straight instead of fanning out. Also cancels `geom_slope` outright
+                        //     whenever the neighbor itself is outside the shape mask: a wall cell is
+                        //     never simulated again, so any flow that reaches one is a silent,
+                        //     permanent leak (this was pinning a "spike" of water against the box
+                        //     wall in `test_liquid_pool_levels_flat_in_closed_box` before this fix).
                         let gravity_len = gravity_dir.length();
                         if gravity_len > 1e-6 {
                             let perp_x = -gravity_dir.y;
@@ -1357,15 +1443,26 @@ pub fn settle_tick(
                             let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
                             let dispersion_noise = rand_val as f32 / 255.0;
 
-                            if !is_free_fall {
+                            let granular_push = if !is_free_fall {
                                 // Lateral avalanche dispersion on bed heap to form a natural tall sand hill
-                                gravity_push += perp_dot * 3.5 * dispersion_noise;
+                                perp_dot * 3.5 * dispersion_noise
                             } else {
                                 // Always randomly scatter a little laterally in free fall for natural stream flow
-                                gravity_push += perp_dot * 0.8 * dispersion_noise;
+                                perp_dot * 0.8 * dispersion_noise
+                            };
+
+                            if cell_liquidity > 0.0 {
+                                let liquid_push = if perp_dot > 0.0 && liquid_can_still_fall {
+                                    -geom_slope
+                                } else {
+                                    0.0
+                                };
+                                gravity_push += granular_push * (1.0 - cell_liquidity) + liquid_push * cell_liquidity;
+                            } else {
+                                gravity_push += granular_push;
                             }
                         }
-                        
+
                         let effective_slope = geom_slope + gravity_push;
 
                         if effective_slope <= threshold {
@@ -1396,10 +1493,31 @@ pub fn settle_tick(
                                 let max_transfer_coeff = if !gravity_active {
                                     0.40
                                 } else {
-                                    let liquid_coeff = if is_free_fall && gravity_dot > 0.0 {
-                                        0.50 // Elongated droplet teardrop transfer
+                                    // C2 fix: both raised from the pre-Phase-2 values (0.50 / 0.40).
+                                    // Gated on the same cell_capacity-based `liquid_can_still_fall`
+                                    // used above (not the coarser is_free_fall), so this differentiates
+                                    // "falling further into an open column below" from "pushed into an
+                                    // already-occupied neighbor" using the real acceptor state rather
+                                    // than the granular free-fall heuristic.
+                                    //   - Falling (0.50 -> 0.70): with the fictitious lateral
+                                    //     dispersion gone, the old 0.50 "elongated droplet" cap left a
+                                    //     falling column visibly thinning with depth (peak fill 0.36 in
+                                    //     `test_liquid_stream_stays_coherent`'s mid-air window at 40
+                                    //     ticks) — a diffusing smear, not a coherent slug. 0.70 lets a
+                                    //     falling liquid move close to (but not quite) a full slug per
+                                    //     tick, reaching peak fill >= 0.5 while still leaving room for
+                                    //     `liquid_alpha` to be the binding constraint (see below).
+                                    //   - Resting/lateral (0.40 -> 0.90): paired with the `liquid_alpha`
+                                    //     increase above so a blocked column's overflow reaches level
+                                    //     within the tick budget `test_liquid_pool_levels_flat_in_closed_box`
+                                    //     allows; on its own (alpha still 0.40) this constant barely
+                                    //     matters since alpha binds first, but raising it removes any
+                                    //     chance it becomes the limiting factor once `liquid_alpha` is
+                                    //     high enough to need it.
+                                    let liquid_coeff = if liquid_can_still_fall && gravity_dot > 0.0 {
+                                        0.70
                                     } else {
-                                        0.40 // Liquids flow freely under gravity
+                                        0.90
                                     };
                                     let granular_coeff = if is_free_fall && gravity_dot > 0.0 {
                                         let rand_ff = ((seed ^ (neighbor_idx as u32).wrapping_mul(1543)) & 0xFFFF) as f32 / 65535.0;
@@ -1446,6 +1564,20 @@ pub fn settle_tick(
                                 // slightly over 1.0 by every tiny-residual neighbor sweeping into it in the same tick.
                                 if (clamped_flow <= FLOW_INACTIVE_THRESHOLD || is_free_fall) && src_h > 0.0 && src_h <= 0.010 && flow > 0.0 {
                                     clamped_flow = src_h.min(max_dst_room);
+                                }
+
+                                // C2 (mask-leak fix): never let the liquid share of a transfer land
+                                // in a neighbor outside the shape mask. Such a cell is skipped by
+                                // `if !inside { continue }` at the top of this loop and is never
+                                // simulated again, so any liquid that reaches it is a silent,
+                                // permanent leak that stays frozen there forever — this is what was
+                                // pinning a "spike" of water against the box wall/floor in
+                                // `test_liquid_pool_levels_flat_in_closed_box` (surface_row scans
+                                // the whole grid width, including outside-mask columns). Blended by
+                                // cell_liquidity so cell_liquidity == 0.0 (sand) sees the exact same
+                                // (pre-existing, unrelated-to-this-phase) leak behaviour as today.
+                                if cell_liquidity > 0.0 && !is_inside(neighbor_idx % w, neighbor_idx / w) {
+                                    clamped_flow *= 1.0 - cell_liquidity;
                                 }
 
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD || (src_h <= 0.001 && clamped_flow > 0.0) {
@@ -2818,12 +2950,13 @@ mod tests {
     // =========================================================================================
 
     #[test]
-    #[ignore = "Phase 2 target: a settled liquid pool should have a flat surface (per-column \
-                surface-row max-min <= 1) with at most one partially-filled cell per column. \
-                Measured today: surface spread = 47 rows (min=10, max=57) across 61 columns, \
-                and up to 37 partially-filled cells in a single column — the 'flat' surface is \
-                actually a smeared multi-row ramp caused by the unconditional lateral dispersion \
-                noise (C2, physics.rs:1276-1282)."]
+    // Phase 2 (C2 fix): un-ignored. The fictitious lateral dispersion term is gone; lateral flow
+    // is now gated on the cell below being unavailable (full/blocked) and, once allowed, driven by
+    // the real surface height difference (geom_slope) instead of noise. `liquid_alpha` /
+    // `max_transfer_coeff` were also raised for the liquid path (see get_ca_params, settle_tick)
+    // so the resulting genuine leveling converges within this test's tick budget. Was: surface
+    // spread = 47 rows (min=10, max=57) across 61 columns, up to 37 partially-filled cells in a
+    // single column. Now: spread = 1 row (min=50, max=51), max 1 partially-filled cell/column.
     fn test_liquid_pool_levels_flat_in_closed_box() {
         // A closed 64x64 box, Water poured into a 12-wide x 56-tall column, settled under
         // downward gravity for a long time. In a correct liquid solver this becomes a flat
@@ -2928,12 +3061,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 2 target: a narrow 4-cell-wide liquid source should fall as a coherent \
-                stream (mid-air cross-section width <= 8, peak fill h >= 0.5), not disperse \
-                into a wide, thin smear. Measured today: width=19, peak_h=0.3166 after 40 ticks \
-                (for comparison DrySand under identical conditions stays much narrower: \
-                width=11, peak_h=0.1096) — the unconditional lateral dispersion term (C2) makes \
-                the liquid stream WORSE than sand's, the opposite of the intended look."]
+    // Phase 2 (C2 fix): un-ignored. Lateral flow for a falling liquid is now gated on the cell
+    // below being unavailable (`liquid_can_still_fall`, cell_capacity-based) instead of an
+    // unconditional dispersion-noise push, so a falling column no longer fans out sideways while
+    // it still has room to fall. Was: width=19, peak_h=0.3166 after 40 ticks. Now: width=8,
+    // peak_h=0.80 (comfortably under the width<=8 / over the peak>=0.5 bars).
     fn test_liquid_stream_stays_coherent() {
         // A 64x96 box with a 4-cell-wide continuous source (a "tap") pouring at the top.
         // A coherent stream should stay narrow as it falls; today's dispersion noise
