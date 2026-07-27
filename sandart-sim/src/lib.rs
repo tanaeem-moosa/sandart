@@ -142,8 +142,12 @@ pub struct DrawingSimulation {
     pub active_bounds: ActiveBounds,
     /// Sliding state tracker for stick-slip shear hysteresis.
     pub sliding: Vec<bool>,
-    /// Wave velocity buffer for liquid simulation.
-    pub wave_vel: Vec<f32>,
+    /// Per-edge momentum for the conservative edge-flux liquid solver (see
+    /// `physics::flux_edge`). `edge_vel_h[i]` is the horizontal edge between cell `i` and
+    /// `i + 1`; `edge_vel_v[i]` the vertical edge between cell `i` and `i + GRID_SIZE`.
+    /// Replaces the old per-cell `wave_vel`, which could not be made mass-conservative.
+    pub edge_vel_h: Vec<f32>,
+    pub edge_vel_v: Vec<f32>,
     /// Seed for marble movement noise.
     pub seed: u32,
 
@@ -248,7 +252,8 @@ impl DrawingSimulation {
         let heightmap = generate_smooth_noise(12345u32);
         let temp_heights = heightmap.data.clone();
         let sliding = vec![false; GRID_SIZE * GRID_SIZE];
-        let wave_vel = vec![0.0f32; GRID_SIZE * GRID_SIZE];
+        let edge_vel_h = vec![0.0f32; GRID_SIZE * GRID_SIZE];
+        let edge_vel_v = vec![0.0f32; GRID_SIZE * GRID_SIZE];
         let mut cell_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
         for chunk in cell_colors.chunks_exact_mut(4) {
             chunk[0] = 210;
@@ -292,7 +297,8 @@ impl DrawingSimulation {
                 active: false,
             },
             sliding,
-            wave_vel,
+            edge_vel_h,
+            edge_vel_v,
             seed: 98765u32,
             marble_radius: 0.018,
             material_mode: MaterialMode::default(),
@@ -385,7 +391,8 @@ impl DrawingSimulation {
             self.temp_heights.copy_from_slice(&self.heightmap.data);
         }
         self.sliding.fill(false);
-        self.wave_vel.fill(0.0);
+        self.edge_vel_h.fill(0.0);
+        self.edge_vel_v.fill(0.0);
         for chunk in self.cell_colors.chunks_exact_mut(4) {
             chunk[0] = 210;
             chunk[1] = 180;
@@ -469,7 +476,7 @@ impl DrawingSimulation {
                 let i2 = y2 * w + x;
                 self.heightmap.data.swap(i1, i2);
                 self.temp_heights.swap(i1, i2);
-                self.wave_vel.swap(i1, i2);
+                // (edge momentum is not mirrored here — it is cleared after the loop)
                 self.sliding.swap(i1, i2);
 
                 for ch in 0..4 {
@@ -480,6 +487,14 @@ impl DrawingSimulation {
                 }
             }
         }
+
+        // Edge momentum does not survive turning the apparatus over. Mirroring it would mean
+        // reversing the sign of every gravity-aligned edge and shifting its index by one row,
+        // and the partial row range swapped above does not cover the edge set cleanly anyway.
+        // Clearing is both simpler and the physically honest answer: the contents are in free
+        // fall from rest the instant the glass is inverted.
+        self.edge_vel_h.fill(0.0);
+        self.edge_vel_v.fill(0.0);
 
         // Clean up any sand outside the shape boundary so no specs stay trapped outside/above ceiling
         for y in 0..h {
@@ -807,7 +822,8 @@ impl DrawingSimulation {
                     self.block_size,
                     &active_marbles[..active_count],
                     time_seed + iter as u32,
-                    &mut self.wave_vel,
+                    &mut self.edge_vel_h,
+                    &mut self.edge_vel_v,
                     &self.shape_mask,
                     self.tick_count + iter as u32,
                     self.gravity_dir,

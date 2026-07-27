@@ -174,6 +174,149 @@ fn liquidity(wetness: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Incompressibility cap for a cell of the given `wetness`: how much material one cell may hold.
+///
+/// Granular materials keep the historical 1.5 packing (load-bearing for the sand-pile height
+/// tests); liquids cap at 1.0 (C1). Interpolated by `liquidity` so there is no hard cut.
+/// Gravitational head, in units of "one saturated cell of fill", per cell of travel per unit of
+/// `gravity_dir`. The unified head is `H = h + Phi`, with `Phi(r) = -(g . r) * GRAVITY_HEAD_SCALE`.
+///
+/// At the shipped Sand-fall gravity of 0.04 this makes the head drop across one row exactly 1.0,
+/// which is the natural unit: it is what makes "fall into the empty cell below" outrank "spread
+/// into the empty cell beside" by precisely the weight of one saturated cell. Because `Phi` is
+/// proportional to `|g|`, the gravity slider moves behaviour continuously between the Sandbox
+/// (`Phi == 0`, pure free-surface wave) and Sand-fall regimes instead of flipping between two
+/// solvers (defect C6).
+const GRAVITY_HEAD_SCALE: f32 = 25.0;
+
+fn cell_capacity_for(wetness: f32) -> f32 {
+    let l = liquidity(wetness);
+    1.5 * (1.0 - l) + 1.0 * l
+}
+
+/// Conservative per-edge flux update — the Phase 5 (Option B) replacement for the per-cell
+/// Laplacian wave update.
+///
+/// For an edge `e = (a, b)` with gravitational heads `head_a`/`head_b` (`H = h + Phi(g)`; `Phi` is
+/// zero when gravity is out-of-plane, so `H = h` reduces to a pure free-surface head):
+///
+/// ```text
+/// yielded = sign(H_a - H_b) * max(|H_a - H_b| - tau, 0)     // tau = yield stress (0 for liquid)
+/// v_e    <- (v_e + c_sq * yielded) * damping                // per-edge momentum
+/// flux    = clamp(v_e, -(donor b limits), +(donor a limits))
+/// h_a -= flux ; h_b += flux
+/// ```
+///
+/// Two properties this buys over the old formulation:
+///
+/// 1. **Mass conservation by construction.** Every edge debits exactly what it credits, so the
+///    total is invariant no matter *which* blocks the LOD scheduler chose to run this tick. The
+///    old per-cell form only telescoped to zero if every cell in the domain updated in the same
+///    pass, which `will_simulate[b]` explicitly breaks (defect C7).
+/// 2. **No unilateral clamp.** The old form ended in `(h + v).clamp(0.0, 1.0)`, an edit with no
+///    counterparty: flooring a negative excursion to 0 *adds* mass and capping at 1.0 *discards*
+///    it. Here the donor limit (`h_donor`) and the acceptor limit (`cap - h_acceptor`) only ever
+///    *reduce a transfer*, which cannot change the total.
+///
+/// Reduction to the old wave solver at `tau = 0`, `Phi = 0`: summing the four edge fluxes incident
+/// on a cell gives `Δh_c = c_sq * (h_l + h_r + h_t + h_b - 4 h_c)` with the same damped-momentum
+/// history, i.e. exactly the old `v_new = (v + c_sq * laplacian) * damping; h += v_new`. Ripples
+/// and sloshing are preserved; only the leak is gone.
+///
+/// `*v_e` is set to the *realised* flux rather than the raw integrated velocity. That is the
+/// anti-windup term: an edge whose donor is empty or whose acceptor is full would otherwise
+/// accumulate unbounded head every tick and then discharge it in one burst the instant the
+/// constraint lifts.
+///
+/// `avail_a` / `avail_b` are the donor limits: how much of each endpoint's mass is actually
+/// available to move across *this* edge. They are the cell's full height for a gravity-aligned
+/// edge, but for a cross-gravity edge the mass that arrived from upstream during this tick is
+/// still in transit — it is unsupported, exerts no hydrostatic pressure, and must not be able to
+/// push sideways. Subtracting it is what distinguishes a falling stream (everything it holds
+/// arrived this tick, so nothing spreads) from a settled pool (nothing arrived, so all of it
+/// levels), without either a free-fall special case or a column-pressure sweep.
+///
+/// `weight` scales the realised flux. It is the `liquidity` share of the donor cell when the
+/// granular CA and this solver are both contributing to the same edge, so that a cell whose
+/// `wetness` drifts across the old `>= 0.75` cut hands over between the two solvers continuously
+/// instead of switching regime (defect C5). It is 1.0 wherever this solver acts alone.
+///
+/// Returns the signed flux (positive = `a` -> `b`).
+#[allow(clippy::too_many_arguments)]
+fn flux_edge(
+    a_b: usize,
+    b_b: usize,
+    a_idx: usize,
+    b_idx: usize,
+    head_a: f32,
+    head_b: f32,
+    c_sq: f32,
+    damping: f32,
+    tau: f32,
+    cap_a: f32,
+    cap_b: f32,
+    avail_a: f32,
+    avail_b: f32,
+    weight: f32,
+    v_e: &mut f32,
+    temp_heights: &mut [f32],
+    cell_colors: &mut [u8],
+    cell_props: &mut [f32],
+    modified: &mut Vec<bool>,
+    next_displacements: &mut Vec<f32>,
+    total_flow: &mut f32,
+    flow_occurred: &mut bool,
+) -> f32 {
+    let driving = head_a - head_b;
+    let yielded = if driving > tau {
+        driving - tau
+    } else if driving < -tau {
+        driving + tau
+    } else {
+        0.0
+    };
+
+    let v = (*v_e + c_sq * yielded) * damping;
+
+    let h_a = temp_heights[a_idx];
+    let h_b = temp_heights[b_idx];
+
+    // Donor mass and acceptor capacity, in the direction the velocity actually points.
+    let flux = weight * if v > 0.0 {
+        v.min(avail_a).min((cap_b - h_b).max(0.0))
+    } else if v < 0.0 {
+        -((-v).min(avail_b).min((cap_a - h_a).max(0.0)))
+    } else {
+        0.0
+    };
+
+    *v_e = flux;
+
+    // Below this the transfer is pure f32 noise; skipping it is still exactly conservative
+    // (nothing is added or removed), it just avoids an advect_properties call per edge per tick.
+    const MIN_FLUX: f32 = 1e-7;
+    if flux > MIN_FLUX {
+        activate_neighbor(a_b, flux, modified, next_displacements);
+        activate_neighbor(b_b, flux, modified, next_displacements);
+        advect_properties(cell_colors, cell_props, a_idx, b_idx, flux, temp_heights[b_idx]);
+        temp_heights[a_idx] -= flux;
+        temp_heights[b_idx] += flux;
+        *total_flow += flux;
+        *flow_occurred = true;
+    } else if flux < -MIN_FLUX {
+        let mag = -flux;
+        activate_neighbor(a_b, mag, modified, next_displacements);
+        activate_neighbor(b_b, mag, modified, next_displacements);
+        advect_properties(cell_colors, cell_props, b_idx, a_idx, mag, temp_heights[a_idx]);
+        temp_heights[b_idx] -= mag;
+        temp_heights[a_idx] += mag;
+        *total_flow += mag;
+        *flow_occurred = true;
+    }
+
+    flux
+}
+
 fn wave_params(wetness: f32) -> (f32, f32) {
     if wetness <= 0.75 {
         (0.08, 0.76)
@@ -248,35 +391,20 @@ fn get_ca_params(
     if gravity_active {
         threshold *= 0.35; // Lower friction/repose angle in Sand-fall mode for realistic fluid flow
 
-        // Liquid materials (wetness >= 0.75) normally use the wave solver and
-        // have threshold=0.0 / flow_rate=0.0. Under gravity, they are routed
-        // through the CA solver instead, so we need to give them positive
-        // flow parameters to enable draining.
+        // Phase 5: the liquid (threshold = 0.0, alpha = 0.75) blend that used to live here is
+        // gone. Under gravity a cell's liquid share is now carried by the conservative edge-flux
+        // solver in `settle_tick` and the CA carries only the complementary `1 - liquidity`
+        // share, so the CA no longer has to impersonate a liquid at all. That deleted the whole
+        // Phase 2 tuning cluster — `liquid_alpha = 0.75` (which passed L1 and L3 only inside a
+        // narrow 0.70-0.80 band), plus the 0.70 free-fall and 0.90 lateral transfer coefficients
+        // and the `liquid_can_still_fall` gate below. In the flux form the equivalent limits are
+        // not coefficients at all: they are the donor's mass and the acceptor's capacity, which
+        // are physical quantities rather than tuned ones.
         //
-        // Blended by `liquidity` instead of a hard `wetness >= 0.75` switch (C5): the granular
-        // branch below gives `alpha = flow_rate * 1.5`, which is exactly 0.0 for a liquid preset
-        // (flow_rate_prop == 0.0 for Water/Milk/etc, and Yogurt sits right on the old cut with
-        // flow_rate 0.08). A cell that drifts a hair below 0.75 under property advection used to
-        // fall wholesale into that near-zero-alpha branch and freeze solid. Blending the two
-        // candidate (threshold, alpha) pairs by `liquidity` means a drift of +/-0.0001 in wetness
-        // only perturbs the *blend weight* by a similarly tiny amount, not the whole regime.
-        let granular_alpha = (alpha * 1.5).min(0.8);
-        let liquid_threshold = 0.0; // Liquids flow at any height difference
-        // C2 fix: raised from 0.50. With the fictitious lateral dispersion term gone, the CA's
-        // per-tick flow between two neighbors is now genuinely rate-limited by `alpha` alone (see
-        // `max_transfer_coeff` below, which no longer binds tighter than this once it was raised
-        // too), so `alpha` is what determines how many ticks a pool needs to reach a level surface.
-        // At the old 0.50 a closed-box pool (`test_liquid_pool_levels_flat_in_closed_box`) took
-        // ~3000 ticks to flatten from a 56-row column; 0.75 gets it there within the test's 1500
-        // while still leaving `test_liquid_stream_stays_coherent`'s 4-cell free-fall stream narrow
-        // (width 8) — this is the real tension between "pool must level fast" and "stream must not
-        // spread" the phase's design doc warned about, so this value is a deliberately-found
-        // balance point rather than an arbitrary bump: measured empirically, 0.70-0.80 all pass
-        // both tests, 0.60 and below fail L1 (too slow to converge), 0.85+ fails L3 (a saturated
-        // stream segment starts spilling sideways before it clears the mid-air measurement window).
-        let liquid_alpha = 0.75;
-        threshold = threshold * (1.0 - liquidity) + liquid_threshold * liquidity;
-        alpha = granular_alpha * (1.0 - liquidity) + liquid_alpha * liquidity;
+        // C5 (a material drifting across the old `wetness >= 0.75` cut must not change regime)
+        // is still handled continuously — the handover is now between the two *solvers*, by the
+        // same `liquidity` weight, rather than between two parameter sets inside one solver.
+        alpha = (alpha * 1.5).min(0.8);
     }
 
     // Lock chance
@@ -904,7 +1032,8 @@ pub fn settle_tick(
     block_size: usize,
     active_marbles: &[ActiveMarbleInfo],
     time_seed: u32,
-    wave_vel: &mut Vec<f32>,
+    edge_vel_h: &mut Vec<f32>,
+    edge_vel_v: &mut Vec<f32>,
     shape_mask: &[u8],
     tick_count: u32,
     gravity_dir: glam::Vec2,
@@ -922,8 +1051,14 @@ pub fn settle_tick(
     if sliding.len() != heightmap.data.len() {
         sliding.resize(heightmap.data.len(), false);
     }
-    if wave_vel.len() != heightmap.data.len() {
-        wave_vel.resize(heightmap.data.len(), 0.0);
+    // Per-edge momentum. `edge_vel_h[i]` belongs to the horizontal edge between cell `i` and
+    // cell `i + 1`; `edge_vel_v[i]` to the vertical edge between cell `i` and cell `i + w`. Each
+    // edge is owned (and therefore integrated exactly once per pass) by its lower-index cell.
+    if edge_vel_h.len() != heightmap.data.len() {
+        edge_vel_h.resize(heightmap.data.len(), 0.0);
+    }
+    if edge_vel_v.len() != heightmap.data.len() {
+        edge_vel_v.resize(heightmap.data.len(), 0.0);
     }
 
     let cols = (w + block_size - 1) / block_size;
@@ -1034,8 +1169,54 @@ pub fn settle_tick(
     // 2. Continuous per-cell solver (loop over active blocks)
     let gravity_active = gravity_dir.length_squared() > 1e-6;
     let b_len = expected_len;
+    // Directional operator split for liquid under gravity.
+    //
+    //   phase 0 — the liquid solver's gravity-aligned edges only, scanned *against* gravity.
+    //   phase 1 — everything else: the granular CA, the Sandbox (g = 0) liquid solver, and the
+    //             liquid solver's cross-gravity edges.
+    //
+    // Both halves of the split are ordering choices, not tuned coefficients, and each fixes a
+    // distinct failure of the naive fused pass:
+    //
+    // *Why the directions are separated.* A cell in free fall and a cell in a settled pool
+    // present the same fill difference to their lateral neighbours — a full cell beside an empty
+    // one — so a fused pass cannot tell "falling" from "resting" and spreads both, fanning a
+    // 4-cell stream out to 33. What actually distinguishes them is that the falling cell has
+    // somewhere to go *along* gravity and the pooled cell does not. Resolving the gravity-aligned
+    // edges first makes that physical: by the time lateral edges are evaluated, a falling cell has
+    // already handed its mass to the cell below and has nothing left to give sideways, while a
+    // pooled cell still holds all of it and levels out. That is the hydrostatic statement "no
+    // lateral pressure without support", obtained from the update order instead of from a
+    // free-fall special case.
+    //
+    // *Why phase 0 runs against gravity.* Sweeping down-gravity is Gauss-Seidel in the flow
+    // direction: row y donates into row y+1, then row y+1 — already topped up — donates into
+    // y+2, so one pass cascades a parcel the whole height of the grid and the stream arrives as
+    // a stretched 0.10-fill smear. Sweeping bottom-to-top empties the acceptor before the donor
+    // is considered, which is the CFL-respecting order: mass advances at most one cell per tick
+    // and a saturated stream stays saturated (peak fill 1.0).
+    for phase in 0..2usize {
+        // phase 0 only exists for in-plane gravity; at g = 0 there is no gravity-aligned
+        // direction and the Sandbox liquid solver handles both of its edges in phase 1.
+        if phase == 0 && !gravity_active {
+            continue;
+        }
+        // True when phase 0 should walk rows bottom-to-top (the usual case: gravity points at
+        // +y, i.e. down the grid).
+        let against_gravity_is_up = gravity_dir.y >= 0.0;
     for idx_b in 0..b_len {
-        let b = if gravity_active && gravity_dir.y > 0.0 {
+        let b = if phase == 0 {
+            // Reverse of the main block order along the gravity axis.
+            let by_fwd = idx_b / cols;
+            let by = if against_gravity_is_up { rows - 1 - by_fwd } else { by_fwd };
+            let bx_idx = idx_b % cols;
+            let bx = if (tick_count + by as u32) % 2 == 0 {
+                bx_idx
+            } else {
+                cols - 1 - bx_idx
+            };
+            by * cols + bx
+        } else if gravity_active && gravity_dir.y > 0.0 {
             // Under downward gravity, process blocks top-to-bottom so falling sand advects across block boundaries without trapping
             let by = idx_b / cols;
             let bx_idx = idx_b % cols;
@@ -1064,7 +1245,9 @@ pub fn settle_tick(
         let x_len = end_x - start_x;
         let y_len = end_y - start_y;
         for idy in 0..y_len {
-            let y = if gravity_active && gravity_dir.y > 0.0 {
+            let y = if phase == 0 {
+                if against_gravity_is_up { end_y - 1 - idy } else { start_y + idy }
+            } else if gravity_active && gravity_dir.y > 0.0 {
                 start_y + idy
             } else if tick_count % 2 == 0 {
                 end_y - 1 - idy
@@ -1088,7 +1271,6 @@ pub fn settle_tick(
 
                 let mask_val = shape_mask[center_idx];
                 let inside = mask_val != crate::MASK_OUTSIDE;
-                let is_safe = mask_val == crate::MASK_INSIDE;
 
                 if !inside {
                     continue;
@@ -1096,69 +1278,99 @@ pub fn settle_tick(
 
                 let wetness = cell_props[center_idx * 4 + PROP_WETNESS];
 
+                if phase == 0 {
+                    // Gravity-aligned liquid pass — see the operator-split note above.
+                    // `wetness <= 0.65` is the cheap early-out that keeps a pure-sand frame from
+                    // paying for this pass: it is exactly where `liquidity` reaches zero.
+                    if wetness <= 0.65 {
+                        continue;
+                    }
+                    let cell_liquidity = liquidity(wetness);
+                    if cell_liquidity > 0.0
+                        && x > 0 && x + 1 < w && y > 0 && y + 1 < h
+                        && is_inside(x, y + 1)
+                    {
+                        let (c_sq, damping) = wave_params(wetness);
+                        let nb_idx = center_idx + w;
+                        let nb_b = ((y + 1) / block_size) * cols + bx;
+                        flux_edge(
+                            b, nb_b, center_idx, nb_idx,
+                            temp_heights[center_idx] + gravity_dir.y * GRAVITY_HEAD_SCALE,
+                            temp_heights[nb_idx],
+                            c_sq, damping, 0.0,
+                            cell_capacity_for(wetness),
+                            cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
+                            temp_heights[center_idx], temp_heights[nb_idx],
+                            cell_liquidity,
+                            &mut edge_vel_v[center_idx],
+                            temp_heights, cell_colors, cell_props,
+                            &mut modified, &mut next_displacements,
+                            &mut total_flow, &mut flow_occurred,
+                        );
+                    }
+                    continue;
+                }
+
                 if wetness >= 0.75 && !gravity_active {
-                    // --- Wave propagation (Liquid behavior) ---
-                    let h_center = heightmap.data[center_idx];
-
-                    // Neumann boundary reflection conditions
-                    let h_left = if is_safe || (x > 0 && is_inside(x - 1, y)) { heightmap.data[center_idx - 1] } else { h_center };
-                    let h_right = if is_safe || (x + 1 < w && is_inside(x + 1, y)) { heightmap.data[center_idx + 1] } else { h_center };
-                    let h_top = if is_safe || (y > 0 && is_inside(x, y - 1)) { heightmap.data[center_idx - w] } else { h_center };
-                    let h_bottom = if is_safe || (y + 1 < h && is_inside(x, y + 1)) { heightmap.data[center_idx + w] } else { h_center };
-
-                    let laplacian = h_left + h_right + h_top + h_bottom - 4.0 * h_center;
-
+                    // --- Conservative edge-flux liquid solver (replaces the per-cell wave
+                    //     update; see `flux_edge`) ---
+                    //
+                    // Each cell integrates only the two edges it *owns* — the one to its right
+                    // and the one below it — so every edge in the domain is integrated exactly
+                    // once per pass, by its lower-index endpoint. The left/top edges of this cell
+                    // are owned by its left/top neighbours and were (or will be) handled there.
+                    //
+                    // Neumann reflection at the shape boundary is now structural: an edge whose
+                    // far side is outside the mask simply does not exist, so no flux crosses it
+                    // and no mass can be stranded in a wall cell (the old formulation mirrored
+                    // `h_center` across the wall to get a zero-gradient; skipping the edge is the
+                    // same boundary condition expressed on the flux instead of the height).
                     let (c_sq, damping) = wave_params(wetness);
-                    let v_new = (wave_vel[center_idx] + c_sq * laplacian) * damping;
-                    wave_vel[center_idx] = v_new;
+                    let cap_c = cell_capacity_for(wetness);
+                    let mut max_flux = 0.0f32;
 
-                    let h_new = (h_center + v_new).clamp(0.0, 1.0);
-                    temp_heights[center_idx] = h_new;
-
-                    // --- Color diffusion driven by flux ---
-                    // When height flows in from a neighbor, blend that neighbor's color into
-                    // this cell proportionally. A flat undisturbed pool produces zero flux →
-                    // zero color change. Rate scales with wetness: water mixes fast, oil slow.
-                    if is_safe && h_new > h_center {
-                        // Net inflow: sample which neighbors are higher and contributed flux
-                        let flux_l = (h_left  - h_center).max(0.0);
-                        let flux_r = (h_right - h_center).max(0.0);
-                        let flux_t = (h_top   - h_center).max(0.0);
-                        let flux_b = (h_bottom- h_center).max(0.0);
-                        let total_flux = flux_l + flux_r + flux_t + flux_b;
-
-                        if total_flux > 1e-5 {
-                            // mix_rate: how strongly colors blend per unit flux.
-                            // Water (wetness=1.0) → 0.35, VegOil (wetness=0.85) → 0.10
-                            let mix_rate = ((wetness - 0.75) / 0.25).clamp(0.0, 1.0) * 0.30 + 0.05;
-                            let blend = (total_flux * mix_rate).min(0.60);
-
-                            let cb = center_idx * 4;
-                            let lb = (center_idx - 1) * 4;
-                            let rb = (center_idx + 1) * 4;
-                            let tb = (center_idx - w) * 4;
-                            let bb = (center_idx + w) * 4;
-
-                            for ch in 0..3 {
-                                let center_c = cell_colors[cb + ch] as f32;
-                                let neighbor_avg =
-                                    cell_colors[lb + ch] as f32 * flux_l +
-                                    cell_colors[rb + ch] as f32 * flux_r +
-                                    cell_colors[tb + ch] as f32 * flux_t +
-                                    cell_colors[bb + ch] as f32 * flux_b;
-                                let neighbor_avg = neighbor_avg / total_flux;
-                                let mixed = center_c + (neighbor_avg - center_c) * blend;
-                                cell_colors[cb + ch] = mixed.clamp(0.0, 255.0).round() as u8;
-                            }
-                        }
+                    if x + 1 < w && is_inside(x + 1, y) {
+                        let nb_idx = center_idx + 1;
+                        let nb_b = by * cols + (x + 1) / block_size;
+                        let f = flux_edge(
+                            b, nb_b, center_idx, nb_idx,
+                            temp_heights[center_idx], temp_heights[nb_idx],
+                            c_sq, damping, 0.0,
+                            cap_c, cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
+                            temp_heights[center_idx], temp_heights[nb_idx], 1.0,
+                            &mut edge_vel_h[center_idx],
+                            temp_heights, cell_colors, cell_props,
+                            &mut modified, &mut next_displacements,
+                            &mut total_flow, &mut flow_occurred,
+                        );
+                        max_flux = max_flux.max(f.abs());
                     }
 
-                    let height_diff = (h_new - h_center).abs();
-                    total_flow += height_diff;
+                    if y + 1 < h && is_inside(x, y + 1) {
+                        let nb_idx = center_idx + w;
+                        let nb_b = ((y + 1) / block_size) * cols + bx;
+                        let f = flux_edge(
+                            b, nb_b, center_idx, nb_idx,
+                            temp_heights[center_idx], temp_heights[nb_idx],
+                            c_sq, damping, 0.0,
+                            cap_c, cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
+                            temp_heights[center_idx], temp_heights[nb_idx], 1.0,
+                            &mut edge_vel_v[center_idx],
+                            temp_heights, cell_colors, cell_props,
+                            &mut modified, &mut next_displacements,
+                            &mut total_flow, &mut flow_occurred,
+                        );
+                        max_flux = max_flux.max(f.abs());
+                    }
 
-                    if v_new.abs() > 3e-4 || (h_new - crate::DEFAULT_SAND_HEIGHT).abs() > 1e-4 {
+                    // Block-activation bookkeeping, unchanged in spirit from the old wave path:
+                    // `max_flux` plays the role the per-cell velocity used to, and a cell whose
+                    // height still differs from the resting bed keeps its neighbourhood awake so
+                    // a travelling wave is not cut off at a block boundary.
+                    let disturbance = (temp_heights[center_idx] - crate::DEFAULT_SAND_HEIGHT).abs();
+                    if max_flux > 3e-4 || disturbance > 1e-4 {
                         flow_occurred = true;
-                        let flow_val = v_new.abs().max((h_new - crate::DEFAULT_SAND_HEIGHT).abs());
+                        let flow_val = max_flux.max(disturbance);
                         activate_neighbor(b, flow_val, &mut modified, &mut next_displacements);
                         if bx > 0 { activate_neighbor(b - 1, flow_val, &mut modified, &mut next_displacements); }
                         if bx + 1 < cols { activate_neighbor(b + 1, flow_val, &mut modified, &mut next_displacements); }
@@ -1180,6 +1392,52 @@ pub fn settle_tick(
                     // neighbor can receive mass in a single tick.
                     let cell_liquidity = liquidity(wetness);
                     let cell_capacity = 1.5 * (1.0 - cell_liquidity) + 1.0 * cell_liquidity;
+                    // Complement of the liquid share handled by the edge-flux solver below.
+                    // Exactly 1.0 for any granular material (liquidity == 0), so the CA path is
+                    // bit-identical to before for sand.
+                    let granular_share = if gravity_active { 1.0 - cell_liquidity } else { 1.0 };
+
+                    // --- Liquid share: the same conservative edge-flux solver as the g = 0
+                    //     branch above, but with a non-zero gravitational head Phi ---
+                    //
+                    // `H = h + Phi(g, r)` is the unified head. In Sandbox the grid plane is
+                    // horizontal, gravity is perpendicular to it and Phi is identically zero, so
+                    // `H = h` and the solver degenerates to the free-surface wave. In Sand-fall
+                    // the grid is a vertical cross-section and gravity is in-plane, so Phi is a
+                    // linear ramp along `g` and the head difference across a downhill edge picks
+                    // up `|g| * GRAVITY_HEAD_SCALE` on top of the fill difference. Nothing else
+                    // about the update changes: the same clamp on donor mass and acceptor
+                    // capacity that makes ripples conservative at g = 0 is what produces
+                    // hydrostatic stacking and level pools at g > 0.
+                    //
+                    // Weighted by `cell_liquidity`, with the granular CA below carrying the
+                    // complementary `1 - cell_liquidity`, so the handover across the old
+                    // `wetness >= 0.75` cut is continuous (C5) and a pure granular cell
+                    // (liquidity == 0) is bit-identical to before.
+                    if gravity_active && cell_liquidity > 0.0 && x + 1 < w && is_inside(x + 1, y) {
+                        let (c_sq, damping) = wave_params(wetness);
+                        let nb_idx = center_idx + 1;
+                        let nb_b = by * cols + (x + 1) / block_size;
+                        // Mass that arrived from upstream during phase 0 is still falling; it is
+                        // unsupported and cannot push sideways (see `flux_edge`'s `avail_*`).
+                        // `edge_vel_v[i]` holds exactly the flux phase 0 realised on the
+                        // gravity-aligned edge feeding cell `i + w`.
+                        let avail_a = (temp_heights[center_idx] - edge_vel_v[center_idx - w].max(0.0)).max(0.0);
+                        let avail_b = (temp_heights[nb_idx] - edge_vel_v[nb_idx - w].max(0.0)).max(0.0);
+                        flux_edge(
+                            b, nb_b, center_idx, nb_idx,
+                            temp_heights[center_idx] + gravity_dir.x * GRAVITY_HEAD_SCALE,
+                            temp_heights[nb_idx],
+                            c_sq, damping, 0.0,
+                            cell_capacity, cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
+                            avail_a, avail_b,
+                            cell_liquidity,
+                            &mut edge_vel_h[center_idx],
+                            temp_heights, cell_colors, cell_props,
+                            &mut modified, &mut next_displacements,
+                            &mut total_flow, &mut flow_occurred,
+                        );
+                    }
 
                     let h_center = if gravity_active {
                         temp_heights[center_idx].max(heightmap.data[center_idx])
@@ -1272,43 +1530,6 @@ pub fn settle_tick(
                                 flow = 0.0;
                             }
 
-                            // C2 gate: this safety valve is a *real* geom_slope-driven flow (not
-                            // the fictitious dispersion noise fixed below), but its liquid share
-                            // still needs "liquid falls while it can" — suppress the lateral push
-                            // while the column below can still accept more (mirrors
-                            // `liquid_can_still_fall`), or a falling stream fans out through this
-                            // separate mechanism instead of the main flow loop. Blended by
-                            // cell_liquidity so cell_liquidity == 0.0 (sand) is bit-identical.
-                            if gravity_active && cell_liquidity > 0.0 {
-                                let gravity_len = gravity_dir.length();
-                                let perp_dot = if gravity_len > 1e-6 {
-                                    let perp_x = -gravity_dir.y;
-                                    let perp_y = gravity_dir.x;
-                                    (ndx * perp_x + ndy * perp_y).abs()
-                                } else {
-                                    0.0
-                                };
-
-                                let liquid_can_still_fall_valve = if perp_dot > 0.0 {
-                                    let h_below_valve = if center_idx + w < temp_heights.len() {
-                                        temp_heights[center_idx + w].max(heightmap.data[center_idx + w])
-                                    } else {
-                                        0.0
-                                    };
-                                    let is_below_inside_valve = y + 1 < h && is_inside(x, y + 1);
-                                    // Same liquid "can still fall?" gate as the main flow loop
-                                    // (cell_capacity-based, not the coarser is_free_fall used for
-                                    // granular purposes elsewhere) — see `liquid_can_still_fall`.
-                                    is_below_inside_valve && h_below_valve < cell_capacity - 0.02
-                                } else {
-                                    false
-                                };
-
-                                if liquid_can_still_fall_valve {
-                                    flow *= 1.0 - cell_liquidity;
-                                }
-                            }
-
                             if flow > 0.0 {
                                 let current_temp_center = temp_heights[center_idx];
                                 let current_temp_neighbor = temp_heights[neighbor_idx];
@@ -1318,7 +1539,8 @@ pub fn settle_tick(
                                 // computation entirely, so without this clamp it could push a
                                 // liquid neighbor above the incompressibility cap on its own.
                                 let max_dst_room = (cell_capacity - current_temp_neighbor).max(0.0);
-                                let clamped_flow = flow.min(temp_diff * 0.4).min(max_dst_room).max(0.0);
+                                let clamped_flow = flow.min(temp_diff * 0.4).min(max_dst_room).max(0.0)
+                                    * granular_share;
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                     try_move(
                                         b, center_idx, neighbor_idx, clamped_flow, w, block_size, cols,
@@ -1398,45 +1620,19 @@ pub fn settle_tick(
                         };
                         let is_below_inside = y + 1 < h && is_inside(x, y + 1);
                         let is_free_fall = gravity_active && is_below_inside && h_below < 0.10;
-                        // Liquid-specific "can this cell still fall?" gate (C2): unlike
-                        // `is_free_fall` above (tuned for granular transfer-coefficient/lock-chance
-                        // bypass, and true only while the cell below is almost completely empty),
-                        // liquid lateral flow must stay blocked for as long as the column below has
-                        // *any* spare capacity, not just while it is nearly empty — otherwise a
-                        // stream that has left partial residue behind it (transfer coeff < 1.0)
-                        // reads as "can't fall" long before it actually can't, and spreads sideways
-                        // prematurely.
-                        let liquid_can_still_fall = gravity_active && is_below_inside && h_below < cell_capacity - 0.02;
 
-                        // Downward pull (liquid has no friction/repose angle, so it flows much faster).
-                        // Blended by `cell_liquidity` rather than a hard `wetness >= 0.75` switch (C5)
-                        // so this multiplier doesn't jump discontinuously as wetness drifts under
-                        // property advection.
-                        let mut gravity_push = {
-                            let sand_mult = 4.0;
-                            let liquid_mult = 40.0;
-                            gravity_dot * (sand_mult * (1.0 - cell_liquidity) + liquid_mult * cell_liquidity)
-                        };
+                        // Downward pull. Phase 5 removed the x40 liquid multiplier that used to
+                        // be blended in here: a liquid's downhill drive is now the gravitational
+                        // head Phi in the flux solver, not a fictitious slope bonus in the CA.
+                        let mut gravity_push = gravity_dot * 4.0;
                         
-                        // Sideways lateral term. Two rule-sets, blended by `cell_liquidity` (C2 fix)
-                        // so that at cell_liquidity == 0.0 this is bit-identical to the old
-                        // unconditional dispersion-noise term (granular behaviour/tests untouched):
-                        //
-                        //   - Granular: unchanged stochastic dispersion/splashing (`granular_push`)
-                        //     — a fictitious slope that builds the bed heap and scatters sand in
-                        //     free fall. Still computed and used at full weight for sand.
-                        //   - Liquid: no fictitious slope at all. A liquid only spreads sideways
-                        //     when it cannot fall (`liquid_can_still_fall` is false — the cell below
-                        //     is already occupied/blocked/off-grid), and then the *real* surface
-                        //     height difference (`geom_slope`, already the base of
-                        //     `effective_slope` below) is what drives it. While the cell below can
-                        //     still accept mass, the liquid share of the lateral push exactly
-                        //     cancels `geom_slope` for this neighbor so a falling stream falls
-                        //     straight instead of fanning out. Also cancels `geom_slope` outright
-                        //     whenever the neighbor itself is outside the shape mask: a wall cell is
-                        //     never simulated again, so any flow that reaches one is a silent,
-                        //     permanent leak (this was pinning a "spike" of water against the box
-                        //     wall in `test_liquid_pool_levels_flat_in_closed_box` before this fix).
+                        // Sideways lateral term — the granular stochastic dispersion/splashing
+                        // that builds the bed heap and scatters sand in free fall. Phase 5
+                        // deleted the liquid counterpart that used to be blended in here (a term
+                        // that cancelled `geom_slope` while the cell below could still accept
+                        // mass): a liquid's lateral motion is now the flux solver's cross-gravity
+                        // edge, gated by the in-transit donor limit rather than by a "can it
+                        // still fall?" predicate.
                         let gravity_len = gravity_dir.length();
                         if gravity_len > 1e-6 {
                             let perp_x = -gravity_dir.y;
@@ -1445,24 +1641,13 @@ pub fn settle_tick(
                             let rand_val = (seed ^ (neighbor_idx as u32).wrapping_mul(823)) & 0xFF;
                             let dispersion_noise = rand_val as f32 / 255.0;
 
-                            let granular_push = if !is_free_fall {
+                            gravity_push += if !is_free_fall {
                                 // Lateral avalanche dispersion on bed heap to form a natural tall sand hill
                                 perp_dot * 3.5 * dispersion_noise
                             } else {
                                 // Always randomly scatter a little laterally in free fall for natural stream flow
                                 perp_dot * 0.8 * dispersion_noise
                             };
-
-                            if cell_liquidity > 0.0 {
-                                let liquid_push = if perp_dot > 0.0 && liquid_can_still_fall {
-                                    -geom_slope
-                                } else {
-                                    0.0
-                                };
-                                gravity_push += granular_push * (1.0 - cell_liquidity) + liquid_push * cell_liquidity;
-                            } else {
-                                gravity_push += granular_push;
-                            }
                         }
 
                         let effective_slope = geom_slope + gravity_push;
@@ -1489,45 +1674,18 @@ pub fn settle_tick(
                             }
 
                             if flow > 0.0 {
-                                // Blended by `cell_liquidity` rather than a hard `wetness >= 0.75`
-                                // switch (C5), so the coefficient doesn't jump discontinuously as
-                                // wetness drifts across the old cut under property advection.
+                                // Phase 5 removed the liquid arm of this coefficient (0.70 while
+                                // the column below could still take more, 0.90 otherwise). A
+                                // liquid's per-tick transfer is no longer a fraction of the donor
+                                // chosen by hand — it is the donor's actual mass and the
+                                // acceptor's actual free capacity, in `flux_edge`.
                                 let max_transfer_coeff = if !gravity_active {
                                     0.40
+                                } else if is_free_fall && gravity_dot > 0.0 {
+                                    let rand_ff = ((seed ^ (neighbor_idx as u32).wrapping_mul(1543)) & 0xFFFF) as f32 / 65535.0;
+                                    0.80 + 0.20 * rand_ff // Random transfer between 80% and 100% in mid-air free fall
                                 } else {
-                                    // C2 fix: both raised from the pre-Phase-2 values (0.50 / 0.40).
-                                    // Gated on the same cell_capacity-based `liquid_can_still_fall`
-                                    // used above (not the coarser is_free_fall), so this differentiates
-                                    // "falling further into an open column below" from "pushed into an
-                                    // already-occupied neighbor" using the real acceptor state rather
-                                    // than the granular free-fall heuristic.
-                                    //   - Falling (0.50 -> 0.70): with the fictitious lateral
-                                    //     dispersion gone, the old 0.50 "elongated droplet" cap left a
-                                    //     falling column visibly thinning with depth (peak fill 0.36 in
-                                    //     `test_liquid_stream_stays_coherent`'s mid-air window at 40
-                                    //     ticks) — a diffusing smear, not a coherent slug. 0.70 lets a
-                                    //     falling liquid move close to (but not quite) a full slug per
-                                    //     tick, reaching peak fill >= 0.5 while still leaving room for
-                                    //     `liquid_alpha` to be the binding constraint (see below).
-                                    //   - Resting/lateral (0.40 -> 0.90): paired with the `liquid_alpha`
-                                    //     increase above so a blocked column's overflow reaches level
-                                    //     within the tick budget `test_liquid_pool_levels_flat_in_closed_box`
-                                    //     allows; on its own (alpha still 0.40) this constant barely
-                                    //     matters since alpha binds first, but raising it removes any
-                                    //     chance it becomes the limiting factor once `liquid_alpha` is
-                                    //     high enough to need it.
-                                    let liquid_coeff = if liquid_can_still_fall && gravity_dot > 0.0 {
-                                        0.70
-                                    } else {
-                                        0.90
-                                    };
-                                    let granular_coeff = if is_free_fall && gravity_dot > 0.0 {
-                                        let rand_ff = ((seed ^ (neighbor_idx as u32).wrapping_mul(1543)) & 0xFFFF) as f32 / 65535.0;
-                                        0.80 + 0.20 * rand_ff // Random transfer between 80% and 100% in mid-air free fall
-                                    } else {
-                                        0.20 // Sand uses lower coeff on bed to prevent wave oscillations
-                                    };
-                                    granular_coeff * (1.0 - cell_liquidity) + liquid_coeff * cell_liquidity
+                                    0.20 // Sand uses lower coeff on bed to prevent wave oscillations
                                 };
                                 // Acceptor cell capacity (incompressibility, C1). `cell_capacity`
                                 // (computed once above, per center cell) is 1.5 for granular
@@ -1583,6 +1741,8 @@ pub fn settle_tick(
                                     clamped_flow = 0.0;
                                 }
 
+                                clamped_flow *= granular_share;
+
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD || (src_h <= 0.001 && clamped_flow > 0.0) {
                                     try_move(
                                         b, center_idx, neighbor_idx, clamped_flow, w, block_size, cols,
@@ -1600,6 +1760,8 @@ pub fn settle_tick(
             }
         }
     }
+    } // end `for phase` — body left at the original indentation so the operator split reads as a
+      // wrapper rather than as a 600-line reformat of the solver.
 
     // 3. Copy back updated blocks
     for b in 0..expected_len {
@@ -1740,7 +1902,8 @@ mod tests {
         active_blocks: Vec<crate::BlockActivity>,
         last_displacements: Vec<f32>,
         last_simulated_ticks: Vec<u32>,
-        wave_vel: Vec<f32>,
+        edge_vel_h: Vec<f32>,
+        edge_vel_v: Vec<f32>,
         mask: Vec<u8>,
         block_size: usize,
         tick_count: u32,
@@ -1761,7 +1924,8 @@ mod tests {
                 active_blocks: vec![crate::BlockActivity::Inactive; expected_len],
                 last_displacements: vec![1.0; expected_len],
                 last_simulated_ticks: vec![0; expected_len],
-                wave_vel: vec![0.0; w * h],
+                edge_vel_h: vec![0.0; w * h],
+                edge_vel_v: vec![0.0; w * h],
                 mask,
                 block_size,
                 tick_count: 0,
@@ -1783,7 +1947,8 @@ mod tests {
                 self.block_size,
                 &[],
                 12345u32.wrapping_add(self.tick_count),
-                &mut self.wave_vel,
+                &mut self.edge_vel_h,
+                &mut self.edge_vel_v,
                 &self.mask,
                 self.tick_count,
                 gravity_dir,
@@ -2078,7 +2243,8 @@ mod tests {
 
         let initial_sum: f64 = hm.as_slice().iter().map(|&x| x as f64).sum();
 
-        let mut wave_vel = vec![0.0; 512 * 512];
+        let mut edge_vel_h = vec![0.0; 512 * 512];
+        let mut edge_vel_v = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = vec![1.0; 256];
         let mut last_simulated_ticks = vec![0; 256];
@@ -2102,7 +2268,8 @@ mod tests {
                 32,
                 &[],
                 12345,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 glam::Vec2::ZERO,
@@ -2142,7 +2309,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; 512 * 512];
+        let mut edge_vel_h = vec![0.0; 512 * 512];
+        let mut edge_vel_v = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = Vec::new();
         let mut last_simulated_ticks = Vec::new();
@@ -2164,7 +2332,8 @@ mod tests {
             32,
             &[],
             12345,
-            &mut wave_vel,
+            &mut edge_vel_h,
+            &mut edge_vel_v,
             &mask,
             0,
             glam::Vec2::ZERO,
@@ -2213,7 +2382,8 @@ mod tests {
             hm.data[center_idx] = 1.0;
             hm.data[center_idx - 1] = 0.5; // slope = 0.5 > 0.20
 
-            let mut wave_vel = vec![0.0; 64 * 64];
+            let mut edge_vel_h = vec![0.0; 64 * 64];
+            let mut edge_vel_v = vec![0.0; 64 * 64];
             let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
             let mut last_displacements = vec![1.0; 4];
             let mut last_simulated_ticks = vec![0; 4];
@@ -2233,7 +2403,8 @@ mod tests {
                 32,
                 &[ActiveMarbleInfo { pos: Vec2::ZERO, vel: 0.1, vel_vec: Vec2::new(0.1, 0.0) }],
                 9999,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 0,
                 glam::Vec2::ZERO,
@@ -2308,7 +2479,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; 128 * 128];
+        let mut edge_vel_h = vec![0.0; 128 * 128];
+        let mut edge_vel_v = vec![0.0; 128 * 128];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = vec![1.0; 16];
         let mut last_simulated_ticks = vec![0; 16];
@@ -2329,7 +2501,8 @@ mod tests {
             32,
             &[],
             12345,
-            &mut wave_vel,
+            &mut edge_vel_h,
+            &mut edge_vel_v,
             &mask,
             0,
             glam::Vec2::ZERO,
@@ -2600,7 +2773,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; 64 * 64];
+        let mut edge_vel_h = vec![0.0; 64 * 64];
+            let mut edge_vel_v = vec![0.0; 64 * 64];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -2627,7 +2801,8 @@ mod tests {
                 32,
                 &[],
                 12345,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -2686,7 +2861,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -2716,7 +2892,8 @@ mod tests {
                 32,
                 &[],
                 12345 + i as u32,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -2762,7 +2939,8 @@ mod tests {
                 32,
                 &[],
                 12345 + 500 + i as u32,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 (500 + i) as u32,
                 gravity_dir,
@@ -2801,7 +2979,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -2826,7 +3005,8 @@ mod tests {
                 32,
                 &[],
                 12345 + i as u32,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -2892,7 +3072,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -2921,7 +3102,8 @@ mod tests {
                 32,
                 &[],
                 12345 + i as u32,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -2953,13 +3135,17 @@ mod tests {
     // =========================================================================================
 
     #[test]
-    // Phase 2 (C2 fix): un-ignored. The fictitious lateral dispersion term is gone; lateral flow
-    // is now gated on the cell below being unavailable (full/blocked) and, once allowed, driven by
-    // the real surface height difference (geom_slope) instead of noise. `liquid_alpha` /
-    // `max_transfer_coeff` were also raised for the liquid path (see get_ca_params, settle_tick)
-    // so the resulting genuine leveling converges within this test's tick budget. Was: surface
+    // Phase 2 (C2 fix): un-ignored. The fictitious lateral dispersion term is gone. Was: surface
     // spread = 47 rows (min=10, max=57) across 61 columns, up to 37 partially-filled cells in a
     // single column. Now: spread = 1 row (min=50, max=51), max 1 partially-filled cell/column.
+    //
+    // Phase 5: the mechanism underneath this changed and the tuning it needed went away. Levelling
+    // is no longer a `liquid_alpha`/`max_transfer_coeff` pair sized to converge inside this test's
+    // tick budget; it is what a conservative edge flux does on its own once cells have a capacity.
+    // Two neighbouring columns of a pool present a real head difference at their surface row, the
+    // flux moves mass down that gradient, and the acceptor's `cap - h` stops it at level. The
+    // Phase 2 constants that used to set the convergence rate are deleted, and the result still
+    // lands at spread = 1.
     fn test_liquid_pool_levels_flat_in_closed_box() {
         // A closed 64x64 box, Water poured into a 12-wide x 56-tall column, settled under
         // downward gravity for a long time. In a correct liquid solver this becomes a flat
@@ -3064,11 +3250,18 @@ mod tests {
     }
 
     #[test]
-    // Phase 2 (C2 fix): un-ignored. Lateral flow for a falling liquid is now gated on the cell
-    // below being unavailable (`liquid_can_still_fall`, cell_capacity-based) instead of an
-    // unconditional dispersion-noise push, so a falling column no longer fans out sideways while
-    // it still has room to fall. Was: width=19, peak_h=0.3166 after 40 ticks. Now: width=8,
-    // peak_h=0.80 (comfortably under the width<=8 / over the peak>=0.5 bars).
+    // Phase 2 (C2 fix): un-ignored — a falling column stopped fanning out sideways.
+    // Was: width=19, peak_h=0.3166 after 40 ticks. Phase 2: width=8, peak_h=0.7987.
+    //
+    // Phase 5: same width, but peak fill is now 1.0000 — the stream is genuinely saturated rather
+    // than a narrow smear. Both properties come out of the update *order* rather than out of the
+    // `liquid_can_still_fall` predicate and the 0.70 transfer coefficient Phase 2 used, which are
+    // both deleted (see the operator-split note in `settle_tick`):
+    //   - width, because gravity-aligned edges resolve before cross-gravity ones, so a falling
+    //     cell has already handed its mass downward and has nothing left to spread;
+    //   - peak fill, because the gravity-aligned sweep runs bottom-to-top, which is the
+    //     CFL-respecting direction and stops a single pass from cascading a parcel down the whole
+    //     grid and stretching it thin.
     fn test_liquid_stream_stays_coherent() {
         // A 64x96 box with a 4-cell-wide continuous source (a "tap") pouring at the top.
         // A coherent stream should stay narrow as it falls; today's dispersion noise
@@ -3153,16 +3346,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 5 target: the sandbox wave solver must conserve mass even when the block \
-                LOD scheduler only simulates a fraction of blocks per tick. Measured today \
-                (128x128 Water 'dome', gravity=0, budget_n=4 of 16 blocks, 600 ticks): \
-                rel_err = +13.85% (mass INCREASES, not decreases). Note: this disagrees with the \
-                liquid-gravity-proposal.md design doc, which reports -1.345% (a decrease) for a \
-                similar but not identical setup — direction and magnitude differ in this \
-                reproduction, but the underlying defect (C7: physics.rs:1025-1032's per-cell \
-                Laplacian only conserves mass if every block updates in the same pass, and \
-                will_simulate[b] at physics.rs:969 breaks that) is confirmed either way: mass is \
-                very much not conserved under partial-block LOD."]
+    // Phase 5 (C7 fix): un-ignored. The sandbox liquid solver now conserves mass even when the
+    // block LOD scheduler only simulates a fraction of the blocks per tick. Before the fix
+    // (128x128 Water "dome", gravity=0, budget_n=4 of 16 blocks, 600 ticks) this measured
+    // rel_err = +13.85% — mass INCREASED. (The liquid-gravity-proposal.md design doc reports
+    // -1.345% for a similar but not identical setup; the sign disagrees, and this reproduction
+    // is the one to trust.) Two independent causes, both structural rather than tunable:
+    //   1. each cell adjusted *itself* by its own Laplacian, which only telescopes to zero over
+    //      the domain if every cell updates in the same pass — `will_simulate[b]` gates blocks
+    //      by frame budget, so it does not;
+    //   2. the trailing `.clamp(0.0, 1.0)` was a unilateral edit with no counterparty: flooring
+    //      a negative excursion to 0 adds mass, capping at 1.0 discards it.
+    // Replaced by the per-edge flux form (`flux_edge`), where every edge debits exactly what it
+    // credits and the donor/acceptor limits can only ever *reduce a transfer*. After the fix:
+    // rel_err = -7e-9 (f32 rounding on the debit/credit pair), vs the required 1e-4.
     fn test_liquid_mass_conserved_in_sandbox_under_lod() {
         let w = 128;
         let h = 128;
@@ -3199,17 +3396,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 4 target: toggling gravity to zero mid-simulation must not destroy mass \
-                (today's slider can reach 0.0 in Sand-fall mode: demo.js:710). Measured today \
-                (hourglass Water, 60 ticks at g=(0,0.04) then 300 ticks at g=(0,0)): \
-                rel_err = +9.75% (mass INCREASES). Note: this disagrees with the \
-                liquid-gravity-proposal.md design doc, which reports -21.5% (a decrease) for a \
-                similar setup — direction and magnitude differ in this reproduction (likely \
-                because the wave solver's clamp(0.0, 1.0) at physics.rs:1031 is asymmetric: an \
-                undershoot below 0 is floored to 0 without removing the corresponding mass from \
-                a neighbor, which can net ADD mass over many ticks of reflection off the \
-                hourglass walls) — but the underlying defect (C6/C7: the gravity-active wave \
-                path is not mass-conservative) is confirmed either way."]
+    // Phase 5: un-ignored, and it came for free with the L5 fix. Toggling gravity to zero
+    // mid-simulation (the shipped slider reaches 0.0 in Sand-fall mode, demo.js:710) used to
+    // measure rel_err = +9.75% over 60 ticks at g=(0,0.04) followed by 300 at g=0 — mass
+    // INCREASED, because the g=0 branch's `clamp(0.0, 1.0)` is asymmetric: an undershoot below 0
+    // was floored to 0 without removing the corresponding mass from any neighbour, and an
+    // hourglass gives many ticks of wall reflection for that to accumulate. (The design doc
+    // reports -21.5%; the sign disagrees and this reproduction is the one to trust.) The edge
+    // flux form has no unilateral clamp at all, so this is conservative by construction rather
+    // than by tuning. After the fix: rel_err = 1.3e-8, vs the required 1e-3.
     fn test_liquid_survives_gravity_toggle() {
         let w = 64;
         let h = 64;
@@ -3246,14 +3441,24 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Phase 1 target: Water, CalmWater, Milk and VegOil should behave measurably \
-                differently under gravity (different viscosity/flow character). Measured today: \
-                identical pour, 800 gravity ticks, all four materials produce bit-identical \
-                centroids to 5 decimal places: (32.02833, 51.50852), mass=975.19975 — matches \
-                the design doc's claim exactly. Cause (C4): get_ca_params (physics.rs:232-234) \
-                collapses every wetness >= 0.75 material to the same (threshold=0.0, \
-                alpha=0.50), and wave_params (the only place that distinguishes them) is never \
-                reached once gravity is active."]
+    #[ignore = "STILL FAILING after Phase 5, but for a different reason than before, and the \
+                remaining gap looks like a defect in this test rather than in the solver. \
+                Originally (C4): get_ca_params collapsed every wetness >= 0.75 material to the \
+                same (threshold = 0.0, alpha = 0.50) and wave_params — the only thing that \
+                distinguishes Water/CalmWater/Milk/VegOil — was unreachable under gravity, so \
+                all four produced bit-identical centroids (max_sep = 0.000000). Phase 5 put the \
+                gravity liquid path on the same edge-flux solver as the g = 0 path, so \
+                wave_params IS now reached and the four presets are no longer identical: \
+                max_sep = 0.0237. But that is still far short of the 0.5 this test demands, \
+                because the metric is the centroid of the FINAL SETTLED state after 800 ticks. \
+                A conservative, incompressible solver settles every liquid into the same shape \
+                — that is the point of Phase 1's capacity constraint and Phase 5's conservation \
+                — so the settled centroid cannot distinguish them no matter how different their \
+                dynamics are. What actually differs is how fast they get there: c_sq/damping \
+                span (0.08, 0.76) for Yogurt to (0.24, 0.98) for Water, roughly a 2x spread in \
+                free-fall rate. That is the design doc's own alternative criterion ('settle-time \
+                differing > 10%'), which this test does not implement. Deliberately left \
+                failing and unmodified rather than weakened."]
     fn test_liquid_presets_are_distinguishable_under_gravity() {
         let w = 64;
         let h = 64;
@@ -3566,7 +3771,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -3589,7 +3795,8 @@ mod tests {
                 32,
                 &[],
                 12345u32.wrapping_add(i),
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i,
                 gravity_dir,
@@ -3645,7 +3852,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -3670,7 +3878,8 @@ mod tests {
                 32,
                 &[],
                 12345 + i as u32,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -3723,7 +3932,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -3747,7 +3957,8 @@ mod tests {
                 32,
                 &[],
                 12345 + i as u32,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -3841,7 +4052,8 @@ mod tests {
             active: true,
         };
 
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
         let mut last_displacements = vec![1.0; cols * rows];
         let mut last_simulated_ticks = vec![0; cols * rows];
@@ -3865,7 +4077,8 @@ mod tests {
                 32,
                 &[],
                 i as u32,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -3934,7 +4147,8 @@ mod tests {
         let mut cell_colors = vec![0u8; w * h * 4];
         let mut cell_props = vec![0.0f32; w * h * 4];
         let mut sliding = vec![false; w * h];
-        let mut wave_vel = vec![0.0f32; w * h];
+        let mut edge_vel_h = vec![0.0f32; w * h];
+        let mut edge_vel_v = vec![0.0f32; w * h];
 
         let center_x = w as f32 / 2.0;
         let center_y = h as f32 / 2.0;
@@ -4036,7 +4250,8 @@ mod tests {
                 32,
                 &[],
                 i as u32,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -4125,7 +4340,8 @@ mod tests {
         let mut temp_heights = hm.data.clone();
         let mut sliding = vec![false; w * h];
         let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let expected_len = (w / 32) * (h / 32);
         let mut active_blocks = vec![crate::BlockActivity::Fast; expected_len];
         let mut last_displacements = vec![1.0; expected_len];
@@ -4183,7 +4399,8 @@ mod tests {
                 32,
                 &[],
                 12345 + i,
-                &mut wave_vel,
+                &mut edge_vel_h,
+                &mut edge_vel_v,
                 &mask,
                 i,
                 gravity_dir,
@@ -4236,7 +4453,8 @@ mod tests {
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
         let mut cell_colors = vec![0u8; w * h * 4];
         let mut sliding = vec![false; w * h];
-        let mut wave_vel = vec![0.0; w * h];
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
         let block_size = 32;
         let (cols, rows) = (w / block_size, h / block_size);
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
@@ -4249,7 +4467,8 @@ mod tests {
                 &mut hm, &mut temp_heights, &mut cell_colors, &mut cell_props,
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[], t as u32,
-                &mut wave_vel, &mask, t as u32, gravity_dir,
+                &mut edge_vel_h,
+                &mut edge_vel_v, &mask, t as u32, gravity_dir,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();
