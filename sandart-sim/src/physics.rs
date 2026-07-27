@@ -1261,23 +1261,25 @@ pub fn settle_tick(
                         if geom_slope > 0.20 {
                             let mut flow = (0.10 * (geom_slope - 0.20)).max(0.0);
 
+                            // Never transfer mass into a neighbour outside the shape mask, for any
+                            // material. Such a cell is skipped by `if !inside { continue }` at the
+                            // top of this loop and is never simulated again, so anything landing
+                            // there is a silent, permanent leak: total mass is still conserved (so
+                            // the leak is invisible to the mass-conservation tests) but the sand or
+                            // liquid is frozen inside a wall forever. The renderer draws
+                            // MASK_OUTSIDE as opaque casing, which hides it visually too.
+                            if !is_inside(neighbor_idx % w, neighbor_idx / w) {
+                                flow = 0.0;
+                            }
+
                             // C2 gate: this safety valve is a *real* geom_slope-driven flow (not
                             // the fictitious dispersion noise fixed below), but its liquid share
-                            // still needs two corrections, or a falling stream fans out / a pool
-                            // leaks through this separate mechanism instead of the main flow loop:
-                            //   1. "liquid falls while it can" — suppress lateral push while the
-                            //      column below can still accept more (mirrors `liquid_can_still_fall`).
-                            //   2. never push liquid into a neighbour outside the shape mask (a
-                            //      wall cell is never simulated again, so anything landing there is
-                            //      a silent, permanent leak — this is what was pinning a "spike" of
-                            //      water against the box wall in `test_liquid_pool_levels_flat_in_closed_box`).
-                            // Both blended by cell_liquidity so cell_liquidity == 0.0 (sand) is
-                            // bit-identical to today.
+                            // still needs "liquid falls while it can" — suppress the lateral push
+                            // while the column below can still accept more (mirrors
+                            // `liquid_can_still_fall`), or a falling stream fans out through this
+                            // separate mechanism instead of the main flow loop. Blended by
+                            // cell_liquidity so cell_liquidity == 0.0 (sand) is bit-identical.
                             if gravity_active && cell_liquidity > 0.0 {
-                                let neighbor_x = neighbor_idx % w;
-                                let neighbor_y = neighbor_idx / w;
-                                let neighbor_outside = !is_inside(neighbor_x, neighbor_y);
-
                                 let gravity_len = gravity_dir.length();
                                 let perp_dot = if gravity_len > 1e-6 {
                                     let perp_x = -gravity_dir.y;
@@ -1302,7 +1304,7 @@ pub fn settle_tick(
                                     false
                                 };
 
-                                if liquid_can_still_fall_valve || neighbor_outside {
+                                if liquid_can_still_fall_valve {
                                     flow *= 1.0 - cell_liquidity;
                                 }
                             }
@@ -1566,18 +1568,19 @@ pub fn settle_tick(
                                     clamped_flow = src_h.min(max_dst_room);
                                 }
 
-                                // C2 (mask-leak fix): never let the liquid share of a transfer land
-                                // in a neighbor outside the shape mask. Such a cell is skipped by
+                                // Mask-leak fix: never let a transfer land in a neighbor outside the
+                                // shape mask, for any material. Such a cell is skipped by
                                 // `if !inside { continue }` at the top of this loop and is never
-                                // simulated again, so any liquid that reaches it is a silent,
-                                // permanent leak that stays frozen there forever — this is what was
-                                // pinning a "spike" of water against the box wall/floor in
+                                // simulated again, so anything that reaches it is a silent,
+                                // permanent leak that stays frozen there forever. Total mass is
+                                // still conserved, so the mass-conservation tests never saw this;
+                                // and the renderer draws MASK_OUTSIDE as opaque casing, so it was
+                                // invisible on screen too. For liquid it was also what pinned a
+                                // "spike" of water against the box wall/floor in
                                 // `test_liquid_pool_levels_flat_in_closed_box` (surface_row scans
-                                // the whole grid width, including outside-mask columns). Blended by
-                                // cell_liquidity so cell_liquidity == 0.0 (sand) sees the exact same
-                                // (pre-existing, unrelated-to-this-phase) leak behaviour as today.
-                                if cell_liquidity > 0.0 && !is_inside(neighbor_idx % w, neighbor_idx / w) {
-                                    clamped_flow *= 1.0 - cell_liquidity;
+                                // the whole grid width, including outside-mask columns).
+                                if !is_inside(neighbor_idx % w, neighbor_idx / w) {
+                                    clamped_flow = 0.0;
                                 }
 
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD || (src_h <= 0.001 && clamped_flow > 0.0) {
@@ -4202,4 +4205,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_no_mass_leaks_into_out_of_mask_cells() {
+        // The granular CA flow path never checked whether the *destination* neighbor was inside
+        // the shape mask before transferring into it (only the sandbox wave branch did, at the
+        // `h_left`/`h_right`/`h_top`/`h_bottom` reads). A MASK_OUTSIDE cell is skipped by
+        // `if !inside { continue }` at the top of the solver loop, so it is never simulated
+        // again and anything landing there is frozen inside a wall permanently.
+        //
+        // This was invisible to every existing test: total mass is still conserved, so the
+        // mass-conservation suite (including test_serpentine_no_sand_leaking, the tightest at
+        // 1e-4) passes regardless. It was invisible on screen too, because the renderer draws
+        // MASK_OUTSIDE as opaque casing.
+        //
+        // Measured before the fix: 254.05 of 2933.00 total mass (8.66%) ended up inside the
+        // hourglass walls over 1500 ticks of DrySand. After: exactly 0.
+        let w = 128;
+        let h = 128;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.04, 0.6);
+        let mut hm = Heightmap::new(w, h, 0.0);
+        for y in 0..h {
+            for x in 0..w {
+                let idx = y * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE && (y as f32) < (h as f32 * 0.45) {
+                    hm.data[idx] = 1.0;
+                }
+            }
+        }
+        let mut temp_heights = hm.data.clone();
+        let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut wave_vel = vec![0.0; w * h];
+        let block_size = 32;
+        let (cols, rows) = (w / block_size, h / block_size);
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
+        let mut last_displacements = vec![1.0; cols * rows];
+        let mut last_simulated_ticks = vec![0; cols * rows];
+        let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        for t in 0..1500 {
+            settle_tick(
+                &mut hm, &mut temp_heights, &mut cell_colors, &mut cell_props,
+                &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
+                &mut last_simulated_ticks, cols * rows, block_size, &[], t as u32,
+                &mut wave_vel, &mask, t as u32, gravity_dir,
+            );
+        }
+        let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();
+        let total: f32 = hm.data.iter().sum();
+        println!(
+            "outside_mask_mass={:.4} total={:.4} frac={:.4}%",
+            outside, total, 100.0 * outside / total
+        );
+
+        assert!(
+            outside < 1e-3,
+            "Mass leaked into MASK_OUTSIDE (wall) cells: {:.4} of {:.4} total ({:.2}%). \
+             Those cells are never simulated again, so this mass is frozen inside a wall forever.",
+            outside,
+            total,
+            100.0 * outside / total
+        );
+    }
 }
