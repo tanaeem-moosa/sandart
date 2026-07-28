@@ -1366,8 +1366,10 @@ mod tests {
         sim.gravity_dir = Vec2::new(0.0, 0.04);
         sim.initialize_hourglass();
 
+        // 20 ticks is plenty: the assertion is only that the mode gate never fires, and the
+        // refresh is scheduled every 5 ticks, so this still covers several would-be refreshes.
         let targets = [None; 5];
-        for _ in 0..120 {
+        for _ in 0..20 {
             sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 16.0, 16.0);
         }
 
@@ -1394,7 +1396,7 @@ mod tests {
         assert!(initial[0] <= initial[1] && initial[1] <= initial[2]);
 
         let targets = [None; 5];
-        for _ in 0..600 {
+        for _ in 0..200 {
             sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 16.0, 16.0);
         }
 

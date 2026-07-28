@@ -1325,16 +1325,50 @@ pub fn settle_tick(
                     // and no mass can be stranded in a wall cell (the old formulation mirrored
                     // `h_center` across the wall to get a zero-gradient; skipping the edge is the
                     // same boundary condition expressed on the flux instead of the height).
+                    //
+                    // *Jacobi driving.* The head difference that integrates an edge's velocity is
+                    // read from `heightmap.data`, the tick's frozen starting heights, never from
+                    // `temp_heights` mid-sweep. `temp_heights` is mutated four times per cell per
+                    // pass (once by each incident edge) and `heightmap.data` is not written until
+                    // the copy-back in step 3, so it is a stable snapshot at zero cost — the same
+                    // one the Sandbox granular CA below already reads.
+                    //
+                    // This is not a style preference, it is the stability condition. Driving the
+                    // velocities from the live buffer makes the update Gauss-Seidel with a
+                    // direction-alternating sweep, and Gauss-Seidel on a wave equation is not
+                    // merely less accurate — it is a *gain*. Linearising the 1-D chain at Water's
+                    // (c_sq, damping) = (0.24, 0.98) gives a per-tick spectral radius of 1.20 for
+                    // the swept form against 0.994 for this one: the sweep injected ~20% of
+                    // amplitude per tick while the damping removed 2%, so a ripple grew until it
+                    // hit the cell cap and stuck there (peak 0.80 -> pinned at 1.0000 in under 50
+                    // ticks) instead of decaying back to a flat pool. Raising the cap did not
+                    // help; it only moved the ceiling and made the directional bias visible as
+                    // 33x worse left/right asymmetry.
+                    //
+                    // The clamps below stay live on purpose. Only the *dynamics* need the
+                    // snapshot; the donor-mass and acceptor-capacity limits inside `flux_edge`
+                    // are a safety limiter and must see what the other three edges have already
+                    // taken this pass, or a cell could be drained twice over. Because every edge
+                    // still debits exactly what it credits, Jacobi ordering costs nothing in
+                    // conservation — that property is structural in the flux form, not a
+                    // consequence of the sweep order.
+                    //
+                    // Gravity-driven liquid deliberately does *not* get this treatment: under
+                    // gravity the solver is doing advection down a hydrostatic head, where the
+                    // ordering (gravity-aligned edges first, swept against gravity) is load
+                    // bearing for CFL. Gauss-Seidel is only wrong for the conservative,
+                    // energy-carrying case, which is exactly this g = 0 branch.
                     let (c_sq, damping) = wave_params(wetness);
                     let cap_c = cell_capacity_for(wetness);
                     let mut max_flux = 0.0f32;
+                    let head_c = heightmap.data[center_idx];
 
                     if x + 1 < w && is_inside(x + 1, y) {
                         let nb_idx = center_idx + 1;
                         let nb_b = by * cols + (x + 1) / block_size;
                         let f = flux_edge(
                             b, nb_b, center_idx, nb_idx,
-                            temp_heights[center_idx], temp_heights[nb_idx],
+                            head_c, heightmap.data[nb_idx],
                             c_sq, damping, 0.0,
                             cap_c, cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
                             temp_heights[center_idx], temp_heights[nb_idx], 1.0,
@@ -1351,7 +1385,7 @@ pub fn settle_tick(
                         let nb_b = ((y + 1) / block_size) * cols + bx;
                         let f = flux_edge(
                             b, nb_b, center_idx, nb_idx,
-                            temp_heights[center_idx], temp_heights[nb_idx],
+                            head_c, heightmap.data[nb_idx],
                             c_sq, damping, 0.0,
                             cap_c, cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
                             temp_heights[center_idx], temp_heights[nb_idx], 1.0,
@@ -1420,10 +1454,70 @@ pub fn settle_tick(
                         let nb_b = by * cols + (x + 1) / block_size;
                         // Mass that arrived from upstream during phase 0 is still falling; it is
                         // unsupported and cannot push sideways (see `flux_edge`'s `avail_*`).
-                        // `edge_vel_v[i]` holds exactly the flux phase 0 realised on the
-                        // gravity-aligned edge feeding cell `i + w`.
-                        let avail_a = (temp_heights[center_idx] - edge_vel_v[center_idx - w].max(0.0)).max(0.0);
-                        let avail_b = (temp_heights[nb_idx] - edge_vel_v[nb_idx - w].max(0.0)).max(0.0);
+                        // `edge_vel_v[i - w]` is exactly the flux phase 0 realised on the
+                        // gravity-aligned edge feeding cell `i`, and `edge_vel_v[i]` the flux it
+                        // realised on the edge draining `i`.
+                        //
+                        // The inflow alone is the right limit for a free-falling parcel and the
+                        // wrong one for a supported parcel, and it used to be subtracted
+                        // unconditionally. A cell standing on a full column — or on the container
+                        // floor, or on casing — bears the hydrostatic head of everything in it and
+                        // must spread sideways at the normal rate however hard it is being fed
+                        // from above. Subtracting the inflow there re-suppressed the motion the
+                        // phase ordering already suppresses, and did so *permanently* under any
+                        // continuous feed: a cell under a running pour receives from above on
+                        // every single tick, so `avail_*` never recovered and lateral flow was
+                        // dead at every depth of the pour rather than only in its falling part.
+                        //
+                        // The limit is therefore not the inflow but the amount of that inflow
+                        // that can actually keep going down:
+                        //
+                        //     in_transit = min(inflow, outflow + room_below)
+                        //
+                        // `outflow` is what already left through the bottom this tick and
+                        // `room_below` is the free space still under the cell, so the second term
+                        // is everything the cell has any downstream route for. Inflow beyond it
+                        // landed on a column that cannot take it any further: it is at rest, and
+                        // it presses sideways like any other resting mass.
+                        //
+                        // The tempting simpler test — "is the cell below full?" — does not work
+                        // here, and it is worth recording why. A *saturated* falling stream passes
+                        // it at every interior cell: phase 0 sweeps bottom-to-top, so each stream
+                        // cell hands `f` downward and is refilled by `f` from above, leaving every
+                        // cell (hence every cell's below-neighbour) back at capacity by the time
+                        // phase 1 reads it. By height alone a saturated stream is
+                        // indistinguishable from a standing column; gating on height alone fanned
+                        // the stream from 8 cells wide to 16. The `outflow` term is what separates
+                        // them: the stream moved its whole content down, the pooled cell moved
+                        // nothing. And `room_below` is what keeps the *front* of a stream falling
+                        // — its edge momentum has not spun up, so it moves little downward on the
+                        // tick it appears, but the empty space beneath it is a route all the same.
+                        //
+                        // Every case in free fall reproduces the old value exactly (in the stream
+                        // interior `outflow = inflow` and `room_below = 0`; at the front
+                        // `room_below` is a whole cell), so this is a strict relaxation confined
+                        // to genuinely supported liquid. Reachable only when `cell_liquidity >
+                        // 0.0`, so granular cells are untouched by construction.
+                        let in_transit = |c: usize| -> f32 {
+                            let cx = c % w;
+                            let cy = c / w;
+                            // No edge below (off-grid, or the cell below is casing): the cell is
+                            // resting on the container, so there is no downstream route at all.
+                            // `edge_vel_v[c]` is stale in that case — phase 0 skips exactly these
+                            // edges, and its guard is mirrored here — so it must not be read.
+                            if !(cx > 0 && cx + 1 < w && cy > 0 && cy + 1 < h && is_inside(cx, cy + 1))
+                            {
+                                return 0.0;
+                            }
+                            let below = c + w;
+                            let h_below = temp_heights[below].max(heightmap.data[below]);
+                            let cap_below = cell_capacity_for(cell_props[below * 4 + PROP_WETNESS]);
+                            let downstream_route =
+                                edge_vel_v[c].max(0.0) + (cap_below - h_below).max(0.0);
+                            edge_vel_v[c - w].max(0.0).min(downstream_route)
+                        };
+                        let avail_a = (temp_heights[center_idx] - in_transit(center_idx)).max(0.0);
+                        let avail_b = (temp_heights[nb_idx] - in_transit(nb_idx)).max(0.0);
                         flux_edge(
                             b, nb_b, center_idx, nb_idx,
                             temp_heights[center_idx] + gravity_dir.x * GRAVITY_HEAD_SCALE,
@@ -3310,6 +3404,123 @@ mod tests {
     }
 
     #[test]
+    // Companion to `test_liquid_stream_stays_coherent`, and its deliberate opposite. That test
+    // pins *falling* water narrow; this one pins *supported* water spreading, and — the point —
+    // it measures while the liquid is still flowing rather than after it has settled.
+    //
+    // This is the case every other liquid test missed. They all settle with the inflow switched
+    // off, so `edge_vel_v` decays to zero, the cross-gravity donor limit recovers, the pool
+    // levels, and the end state looks right. The defect only existed during active flow: the
+    // in-transit subtraction on the lateral edge was applied unconditionally, so in any
+    // continuously fed body of liquid — a pour, or an upper chamber draining into a pool — every
+    // cell received from above on every tick and `avail_*` never recovered. Lateral flow was
+    // throttled at every depth, and the liquid stood up in vertical sheets against the casing
+    // with a hollow between them instead of keeping a level surface: the user's "water walls".
+    //
+    // Metric: the number of *enclosed voids* — cells inside the shape that are essentially empty
+    // (h <= 0.05) but have liquid (h > 0.5) somewhere to their left AND somewhere to their right
+    // in the same row, with no casing in between. A level free surface has none; a pair of
+    // standing walls with a drained channel between them has one per row of the channel, so the
+    // count is a direct read of how wall-like the liquid is right now.
+    //
+    // Measured on a full hourglass upper chamber draining into the empty lower one, at the tick
+    // where the drain is fully developed:
+    //                            tick 120   tick 160   sum over 400 ticks
+    //   before (unconditional):     223         41           38437
+    //   after  (this fix):           94          0           30060
+    //
+    // `test_liquid_stream_stays_coherent` is the counterweight and is unchanged by the fix
+    // (max_width 8, peak_h 1.0000, both before and after). Removing the in-transit limit
+    // altogether does drive this test's tick-120 count to near zero, but it also blows that
+    // stream out from 8 cells wide to 59 — see the note on `in_transit` in `settle_tick` for why
+    // the limit has to survive for genuinely free-falling liquid.
+    fn test_liquid_flowing_liquid_does_not_stand_in_walls() {
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // Fill the whole upper chamber; the lower one starts empty, so the neck feeds a column
+        // that is continuously fed from above for the entire measurement window.
+        for y in 0..h / 2 {
+            for x in 0..w {
+                if mask[y * w + x] != crate::MASK_OUTSIDE {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+        }
+
+        let count_voids = |sim: &TestSim| -> usize {
+            let mut voids = 0;
+            for y in 1..h - 1 {
+                let mut liquid_to_the_left = false;
+                for x in 0..w {
+                    if mask[y * w + x] == crate::MASK_OUTSIDE {
+                        // Casing breaks the row into independent spans.
+                        liquid_to_the_left = false;
+                        continue;
+                    }
+                    let v = sim.hm.data[y * w + x];
+                    if v > 0.5 {
+                        liquid_to_the_left = true;
+                        continue;
+                    }
+                    if !liquid_to_the_left || v > 0.05 {
+                        continue;
+                    }
+                    let liquid_to_the_right = (x + 1..w)
+                        .take_while(|&x2| mask[y * w + x2] != crate::MASK_OUTSIDE)
+                        .any(|x2| sim.hm.data[y * w + x2] > 0.5);
+                    if liquid_to_the_right {
+                        voids += 1;
+                    }
+                }
+            }
+            voids
+        };
+
+        let mut at_120 = 0;
+        let mut at_160 = 0;
+        let mut total = 0;
+        let initial_mass = sim.mass();
+        for t in 0..400 {
+            sim.tick(gravity_dir, 256);
+            let voids = count_voids(&sim);
+            total += voids;
+            if t + 1 == 120 {
+                at_120 = voids;
+            }
+            if t + 1 == 160 {
+                at_160 = voids;
+            }
+        }
+        println!(
+            "test_liquid_flowing_liquid_does_not_stand_in_walls: voids@120={} voids@160={} \
+             total={} mass {:.3} -> {:.3}",
+            at_120, at_160, total, initial_mass, sim.mass()
+        );
+
+        // Measured before the fix: 223 / 41 / 38437.
+        assert!(
+            at_120 <= 150,
+            "Draining liquid is standing in walls: {} enclosed void cells at tick 120",
+            at_120
+        );
+        assert!(
+            at_160 <= 20,
+            "Draining liquid is still standing in walls: {} enclosed void cells at tick 160",
+            at_160
+        );
+        assert!(
+            total <= 34_000,
+            "Draining liquid spent too long in walls: {} void cell-ticks over 400 ticks",
+            total
+        );
+    }
+
+    #[test]
     fn test_liquid_mass_conserved_under_gravity() {
         // Regression guard (Phase 0): this invariant already holds today and must keep holding
         // through every later phase. Water poured into the upper chamber of an hourglass,
@@ -3396,6 +3607,408 @@ mod tests {
         );
         assert!(rel_err.abs() < 1e-4, "Mass not conserved under partial-block LOD: rel_err={:.6}", rel_err);
     }
+
+    // =======================================================================================
+    // Sandbox (gravity = 0) wave dynamics.
+    //
+    // Until these existed there was no test of liquid *behaviour* at g = 0 at all. Every other
+    // liquid test is gravity-oriented except `test_liquid_mass_conserved_in_sandbox_under_lod`,
+    // which weighs the pool and never looks at it. That blind spot let `cce3b571` ship a solver
+    // whose Sandbox ripples *grew* ~20% in amplitude per tick until they pinned against the cell
+    // cap — the user's "used to ripple and reflect, now fully chaotic" — through 59 green tests,
+    // because mass stayed perfect the whole time. Conservation and dynamics are independent
+    // properties and each needs its own test.
+    // =======================================================================================
+
+    /// A flat Sandbox pool: every in-mask cell filled to `level`, gravity to be passed as zero.
+    fn wave_pool(w: usize, h: usize, block_size: usize, shape: SandboxShape, level: f32) -> TestSim {
+        let mask = make_test_mask(w, h, shape, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, block_size);
+        for i in 0..w * h {
+            if sim.mask[i] != crate::MASK_OUTSIDE {
+                sim.hm.data[i] = level;
+            }
+        }
+        sim
+    }
+
+    /// Radially symmetric gaussian crest centred on `(bx, by)`.
+    fn add_bump(sim: &mut TestSim, w: usize, h: usize, bx: f32, by: f32, amp: f32, sigma: f32) {
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if sim.mask[i] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let dx = x as f32 - bx;
+                let dy = y as f32 - by;
+                sim.hm.data[i] += amp * (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+            }
+        }
+    }
+
+    /// Crest that is uniform in y, so the dynamics reduce to a 1-D channel along x. Used by the
+    /// reflection test, where a radial ripple would confound "bounced off the wall" with
+    /// "spread out sideways".
+    fn add_band_bump(sim: &mut TestSim, w: usize, h: usize, bx: f32, amp: f32, sigma: f32) {
+        for y in 0..h {
+            for x in 0..w {
+                let i = y * w + x;
+                if sim.mask[i] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let dx = x as f32 - bx;
+                sim.hm.data[i] += amp * (-(dx * dx) / (2.0 * sigma * sigma)).exp();
+            }
+        }
+    }
+
+    /// Level the pool must relax to once the ripple is gone: all the mass, spread evenly over
+    /// the cells that can hold it. Derived from the state rather than hard-coded so it stays
+    /// correct if the mask area changes.
+    fn wave_rest_level(sim: &TestSim) -> f32 {
+        let mut total = 0.0f64;
+        let mut n = 0usize;
+        for i in 0..sim.hm.data.len() {
+            if sim.mask[i] != crate::MASK_OUTSIDE {
+                total += sim.hm.data[i] as f64;
+                n += 1;
+            }
+        }
+        (total / n.max(1) as f64) as f32
+    }
+
+    /// Ripple amplitude: the largest departure from the resting pool level, in either direction.
+    fn wave_amplitude(sim: &TestSim, rest: f32) -> f32 {
+        let mut a = 0.0f32;
+        for i in 0..sim.hm.data.len() {
+            if sim.mask[i] != crate::MASK_OUTSIDE {
+                a = a.max((sim.hm.data[i] - rest).abs());
+            }
+        }
+        a
+    }
+
+    /// Ripple amplitude restricted to the vertical strip `x in [x0, x1)`.
+    fn wave_amplitude_in_band(sim: &TestSim, w: usize, h: usize, rest: f32, x0: usize, x1: usize) -> f32 {
+        let mut a = 0.0f32;
+        for y in 0..h {
+            for x in x0..x1.min(w) {
+                let i = y * w + x;
+                if sim.mask[i] != crate::MASK_OUTSIDE {
+                    a = a.max((sim.hm.data[i] - rest).abs());
+                }
+            }
+        }
+        a
+    }
+
+    #[test]
+    // THE regression test for this bug. A crest dropped on a still pool must lose amplitude and
+    // settle back to a flat pool; it is a damped wave, and the only source of energy is the
+    // initial disturbance.
+    //
+    // The `cce3b571` edge-flux solver drove each edge's velocity from `temp_heights`, the buffer
+    // it was concurrently writing, so a cell's four incident edges each saw whatever the previous
+    // ones had already done and the pass became Gauss-Seidel with a direction-alternating sweep.
+    // Gauss-Seidel on a wave equation is a gain, not just a loss of accuracy: linearising the
+    // 1-D chain at Water's (c_sq, damping) = (0.24, 0.98) gives a per-tick spectral radius of
+    // 1.20 for the swept form versus 0.994 for the snapshot form. 20% growth per tick against 2%
+    // damping, so this test measured `maxh` climbing 0.80 -> 1.0000 by tick 50 and pinning there
+    // for the remaining 350 — a pool of saturated cells, which is what the user saw as "fully
+    // chaotic". Raising the cell cap to 3.0 only moved the ceiling (peak pinned at 3.0000) and
+    // made the sweep bias 33x more visible, confirming injection rather than clipping.
+    //
+    // Driving the velocities from `heightmap.data` instead — frozen for the whole tick, since the
+    // copy-back happens after the sweep — restores Jacobi ordering without touching the flux
+    // form, so conservation (checked separately below) is unaffected.
+    fn test_sandbox_wave_decays_to_flat_pool() {
+        let (w, h, bs) = (128, 128, 32);
+        let mut sim = wave_pool(w, h, bs, SandboxShape::Circle, 0.50);
+        add_bump(&mut sim, w, h, w as f32 / 2.0, h as f32 / 2.0, 0.30, 12.0);
+        let rest = wave_rest_level(&sim);
+
+        let mut samples = vec![(0u32, wave_amplitude(&sim, rest))];
+        for t in 1..=400u32 {
+            sim.tick(glam::Vec2::ZERO, 16);
+            if t % 50 == 0 {
+                samples.push((t, wave_amplitude(&sim, rest)));
+            }
+        }
+        println!(
+            "test_sandbox_wave_decays_to_flat_pool: rest={:.4} amplitude {:?}",
+            rest,
+            samples.iter().map(|&(t, a)| (t, (a * 1e4).round() / 1e4)).collect::<Vec<_>>()
+        );
+
+        // The envelope must come down at every sample. A growing solver fails this on the first
+        // interval; a solver that merely stalls fails it later.
+        for pair in samples.windows(2) {
+            let ((t0, a0), (t1, a1)) = (pair[0], pair[1]);
+            assert!(
+                a1 < a0,
+                "Sandbox ripple did not decay between tick {} and {}: {:.6} -> {:.6}. \
+                 A growing amplitude means the wave update is injecting energy (Gauss-Seidel \
+                 ordering); see this test's comment.",
+                t0, t1, a0, a1
+            );
+        }
+        let final_amp = samples.last().unwrap().1;
+        assert!(
+            final_amp < 0.25 * samples[0].1,
+            "Sandbox ripple still holds {:.1}% of its initial amplitude after 400 ticks \
+             ({:.6} of {:.6}); it should have relaxed toward the {:.4} rest level",
+            100.0 * final_amp / samples[0].1, final_amp, samples[0].1, rest
+        );
+    }
+
+    #[test]
+    // A centred disturbance in a left-right symmetric domain must stay centred. Any bias in the
+    // update order — and the solver's block, row and column sweeps all flip on `tick_count % 2`
+    // — shows up here long before it is visible as instability.
+    //
+    // This is deliberately a *separate* assertion from the decay test: raising the cell cap to
+    // 3.0 while the solver was still Gauss-Seidel left the pool "stable-looking" at its new
+    // ceiling but drove asymmetry from 0.0029 to 0.0996, 33x worse. Amplitude and symmetry fail
+    // independently, so they are tested independently.
+    fn test_sandbox_wave_stays_left_right_symmetric() {
+        let (w, h, bs) = (128, 128, 32);
+        let mut sim = wave_pool(w, h, bs, SandboxShape::Circle, 0.50);
+        // Centred on (w-1)/2, the exact axis of the mirror map x -> w-1-x, so the initial
+        // condition is *bit* symmetric and any asymmetry that appears later is the solver's.
+        add_bump(&mut sim, w, h, (w as f32 - 1.0) / 2.0, (h as f32 - 1.0) / 2.0, 0.30, 12.0);
+
+        // Mirror error of the height field itself, normalised by total mass. Compared against
+        // the field's own reflection rather than a left/right mass split, which is far coarser:
+        // equal masses either side says nothing about equal *shapes* either side.
+        let mirror_error = |s: &TestSim| -> f64 {
+            let (mut diff, mut total) = (0.0f64, 0.0f64);
+            for y in 0..h {
+                for x in 0..w {
+                    let (i, j) = (y * w + x, y * w + (w - 1 - x));
+                    if s.mask[i] == crate::MASK_OUTSIDE || s.mask[j] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    diff += (s.hm.data[i] - s.hm.data[j]).abs() as f64;
+                    total += s.hm.data[i] as f64;
+                }
+            }
+            if total > 0.0 { diff / total } else { 0.0 }
+        };
+
+        let initial = mirror_error(&sim);
+        assert!(initial < 1e-9, "test setup is not mirror symmetric: {:.3e}", initial);
+
+        let mut worst = 0.0f64;
+        let mut trace = Vec::new();
+        for t in 1..=400u32 {
+            sim.tick(glam::Vec2::ZERO, 16);
+            let e = mirror_error(&sim);
+            worst = worst.max(e);
+            if t % 100 == 0 {
+                trace.push((t, e));
+            }
+        }
+        let final_err = mirror_error(&sim);
+        println!(
+            "test_sandbox_wave_stays_left_right_symmetric: worst={:.3e} final={:.3e} trace={:?}",
+            worst, final_err,
+            trace.iter().map(|&(t, e)| (t, format!("{:.2e}", e))).collect::<Vec<_>>()
+        );
+
+        // Some asymmetry is unavoidable: the sweep order alternates every tick, so a symmetric
+        // pair of cells is not visited in the same relative order on every tick. What must not
+        // happen is for that to *accumulate*.
+        assert!(
+            worst < 1e-2,
+            "Centred disturbance went lopsided: mirror error reached {:.3e}. A directional \
+             sweep bias in the wave update is the cause to look for.",
+            worst
+        );
+        assert!(
+            final_err < 0.25 * worst,
+            "Mirror error is not transient — it peaked at {:.3e} and is still {:.3e} after 400 \
+             ticks, so the bias is accumulating rather than washing out",
+            worst, final_err
+        );
+    }
+
+    #[test]
+    // Conservation, on the same disturbance the decay test uses. `cce3b571` bought this at the
+    // cost of stability (-3.93% drift over 400 ticks before it, ~0% after), and the fix for the
+    // stability half must not hand the drift back: Jacobi ordering changes *when* an edge's
+    // velocity is read, not the fact that the edge debits exactly what it credits.
+    fn test_sandbox_wave_conserves_mass() {
+        let (w, h, bs) = (128, 128, 32);
+        let mut sim = wave_pool(w, h, bs, SandboxShape::Circle, 0.50);
+        add_bump(&mut sim, w, h, w as f32 / 2.0, h as f32 / 2.0, 0.30, 12.0);
+        let initial = sim.mass();
+        for _ in 0..400 {
+            sim.tick(glam::Vec2::ZERO, 16);
+        }
+        let final_mass = sim.mass();
+        let rel_err = (final_mass - initial) / initial;
+        println!(
+            "test_sandbox_wave_conserves_mass: init={:.6} final={:.6} rel_err={:.3e}",
+            initial, final_mass, rel_err
+        );
+        assert!(
+            rel_err.abs() < 1e-4,
+            "Sandbox ripple leaked mass: rel_err={:.6}", rel_err
+        );
+    }
+
+    #[test]
+    // Reflection — "ripples that would reflect", the other half of the user's report.
+    //
+    // A y-uniform crest near the left wall of a square pool makes the problem a 1-D channel, so
+    // the wave that leaves the crest has nowhere to go but the far wall and back; a radial bump
+    // would let "spread out sideways" masquerade as "bounced".
+    //
+    // Two distinct failure modes are ruled out by looking at both ends of the channel:
+    //   * absorbed into the wall  -> the far band rings up and the near band never rings again;
+    //   * piled against the wall  -> the far band rings up and stays up.
+    // A real reflection is the far band rising and then falling *and* the near band recovering
+    // after its own minimum.
+    fn test_sandbox_wave_reflects_off_boundary() {
+        let (w, h, bs) = (64, 64, 32);
+        let mut sim = wave_pool(w, h, bs, SandboxShape::Square, 0.50);
+        // Actual mask extent along the mid row — the Square shape insets from the grid edge.
+        let (mut x_lo, mut x_hi) = (w, 0usize);
+        for x in 0..w {
+            if sim.mask[(h / 2) * w + x] != crate::MASK_OUTSIDE {
+                x_lo = x_lo.min(x);
+                x_hi = x_hi.max(x);
+            }
+        }
+        add_band_bump(&mut sim, w, h, x_lo as f32 + 4.0, 0.30, 3.0);
+        let rest = wave_rest_level(&sim);
+
+        // Signed mean deviation of a whole column. Signed, not absolute: a crest reflecting off
+        // a Neumann wall arrives as a *positive* excursion where there was a negative one, which
+        // an absolute-value metric would blur into the static offset.
+        let column = |s: &TestSim, x: usize| -> f32 {
+            let (mut sum, mut n) = (0.0f32, 0usize);
+            for y in 0..h {
+                let i = y * w + x;
+                if s.mask[i] != crate::MASK_OUTSIDE {
+                    sum += s.hm.data[i] - rest;
+                    n += 1;
+                }
+            }
+            sum / n.max(1) as f32
+        };
+        let (near_x, far_x) = (x_lo + 4, x_hi - 1);
+
+        let (mut near, mut far) = (vec![column(&sim, near_x)], vec![column(&sim, far_x)]);
+        for _ in 0..400 {
+            sim.tick(glam::Vec2::ZERO, 4);
+            near.push(column(&sim, near_x));
+            far.push(column(&sim, far_x));
+        }
+
+        let far_peak_t = (0..far.len()).max_by(|&a, &b| far[a].total_cmp(&far[b])).unwrap();
+        let far_peak = far[far_peak_t];
+        let far_end = far[far.len() - 1];
+        // Whatever comes back to the near column *after* the wave has reached the far wall.
+        let return_from = far_peak_t + 20;
+        let near_return = near[return_from..].iter().cloned().fold(f32::MIN, f32::max);
+        println!(
+            "test_sandbox_wave_reflects_off_boundary: mask x {}..{}, rest={:.4}; \
+             far start={:+.5} peak={:+.5}@t{} end={:+.5}; near at t{}={:+.5} return={:+.5}",
+            x_lo, x_hi, rest, far[0], far_peak, far_peak_t, far_end,
+            far_peak_t, near[far_peak_t], near_return
+        );
+
+        // The far column starts below the rest level (all the disturbance is at the near end)
+        // and must stay there until the wave physically crosses the pool.
+        assert!(far[0] < 0.0, "far column did not start below rest: {:+.6}", far[0]);
+        assert!(
+            far_peak_t > 40,
+            "The far wall reacted at t={}, far sooner than a wave can cross {} cells at this \
+             wave speed — that is not propagation",
+            far_peak_t, far_x - near_x
+        );
+        assert!(
+            far_peak > 0.02,
+            "The disturbance never reached the far wall: that column only ever rose to {:+.6} \
+             above the rest level",
+            far_peak
+        );
+        // Reflected, not absorbed and not accumulated.
+        assert!(
+            far_end < 0.25 * far_peak,
+            "The disturbance piled up against the far wall instead of bouncing off it: the wall \
+             column peaked at {:+.6} and is still {:+.6} at the end",
+            far_peak, far_end
+        );
+        assert!(
+            near[far_peak_t] <= 0.0,
+            "The near end had not gone quiet by the time the wave hit the far wall ({:+.6}), so \
+             the recovery below would not prove anything",
+            near[far_peak_t]
+        );
+        assert!(
+            near_return > 0.004,
+            "Nothing came back: after the wave hit the far wall at t={}, the near column only \
+             ever recovered to {:+.6}. The boundary swallowed the wave instead of reflecting it",
+            far_peak_t, near_return
+        );
+    }
+
+    #[test]
+    #[ignore = "MARKER, not a regression, and deliberately NOT fixed here: a pool already sitting \
+                at cell capacity has no headroom for a crest, so it cannot ripple. Water's \
+                cell_capacity_for(1.0) is exactly 1.0, and every transfer in `flux_edge` is \
+                limited by the acceptor's `(cap_b - h_b).max(0.0)`, so at h == cap that limit is \
+                zero on every edge in every direction. A refilling trough can therefore rise to \
+                the rest level but can never overshoot it, and overshoot is what ringing IS. \
+                Measured today, the same narrow trough carved into the same pool at two fill \
+                levels: a half-full pool (rest 0.4964) overshoots the rest level by 1.306e-1 and \
+                rings; an at-capacity pool (rest 0.9928) overshoots by 7.220e-3 — which is not a \
+                damped version of the same thing, it is *exactly* the 7.220e-3 of headroom \
+                between that rest level and the cap, to every digit. The crest is not attenuated, \
+                it is clipped by the ceiling. Distinct from the Gauss-Seidel energy injection \
+                fixed alongside these tests (that one made ripples grow; this one stops them \
+                existing). The remedy is headroom — a free surface allowed above the packing \
+                limit, or a capacity above the fill ceiling — which changes what a cell means and \
+                belongs in its own commit."]
+    fn test_sandbox_wave_at_capacity_cannot_ripple() {
+        let (w, h, bs) = (64, 64, 32);
+        // Carve one narrow trough and watch its centre refill. A real damped wave overshoots the
+        // rest level and rings; the question is only whether there is room above rest to do it in.
+        let run = |level: f32| -> (f32, f32) {
+            let mut sim = wave_pool(w, h, bs, SandboxShape::Square, level);
+            add_bump(&mut sim, w, h, 32.0, 32.0, -level, 2.0);
+            let rest = wave_rest_level(&sim);
+            let probe = 32 * w + 32;
+            let mut peak = f32::MIN;
+            for _ in 0..600 {
+                sim.tick(glam::Vec2::ZERO, 4);
+                peak = peak.max(sim.hm.data[probe]);
+            }
+            (rest, peak - rest)
+        };
+
+        let cap = cell_capacity_for(1.0);
+        let (rest_half, over_half) = run(0.50);
+        let (rest_full, over_full) = run(cap);
+        println!(
+            "test_sandbox_wave_at_capacity_cannot_ripple: cap={:.3}; half-full rest={:.4} \
+             overshoot={:.3e}; at-capacity rest={:.4} headroom={:.3e} overshoot={:.3e}",
+            cap, rest_half, over_half, rest_full, cap - rest_full, over_full
+        );
+        assert!(over_half > 1e-3, "control case did not ring at all: {:.3e}", over_half);
+        assert!(
+            over_full > 0.5 * over_half,
+            "A pool at capacity cannot ripple: the same trough overshoots the rest level by \
+             {:.3e} in a half-full pool but only {:.3e} at capacity, where the entire headroom \
+             above rest is {:.3e}",
+            over_half, over_full, cap - rest_full
+        );
+    }
+
 
     #[test]
     // Phase 5: un-ignored, and it came for free with the L5 fix. Toggling gravity to zero
