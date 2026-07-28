@@ -141,6 +141,10 @@ pub struct DrawingSimulation {
     /// blended directly in u8. `cell_colors` (u8) is regenerated from this buffer for
     /// external consumption; it is never blended directly.
     pub cell_colors_f32: Vec<f32>,
+    /// Dither amplitude used when quantizing `cell_colors_f32` down to the `u8` render view.
+    /// 0.0 = plain rounding (the original behaviour). 1.0 = true stochastic rounding, spread
+    /// over one LSB. Higher values speckle wider for a coarser, grainier look.
+    pub color_dither: f32,
     /// Per-cell physics & render properties. Advected with height.
     /// Layout: [wetness, threshold, flow_rate, grain_size] interleaved.
     pub cell_props: Vec<f32>,
@@ -315,6 +319,7 @@ impl DrawingSimulation {
             temp_heights,
             cell_colors,
             cell_colors_f32,
+            color_dither: 0.0,
             cell_props,
             marble_pos: Vec2::ZERO,
             prev_marble_pos: Vec2::ZERO,
@@ -407,6 +412,63 @@ impl DrawingSimulation {
         self.shape_mask.len()
     }
 
+    /// Force a full regeneration of the `u8` colour view. Needed when the quantisation itself
+    /// changes (e.g. `color_dither`), since the per-frame path only reconverts blocks whose
+    /// colours moved and would otherwise leave a settled bed on its old quantisation.
+    pub fn resync_cell_colors(&mut self) {
+        self.sync_cell_colors_u8();
+    }
+
+    /// Quantize one f32 colour channel to u8, optionally dithering.
+    ///
+    /// With `strength == 0.0` this is a plain round, i.e. the previous behaviour exactly.
+    ///
+    /// Otherwise the fractional part becomes the probability of rounding up, so the result is
+    /// unbiased: a channel sitting at 180.3 lands on 181 in 30% of cells and 180 in the other
+    /// 70%, and reads as 180.3 across any small region. That is what makes it look grainy
+    /// rather than banded — an 8-bit gradient posterizes into flat steps, a dithered one
+    /// breaks the step edges up into speckle, which for sand is texture rather than error.
+    ///
+    /// The "probability" is a hash of the buffer index, NOT a per-frame random draw. That
+    /// choice is the whole difference between grain and static:
+    ///
+    /// - Position-hashed, the pattern is fixed to the grid. A cell's threshold never changes,
+    ///   so a still image is still, and only cells whose colour actually crossed their own
+    ///   threshold flip. It reads as texture sitting on the sand.
+    /// - Re-drawn each frame, the same cell would flip between 180 and 181 at random forever,
+    ///   which reads as crawling TV static over the whole bed.
+    ///
+    /// It also has to be stable for `sync_cell_colors_u8_dirty` to be correct: that only
+    /// reconverts blocks which changed this tick, so a frame-varying dither would leave
+    /// untouched blocks frozen at an old pattern while active ones shimmered, making the
+    /// 32x32 block grid show up as visible seams. Being a pure function of the index, the
+    /// dirty path and the full path agree cell-for-cell — which is what
+    /// `test_dirty_color_sync_matches_full_sync` already pins down.
+    ///
+    /// `strength` scales the dither amplitude: 1.0 spreads over one LSB (true stochastic
+    /// rounding), higher values spread wider for a coarser, more granular look.
+    #[inline]
+    fn quantize_color(src: f32, index: usize, strength: f32) -> u8 {
+        let v = src.clamp(0.0, 255.0);
+        if strength <= 0.0 {
+            return v.round() as u8;
+        }
+        // Cheap integer hash of the buffer index -> a fixed offset in [0, 1) for this channel.
+        let mut hsh = index as u32;
+        hsh ^= hsh >> 16;
+        hsh = hsh.wrapping_mul(0x7feb_352d);
+        hsh ^= hsh >> 15;
+        hsh = hsh.wrapping_mul(0x846c_a68b);
+        hsh ^= hsh >> 16;
+        let offset = (hsh >> 8) as f32 / 16_777_216.0; // [0, 1)
+
+        // floor(v + offset) rounds up exactly when frac(v) > 1 - offset, i.e. with probability
+        // frac(v) across the population of cells. `strength` widens the window around the
+        // value so coarser settings speckle over more than one level.
+        let dithered = v + (offset - 0.5) * strength + 0.5;
+        dithered.clamp(0.0, 255.0).floor() as u8
+    }
+
     /// Regenerate the `u8` render/upload view (`cell_colors`) from the `f32` simulation
     /// source of truth (`cell_colors_f32`). Must be called any time `cell_colors_f32` is
     /// mutated and `cell_colors` may subsequently be read by an external consumer (GPU
@@ -415,8 +477,14 @@ impl DrawingSimulation {
     /// whole grid (`reset`, `draw_point`/`draw_line`). The per-frame path in `update()` uses
     /// `sync_cell_colors_u8_dirty` instead — see there for why the narrow version is sound.
     fn sync_cell_colors_u8(&mut self) {
-        for (dst, &src) in self.cell_colors.iter_mut().zip(self.cell_colors_f32.iter()) {
-            *dst = src.clamp(0.0, 255.0).round() as u8;
+        let strength = self.color_dither;
+        for (i, (dst, &src)) in self
+            .cell_colors
+            .iter_mut()
+            .zip(self.cell_colors_f32.iter())
+            .enumerate()
+        {
+            *dst = Self::quantize_color(src, i, strength);
         }
     }
 
@@ -449,6 +517,7 @@ impl DrawingSimulation {
     /// conversion). `test_dirty_color_sync_matches_full_sync` pins this down against the full
     /// regeneration so the invariant cannot silently rot.
     fn sync_cell_colors_u8_dirty(&mut self) {
+        let strength = self.color_dither;
         let w = self.heightmap.width;
         let h = self.heightmap.height;
         let block_size = self.block_size;
@@ -489,11 +558,14 @@ impl DrawingSimulation {
                 for y in start_y..end_y {
                     let s = (y * w + start_x) * 4;
                     let e = (y * w + end_x) * 4;
-                    for (dst, &src) in self.cell_colors[s..e]
+                    for (offset, (dst, &src)) in self.cell_colors[s..e]
                         .iter_mut()
                         .zip(self.cell_colors_f32[s..e].iter())
+                        .enumerate()
                     {
-                        *dst = src.clamp(0.0, 255.0).round() as u8;
+                        // Index must be the absolute buffer index, not the slice offset, or the
+                        // dither pattern would differ between this path and the full one.
+                        *dst = Self::quantize_color(src, s + offset, strength);
                     }
                 }
             }
@@ -1524,6 +1596,55 @@ mod tests {
     /// Run for both a granular and a liquid material, and through the full drain lifecycle
     /// (upper chamber settling, streaming through the neck, pooling below), because the three
     /// stages exercise very different dirty-block patterns.
+    #[test]
+    fn test_color_dither_is_unbiased_and_stable() {
+        // strength 0 must be a plain round — the pre-dither behaviour, bit for bit.
+        for (v, want) in [(0.0f32, 0u8), (127.4, 127), (127.5, 128), (255.0, 255)] {
+            assert_eq!(DrawingSimulation::quantize_color(v, 12345, 0.0), want);
+        }
+
+        // Dithering must be unbiased: a constant value quantised across many cells should
+        // average back to that value, rather than all snapping to the same level. This is the
+        // property that stops slow sub-LSB drift being erased, and it is what makes a gradient
+        // speckle instead of band.
+        for value in [10.3f32, 128.5, 200.75] {
+            let n = 20_000usize;
+            let sum: f64 = (0..n)
+                .map(|i| DrawingSimulation::quantize_color(value, i, 1.0) as f64)
+                .sum();
+            let mean = sum / n as f64;
+            assert!(
+                (mean - value as f64).abs() < 0.05,
+                "dither biased at {}: mean {:.4}",
+                value,
+                mean
+            );
+
+            // ...and it must actually spread, not just round consistently.
+            let distinct = (0..256usize)
+                .map(|i| DrawingSimulation::quantize_color(value, i, 1.0))
+                .collect::<std::collections::HashSet<_>>();
+            assert!(distinct.len() > 1, "dither produced no speckle at {}", value);
+        }
+
+        // Stability: the pattern is a pure function of the buffer index, never of time. If this
+        // ever became frame-varying, a still image would crawl and — because the per-frame sync
+        // only reconverts changed blocks — the 32x32 block grid would appear as visible seams.
+        for i in [0usize, 1, 999, 1_048_575] {
+            let a = DrawingSimulation::quantize_color(77.6, i, 2.0);
+            let b = DrawingSimulation::quantize_color(77.6, i, 2.0);
+            assert_eq!(a, b, "dither not stable at index {}", i);
+        }
+
+        // Must stay in range at the rails even with a wide dither.
+        for i in 0..512usize {
+            let lo = DrawingSimulation::quantize_color(0.0, i, 4.0);
+            let hi = DrawingSimulation::quantize_color(255.0, i, 4.0);
+            assert!(lo <= 2, "underflowed at index {}: {}", i, lo);
+            assert!(hi >= 253, "overflowed at index {}: {}", i, hi);
+        }
+    }
+
     #[test]
     fn test_dirty_color_sync_matches_full_sync() {
         for material in [MaterialMode::DrySand, MaterialMode::Water] {

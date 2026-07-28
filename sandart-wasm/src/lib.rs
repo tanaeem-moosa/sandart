@@ -320,6 +320,17 @@ impl WasmSimulationState {
     /// UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
     /// selection even while in Sandbox (so it's remembered if the user switches back to
     /// Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
+    /// Dither amplitude for the f32 -> u8 colour conversion. 0.0 = plain rounding,
+    /// 1.0 = true stochastic rounding, higher = coarser grain.
+    pub fn set_color_dither(&mut self, strength: f32) {
+        self.sim.color_dither = strength.max(0.0);
+        // The u8 view is only regenerated for blocks that changed, so a settled bed would keep
+        // its old quantisation until something disturbed it. Force a full rebuild so the change
+        // is visible immediately.
+        self.full_upload_needed = true;
+        self.sim.resync_cell_colors();
+    }
+
     pub fn set_quantile_mode(&mut self, mode: u32) {
         self.quantile_mode = match mode {
             0 => QuantileMode::Off,
