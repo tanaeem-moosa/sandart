@@ -977,6 +977,13 @@ function setupPanelInput() {
     }
     ditherSlider.addEventListener('input', syncDitherSetting);
 
+    // EXPERIMENT: simulate u8 colour storage by rounding every blend to an integer. Unbiased,
+    // so conservation is unaffected — the thing to watch for is patterns diffusing over time.
+    const u8DynamicsCheck = document.getElementById('check-u8-dynamics');
+    u8DynamicsCheck.addEventListener('change', () => {
+        if (state) state.set_color_u8_dynamics(u8DynamicsCheck.checked);
+    });
+
     // Mass Distribution Lines (quantile overlay): off / quartiles / deciles. Sand-fall only —
     // the sidebar control lives in #sandfall-controls, which switchMode() already hides in
     // Sandbox, and the Rust side independently forces this off whenever not in Sand-fall mode.

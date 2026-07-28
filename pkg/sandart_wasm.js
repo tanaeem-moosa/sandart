@@ -141,9 +141,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
     }
     /**
-     * UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
-     * selection even while in Sandbox (so it's remembered if the user switches back to
-     * Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
      * Dither amplitude for the f32 -> u8 colour conversion. 0.0 = plain rounding,
      * 1.0 = true stochastic rounding, higher = coarser grain.
      * @param {number} strength
@@ -156,6 +153,18 @@ export class WasmSimulationState {
      */
     set_color_mode(mode) {
         wasm.wasmsimulationstate_set_color_mode(this.__wbg_ptr, mode);
+    }
+    /**
+     * UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
+     * selection even while in Sandbox (so it's remembered if the user switches back to
+     * Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
+     * EXPERIMENT: simulate u8 colour storage by stochastically rounding every blend back to
+     * an integer. Unbiased, so conservation is unaffected; the thing to watch for is patterns
+     * diffusing over time. Off by default.
+     * @param {boolean} on
+     */
+    set_color_u8_dynamics(on) {
+        wasm.wasmsimulationstate_set_color_u8_dynamics(this.__wbg_ptr, on);
     }
     /**
      * @param {number} x
