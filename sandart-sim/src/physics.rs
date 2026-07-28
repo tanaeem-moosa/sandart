@@ -317,6 +317,126 @@ fn flux_edge(
     flux
 }
 
+/// Sleeping predicate for a flux edge: `true` when `flux_edge` would provably realise a flux of
+/// *exactly* zero this tick, so the whole call — and the `*v_e` write that goes with it — can be
+/// skipped.
+///
+/// This is the flux form's answer to the granular CA's fast-path shortcut at the
+/// `h_center - min_h <= threshold_min` check further down. That one is gated on gravity being
+/// *off*, and has to be: it compares bare heights, so under gravity it cannot tell "resting on a
+/// full column" from "about to fall into an empty one". Here `H = h + Phi(g, r)` already folds
+/// gravity into the head, so "at rest under gravity" is a well-posed question and the answer is
+/// checkable in a handful of flops — which matters because gravity mode is where the frame time
+/// actually goes.
+///
+/// Two disjoint reasons an edge is dead, both *exact* (no tolerance, no behaviour change):
+///
+/// 1. **Constrained both ways.** `a` can only donate if it has mass available *and* `b` has room;
+///    `b` symmetrically. If neither direction has both, `flux_edge`'s donor/acceptor clamps
+///    (`v.min(avail_a).min((cap_b - h_b).max(0.0))` and its mirror) drive the transfer to zero
+///    whatever the stored momentum is. This is what puts the *interior* of a settled body to
+///    sleep under gravity, and it is the branch that matters there: a saturated column has a
+///    driving head of `|g| * GRAVITY_HEAD_SCALE` on every vertical edge — one whole cell of fill
+///    per row — and is nonetheless completely at rest, because every neighbour is already at
+///    capacity. Empty air is the mirror image: a big head, and nothing anywhere to donate. Only
+///    the free surface between them stays awake.
+///
+///    Callers may pass any *upper bound* on the true `avail_*` (the cell's full height is one,
+///    when the real limit further subtracts in-transit mass). Overstating `avail` can only make
+///    this branch fire less often, never more, so a bound is sound; it just sleeps less.
+///
+/// 2. **At equilibrium and at rest.** `|H_a - H_b| <= tau` makes `yielded` zero, and with no
+///    stored `v_e` to carry over, the integrated velocity `(v_e + c_sq * yielded) * damping` is
+///    zero and so is the flux. At `tau = 0` this is the flat-pool case: a level free surface has
+///    `H_a == H_b`. It is also the branch that would carry a granular material's whole settled
+///    heap once `tau` is its yield stress rather than zero.
+///
+///    Both conditions are required, and that is deliberate rather than defensive. A standing wave
+///    at its turning point has `v_e` momentarily near zero while `|H_a - H_b|` is at its largest;
+///    sleeping on `v_e` alone would freeze a live ripple mid-oscillation. Conversely a wave
+///    crossing its rest level has `H_a == H_b` while carrying full momentum, and sleeping on the
+///    head alone would swallow it. The conjunction is exactly "nothing stored and nothing
+///    driving", which is the only state that reproduces `flux == 0`.
+///
+/// Because both branches imply `flux == 0`, and `flux_edge` ends with `*v_e = flux`, a caller that
+/// takes this early-out must leave `*v_e` at zero — branch 2 already requires it to be zero, and
+/// branch 1 callers clear it (skipping the store when it is already zero, so a sleeping region
+/// stops dirtying the 1 MB edge-velocity buffers every tick).
+///
+/// Mass conservation is unaffected by construction: a skipped edge transfers nothing, and
+/// `flux_edge` is the only thing that moves mass on the liquid path. Block activity is unaffected
+/// for the same reason — a zero flux never reached `activate_neighbor` in the first place, so a
+/// sleeping edge neither wakes anything nor withholds a wake that used to happen. Waking is
+/// therefore entirely the existing machinery's job: whatever *does* move calls `activate_neighbor`
+/// on both endpoints' blocks, those blocks re-run, and their edges are re-tested from scratch. The
+/// predicate stores no state of its own, so there is nothing that can go stale.
+#[inline(always)]
+fn edge_sleeps(
+    driving: f32,
+    tau: f32,
+    v_e: f32,
+    avail_a: f32,
+    avail_b: f32,
+    room_a: f32,
+    room_b: f32,
+) -> bool {
+    let slept = if (avail_a <= 0.0 || room_b <= 0.0) && (avail_b <= 0.0 || room_a <= 0.0) {
+        true
+    } else {
+        v_e == 0.0 && driving.abs() <= tau
+    };
+    #[cfg(test)]
+    edge_sleep_stats::note(slept);
+    slept
+}
+
+/// Test-only instrumentation for `edge_sleeps`, and the only way a test can see the *mechanism*
+/// rather than its consequences.
+///
+/// Sleeping is deliberately exact — the edges it skips would have moved zero mass — so it leaves no
+/// trace in any heightmap, mass total, flow total or block-activity count. That is the property
+/// that makes it safe and the property that makes it untestable from the outside: a solver that
+/// silently stopped sleeping altogether would still pass every behavioural test in this file while
+/// costing 2.7x more per tick. Counting the two outcomes of the predicate is what closes that hole.
+///
+/// Thread-local rather than a global counter because the test harness runs tests in parallel and
+/// `settle_tick` is single-threaded, so each test observes only its own solver.
+#[cfg(test)]
+mod edge_sleep_stats {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNTS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    }
+
+    #[inline(always)]
+    pub fn note(slept: bool) {
+        COUNTS.with(|c| {
+            let (s, a) = c.get();
+            c.set(if slept { (s + 1, a) } else { (s, a + 1) });
+        });
+    }
+
+    pub fn reset() {
+        COUNTS.with(|c| c.set((0, 0)));
+    }
+
+    /// `(slept, awake)` since the last `reset`.
+    pub fn take() -> (u64, u64) {
+        COUNTS.with(|c| c.get())
+    }
+
+    /// Fraction of edges tested that were skipped. `None` when no edge was tested at all.
+    pub fn slept_fraction() -> Option<f64> {
+        let (s, a) = take();
+        if s + a == 0 {
+            None
+        } else {
+            Some(s as f64 / (s + a) as f64)
+        }
+    }
+}
+
 fn wave_params(wetness: f32) -> (f32, f32) {
     if wetness <= 0.75 {
         (0.08, 0.76)
@@ -1290,17 +1410,36 @@ pub fn settle_tick(
                         && x > 0 && x + 1 < w && y > 0 && y + 1 < h
                         && is_inside(x, y + 1)
                     {
-                        let (c_sq, damping) = wave_params(wetness);
                         let nb_idx = center_idx + w;
+                        let h_a = temp_heights[center_idx];
+                        let h_b = temp_heights[nb_idx];
+                        let cap_a = cell_capacity_for(wetness);
+                        let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        let head_a = h_a + gravity_dir.y * GRAVITY_HEAD_SCALE;
+                        // Sleeping edge (see `edge_sleeps`). This is the pass where sleeping pays
+                        // most, because it is the one every liquid cell in the domain enters: the
+                        // interior of a filled chamber is room-blocked in both directions, empty
+                        // space above the free surface has nothing to donate in either, and only
+                        // the surface itself — a few cells per column — survives the test.
+                        if edge_sleeps(
+                            head_a - h_b, 0.0, edge_vel_v[center_idx],
+                            h_a, h_b, cap_a - h_a, cap_b - h_b,
+                        ) {
+                            if edge_vel_v[center_idx] != 0.0 {
+                                edge_vel_v[center_idx] = 0.0;
+                            }
+                            continue;
+                        }
+                        let (c_sq, damping) = wave_params(wetness);
                         let nb_b = ((y + 1) / block_size) * cols + bx;
                         flux_edge(
                             b, nb_b, center_idx, nb_idx,
-                            temp_heights[center_idx] + gravity_dir.y * GRAVITY_HEAD_SCALE,
-                            temp_heights[nb_idx],
+                            head_a,
+                            h_b,
                             c_sq, damping, 0.0,
-                            cell_capacity_for(wetness),
-                            cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
-                            temp_heights[center_idx], temp_heights[nb_idx],
+                            cap_a,
+                            cap_b,
+                            h_a, h_b,
                             cell_liquidity,
                             &mut edge_vel_v[center_idx],
                             temp_heights, cell_colors, cell_props,
@@ -1363,38 +1502,78 @@ pub fn settle_tick(
                     let mut max_flux = 0.0f32;
                     let head_c = heightmap.data[center_idx];
 
+                    // *Which buffer the sleeping test reads is the whole subtlety here.* The two
+                    // branches of `edge_sleeps` mirror two different clauses of `flux_edge`, and
+                    // those clauses read different buffers on this path — so the predicate must
+                    // too, or it would sleep an edge that would in fact have moved mass:
+                    //
+                    //   * the *driving* head goes to `yielded`, which under Jacobi driving is
+                    //     computed from `heightmap.data` (the tick's frozen snapshot, per the note
+                    //     above). Passing `temp_heights` here would test a head the solver never
+                    //     uses.
+                    //   * the *donor and acceptor* limits are the live clamps, which deliberately
+                    //     stay on `temp_heights` so they see what the other three edges incident
+                    //     on this cell have already taken this pass.
+                    //
+                    // A wave is safe from both branches by construction: its crest cells are not
+                    // room-blocked (branch 1 needs a full or empty cell on both sides), and it only
+                    // has `H_a == H_b` exactly while `v_e` is carrying it, which branch 2 excludes.
                     if x + 1 < w && is_inside(x + 1, y) {
                         let nb_idx = center_idx + 1;
-                        let nb_b = by * cols + (x + 1) / block_size;
-                        let f = flux_edge(
-                            b, nb_b, center_idx, nb_idx,
-                            head_c, heightmap.data[nb_idx],
-                            c_sq, damping, 0.0,
-                            cap_c, cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
-                            temp_heights[center_idx], temp_heights[nb_idx], 1.0,
-                            &mut edge_vel_h[center_idx],
-                            temp_heights, cell_colors, cell_props,
-                            &mut modified, &mut next_displacements,
-                            &mut total_flow, &mut flow_occurred,
-                        );
-                        max_flux = max_flux.max(f.abs());
+                        let h_a = temp_heights[center_idx];
+                        let h_b = temp_heights[nb_idx];
+                        let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        if edge_sleeps(
+                            head_c - heightmap.data[nb_idx], 0.0, edge_vel_h[center_idx],
+                            h_a, h_b, cap_c - h_a, cap_b - h_b,
+                        ) {
+                            if edge_vel_h[center_idx] != 0.0 {
+                                edge_vel_h[center_idx] = 0.0;
+                            }
+                        } else {
+                            let nb_b = by * cols + (x + 1) / block_size;
+                            let f = flux_edge(
+                                b, nb_b, center_idx, nb_idx,
+                                head_c, heightmap.data[nb_idx],
+                                c_sq, damping, 0.0,
+                                cap_c, cap_b,
+                                h_a, h_b, 1.0,
+                                &mut edge_vel_h[center_idx],
+                                temp_heights, cell_colors, cell_props,
+                                &mut modified, &mut next_displacements,
+                                &mut total_flow, &mut flow_occurred,
+                            );
+                            max_flux = max_flux.max(f.abs());
+                        }
                     }
 
                     if y + 1 < h && is_inside(x, y + 1) {
                         let nb_idx = center_idx + w;
-                        let nb_b = ((y + 1) / block_size) * cols + bx;
-                        let f = flux_edge(
-                            b, nb_b, center_idx, nb_idx,
-                            head_c, heightmap.data[nb_idx],
-                            c_sq, damping, 0.0,
-                            cap_c, cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
-                            temp_heights[center_idx], temp_heights[nb_idx], 1.0,
-                            &mut edge_vel_v[center_idx],
-                            temp_heights, cell_colors, cell_props,
-                            &mut modified, &mut next_displacements,
-                            &mut total_flow, &mut flow_occurred,
-                        );
-                        max_flux = max_flux.max(f.abs());
+                        let h_a = temp_heights[center_idx];
+                        let h_b = temp_heights[nb_idx];
+                        let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        if edge_sleeps(
+                            head_c - heightmap.data[nb_idx], 0.0, edge_vel_v[center_idx],
+                            h_a, h_b, cap_c - h_a, cap_b - h_b,
+                        ) {
+                            if edge_vel_v[center_idx] != 0.0 {
+                                edge_vel_v[center_idx] = 0.0;
+                            }
+                        } else {
+                            let nb_b = ((y + 1) / block_size) * cols + bx;
+                            let f = flux_edge(
+                                b, nb_b, center_idx, nb_idx,
+                                head_c, heightmap.data[nb_idx],
+                                c_sq, damping, 0.0,
+                                cap_c, cap_b,
+                                h_a, h_b, 1.0,
+                                &mut edge_vel_v[center_idx],
+                                temp_heights, cell_colors, cell_props,
+                                &mut modified, &mut next_displacements,
+                                &mut total_flow, &mut flow_occurred,
+                            );
+                            max_flux = max_flux.max(f.abs());
+                        }
                     }
 
                     // Block-activation bookkeeping, unchanged in spirit from the old wave path:
@@ -1449,88 +1628,141 @@ pub fn settle_tick(
                     // `wetness >= 0.75` cut is continuous (C5) and a pure granular cell
                     // (liquidity == 0) is bit-identical to before.
                     if gravity_active && cell_liquidity > 0.0 && x + 1 < w && is_inside(x + 1, y) {
-                        let (c_sq, damping) = wave_params(wetness);
                         let nb_idx = center_idx + 1;
-                        let nb_b = by * cols + (x + 1) / block_size;
-                        // Mass that arrived from upstream during phase 0 is still falling; it is
-                        // unsupported and cannot push sideways (see `flux_edge`'s `avail_*`).
-                        // `edge_vel_v[i - w]` is exactly the flux phase 0 realised on the
-                        // gravity-aligned edge feeding cell `i`, and `edge_vel_v[i]` the flux it
-                        // realised on the edge draining `i`.
+                        let h_a = temp_heights[center_idx];
+                        let h_b = temp_heights[nb_idx];
+                        let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        let head_a = h_a + gravity_dir.x * GRAVITY_HEAD_SCALE;
+                        // Sleeping edge (see `edge_sleeps`), tested *before* the in-transit
+                        // computation below rather than after, because that computation is the
+                        // expensive part of this edge: two neighbour loads, a capacity lookup and
+                        // two edge-velocity reads per endpoint. A sleeping edge must not pay for a
+                        // donor limit whose only use is to be clamped to zero.
                         //
-                        // The inflow alone is the right limit for a free-falling parcel and the
-                        // wrong one for a supported parcel, and it used to be subtracted
-                        // unconditionally. A cell standing on a full column — or on the container
-                        // floor, or on casing — bears the hydrostatic head of everything in it and
-                        // must spread sideways at the normal rate however hard it is being fed
-                        // from above. Subtracting the inflow there re-suppressed the motion the
-                        // phase ordering already suppresses, and did so *permanently* under any
-                        // continuous feed: a cell under a running pour receives from above on
-                        // every single tick, so `avail_*` never recovered and lateral flow was
-                        // dead at every depth of the pour rather than only in its falling part.
-                        //
-                        // The limit is therefore not the inflow but the amount of that inflow
-                        // that can actually keep going down:
-                        //
-                        //     in_transit = min(inflow, outflow + room_below)
-                        //
-                        // `outflow` is what already left through the bottom this tick and
-                        // `room_below` is the free space still under the cell, so the second term
-                        // is everything the cell has any downstream route for. Inflow beyond it
-                        // landed on a column that cannot take it any further: it is at rest, and
-                        // it presses sideways like any other resting mass.
-                        //
-                        // The tempting simpler test — "is the cell below full?" — does not work
-                        // here, and it is worth recording why. A *saturated* falling stream passes
-                        // it at every interior cell: phase 0 sweeps bottom-to-top, so each stream
-                        // cell hands `f` downward and is refilled by `f` from above, leaving every
-                        // cell (hence every cell's below-neighbour) back at capacity by the time
-                        // phase 1 reads it. By height alone a saturated stream is
-                        // indistinguishable from a standing column; gating on height alone fanned
-                        // the stream from 8 cells wide to 16. The `outflow` term is what separates
-                        // them: the stream moved its whole content down, the pooled cell moved
-                        // nothing. And `room_below` is what keeps the *front* of a stream falling
-                        // — its edge momentum has not spun up, so it moves little downward on the
-                        // tick it appears, but the empty space beneath it is a route all the same.
-                        //
-                        // Every case in free fall reproduces the old value exactly (in the stream
-                        // interior `outflow = inflow` and `room_below = 0`; at the front
-                        // `room_below` is a whole cell), so this is a strict relaxation confined
-                        // to genuinely supported liquid. Reachable only when `cell_liquidity >
-                        // 0.0`, so granular cells are untouched by construction.
-                        let in_transit = |c: usize| -> f32 {
-                            let cx = c % w;
-                            let cy = c / w;
-                            // No edge below (off-grid, or the cell below is casing): the cell is
-                            // resting on the container, so there is no downstream route at all.
-                            // `edge_vel_v[c]` is stale in that case — phase 0 skips exactly these
-                            // edges, and its guard is mirrored here — so it must not be read.
-                            if !(cx > 0 && cx + 1 < w && cy > 0 && cy + 1 < h && is_inside(cx, cy + 1))
-                            {
-                                return 0.0;
+                        // Testing first means the predicate cannot see the in-transit reduction,
+                        // so it is handed `h_a` / `h_b` — an *upper* bound on `avail_a` / `avail_b`
+                        // (`in_transit >= 0`). Overstating `avail` can only suppress branch 1, so
+                        // this is sound; the edges it gives up on are cells that received mass from
+                        // above this tick, which are moving anyway and would not have slept for long.
+                        // The cases branch 1 exists for are untouched by the bound: a pooled
+                        // interior sleeps on `room_a == room_b == 0` and empty space on
+                        // `h_a == h_b == 0`, neither of which involves `in_transit` at all.
+                        if edge_sleeps(
+                            head_a - h_b, 0.0, edge_vel_h[center_idx],
+                            h_a, h_b, cell_capacity - h_a, cap_b - h_b,
+                        ) {
+                            if edge_vel_h[center_idx] != 0.0 {
+                                edge_vel_h[center_idx] = 0.0;
                             }
-                            let below = c + w;
-                            let h_below = temp_heights[below].max(heightmap.data[below]);
-                            let cap_below = cell_capacity_for(cell_props[below * 4 + PROP_WETNESS]);
-                            let downstream_route =
-                                edge_vel_v[c].max(0.0) + (cap_below - h_below).max(0.0);
-                            edge_vel_v[c - w].max(0.0).min(downstream_route)
-                        };
-                        let avail_a = (temp_heights[center_idx] - in_transit(center_idx)).max(0.0);
-                        let avail_b = (temp_heights[nb_idx] - in_transit(nb_idx)).max(0.0);
-                        flux_edge(
-                            b, nb_b, center_idx, nb_idx,
-                            temp_heights[center_idx] + gravity_dir.x * GRAVITY_HEAD_SCALE,
-                            temp_heights[nb_idx],
-                            c_sq, damping, 0.0,
-                            cell_capacity, cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]),
-                            avail_a, avail_b,
-                            cell_liquidity,
-                            &mut edge_vel_h[center_idx],
-                            temp_heights, cell_colors, cell_props,
-                            &mut modified, &mut next_displacements,
-                            &mut total_flow, &mut flow_occurred,
-                        );
+                        } else {
+                            let (c_sq, damping) = wave_params(wetness);
+                            let nb_b = by * cols + (x + 1) / block_size;
+                            // Mass that arrived from upstream during phase 0 is still falling; it is
+                            // unsupported and cannot push sideways (see `flux_edge`'s `avail_*`).
+                            // `edge_vel_v[i - w]` is exactly the flux phase 0 realised on the
+                            // gravity-aligned edge feeding cell `i`, and `edge_vel_v[i]` the flux it
+                            // realised on the edge draining `i`.
+                            //
+                            // The inflow alone is the right limit for a free-falling parcel and the
+                            // wrong one for a supported parcel, and it used to be subtracted
+                            // unconditionally. A cell standing on a full column — or on the container
+                            // floor, or on casing — bears the hydrostatic head of everything in it and
+                            // must spread sideways at the normal rate however hard it is being fed
+                            // from above. Subtracting the inflow there re-suppressed the motion the
+                            // phase ordering already suppresses, and did so *permanently* under any
+                            // continuous feed: a cell under a running pour receives from above on
+                            // every single tick, so `avail_*` never recovered and lateral flow was
+                            // dead at every depth of the pour rather than only in its falling part.
+                            //
+                            // The limit is therefore not the inflow but the amount of that inflow
+                            // that can actually keep going down:
+                            //
+                            //     in_transit = min(inflow, outflow + room_below)
+                            //
+                            // `outflow` is what already left through the bottom this tick and
+                            // `room_below` is the free space still under the cell, so the second term
+                            // is everything the cell has any downstream route for. Inflow beyond it
+                            // landed on a column that cannot take it any further: it is at rest, and
+                            // it presses sideways like any other resting mass.
+                            //
+                            // The tempting simpler test — "is the cell below full?" — does not work
+                            // here, and it is worth recording why. A *saturated* falling stream passes
+                            // it at every interior cell: phase 0 sweeps bottom-to-top, so each stream
+                            // cell hands `f` downward and is refilled by `f` from above, leaving every
+                            // cell (hence every cell's below-neighbour) back at capacity by the time
+                            // phase 1 reads it. By height alone a saturated stream is
+                            // indistinguishable from a standing column; gating on height alone fanned
+                            // the stream from 8 cells wide to 16. The `outflow` term is what separates
+                            // them: the stream moved its whole content down, the pooled cell moved
+                            // nothing. And `room_below` is what keeps the *front* of a stream falling
+                            // — its edge momentum has not spun up, so it moves little downward on the
+                            // tick it appears, but the empty space beneath it is a route all the same.
+                            //
+                            // Every case in free fall reproduces the old value exactly (in the stream
+                            // interior `outflow = inflow` and `room_below = 0`; at the front
+                            // `room_below` is a whole cell), so this is a strict relaxation confined
+                            // to genuinely supported liquid. Reachable only when `cell_liquidity >
+                            // 0.0`, so granular cells are untouched by construction.
+                            let in_transit = |c: usize| -> f32 {
+                                let cx = c % w;
+                                let cy = c / w;
+                                // No edge below (off-grid, or the cell below is casing): the cell is
+                                // resting on the container, so there is no downstream route at all.
+                                // `edge_vel_v[c]` is stale in that case — phase 0 skips exactly these
+                                // edges, and its guard is mirrored here — so it must not be read.
+                                if !(cx > 0 && cx + 1 < w && cy > 0 && cy + 1 < h && is_inside(cx, cy + 1))
+                                {
+                                    return 0.0;
+                                }
+                                let below = c + w;
+                                let h_below = temp_heights[below].max(heightmap.data[below]);
+                                let cap_below = cell_capacity_for(cell_props[below * 4 + PROP_WETNESS]);
+                                let downstream_route =
+                                    edge_vel_v[c].max(0.0) + (cap_below - h_below).max(0.0);
+                                edge_vel_v[c - w].max(0.0).min(downstream_route)
+                            };
+                            let avail_a = (h_a - in_transit(center_idx)).max(0.0);
+                            let avail_b = (h_b - in_transit(nb_idx)).max(0.0);
+                            flux_edge(
+                                b, nb_b, center_idx, nb_idx,
+                                head_a,
+                                h_b,
+                                c_sq, damping, 0.0,
+                                cell_capacity, cap_b,
+                                avail_a, avail_b,
+                                cell_liquidity,
+                                &mut edge_vel_h[center_idx],
+                                temp_heights, cell_colors, cell_props,
+                                &mut modified, &mut next_displacements,
+                                &mut total_flow, &mut flow_occurred,
+                            );
+                        }
+                    }
+
+                    // Sleeping cell: a fully liquid cell under gravity has `granular_share == 0`,
+                    // and *every* transfer below is scaled by it — the avalanche safety valve's
+                    // `clamped_flow` and the main flow loop's both end in `* granular_share`, and
+                    // both are then gated on `> FLOW_INACTIVE_THRESHOLD` (or, in the tiny-residual
+                    // arm, on `clamped_flow > 0.0`), which exact zero never passes. So the whole
+                    // remaining body — four neighbour height loads against two arrays, the
+                    // avalanche sweep, the higher-neighbour count, the marble distance search,
+                    // `get_ca_params`, and the four-neighbour flow loop — is computed and then
+                    // multiplied away. Its only surviving side effect is `sliding[center_idx] =
+                    // cell_flowed`, which is necessarily `false` because no `try_move` can fire, so
+                    // setting it here and bailing is exactly equivalent rather than an
+                    // approximation. (The one other exit that writes `sliding`, the
+                    // `!gravity_active && avalanche_checked` early-out, is unreachable here:
+                    // `granular_share` is only ever below 1.0 when gravity is active.)
+                    //
+                    // This is the cell-level counterpart of `edge_sleeps` and it is what the
+                    // liquid path actually spends its time on: `liquidity` saturates at
+                    // `wetness >= 0.85`, so Water, Milk, CalmWater and VegetableOil have
+                    // `granular_share == 0` in *every* cell under gravity. Granular materials have
+                    // `liquidity == 0` hence `granular_share == 1`, so this never fires for them
+                    // and the CA path is untouched.
+                    if granular_share <= 0.0 {
+                        sliding[center_idx] = false;
+                        continue;
                     }
 
                     let h_center = if gravity_active {
@@ -3518,6 +3750,269 @@ mod tests {
             "Draining liquid spent too long in walls: {} void cell-ticks over 400 ticks",
             total
         );
+    }
+
+    #[test]
+    // Unit test for the sleeping predicate itself. The two branches of `edge_sleeps` are exact
+    // — each is a restatement of a clause inside `flux_edge` that forces `flux == 0` — so this
+    // pins the cases they are *meant* to catch and, more importantly, the two they must not.
+    fn test_edge_sleeps_predicate() {
+        let cap = 1.0f32; // Water
+        let g = 0.04 * GRAVITY_HEAD_SCALE; // one saturated cell of head per row, as shipped
+
+        // --- must sleep ---
+        // Interior of a settled full pool, vertical edge under gravity. The driving head is a
+        // whole cell (that is what gravity IS here), yet nothing can move: both cells are at
+        // capacity, so neither direction has room. Branch 1. This is the case that the granular
+        // CA's `h_center - min_h` shortcut structurally cannot express, and the reason flux can
+        // sleep under gravity at all.
+        assert!(
+            edge_sleeps(cap + g - cap, 0.0, 0.0, cap, cap, cap - cap, cap - cap),
+            "the interior of a settled full pool must sleep"
+        );
+        // Same edge with momentum still stored: still blocked, because the clamps ignore v_e.
+        assert!(
+            edge_sleeps(cap + g - cap, 0.0, 0.3, cap, cap, 0.0, 0.0),
+            "a room-blocked edge must sleep whatever momentum it has stored"
+        );
+        // Empty space above the free surface: a big head, nothing to donate either way.
+        assert!(
+            edge_sleeps(0.0 + g - 0.0, 0.0, 0.0, 0.0, 0.0, cap, cap),
+            "empty space must sleep"
+        );
+        // Flat pool at g = 0, at any level: level and at rest. Branch 2.
+        assert!(
+            edge_sleeps(0.0, 0.0, 0.0, 0.4, 0.4, cap - 0.4, cap - 0.4),
+            "a level, motionless free surface must sleep"
+        );
+        // A settled granular heap at its angle of repose, once tau is a real yield stress:
+        // below the yield stress and at rest.
+        assert!(
+            edge_sleeps(0.05, 0.20, 0.0, 0.8, 0.7, 0.7, 0.8),
+            "a sub-yield-stress edge at rest must sleep"
+        );
+
+        // --- must NOT sleep: the two ways a live wave passes near one of the conditions ---
+        // Turning point: the crest has stopped, so v_e is zero, but the surface is at its most
+        // tilted. Sleeping here would freeze the ripple at maximum amplitude forever.
+        assert!(
+            !edge_sleeps(0.25, 0.0, 0.0, 0.6, 0.35, cap - 0.6, cap - 0.35),
+            "a wave at its turning point (v_e == 0, large head) must NOT sleep"
+        );
+        // Zero crossing: the surface is momentarily level, but all the energy is in the
+        // momentum. Sleeping here would swallow the wave.
+        assert!(
+            !edge_sleeps(0.0, 0.0, 0.05, 0.5, 0.5, cap - 0.5, cap - 0.5),
+            "a wave crossing its rest level (head == 0, v_e != 0) must NOT sleep"
+        );
+        // An unequal surface with somewhere to go: the ordinary awake case.
+        assert!(
+            !edge_sleeps(0.3, 0.0, 0.0, 0.7, 0.4, cap - 0.7, cap - 0.4),
+            "an edge with both a head and a route must NOT sleep"
+        );
+        // Full donor, empty acceptor: one direction is open, so the edge is live even though the
+        // mirrored direction is doubly blocked.
+        assert!(
+            !edge_sleeps(cap + g, 0.0, 0.0, cap, 0.0, 0.0, cap),
+            "a full cell above an empty one must NOT sleep"
+        );
+    }
+
+    #[test]
+    // The system-level half of edge sleeping: a body of liquid that has finished moving must stop
+    // doing work, and must start again when something disturbs it.
+    //
+    // Without this, sleeping regresses silently, and *more* silently than usual. Sleeping is exact
+    // — the edges it skips would have moved zero mass — so it leaves no trace in any heightmap,
+    // mass total or flow total. Deleting it entirely changes nothing any other test in this file
+    // measures while costing 2.7x on the Sand-fall benchmark. So this test looks at two things no
+    // other test does:
+    //
+    //   1. `edge_sleep_stats`, the predicate's own outcome counter — the mechanism itself. It must
+    //      be *low* while the pour is running (or the predicate is freezing live liquid) and *high*
+    //      once the body has settled (or sleeping is not happening).
+    //   2. The MUST-simulate block count (`BlockActivity::Fast`), the class that bypasses `budget_n`
+    //      entirely and therefore the one that sets the frame cost.
+    //
+    // The wake half is the other risk. A sleeping edge writes nothing and calls `activate_neighbor`
+    // for nothing, which is safe only because a sleeping edge would have moved zero mass anyway —
+    // if that equivalence ever breaks, a pool goes quiet and then *stays* quiet through a
+    // disturbance. So the second phase drops a column of water onto the settled pool (arming one
+    // block the way a draw stroke does) and requires the activity to spread beyond that block, the
+    // sleep fraction to fall, and both to recover afterwards.
+    //
+    // A measured caveat, recorded here because it bounds what this test can assert. The MUST count
+    // decays 64 -> 8 and then sits at exactly 8 forever (checked to 20000 ticks): 8 blocks is the
+    // full width of the pool's free-surface row. That row never reaches equilibrium. Water's
+    // (c_sq, damping) = (0.24, 0.98) is a lightly damped oscillator, so the momentum an edge
+    // accumulates from a height difference `d` settles at `c_sq * damping * d / (1 - damping)`,
+    // about 12x `d`; a surface film of 0.02 therefore ping-pongs its entire contents between two
+    // adjacent surface cells every tick, forever, at a flux far above the 1e-4 MUST threshold. It
+    // is invisible (0.02 of one cell) and it is not something edge sleeping can address — those
+    // edges are genuinely moving mass, and `edge_sleeps` skips only edges that provably are not.
+    // It is a separate defect in the surface dynamics, so the assertion below is that the MUST
+    // count *collapses to the surface row*, not that it reaches zero.
+    fn test_settled_liquid_sleeps_and_wakes() {
+        let (w, h, bs) = (128, 128, 16);
+        let cols = w / bs;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask.clone(), bs);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // A tall narrow column: it has to fall, hit the floor, spread across the box and level
+        // off, so the run genuinely passes through a busy phase before the quiet one.
+        for y in 8..h - 8 {
+            for x in 48..80 {
+                if mask[y * w + x] != crate::MASK_OUTSIDE {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+        }
+
+        let must_count = |s: &TestSim| -> usize {
+            s.active_blocks
+                .iter()
+                .filter(|a| matches!(a, crate::BlockActivity::Fast))
+                .count()
+        };
+
+        // --- while the pour is running: busy, and hardly anything sleeps ---
+        let mut peak_must = 0usize;
+        edge_sleep_stats::reset();
+        for _ in 0..40 {
+            sim.tick(gravity_dir, 256);
+            peak_must = peak_must.max(must_count(&sim));
+        }
+        let pouring_slept = edge_sleep_stats::slept_fraction().expect("no liquid edges were tested");
+
+        // --- settle ---
+        let mut trace = Vec::new();
+        for t in 41..=1200 {
+            sim.tick(gravity_dir, 256);
+            peak_must = peak_must.max(must_count(&sim));
+            if t % 300 == 0 {
+                trace.push((t, must_count(&sim)));
+            }
+        }
+
+        // Sampled over a whole staleness period (MAX_STALENESS = 30), so a block re-admitted on
+        // the staleness path cannot hide inside a lucky single sample.
+        edge_sleep_stats::reset();
+        let mut settled_must = 0usize;
+        for _ in 0..30 {
+            sim.tick(gravity_dir, 256);
+            settled_must += must_count(&sim);
+        }
+        let settled_slept = edge_sleep_stats::slept_fraction().expect("no liquid edges were tested");
+        println!(
+            "test_settled_liquid_sleeps_and_wakes: {} blocks total; peak must={} trace={:?}; \
+             MUST block-ticks over 30 settled ticks={}; edges slept: {:.1}% while pouring, \
+             {:.1}% settled",
+            sim.active_blocks.len(), peak_must, trace, settled_must,
+            100.0 * pouring_slept, 100.0 * settled_slept
+        );
+
+        assert!(
+            peak_must >= 16,
+            "the pour never generated any work to sleep through: peak MUST count was {}",
+            peak_must
+        );
+        // 8 blocks is the free-surface row (see the caveat above); 30 ticks of it is 240.
+        assert!(
+            settled_must <= 300,
+            "A settled pool is still MUST-simulating {} block-ticks per 30 ticks, out of a peak \
+             of {} blocks/tick. Only the free-surface row should still be active once the body \
+             has levelled off.",
+            settled_must, peak_must
+        );
+        // THE assertion for the mechanism. Measured: 54.7% pouring, 92.8% settled.
+        assert!(
+            settled_slept > 0.90,
+            "A settled body of liquid is not sleeping: only {:.1}% of the liquid edges tested were \
+             skipped ({:.1}% while it was still pouring). Every edge inside a settled body is \
+             either room-blocked in both directions or at zero head with zero stored velocity, so \
+             almost all of them should take the `edge_sleeps` early-out.",
+            100.0 * settled_slept, 100.0 * pouring_slept
+        );
+        assert!(
+            pouring_slept < settled_slept - 0.25,
+            "The sleeping predicate does not discriminate: it skipped {:.1}% of edges while the \
+             liquid was actively pouring and {:.1}% once it had settled. A predicate that sleeps \
+             moving liquid is not a fast path, it is a freeze.",
+            100.0 * pouring_slept, 100.0 * settled_slept
+        );
+
+        // --- wake ---
+        // Drop a fresh column into one block and arm it, exactly as a draw stroke does.
+        let (drop_x, drop_y) = (24usize, 100usize);
+        let drop_b = (drop_y / bs) * cols + (drop_x / bs);
+        for y in drop_y - 6..drop_y {
+            for x in drop_x..drop_x + 8 {
+                if mask[y * w + x] != crate::MASK_OUTSIDE {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+        }
+        sim.last_displacements[drop_b] = 1.0;
+        let mass_after_drop = sim.mass();
+
+        edge_sleep_stats::reset();
+        let mut woke_blocks = std::collections::HashSet::new();
+        for _ in 0..120 {
+            sim.tick(gravity_dir, 256);
+            for (b, a) in sim.active_blocks.iter().enumerate() {
+                if matches!(a, crate::BlockActivity::Fast) {
+                    woke_blocks.insert(b);
+                }
+            }
+        }
+        let woken_slept = edge_sleep_stats::slept_fraction().expect("no liquid edges were tested");
+        println!(
+            "test_settled_liquid_sleeps_and_wakes: after the drop into block {}, {} distinct \
+             blocks became MUST; edges slept {:.1}%",
+            drop_b, woke_blocks.len(), 100.0 * woken_slept
+        );
+        assert!(
+            woke_blocks.len() > 1,
+            "The disturbance did not propagate out of the block it was drawn into: only {} block \
+             ever became MUST. A sleeping edge must not be able to swallow a wake.",
+            woke_blocks.len()
+        );
+        // The sleep fraction is deliberately *not* asserted on here. It is a whole-domain ratio
+        // over the blocks that ran, and the drop wakes nine blocks of a sixty-four block pool that
+        // is otherwise still settled, so it barely moves (measured 93.1% against 92.8%). What
+        // proves the wake is the block count above: the disturbance crossed out of the block it
+        // was drawn into, which it can only do through `activate_neighbor`.
+
+        // And it must go quiet again afterwards, not stay awake because it was once disturbed.
+        for _ in 0..900 {
+            sim.tick(gravity_dir, 256);
+        }
+        edge_sleep_stats::reset();
+        let mut requiet_must = 0usize;
+        for _ in 0..30 {
+            sim.tick(gravity_dir, 256);
+            requiet_must += must_count(&sim);
+        }
+        let requiet_slept = edge_sleep_stats::slept_fraction().expect("no liquid edges were tested");
+        println!(
+            "test_settled_liquid_sleeps_and_wakes: re-settled MUST block-ticks={} slept={:.1}%",
+            requiet_must, 100.0 * requiet_slept
+        );
+        assert!(
+            requiet_slept > 0.90 && requiet_must <= 300,
+            "The pool did not go back to sleep after the disturbance: {:.1}% of edges slept, \
+             {} MUST block-ticks over 30 ticks",
+            100.0 * requiet_slept, requiet_must
+        );
+
+        let mass_err = (sim.mass() - mass_after_drop).abs() / mass_after_drop;
+        println!(
+            "test_settled_liquid_sleeps_and_wakes: mass rel_err over the woken phase={:.3e}",
+            mass_err
+        );
+        assert!(mass_err < 1e-4, "sleeping leaked mass: rel_err={:.3e}", mass_err);
     }
 
     #[test]
