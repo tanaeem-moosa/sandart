@@ -232,6 +232,15 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_pattern_mode(this.__wbg_ptr, ptr0, len0);
     }
     /**
+     * UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
+     * selection even while in Sandbox (so it's remembered if the user switches back to
+     * Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
+     * @param {number} mode
+     */
+    set_quantile_mode(mode) {
+        wasm.wasmsimulationstate_set_quantile_mode(this.__wbg_ptr, mode);
+    }
+    /**
      * @param {number} steps
      * @param {number} step_size
      */

@@ -962,7 +962,17 @@ function setupPanelInput() {
     const gravityVal = document.getElementById('gravity-val');
     const neckSlider = document.getElementById('neck-slider');
     const curvatureSlider = document.getElementById('curvature-slider');
-    
+    const quantileSelect = document.getElementById('quantile-select');
+
+    // Mass Distribution Lines (quantile overlay): off / quartiles / deciles. Sand-fall only —
+    // the sidebar control lives in #sandfall-controls, which switchMode() already hides in
+    // Sandbox, and the Rust side independently forces this off whenever not in Sand-fall mode.
+    function syncQuantileSetting() {
+        if (!state) return;
+        state.set_quantile_mode(parseInt(quantileSelect.value));
+    }
+    quantileSelect.addEventListener('change', syncQuantileSetting);
+
     function syncSandFallSettings() {
         if (!state) return;
         const val = parseFloat(gravitySlider.value);
@@ -977,6 +987,8 @@ function setupPanelInput() {
         const curveVal = parseFloat(curvatureSlider.value);
         document.getElementById('curvature-val').innerText = curveVal.toFixed(1);
         state.set_hourglass_curve(curveVal);
+
+        syncQuantileSetting();
     }
     gravitySlider.addEventListener('input', syncSandFallSettings);
 
