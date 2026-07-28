@@ -20,8 +20,14 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # The upstream `curl ... init.sh | sh` installer runs `need_cmd which` and
+      # `which rustup`, and ubuntu-latest (now 24.04) no longer ships a `which`
+      # binary, so that installer fails at the detection step. This action pulls a
+      # prebuilt binary instead, which is both more reliable and much faster.
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
 
       - name: Compile WebAssembly
         run: wasm-pack build sandart-wasm --target web
