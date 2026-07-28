@@ -160,6 +160,11 @@ pub struct DrawingSimulation {
     /// Replaces the old per-cell `wave_vel`, which could not be made mass-conservative.
     pub edge_vel_h: Vec<f32>,
     pub edge_vel_v: Vec<f32>,
+    /// Depth-integrated lateral pressure bookkeeping for the cross-gravity liquid edge (see
+    /// `physics::LATERAL_PRESSURE_SCALE` and the `column_depth` note in `settle_tick`). Persists
+    /// tick-to-tick like `edge_vel_h`/`edge_vel_v` so a column under a sleeping block keeps the
+    /// last depth it actually computed.
+    pub column_depth: Vec<f32>,
     /// Seed for marble movement noise.
     pub seed: u32,
 
@@ -280,6 +285,7 @@ impl DrawingSimulation {
         let sliding = vec![false; GRID_SIZE * GRID_SIZE];
         let edge_vel_h = vec![0.0f32; GRID_SIZE * GRID_SIZE];
         let edge_vel_v = vec![0.0f32; GRID_SIZE * GRID_SIZE];
+        let column_depth = vec![0.0f32; GRID_SIZE * GRID_SIZE];
         let mut cell_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
         for chunk in cell_colors.chunks_exact_mut(4) {
             chunk[0] = 210;
@@ -325,6 +331,7 @@ impl DrawingSimulation {
             sliding,
             edge_vel_h,
             edge_vel_v,
+            column_depth,
             seed: 98765u32,
             marble_radius: 0.018,
             material_mode: MaterialMode::default(),
@@ -422,6 +429,7 @@ impl DrawingSimulation {
         self.sliding.fill(false);
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
+        self.column_depth.fill(0.0);
         for chunk in self.cell_colors.chunks_exact_mut(4) {
             chunk[0] = 210;
             chunk[1] = 180;
@@ -525,6 +533,7 @@ impl DrawingSimulation {
         // fall from rest the instant the glass is inverted.
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
+        self.column_depth.fill(0.0);
 
         // Clean up any sand outside the shape boundary so no specs stay trapped outside/above ceiling
         for y in 0..h {
@@ -909,6 +918,7 @@ impl DrawingSimulation {
                     time_seed + iter as u32,
                     &mut self.edge_vel_h,
                     &mut self.edge_vel_v,
+                    &mut self.column_depth,
                     &self.shape_mask,
                     self.tick_count + iter as u32,
                     self.gravity_dir,

@@ -229,6 +229,48 @@ fn liquidity(wetness: f32) -> f32 {
 /// solvers (defect C6).
 const GRAVITY_HEAD_SCALE: f32 = 25.0;
 
+/// Weight on the depth-integrated lateral pressure term (see `column_depth` in `settle_tick`'s
+/// cross-gravity liquid branch): how many head units one cell of *stacked, resting* liquid above
+/// a cell adds to that cell's lateral driving head, on top of the cell's own local fill.
+///
+/// This is the fix for a specific blindness in `H = h + Phi`: `Phi` only depends on this edge's
+/// two endpoints, so it correctly makes a column push down into whatever is below it, but the
+/// *lateral* edge has no `Phi` term at all under vertical gravity (`gravity_dir.x == 0`) and so
+/// drives purely on `h_a - h_b` — the local fill difference. Local fill saturates at `cell_capacity`
+/// (~1.0), so a cell at the bottom of a 20-deep resting column and a cell under a single resting
+/// cell present an *identical* driving head to their lateral neighbour once both are full. Real
+/// hydrostatic pressure keeps growing with depth; this term restores that growth without
+/// resurrecting the old per-cell wave solver's leak, because — like `GRAVITY_HEAD_SCALE` — it only
+/// ever feeds `driving`, never the donor/acceptor mass limits that keep `flux_edge` conservative.
+///
+/// A shallow, undifferentiated puddle has `column_depth == 0` and reduces exactly to the
+/// pre-existing `head_a = h_a + gravity_dir.x * GRAVITY_HEAD_SCALE` formula regardless of this
+/// constant, so in principle any positive scale is "correct" and only the genuinely deep case
+/// should feel it. In practice `column_depth` is a cheap, single-tick, no-lookahead estimate (see
+/// its doc comment in `settle_tick`), not an exact column integral, and it is not perfectly zero
+/// for a falling stream — a saturated stream's *own re-fed source* (a small block of cells held
+/// at capacity by continuous inflow, as opposed to the stream's interior, which the `in_transit`
+/// subtraction does handle exactly) still reads as a few cells of "resting" depth. Below
+/// `LATERAL_PRESSURE_DEPTH_FLOOR` cells of accumulated depth, that noise floor and genuine
+/// shallow overburden are not distinguishable from each other, so the term is held off entirely
+/// there (see the `.max(0.0)` on `column_depth - LATERAL_PRESSURE_DEPTH_FLOOR` at the call site)
+/// and only engages past it, where a real hydrostatic stack lives.
+///
+/// Both constants are measured, not derived: swept jointly against
+/// `test_liquid_stream_stays_coherent` (a 4-cell tap, whose peak `column_depth` sits at ~3 cells
+/// right at its own always-full source — this is the floor's binding case) and
+/// `test_liquid_flowing_liquid_does_not_stand_in_walls` (an hourglass chamber tens of cells deep —
+/// this is what the scale is for). Floor swept at fixed scale = 1: 1.25 already lets the tap's
+/// source push a 9th column (fails), 1.5 holds it at the required 8 with room to spare. Scale then
+/// swept at that floor: the walls test's 400-tick enclosed-void total falls from 30060 (the
+/// pre-existing in-transit-only fix) to 23526 at scale = 2, 21938 at scale = 5, and flattens out
+/// around there (22085 at scale = 10) — comparable to full removal of the in-transit limiter
+/// (6304) is not reachable this way without also reopening the stream (removing the limiter
+/// outright fans it to 59 cells wide), so 5 is picked as past the knee of that curve rather than
+/// at either extreme.
+const LATERAL_PRESSURE_SCALE: f32 = 5.0;
+const LATERAL_PRESSURE_DEPTH_FLOOR: f32 = 1.5;
+
 fn cell_capacity_for(wetness: f32) -> f32 {
     let l = liquidity(wetness);
     1.5 * (1.0 - l) + 1.0 * l
@@ -281,6 +323,46 @@ fn cell_capacity_for(wetness: f32) -> f32 {
 /// `wetness` drifts across the old `>= 0.75` cut hands over between the two solvers continuously
 /// instead of switching regime (defect C5). It is 1.0 wherever this solver acts alone.
 ///
+/// How much of cell `c`'s fill is still passing through it — mass that arrived from upstream
+/// this tick and can be shown to be continuing on downward, as opposed to mass that arrived and
+/// is now at rest. Shared by the cross-gravity liquid edge's `avail_a`/`avail_b` and by
+/// `column_depth`'s top-down accumulation in `settle_tick`; see the big comment on that edge for
+/// the full derivation of `in_transit = min(inflow, outflow + room_below)`.
+///
+/// A plain function, not a closure defined inline in the per-cell loop: that loop runs once for
+/// *every* cell in every active block regardless of material, `settle_tick` is already large, and
+/// a wider closure there measurably worsened generated code for the pure-granular path in
+/// benchmarking even though the closure body is never invoked when `cell_liquidity == 0.0` — the
+/// cost was in how it changed codegen for the enclosing loop, not in calling it.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn in_transit_at(
+    c: usize,
+    w: usize,
+    h: usize,
+    temp_heights: &[f32],
+    heightmap_data: &[f32],
+    cell_props: &[f32],
+    edge_vel_v: &[f32],
+    shape_mask: &[u8],
+) -> f32 {
+    let cx = c % w;
+    let cy = c / w;
+    // No edge below (off-grid, or the cell below is casing): the cell is resting on the
+    // container, so there is no downstream route at all. `edge_vel_v[c]` is stale in that case —
+    // phase 0 skips exactly these edges, and its guard is mirrored here — so it must not be read.
+    if !(cx > 0 && cx + 1 < w && cy > 0 && cy + 1 < h
+        && shape_mask[(cy + 1) * w + cx] != crate::MASK_OUTSIDE)
+    {
+        return 0.0;
+    }
+    let below = c + w;
+    let h_below = temp_heights[below].max(heightmap_data[below]);
+    let cap_below = cell_capacity_for(cell_props[below * 4 + PROP_WETNESS]);
+    let downstream_route = edge_vel_v[c].max(0.0) + (cap_below - h_below).max(0.0);
+    edge_vel_v[c - w].max(0.0).min(downstream_route)
+}
+
 /// Returns the signed flux (positive = `a` -> `b`).
 #[allow(clippy::too_many_arguments)]
 fn flux_edge(
@@ -1194,6 +1276,7 @@ pub fn settle_tick(
     time_seed: u32,
     edge_vel_h: &mut Vec<f32>,
     edge_vel_v: &mut Vec<f32>,
+    column_depth: &mut Vec<f32>,
     shape_mask: &[u8],
     tick_count: u32,
     gravity_dir: glam::Vec2,
@@ -1219,6 +1302,12 @@ pub fn settle_tick(
     }
     if edge_vel_v.len() != heightmap.data.len() {
         edge_vel_v.resize(heightmap.data.len(), 0.0);
+    }
+    // Persistent, like `edge_vel_h`/`edge_vel_v`: see the depth-integrated lateral pressure
+    // note in the cross-gravity liquid branch below for what this holds and why it must
+    // survive a tick where the block that computed it goes to sleep.
+    if column_depth.len() != heightmap.data.len() {
+        column_depth.resize(heightmap.data.len(), 0.0);
     }
 
     let cols = (w + block_size - 1) / block_size;
@@ -1702,6 +1791,42 @@ pub fn settle_tick(
                     // bit-identical to before for sand.
                     let granular_share = if gravity_active { 1.0 - cell_liquidity } else { 1.0 };
 
+                    // Depth-integrated lateral pressure (see `LATERAL_PRESSURE_SCALE`): the amount
+                    // of resting liquid stacked strictly *above* this cell in its connected static
+                    // column, used below to make the lateral edge's driving head grow with depth
+                    // instead of saturating at one cell's capacity.
+                    //
+                    // Computed top-down with no second pass and no cross-tick lag needed: under
+                    // downward gravity this loop already visits every column top-to-bottom (see
+                    // the block/row order picked for `gravity_active && gravity_dir.y > 0.0`
+                    // earlier in this function), so by the time this cell is processed,
+                    // `column_depth[center_idx - w]` — the row directly above — already holds
+                    // *this* tick's freshly computed value, not a stale one. `column_depth` still
+                    // persists tick-to-tick like `edge_vel_h`/`edge_vel_v`, so a column standing
+                    // under a block the scheduler left asleep this tick keeps the last value it
+                    // actually computed instead of reporting zero overburden the instant it goes
+                    // quiet.
+                    //
+                    // A falling stream has `in_transit(above) ~= h(above)` at every interior cell
+                    // (phase 0 refills exactly what it drains, per the lateral edge's comment
+                    // below), so `resting_above ~= 0` and the sum stays ~0 the whole way down —
+                    // this term is inert for the case that must stay narrow. A genuinely resting
+                    // stack accumulates one cell of head per row, same units `h` itself uses, so a
+                    // shallow puddle (nothing above) reduces exactly to today's `head_a = h_a`.
+                    if gravity_active && cell_liquidity > 0.0 {
+                        let above_idx = center_idx - w; // safe: the CA guard above requires y > 0
+                        let depth_above = if is_inside(x, y - 1) {
+                            let resting_above =
+                                (temp_heights[above_idx]
+                                    - in_transit_at(above_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask))
+                                .max(0.0);
+                            resting_above + column_depth[above_idx]
+                        } else {
+                            0.0
+                        };
+                        column_depth[center_idx] = depth_above;
+                    }
+
                     // --- Liquid share: the same conservative edge-flux solver as the g = 0
                     //     branch above, but with a non-zero gravitational head Phi ---
                     //
@@ -1724,7 +1849,15 @@ pub fn settle_tick(
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
-                        let head_a = h_a + gravity_dir.x * GRAVITY_HEAD_SCALE;
+                        // `head_b_full` folds the neighbour's own depth-integrated overburden in
+                        // (see `LATERAL_PRESSURE_SCALE`), symmetrically with `head_a` below, so the
+                        // driving term compares total column pressure rather than local fill alone.
+                        // `column_depth[nb_idx]` may be a tick stale if the neighbour's block ran
+                        // after this one, or hasn't run yet this tick — harmless, since (like
+                        // `GRAVITY_HEAD_SCALE`) it only ever feeds `driving`, never the mass limits.
+                        let head_a = h_a + gravity_dir.x * GRAVITY_HEAD_SCALE
+                            + LATERAL_PRESSURE_SCALE * (column_depth[center_idx] - LATERAL_PRESSURE_DEPTH_FLOOR).max(0.0);
+                        let head_b_full = h_b + LATERAL_PRESSURE_SCALE * (column_depth[nb_idx] - LATERAL_PRESSURE_DEPTH_FLOOR).max(0.0);
                         // Sleeping edge (see `edge_sleeps`), tested *before* the in-transit
                         // computation below rather than after, because that computation is the
                         // expensive part of this edge: two neighbour loads, a capacity lookup and
@@ -1739,8 +1872,12 @@ pub fn settle_tick(
                         // The cases branch 1 exists for are untouched by the bound: a pooled
                         // interior sleeps on `room_a == room_b == 0` and empty space on
                         // `h_a == h_b == 0`, neither of which involves `in_transit` at all.
+                        //
+                        // The driving term passed here must be `head_a - head_b_full` — the exact
+                        // quantity `flux_edge` will compute internally below — or branch 2 could
+                        // sleep an edge the depth-pressure term would in fact have moved.
                         if edge_sleeps(
-                            head_a - h_b, 0.0, edge_vel_h[center_idx],
+                            head_a - head_b_full, 0.0, edge_vel_h[center_idx],
                             h_a, h_b, cell_capacity - h_a, cap_b - h_b,
                         ) {
                             if edge_vel_h[center_idx] != 0.0 {
@@ -1795,30 +1932,20 @@ pub fn settle_tick(
                             // `room_below` is a whole cell), so this is a strict relaxation confined
                             // to genuinely supported liquid. Reachable only when `cell_liquidity >
                             // 0.0`, so granular cells are untouched by construction.
-                            let in_transit = |c: usize| -> f32 {
-                                let cx = c % w;
-                                let cy = c / w;
-                                // No edge below (off-grid, or the cell below is casing): the cell is
-                                // resting on the container, so there is no downstream route at all.
-                                // `edge_vel_v[c]` is stale in that case — phase 0 skips exactly these
-                                // edges, and its guard is mirrored here — so it must not be read.
-                                if !(cx > 0 && cx + 1 < w && cy > 0 && cy + 1 < h && is_inside(cx, cy + 1))
-                                {
-                                    return 0.0;
-                                }
-                                let below = c + w;
-                                let h_below = temp_heights[below].max(heightmap.data[below]);
-                                let cap_below = cell_capacity_for(cell_props[below * 4 + PROP_WETNESS]);
-                                let downstream_route =
-                                    edge_vel_v[c].max(0.0) + (cap_below - h_below).max(0.0);
-                                edge_vel_v[c - w].max(0.0).min(downstream_route)
-                            };
-                            let avail_a = (h_a - in_transit(center_idx)).max(0.0);
-                            let avail_b = (h_b - in_transit(nb_idx)).max(0.0);
+                            //
+                            // (`in_transit` itself is defined above, alongside `column_depth`,
+                            // since that bookkeeping needs it for every liquid cell regardless of
+                            // whether this edge sleeps.)
+                            let avail_a = (h_a
+                                - in_transit_at(center_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask))
+                                .max(0.0);
+                            let avail_b = (h_b
+                                - in_transit_at(nb_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask))
+                                .max(0.0);
                             flux_edge(
                                 b, nb_b, center_idx, nb_idx,
                                 head_a,
-                                h_b,
+                                head_b_full,
                                 c_sq, damping, 0.0,
                                 cell_capacity, cap_b,
                                 avail_a, avail_b,
@@ -2322,6 +2449,7 @@ mod tests {
         last_simulated_ticks: Vec<u32>,
         edge_vel_h: Vec<f32>,
         edge_vel_v: Vec<f32>,
+        column_depth: Vec<f32>,
         mask: Vec<u8>,
         block_size: usize,
         tick_count: u32,
@@ -2344,6 +2472,7 @@ mod tests {
                 last_simulated_ticks: vec![0; expected_len],
                 edge_vel_h: vec![0.0; w * h],
                 edge_vel_v: vec![0.0; w * h],
+                column_depth: vec![0.0; w * h],
                 mask,
                 block_size,
                 tick_count: 0,
@@ -2367,6 +2496,7 @@ mod tests {
                 12345u32.wrapping_add(self.tick_count),
                 &mut self.edge_vel_h,
                 &mut self.edge_vel_v,
+                &mut self.column_depth,
                 &self.mask,
                 self.tick_count,
                 gravity_dir,
@@ -2663,6 +2793,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; 512 * 512];
         let mut edge_vel_v = vec![0.0; 512 * 512];
+        let mut column_depth = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = vec![1.0; 256];
         let mut last_simulated_ticks = vec![0; 256];
@@ -2688,6 +2819,7 @@ mod tests {
                 12345,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 glam::Vec2::ZERO,
@@ -2729,6 +2861,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; 512 * 512];
         let mut edge_vel_v = vec![0.0; 512 * 512];
+        let mut column_depth = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = Vec::new();
         let mut last_simulated_ticks = Vec::new();
@@ -2752,6 +2885,7 @@ mod tests {
             12345,
             &mut edge_vel_h,
             &mut edge_vel_v,
+            &mut column_depth,
             &mask,
             0,
             glam::Vec2::ZERO,
@@ -2802,6 +2936,7 @@ mod tests {
 
             let mut edge_vel_h = vec![0.0; 64 * 64];
             let mut edge_vel_v = vec![0.0; 64 * 64];
+            let mut column_depth = vec![0.0; 64 * 64];
             let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
             let mut last_displacements = vec![1.0; 4];
             let mut last_simulated_ticks = vec![0; 4];
@@ -2823,6 +2958,7 @@ mod tests {
                 9999,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 0,
                 glam::Vec2::ZERO,
@@ -2899,6 +3035,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; 128 * 128];
         let mut edge_vel_v = vec![0.0; 128 * 128];
+        let mut column_depth = vec![0.0; 128 * 128];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = vec![1.0; 16];
         let mut last_simulated_ticks = vec![0; 16];
@@ -2921,6 +3058,7 @@ mod tests {
             12345,
             &mut edge_vel_h,
             &mut edge_vel_v,
+            &mut column_depth,
             &mask,
             0,
             glam::Vec2::ZERO,
@@ -3195,6 +3333,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; 64 * 64];
             let mut edge_vel_v = vec![0.0; 64 * 64];
+            let mut column_depth = vec![0.0; 64 * 64];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -3223,6 +3362,7 @@ mod tests {
                 12345,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -3283,6 +3423,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -3314,6 +3455,7 @@ mod tests {
                 12345 + i as u32,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -3361,6 +3503,7 @@ mod tests {
                 12345 + 500 + i as u32,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 (500 + i) as u32,
                 gravity_dir,
@@ -3401,6 +3544,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -3427,6 +3571,7 @@ mod tests {
                 12345 + i as u32,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -3494,6 +3639,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -3524,6 +3670,7 @@ mod tests {
                 12345 + i as u32,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -5158,6 +5305,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -5182,6 +5330,7 @@ mod tests {
                 12345u32.wrapping_add(i),
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i,
                 gravity_dir,
@@ -5239,6 +5388,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -5265,6 +5415,7 @@ mod tests {
                 12345 + i as u32,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -5319,6 +5470,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -5344,6 +5496,7 @@ mod tests {
                 12345 + i as u32,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -5439,6 +5592,7 @@ mod tests {
 
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
         let mut last_displacements = vec![1.0; cols * rows];
         let mut last_simulated_ticks = vec![0; cols * rows];
@@ -5464,6 +5618,7 @@ mod tests {
                 i as u32,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -5534,6 +5689,7 @@ mod tests {
         let mut sliding = vec![false; w * h];
         let mut edge_vel_h = vec![0.0f32; w * h];
         let mut edge_vel_v = vec![0.0f32; w * h];
+        let mut column_depth = vec![0.0f32; w * h];
 
         let center_x = w as f32 / 2.0;
         let center_y = h as f32 / 2.0;
@@ -5637,6 +5793,7 @@ mod tests {
                 i as u32,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i as u32,
                 gravity_dir,
@@ -5746,6 +5903,7 @@ mod tests {
         let mut sliding = vec![false; w * h];
         let mut edge_vel_h = vec![0.0f32; w * h];
         let mut edge_vel_v = vec![0.0f32; w * h];
+        let mut column_depth = vec![0.0f32; w * h];
         let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
         let n_blocks = (w / 32) * (h / 32);
         let mut active_blocks = vec![crate::BlockActivity::Fast; n_blocks];
@@ -5772,6 +5930,7 @@ mod tests {
                 i,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i,
                 gravity_dir,
@@ -5949,6 +6108,7 @@ mod tests {
         let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let expected_len = (w / 32) * (h / 32);
         let mut active_blocks = vec![crate::BlockActivity::Fast; expected_len];
         let mut last_displacements = vec![1.0; expected_len];
@@ -6008,6 +6168,7 @@ mod tests {
                 12345 + i,
                 &mut edge_vel_h,
                 &mut edge_vel_v,
+                &mut column_depth,
                 &mask,
                 i,
                 gravity_dir,
@@ -6062,6 +6223,7 @@ mod tests {
         let mut sliding = vec![false; w * h];
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
         let block_size = 32;
         let (cols, rows) = (w / block_size, h / block_size);
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
@@ -6075,7 +6237,7 @@ mod tests {
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[], t as u32,
                 &mut edge_vel_h,
-                &mut edge_vel_v, &mask, t as u32, gravity_dir,
+                &mut edge_vel_v, &mut column_depth, &mask, t as u32, gravity_dir,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();
