@@ -141,6 +141,17 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
     }
     /**
+     * UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
+     * selection even while in Sandbox (so it's remembered if the user switches back to
+     * Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
+     * Dither amplitude for the f32 -> u8 colour conversion. 0.0 = plain rounding,
+     * 1.0 = true stochastic rounding, higher = coarser grain.
+     * @param {number} strength
+     */
+    set_color_dither(strength) {
+        wasm.wasmsimulationstate_set_color_dither(this.__wbg_ptr, strength);
+    }
+    /**
      * @param {number} mode
      */
     set_color_mode(mode) {
@@ -232,9 +243,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_pattern_mode(this.__wbg_ptr, ptr0, len0);
     }
     /**
-     * UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
-     * selection even while in Sandbox (so it's remembered if the user switches back to
-     * Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
      * @param {number} mode
      */
     set_quantile_mode(mode) {

@@ -964,6 +964,19 @@ function setupPanelInput() {
     const curvatureSlider = document.getElementById('curvature-slider');
     const quantileSelect = document.getElementById('quantile-select');
 
+    // Grain: dither amplitude for the f32 -> u8 colour conversion. Applies in both modes, so
+    // this control lives with the colour theme rather than in #sandfall-controls. 0 = plain
+    // rounding (previous behaviour), 1 = true stochastic rounding, higher = coarser speckle.
+    const ditherSlider = document.getElementById('dither-slider');
+    const ditherVal = document.getElementById('dither-val');
+    function syncDitherSetting() {
+        if (!state) return;
+        const v = parseFloat(ditherSlider.value);
+        ditherVal.innerText = v.toFixed(2);
+        state.set_color_dither(v);
+    }
+    ditherSlider.addEventListener('input', syncDitherSetting);
+
     // Mass Distribution Lines (quantile overlay): off / quartiles / deciles. Sand-fall only —
     // the sidebar control lives in #sandfall-controls, which switchMode() already hides in
     // Sandbox, and the Rust side independently forces this off whenever not in Sand-fall mode.
