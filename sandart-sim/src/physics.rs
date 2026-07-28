@@ -1547,17 +1547,17 @@ pub fn settle_tick(
                 let wetness = cell_props[center_idx * 4 + PROP_WETNESS];
 
                 if phase == 0 {
-                    // Gravity-aligned liquid pass — see the operator-split note above.
-                    // `wetness <= 0.65` is the cheap early-out that keeps a pure-sand frame from
-                    // paying for this pass: it is exactly where `liquidity` reaches zero.
-                    if wetness <= 0.65 {
-                        continue;
-                    }
-                    let cell_liquidity = liquidity(wetness);
-                    if cell_liquidity > 0.0
-                        && x > 0 && x + 1 < w && y > 0 && y + 1 < h
-                        && is_inside(x, y + 1)
-                    {
+                    // Gravity-aligned pass — see the operator-split note above. Originally liquid
+                    // only (gated on `wetness <= 0.65`, i.e. `liquidity == 0`); Stage B extends it
+                    // to carry the granular share of this same edge too, so the vertical/
+                    // gravity-aligned edge is now *entirely* owned by the flux solver for every
+                    // material, liquid or granular, and the CA below no longer touches it (see the
+                    // `ndy != 0.0` exclusion in the avalanche valve and main flow loop further
+                    // down). `granular_share` there is always `1 - cell_liquidity` under gravity,
+                    // so the two shares sum to exactly 1.0 and nothing needs a separate "granular"
+                    // flux_edge call — one call at `weight = 1.0` covers the whole edge.
+                    if x > 0 && x + 1 < w && y > 0 && y + 1 < h && is_inside(x, y + 1) {
+                        let cell_liquidity = liquidity(wetness);
                         let nb_idx = center_idx + w;
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
@@ -1565,10 +1565,10 @@ pub fn settle_tick(
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
                         let head_a = h_a + gravity_dir.y * GRAVITY_HEAD_SCALE;
                         // Sleeping edge (see `edge_sleeps`). This is the pass where sleeping pays
-                        // most, because it is the one every liquid cell in the domain enters: the
-                        // interior of a filled chamber is room-blocked in both directions, empty
-                        // space above the free surface has nothing to donate in either, and only
-                        // the surface itself — a few cells per column — survives the test.
+                        // most, because it is the one every cell in the domain enters: the
+                        // interior of a filled chamber/pile is room-blocked in both directions,
+                        // empty space above the free surface/heap has nothing to donate in either,
+                        // and only the surface itself — a few cells per column — survives the test.
                         if edge_sleeps(
                             head_a - h_b, 0.0, edge_vel_v[center_idx],
                             h_a, h_b, cap_a - h_a, cap_b - h_b,
@@ -1578,7 +1578,25 @@ pub fn settle_tick(
                             }
                             continue;
                         }
-                        let (c_sq, damping) = wave_params(wetness);
+                        // Dynamics are blended by `cell_liquidity`, not the flux weight: at
+                        // `cell_liquidity == 1` this reduces exactly to `wave_params(wetness)` at
+                        // `weight == 1.0`, bit-for-bit what the liquid-only pass computed before
+                        // (Water etc. are untouched). At `cell_liquidity == 0` (any granular
+                        // material) it instead uses a saturating pair that reaches the donor/
+                        // acceptor clamp within a tick or two from rest rather than the liquid's
+                        // multi-tick ramp — the CA's own free-fall transfer coefficient was
+                        // already 0.8-1.0 (near-instant) once a cell had clear room below, and nothing
+                        // in the CA imposed a repose-style yield stress on straight-down motion (the
+                        // dominant `gravity_push` term swamped `threshold` there), so `tau = 0` here
+                        // matches its predecessor's effective behaviour rather than inventing a new
+                        // one. The donor-mass/acceptor-room clamp inside `flux_edge` (not this
+                        // ramp) is what actually stops a packed column, exactly as it does for
+                        // liquid.
+                        const GRANULAR_FALL_C_SQ: f32 = 1.0;
+                        const GRANULAR_FALL_DAMPING: f32 = 1.0;
+                        let (liquid_c_sq, liquid_damping) = wave_params(wetness);
+                        let c_sq = GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity;
+                        let damping = GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity;
                         let nb_b = ((y + 1) / block_size) * cols + bx;
                         flux_edge(
                             b, nb_b, center_idx, nb_idx,
@@ -1588,7 +1606,7 @@ pub fn settle_tick(
                             cap_a,
                             cap_b,
                             h_a, h_b,
-                            cell_liquidity,
+                            1.0,
                             &mut edge_vel_v[center_idx],
                             temp_heights, cell_colors, cell_props,
                             &mut modified, &mut next_displacements,
@@ -2057,6 +2075,16 @@ pub fn settle_tick(
                         if gravity_active && gravity_dot < -0.01 {
                             continue;
                         }
+                        // The gravity-aligned (grid-y) edge is now owned entirely by the phase-0
+                        // flux pass above (Stage B) — both directions of it, since a single
+                        // `flux_edge` call there covers whichever way `gravity_dir.y` points. The
+                        // CA must not also move mass across it, or the transfer double-counts.
+                        // Only ndy == 0 (the lateral, grid-x edge) is left for the CA to arbitrate,
+                        // which is exactly where the repose/avalanche behaviour this valve exists
+                        // for actually lives.
+                        if gravity_active && ndy != 0.0 {
+                            continue;
+                        }
 
                         let h_neighbor = if gravity_active { temp_heights[neighbor_idx].max(heightmap.data[neighbor_idx]) } else { heightmap.data[neighbor_idx] };
                         let geom_slope = h_center - h_neighbor;
@@ -2155,6 +2183,12 @@ pub fn settle_tick(
                         
                         // Under gravity, sand cannot flow upwards against gravity
                         if gravity_active && gravity_dot < -0.01 {
+                            continue;
+                        }
+                        // The gravity-aligned (grid-y) edge is fully owned by the phase-0 flux
+                        // pass now (Stage B) — see the identical exclusion in the avalanche valve
+                        // above for why both directions of it must be skipped here.
+                        if gravity_active && ndy != 0.0 {
                             continue;
                         }
 
@@ -5543,6 +5577,128 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    // Stage B: granular material's gravity-aligned edge moved onto the same conservative
+    // `flux_edge` solver liquid already uses (see the phase-0 block in `settle_tick` and the
+    // `ndy != 0.0` exclusion that keeps the CA from also touching that edge). Every other test
+    // added for that migration measures a *settled* pile — exactly the blind spot called out
+    // repeatedly in this file's history (defects C5/C13/etc. were all invisible to settled-state
+    // tests and only showed up while mass was still moving). This is the flowing-state check for
+    // sand, the direct analogue of `test_liquid_stream_stays_coherent`.
+    //
+    // Two things could go wrong in a way no settled-state test would catch:
+    //   1. Mass could leak or duplicate specifically while the flux edge is active (as opposed to
+    //      at rest, where a bug would show up in every other conservation test too).
+    //   2. The new (c_sq, damping) = (1.0, 1.0) pair chosen for granular fall (see the phase-0
+    //      comment) could either stall (an over-eager `edge_sleeps` wrongly freezing a falling
+    //      column) or overshoot CFL (mass advancing more than one row per tick, which would show
+    //      up as the falling front's row jumping by more than 1 in a single tick).
+    fn test_granular_flowing_fall_conserves_mass_and_respects_cfl() {
+        let w = 64;
+        let h = 96;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, 32);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // A 4-cell-wide continuous tap, matching the liquid stream test's shape exactly so the
+        // two are directly comparable.
+        let mut poured_mass = 0.0f64;
+        let source_cells = 4 * 4; // y in 6..10, x in 30..34
+        let mut max_row_jump = 0i64;
+        let mut prev_front: Option<usize> = None;
+        let mut max_width = 0usize;
+        let mut min_mass_err_ticks_with_flow = 0;
+
+        for t in 0..60 {
+            for y in 6..10 {
+                for x in 30..34 {
+                    let idx = y * w + x;
+                    // Only top up cells not already full, so the poured-mass tally stays exact.
+                    let before = sim.hm.data[idx];
+                    sim.hm.data[idx] = 1.0;
+                    poured_mass += (1.0 - before) as f64;
+                }
+            }
+            sim.tick(gravity_dir, 256);
+
+            // Mass conservation *while flowing*, not just once settled: total mass in the grid
+            // must equal what was poured in, at every single tick, not just the last one.
+            let current_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
+            let mass_err = (current_mass - poured_mass).abs() / poured_mass.max(1e-9);
+            assert!(
+                mass_err < 1e-3,
+                "Mass not conserved mid-flow at tick {}: poured={:.6} actual={:.6} err={:.2e}",
+                t, poured_mass, current_mass, mass_err
+            );
+            if current_mass > 1e-6 {
+                min_mass_err_ticks_with_flow += 1;
+            }
+
+            // Falling front: the deepest row (below the source) that still has any sand in it.
+            let mut front = None;
+            for y in (10..h).rev() {
+                let row_has_sand = (0..w).any(|x| sim.hm.data[y * w + x] > 0.05);
+                if row_has_sand {
+                    front = Some(y);
+                    break;
+                }
+            }
+            if let (Some(f), Some(pf)) = (front, prev_front) {
+                // The front may not advance every tick (it can pause while a cell ramps up), but
+                // it must never advance by more than one row in a single tick — more would mean
+                // mass hopped over a row without ever being subject to that row's own donor/
+                // acceptor clamp, breaking the CFL property the whole gravity-aligned phase-0
+                // ordering exists to guarantee (see the operator-split note in `settle_tick`).
+                max_row_jump = max_row_jump.max((f as i64 - pf as i64).max(0));
+            }
+            prev_front = front.or(prev_front);
+
+            // Coherence: same measurement `test_liquid_stream_stays_coherent` uses, restricted to
+            // the mid-air band clear of the source and the eventual floor.
+            for y in 15..70 {
+                let mut min_x = None;
+                let mut max_x = None;
+                for x in 0..w {
+                    if sim.hm.data[y * w + x] > 0.05 {
+                        if min_x.is_none() { min_x = Some(x); }
+                        max_x = Some(x);
+                    }
+                }
+                if let (Some(mn), Some(mx)) = (min_x, max_x) {
+                    max_width = max_width.max(mx - mn + 1);
+                }
+            }
+        }
+
+        println!(
+            "test_granular_flowing_fall_conserves_mass_and_respects_cfl: poured={:.6} \
+             max_row_jump={} max_width={} ticks_with_flow={} source_cells={}",
+            poured_mass, max_row_jump, max_width, min_mass_err_ticks_with_flow, source_cells
+        );
+
+        assert!(
+            max_row_jump <= 1,
+            "Falling front advanced {} rows in a single tick — CFL violated by the granular \
+             vertical flux edge",
+            max_row_jump
+        );
+        // Measured today: max_width=22. Water's equivalent tap stays at 8 cells
+        // (`test_liquid_stream_stays_coherent`) because it has no dispersion term at all; sand's
+        // free-fall CA lateral loop (untouched by Stage B — this is the pre-existing
+        // `perp_dot * 0.8 * dispersion_noise` scatter, still owned entirely by the CA) is expected
+        // to be wider than that, so this bound is generous rather than a tight pin. What it
+        // guards against is Stage B's *own* failure mode: the vertical flux edge silently handing
+        // mass sideways instead of down (e.g. a `weight`/`cap` mixup), which would blow this out
+        // much further, the way removing the liquid in-transit limiter blew that test's stream
+        // from 8 to 59.
+        assert!(
+            max_width <= 30,
+            "Granular stream fanned out too wide while falling: {} cells",
+            max_width
+        );
     }
 
     #[test]
