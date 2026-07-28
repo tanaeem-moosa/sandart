@@ -798,25 +798,6 @@
                 <div class="swatch" data-preset="rainbow" title="Rainbow" style="background: linear-gradient(135deg, red, yellow, green, blue); border-radius: 50%; width: 28px; height: 28px;"></div>
             </div>
 
-            <div class="control-group" style="margin-top: 16px;">
-                <div class="label-val">
-                    <label for="dither-slider">Grain (Color Dither)</label>
-                    <span id="dither-val" class="val-display">0.0</span>
-                </div>
-                <input type="range" id="dither-slider" min="0.0" max="4.0" step="0.25" value="0.0">
-            </div>
-
-            <div class="control-group">
-                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                    <input type="checkbox" id="check-u8-dynamics">
-                    <span>u8 Color Dynamics (experiment)</span>
-                </label>
-                <span style="font-size: 10px; color: var(--text-muted);">
-                    Rounds every color blend to an integer, as if colour were stored as u8.
-                    Watch for patterns slowly smearing.
-                </span>
-            </div>
-
             <div class="control-group" id="custom-color-inputs">
                 <div class="color-picker-wrapper">
                     <div style="display: flex; flex-direction: column; align-items: center;">
