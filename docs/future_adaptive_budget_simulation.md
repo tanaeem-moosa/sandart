@@ -47,7 +47,7 @@ MUST and STALE are always simulated regardless of budget. The budget N only gove
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `MUST_SIMULATE_THRESHOLD` | **0.1** | Displacement above this → always simulate |
+| `MUST_SIMULATE_THRESHOLD` | **1e-4** | Displacement above this → always simulate. Was 0.1 in Sandbox and 1e-4 under gravity, until the Sandbox arm was found to be gating wave propagation on the budget: a ripple's recorded displacement is ~1e-3, so wavefront blocks were never MUST and the front advanced only as blocks aged out at `MAX_STALENESS`. The 0.1 bar existed only to hide an absolute-level liquid wake magnitude; with that replaced by a head *difference* (see `physics.rs`, the g = 0 liquid branch) both modes share one threshold. |
 | `MAX_STALENESS` | **30** | Ticks before a block is force-simulated |
 | `TARGET_FRAME_MS` | **33.3** | 30 FPS target |
 | `EMA_ALPHA` | **0.1** | Smoothing factor for frame time EMA |

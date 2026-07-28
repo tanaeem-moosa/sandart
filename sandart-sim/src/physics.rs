@@ -1235,10 +1235,8 @@ pub fn settle_tick(
         active_blocks.resize(expected_len, crate::BlockActivity::Inactive);
     }
 
-    let gravity_active = gravity_dir.length_squared() > 1e-6;
-
     // Constants from the design doc
-    const MUST_SIMULATE_THRESHOLD: f32 = 0.1;
+    const MUST_SIMULATE_THRESHOLD: f32 = 1e-4;
     const MAX_STALENESS: u32 = 30;
     const FLOW_INACTIVE_THRESHOLD: f32 = 3e-4;
 
@@ -1247,7 +1245,28 @@ pub fn settle_tick(
     let mut stale_simulate = Vec::new();
     let mut rest_candidates = Vec::new();
 
-    let active_threshold = if gravity_active { 1e-4 } else { MUST_SIMULATE_THRESHOLD };
+    // A block is MUST-simulate when the wake magnitude its cells recorded last tick clears this
+    // bar; everything under it competes for the remaining budget by `staleness * displacement`.
+    //
+    // Sandbox used to sit at 0.1, a thousand times coarser than gravity's 1e-4, and it had to:
+    // the liquid path's wake magnitude was an absolute height, `|h - DEFAULT_SAND_HEIGHT|`, which
+    // never returns to zero for a pool resting anywhere else, so the only thing keeping the whole
+    // domain from being permanently MUST was a bar set above a typical bed offset. The cost was
+    // that no ripple could clear it either — a wavefront's recorded magnitude is ~1e-3 — so
+    // Sandbox waves propagated at a speed set by the budget rather than by the physics.
+    //
+    // The liquid wake magnitude is now a head *difference* across the cell's owned edges (see the
+    // block-activation note in the g = 0 branch below), which is zero for any pool at rest at any
+    // level, so the two modes can share one threshold.
+    //
+    // Both halves are required and neither works alone. Dropping this bar while the wake magnitude
+    // was still a level makes a settled 256x256 pool at 0.50 report 7680 of 7680 MUST block-ticks
+    // over a staleness period — the entire domain, permanently, with nothing moving. Keeping the
+    // bar while fixing the magnitude leaves a ~1e-3 wavefront just as far under 0.1 as before.
+    // With both, that same settled pool measures 0 MUST block-ticks at 0.35 *and* at 0.50
+    // (`test_settled_sandbox_pool_does_not_stay_hot`) and reach stops depending on the budget at
+    // all (`test_sandbox_wave_reach_is_budget_independent`).
+    let active_threshold = MUST_SIMULATE_THRESHOLD;
     for b in 0..expected_len {
         let displacement = last_displacements[b];
         let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
@@ -1540,6 +1559,11 @@ pub fn settle_tick(
                     let (c_sq, damping) = wave_params(wetness);
                     let cap_c = cell_capacity_for(wetness);
                     let mut max_flux = 0.0f32;
+                    // Largest head difference across the edges this cell owns — the *driving*
+                    // term, the same quantity `edge_sleeps`' branch 2 tests against `tau`. It is
+                    // the wake magnitude; see the block-activation note at the end of this branch
+                    // for why it is a difference and not a level.
+                    let mut max_head_diff = 0.0f32;
                     let head_c = heightmap.data[center_idx];
 
                     // *Which buffer the sleeping test reads is the whole subtlety here.* The two
@@ -1563,6 +1587,7 @@ pub fn settle_tick(
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        max_head_diff = max_head_diff.max((head_c - heightmap.data[nb_idx]).abs());
                         if edge_sleeps(
                             head_c - heightmap.data[nb_idx], 0.0, edge_vel_h[center_idx],
                             h_a, h_b, cap_c - h_a, cap_b - h_b,
@@ -1592,6 +1617,7 @@ pub fn settle_tick(
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        max_head_diff = max_head_diff.max((head_c - heightmap.data[nb_idx]).abs());
                         if edge_sleeps(
                             head_c - heightmap.data[nb_idx], 0.0, edge_vel_v[center_idx],
                             h_a, h_b, cap_c - h_a, cap_b - h_b,
@@ -1616,14 +1642,40 @@ pub fn settle_tick(
                         }
                     }
 
-                    // Block-activation bookkeeping, unchanged in spirit from the old wave path:
-                    // `max_flux` plays the role the per-cell velocity used to, and a cell whose
-                    // height still differs from the resting bed keeps its neighbourhood awake so
-                    // a travelling wave is not cut off at a block boundary.
-                    let disturbance = (temp_heights[center_idx] - crate::DEFAULT_SAND_HEIGHT).abs();
-                    if max_flux > 3e-4 || disturbance > 1e-4 {
+                    // Block-activation bookkeeping. `max_flux` plays the role the per-cell
+                    // velocity used to, and the head difference keeps a cell's neighbourhood awake
+                    // so a travelling wave is not cut off at a block boundary: an edge that is
+                    // about to move mass next tick has a head to move it with, and this is that
+                    // head — literally `edge_sleeps`' branch-2 driving term, so the wake magnitude
+                    // and the sleep predicate now agree on what "something is happening here"
+                    // means.
+                    //
+                    // It used to be `|temp_heights[center] - DEFAULT_SAND_HEIGHT|`, an *absolute
+                    // level*, and that is a category error that the coarse 0.1 must-simulate bar
+                    // in `settle_tick`'s scheduler was covering for. A pool is only at
+                    // DEFAULT_SAND_HEIGHT by coincidence — the user's bed is wherever they poured
+                    // it — so a perfectly flat, perfectly still pool at any other level reported a
+                    // constant nonzero "disturbance" forever, and the only reason that was not
+                    // ruinous is that the bar sat above a typical offset. Measured on a settled
+                    // 256x256 pool, MUST block-ticks over a staleness period (7680 = the whole
+                    // domain): level magnitude gave 7680 at a 0.50 bed under either bar, and 0 at a
+                    // 0.35 bed purely because that is the constant written into the expression;
+                    // the head difference gives 0 at both.
+                    //
+                    // Level-based also gets the ripple itself backwards. The quantity that must
+                    // clear the bar is the wavefront's, and a low-amplitude ripple's height
+                    // deviation is ~1e-3 — a thousand times under the old 0.1 bar — so wavefront
+                    // blocks were never MUST, fell into `rest_candidates` and were scheduled by
+                    // `staleness * displacement`, which for a small deviation sorts to the bottom
+                    // of the queue. The front then advanced only when a block aged out at
+                    // MAX_STALENESS, which is the reported bug: waves that "freeze half way
+                    // through" and jerk forward sporadically. Reach scaled with the simulation
+                    // budget instead of with the wave speed — on a 235-column pool the disturbance
+                    // died at column 148 at budget 32 and 200 at budget 64, against 245 (the wall)
+                    // at 256. See `test_sandbox_wave_reach_is_budget_independent`.
+                    if max_flux > 3e-4 || max_head_diff > 1e-4 {
                         flow_occurred = true;
-                        let flow_val = max_flux.max(disturbance);
+                        let flow_val = max_flux.max(max_head_diff);
                         activate_neighbor(b, flow_val, &mut modified, &mut next_displacements);
                         if bx > 0 { activate_neighbor(b - 1, flow_val, &mut modified, &mut next_displacements); }
                         if bx + 1 < cols { activate_neighbor(b + 1, flow_val, &mut modified, &mut next_displacements); }
@@ -4490,6 +4542,189 @@ mod tests {
              ever recovered to {:+.6}. The boundary swallowed the wave instead of reflecting it",
             far_peak_t, near_return
         );
+    }
+
+    #[test]
+    // THE regression test for "waves in sandbox don't continue to the edge, they freeze half way
+    // through" — and the one thing the four tests above structurally cannot see.
+    //
+    // Those tests run a wave, but never through the block scheduler:
+    //   * `TestSim::new` sets `last_displacements` to 1.0 everywhere, so every block is MUST on
+    //     tick 1 whatever the wake magnitude says, and
+    //   * their pools sit at 0.50, which is 0.15 above DEFAULT_SAND_HEIGHT — above the old 0.1
+    //     MUST bar — so under the old `|h - DEFAULT_SAND_HEIGHT|` wake magnitude every block was
+    //     MUST on *every* tick for the whole run. Measured on the pre-fix code, a settled 256x256
+    //     pool at 0.50: 7680 of 7680 MUST block-ticks over a staleness period. They measured a
+    //     solver with the LOD switched off.
+    //
+    // So this test does the two things they don't: it puts the pool at the level the app actually
+    // starts at (DEFAULT_SAND_HEIGHT — `sandart/src/main.rs` fills the bed with it), and it arms
+    // *only* the blocks the disturbance was drawn into, leaving the rest of the domain asleep and
+    // the scheduler in charge of waking it.
+    //
+    // The assertion is not "the wave arrives" but "the wave arrives at the same time regardless of
+    // how much simulation budget there is". Propagation speed is a property of the medium; a
+    // scheduler is an optimisation and optimisations do not get to change physics. Reach tracking
+    // the budget is the exact signature of the bug, and byte-identical reach across two budgets is
+    // the exact signature of it being gone.
+    //
+    // Measured, 1200 ticks, mask spanning columns 11..245, reach = furthest column ever deviating
+    // > 2e-3 from where it started:
+    //
+    //     budget | before                   | after
+    //     -------+--------------------------+--------------------------
+    //       32   | column 148, far peak 0   | column 245, far peak 0.00775
+    //       64   | column 200, far peak 0   | column 245, far peak 0.00775
+    //      256   | column 245               | column 245, far peak 0.00779
+    //
+    // Before, the far column's deviation was *exactly* 0.00000 for all 1200 ticks at budget 32 and
+    // 64: not a slow wave, a stopped one. After, budgets 32 and 64 agree to the bit. Budget 256 is
+    // allowed to differ in the last digits — it simulates the sub-threshold rest candidates too,
+    // which is a different (larger) set of floating-point additions, not a different wave.
+    fn test_sandbox_wave_reach_is_budget_independent() {
+        let (w, h, bs) = (256, 256, 16);
+        let cols = (w + bs - 1) / bs;
+
+        // Returns (mask extent, furthest column the disturbance ever reached, that column's peak).
+        let run = |budget: usize| -> (usize, usize, usize, f32) {
+            let mut sim = wave_pool(w, h, bs, SandboxShape::Square, crate::DEFAULT_SAND_HEIGHT);
+            let (mut x_lo, mut x_hi) = (w, 0usize);
+            for x in 0..w {
+                if sim.mask[(h / 2) * w + x] != crate::MASK_OUTSIDE {
+                    x_lo = x_lo.min(x);
+                    x_hi = x_hi.max(x);
+                }
+            }
+            // y-uniform crest hard against the left wall, so this is a 1-D channel and "reached
+            // the far wall" cannot be confused with "spread out sideways" (same reasoning as
+            // `test_sandbox_wave_reflects_off_boundary`).
+            add_band_bump(&mut sim, w, h, x_lo as f32 + 4.0, 0.30, 3.0);
+
+            // The load-bearing line: only the blocks that actually hold the crest start awake.
+            // Everything ahead of the wavefront must be woken by the solver's own activation
+            // bookkeeping, which is the machinery under test.
+            sim.last_displacements.fill(0.0);
+            for y in 0..h {
+                for x in 0..w {
+                    let i = y * w + x;
+                    if sim.mask[i] != crate::MASK_OUTSIDE
+                        && (sim.hm.data[i] - crate::DEFAULT_SAND_HEIGHT).abs() > 1e-6
+                    {
+                        sim.last_displacements[(y / bs) * cols + (x / bs)] = 1.0;
+                    }
+                }
+            }
+
+            let column = |s: &TestSim, x: usize| -> f32 {
+                let (mut sum, mut n) = (0.0f32, 0usize);
+                for y in 0..h {
+                    let i = y * w + x;
+                    if s.mask[i] != crate::MASK_OUTSIDE {
+                        sum += s.hm.data[i];
+                        n += 1;
+                    }
+                }
+                sum / n.max(1) as f32
+            };
+            let base: Vec<f32> = (0..w).map(|x| column(&sim, x)).collect();
+            let mut peak = vec![0.0f32; w];
+            for _ in 0..1200u32 {
+                sim.tick(glam::Vec2::ZERO, budget);
+                for x in 0..w {
+                    peak[x] = peak[x].max((column(&sim, x) - base[x]).abs());
+                }
+            }
+            let reach = (x_lo..=x_hi).filter(|&x| peak[x] > 2e-3).max().unwrap_or(x_lo);
+            (x_lo, x_hi, reach, peak[x_hi])
+        };
+
+        // Only the two throttled budgets are run. Budget 256 reaches the wall even on the
+        // pre-fix code — it simulates everything, so it never exercised the scheduler path this
+        // test exists for — and it costs a third of the runtime. Measured at 256 when the fix
+        // landed: reach 245, far peak 0.00779.
+        let (x_lo, x_hi, reach_32, far_32) = run(32);
+        let (_, _, reach_64, far_64) = run(64);
+        println!(
+            "test_sandbox_wave_reach_is_budget_independent: mask x {}..{}; \
+             reach/far-peak = {}/{:.5} at budget 32, {}/{:.5} at 64",
+            x_lo, x_hi, reach_32, far_32, reach_64, far_64
+        );
+
+        for (budget, reach, far) in [(32, reach_32, far_32), (64, reach_64, far_64)] {
+            assert_eq!(
+                reach, x_hi,
+                "At budget {} the disturbance stalled at column {} of {} and never reached the \
+                 wall (that wall column only ever moved by {:.6}). The wave solver is not the \
+                 suspect: check that the g = 0 liquid branch's wake magnitude is the head \
+                 difference across the cell's owned edges, and that the scheduler's Sandbox \
+                 must-simulate threshold is low enough for a ripple-sized head to clear it.",
+                budget, reach, x_hi, far
+            );
+            assert!(
+                far > 2e-3,
+                "At budget {} the far wall column only ever moved by {:.6}", budget, far
+            );
+        }
+
+        // The sharp one. Two budgets, one wave, bit for bit.
+        assert_eq!(
+            (reach_32, far_32.to_bits()), (reach_64, far_64.to_bits()),
+            "Propagation still depends on the simulation budget: reach {}/far peak {:.6} at \
+             budget 32 versus reach {}/far peak {:.6} at 64. The wavefront is being scheduled \
+             rather than simulated.",
+            reach_32, far_32, reach_64, far_64
+        );
+    }
+
+    #[test]
+    // The other half of the fix, and the reason it could not be "just lower the threshold".
+    //
+    // The scheduler's Sandbox must-simulate bar was 0.1 — 1000x gravity's — purely because the
+    // liquid wake magnitude it read was an absolute level, `|h - DEFAULT_SAND_HEIGHT|`. A pool is
+    // at DEFAULT_SAND_HEIGHT only by coincidence: the user pours wherever they pour. So lowering
+    // the bar alone makes a still, flat, utterly quiet pool at any other level report every block
+    // as MUST forever — measured on this exact 256x256 setup at level 0.50: 7680 of 7680 MUST
+    // block-ticks over a staleness period, the whole domain, permanently, with nothing moving.
+    // That is worse than the bug: it burns the entire budget every tick to simulate a flat pool.
+    //
+    // A head *difference* across the cell's owned edges is zero for a flat pool at every level, so
+    // it is safe to compare against a threshold 1000x finer. Both levels below now measure 0 MUST
+    // block-ticks. On the pre-fix code the same two runs measured 0 at 0.35 — only because that is
+    // the constant the wake magnitude subtracted, so it is no evidence of anything — and the full
+    // 7680 at 0.50, which is why this test checks a level the solver has no special knowledge of
+    // as well as the one it does.
+    fn test_settled_sandbox_pool_does_not_stay_hot() {
+        let (w, h, bs) = (256, 256, 16);
+        let cols = (w + bs - 1) / bs;
+        let rows = (h + bs - 1) / bs;
+        let block_ticks = cols * rows * 30;
+
+        for &level in &[crate::DEFAULT_SAND_HEIGHT, 0.50f32] {
+            let mut sim = wave_pool(w, h, bs, SandboxShape::Square, level);
+            let mut must = 0usize;
+            // Long enough for the initial all-awake state to drain; then count MUST blocks over a
+            // whole staleness period, so a block that merely ages back in is not mistaken for one
+            // the wake magnitude is holding hot.
+            for t in 0..300u32 {
+                sim.tick(glam::Vec2::ZERO, 256);
+                if t >= 270 {
+                    must += sim.active_blocks.iter()
+                        .filter(|&&a| a == crate::BlockActivity::Fast).count();
+                }
+            }
+            println!(
+                "test_settled_sandbox_pool_does_not_stay_hot: level={:.2} must={} of {}",
+                level, must, block_ticks
+            );
+            assert_eq!(
+                must, 0,
+                "A flat, still pool at level {:.2} keeps {} of {} block-ticks MUST-simulate. The \
+                 liquid wake magnitude has become a level again rather than a head difference: \
+                 anything that does not return to zero for a pool at rest *at any level* makes \
+                 the whole domain permanently hot at this threshold.",
+                level, must, block_ticks
+            );
+        }
     }
 
     #[test]
