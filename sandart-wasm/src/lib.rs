@@ -320,6 +320,14 @@ impl WasmSimulationState {
     /// UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
     /// selection even while in Sandbox (so it's remembered if the user switches back to
     /// Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
+    /// EXPERIMENT: simulate u8 colour storage by stochastically rounding every blend back to
+    /// an integer. Unbiased, so conservation is unaffected; the thing to watch for is patterns
+    /// diffusing over time. Off by default.
+    pub fn set_color_u8_dynamics(&mut self, on: bool) {
+        sandart_sim::physics::COLOR_U8_DYNAMICS
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Dither amplitude for the f32 -> u8 colour conversion. 0.0 = plain rounding,
     /// 1.0 = true stochastic rounding, higher = coarser grain.
     pub fn set_color_dither(&mut self, strength: f32) {

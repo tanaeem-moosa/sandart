@@ -22,6 +22,40 @@ pub struct ActiveMarbleInfo {
 use crate::{PROP_WETNESS, PROP_THRESHOLD, PROP_FLOW_RATE, PROP_GRAIN_SIZE};
 
 /// Advect color and properties from src cell to dst cell based on the flow amount and dst cell's height before arrival
+/// EXPERIMENT toggle: when true, every colour blend is stochastically rounded back to an
+/// integer, reproducing the *dynamics* of storing colour as `u8` while leaving the buffer as
+/// `f32`. This exists so the u8-storage question can be answered by looking at it rather than
+/// by rewriting the colour plumbing; flip it off and the behaviour is exactly the f32 solver.
+///
+/// Note the seeding requirement is the opposite of the display dither's. The display dither is
+/// hashed on cell position and must be *stable*, or a still image crawls. This one must *vary
+/// per event*: a fixed per-cell threshold would reintroduce the systematic erasure that u8
+/// rounding had, because a cell nudged by less than its own threshold would never flip, no
+/// matter how many times it was nudged. Seeded from the flow magnitude's bits, which vary
+/// naturally between transfers.
+///
+/// The expected failure mode is not bias — this is unbiased, so mass and colour totals stay
+/// conserved and every conservation test will keep passing. It is *diffusion*: each blend adds
+/// roughly +/-0.5 LSB of noise, and with the flux solver performing far more advection events
+/// than the old CA, that random walk accumulates into spatial blur over thousands of ticks.
+/// Watch for patterns smearing, not for anything the test suite can catch.
+pub static COLOR_U8_DYNAMICS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[inline]
+fn stochastic_round(v: f32, entropy: u32) -> f32 {
+    let floor = v.floor();
+    let frac = v - floor;
+    let mut h = entropy;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^= h >> 16;
+    let r = (h >> 8) as f32 / 16_777_216.0; // [0, 1)
+    if r < frac { floor + 1.0 } else { floor }
+}
+
 pub fn advect_properties(colors: &mut [f32], props: &mut [f32], src: usize, dst: usize, flow: f32, h_dst: f32) {
     let total = h_dst + flow;
     if total < 1e-6 {
@@ -40,11 +74,20 @@ pub fn advect_properties(colors: &mut [f32], props: &mut [f32], src: usize, dst:
         let w_keep = h_dst / total;
         let w_arrive = flow / total;
 
+        let u8_dynamics = COLOR_U8_DYNAMICS.load(std::sync::atomic::Ordering::Relaxed);
         for ch in 0..3 {
-            colors[dst_base + ch] = (
+            let blended = (
                 colors[dst_base + ch] * w_keep
                 + colors[src_base + ch] * w_arrive
             ).clamp(0.0, 255.0);
+            colors[dst_base + ch] = if u8_dynamics {
+                // Vary the draw per transfer and per channel, so repeated sub-LSB nudges
+                // accumulate in expectation instead of being discarded every time.
+                let entropy = flow.to_bits() ^ (dst as u32).wrapping_mul(2_654_435_761) ^ (ch as u32).wrapping_mul(97);
+                stochastic_round(blended, entropy)
+            } else {
+                blended
+            };
         }
         colors[dst_base + 3] = 255.0; // opaque alpha
 
