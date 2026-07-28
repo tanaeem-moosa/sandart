@@ -182,6 +182,13 @@ pub struct DrawingSimulation {
     pub shape_mask: Vec<u8>,
     /// Set to true when the shape_mask has been regenerated and needs GPU re-upload.
     pub shape_mask_dirty: bool,
+    /// Whether the apparatus is currently upside down. Consumed by `generate_shape_mask` (it
+    /// negates `dy` in the shape evaluator), so the *structure* inverts along with its contents
+    /// — asymmetric shapes like StaircaseCascade and the Serpentine stages used to keep their
+    /// original orientation while the sand mirrored into them. Stored rather than applied to the
+    /// mask in place because the mask is rebuilt from scratch whenever neck width, curvature or
+    /// the shape itself changes, which would silently discard an in-place mirror.
+    pub flipped: bool,
 
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
@@ -341,6 +348,7 @@ impl DrawingSimulation {
             hourglass_curve: 0.6,
             shape_mask: vec![MASK_OUTSIDE; GRID_SIZE * GRID_SIZE],
             shape_mask_dirty: true,
+            flipped: false,
             active_blocks,
             last_displacements,
             last_simulated_ticks,
@@ -371,6 +379,7 @@ impl DrawingSimulation {
                     self.sandbox_shape,
                     self.neck_width,
                     self.hourglass_curve,
+                    self.flipped,
                 );
                 self.shape_mask[offset + x] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
             }
@@ -410,6 +419,9 @@ impl DrawingSimulation {
 
     /// Reset the simulation state.
     pub fn reset(&mut self) {
+        // A reset returns the apparatus to its upright orientation, so clear this before
+        // rebuilding the mask rather than resetting into whatever way up it was left.
+        self.flipped = false;
         self.generate_shape_mask();
         if matches!(
             self.sandbox_shape,
@@ -534,6 +546,16 @@ impl DrawingSimulation {
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
         self.column_depth.fill(0.0);
+
+        // Turn the *structure* over too, not just what is in it. Symmetric shapes are unaffected
+        // by construction; the asymmetric ones (StaircaseCascade's alternating shelves, the
+        // Serpentine's three offset stages, ProceduralFunnel's noise) used to stay upright while
+        // their contents mirrored into them.
+        //
+        // This must run BEFORE the out-of-bounds cleanup below, or that loop culls the mirrored
+        // sand against the *old* geometry and deletes mass that the new geometry has room for.
+        self.flipped = !self.flipped;
+        self.generate_shape_mask();
 
         // Clean up any sand outside the shape boundary so no specs stay trapped outside/above ceiling
         for y in 0..h {
@@ -999,6 +1021,18 @@ impl HeightmapSimulation for DrawingSimulation {
 mod tests {
     use super::*;
 
+    /// Every shape offered under the "Sand-fall Funnels" group in the UI. Kept in one place so a
+    /// new funnel is covered by the geometry and mass-conservation tests by default rather than
+    /// by remembering to add it to each.
+    const SANDFALL_FUNNEL_SHAPES: [SandboxShape; 6] = [
+        SandboxShape::Hourglass,
+        SandboxShape::MultiStageHourglass,
+        SandboxShape::GaltonBoard,
+        SandboxShape::StaircaseCascade,
+        SandboxShape::ProceduralFunnel,
+        SandboxShape::MultiNeckHourglass,
+    ];
+
     #[test]
     fn test_simulation_reset() {
         let mut sim = DrawingSimulation::new();
@@ -1289,6 +1323,170 @@ mod tests {
     }
 
     #[test]
+    // `test_serpentine_no_sand_leaking` pinned exactly one shape. Every funnel geometry has the
+    // same failure mode — a shelf, peg or neck that does not quite close lets sand cross into
+    // MASK_OUTSIDE, where `settle_tick`'s mask guards freeze it permanently — so all of them are
+    // worth the same check, and the ones whose geometry just changed most of all: the Galton peg
+    // lattice, the three-neck hourglass and the finer staircase.
+    //
+    // Run at the default neck width only — sweeping the slider here costs 20s of suite time, and
+    // what the slider actually threatens is *geometric* (necks merging, shelves fusing into a
+    // dam), which `test_sandfall_funnel_geometry_has_no_dam` checks across the full travel for
+    // free.
+    fn test_all_sandfall_funnels_conserve_sand_mass() {
+        for shape in SANDFALL_FUNNEL_SHAPES {
+            let mut sim = super::DrawingSimulation::new();
+            sim.sandbox_shape = shape;
+            sim.gravity_dir = Vec2::new(0.0, 0.04);
+            sim.initialize_hourglass();
+
+            let initial_mass: f32 = sim.heightmap.data.iter().sum();
+            assert!(initial_mass > 0.0, "{:?}: initialized with no sand at all", shape);
+
+            let targets = [None; 5];
+            for _ in 0..300 {
+                sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, shape, 16.0, 16.0);
+            }
+
+            let final_mass: f32 = sim.heightmap.data.iter().sum();
+            let mass_err = (final_mass - initial_mass).abs() / initial_mass;
+            assert!(
+                mass_err < 0.0001,
+                "{:?}: leaked sand through the geometry. init={:.4} final={:.4} err={:.6}",
+                shape, initial_mass, final_mass, mass_err
+            );
+        }
+    }
+
+    #[test]
+    // The geometric companion to the mass test above, and the one that actually covers the
+    // neck-width slider: pure mask inspection, so all three shapes x the full slider travel costs
+    // nothing to run.
+    //
+    // The failure it exists for is the staircase. Consecutive shelves alternate slope sign and
+    // which wall they attach to, so they converge at the shared inner edge; reduce the step
+    // spacing without reducing the slope to match and neighbouring shelves fuse into one thick
+    // slab. Sand still gets past — every shelf leaves an open side — so this is not a leak and
+    // the mass test above sails straight through it. What is lost is the staircase itself: ask
+    // for 13 steps, see six fat ones.
+    //
+    // Measured as the thickest unbroken run of wall down any column. A single shelf is 7 cells
+    // (half-thickness 3.5 either side of its centre line); a fused pair is twice that. There is
+    // no ambiguity between the two — measured on the shipped grid, the 0.04..0.08 slope gives a
+    // maximum run of exactly 7 and the old 0.10..0.20 slope at this step count gives exactly 14,
+    // at dx = -102, right where the model above says the two shelves cross.
+    //
+    // Note it has to scan the full width, not the middle. Consecutive shelves are separated by
+    // `step_spacing - 2 * dx * slope`, which is at its largest on the axis and only closes near
+    // the attach edge at dx ~ +/-98 — sampling near the centre, as an earlier version of this
+    // test did, reports every configuration as healthy including one with shelves visibly fused.
+    fn test_staircase_steps_stay_separated() {
+        let mut sim = super::DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::StaircaseCascade;
+        sim.generate_shape_mask();
+
+        let w = GRID_SIZE;
+        let h = GRID_SIZE;
+        // Scanning only between the first and last row holding any interior keeps the box's own
+        // top and bottom casing out of the measurement; within that band, at any column, the only
+        // wall is shelf.
+        let occupied: Vec<usize> = (0..h)
+            .filter(|&y| (0..w).any(|x| sim.shape_mask[y * w + x] != MASK_OUTSIDE))
+            .collect();
+        let (first, last) = (occupied[0], *occupied.last().unwrap());
+
+        let mut worst_run = 0usize;
+        let mut worst_x = 0usize;
+        for x in 0..w {
+            if !(first..=last).any(|y| sim.shape_mask[y * w + x] != MASK_OUTSIDE) {
+                continue; // column is entirely outside the box
+            }
+            let mut run = 0usize;
+            for y in first..=last {
+                if sim.shape_mask[y * w + x] == MASK_OUTSIDE {
+                    run += 1;
+                    if run > worst_run {
+                        worst_run = run;
+                        worst_x = x;
+                    }
+                } else {
+                    run = 0;
+                }
+            }
+        }
+
+        assert!(
+            worst_run <= 10,
+            "StaircaseCascade has a {}-cell-thick wall run at x={} (dx={}); one shelf is 7, so \
+             consecutive shelves have fused into a slab and the cascade has fewer, fatter steps \
+             than the 13 configured",
+            worst_run,
+            worst_x,
+            worst_x as i32 - (w as i32 / 2)
+        );
+    }
+
+    #[test]
+    // Flipping the apparatus must invert the *structure*, not only its contents. The mask used
+    // to be left untouched, so an asymmetric shape kept its original orientation while the sand
+    // mirrored into it — shelves that had been catching sand were suddenly upside down relative
+    // to the pile sitting on them.
+    //
+    // Checked structurally rather than by running sand: the flipped mask must equal the upright
+    // mask mirrored about `center_y = h / 2`, which is the same axis `flip_hourglass` mirrors the
+    // contents about (`y2 = h - y`). If those two axes ever drift apart the sand lands inside the
+    // walls, so this pins them together.
+    fn test_flip_inverts_the_structure_not_just_the_sand() {
+        for shape in [
+            SandboxShape::StaircaseCascade,
+            SandboxShape::MultiStageHourglass,
+            SandboxShape::ProceduralFunnel,
+        ] {
+            let mut sim = super::DrawingSimulation::new();
+            sim.sandbox_shape = shape;
+            sim.generate_shape_mask();
+            let upright = sim.shape_mask.clone();
+
+            sim.flip_hourglass();
+            let flipped = sim.shape_mask.clone();
+
+            let w = GRID_SIZE;
+            let h = GRID_SIZE;
+            let (mut compared, mut mismatched) = (0usize, 0usize);
+            for y in 1..h {
+                for x in 0..w {
+                    compared += 1;
+                    if flipped[y * w + x] != upright[(h - y) * w + x] {
+                        mismatched += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                mismatched, 0,
+                "{:?}: flipped mask is not the mirror of the upright one ({} of {} cells differ)",
+                shape, mismatched, compared
+            );
+
+            // ...and the flip has to be a real change for these shapes, or the assertion above
+            // would pass just as happily against a mask that never moved.
+            let differs = upright.iter().zip(&flipped).filter(|(a, b)| a != b).count();
+            assert!(
+                differs > 0,
+                "{:?}: mask is identical after flipping, so nothing was actually inverted",
+                shape
+            );
+
+            // Flipping twice returns to the original orientation.
+            sim.flip_hourglass();
+            assert_eq!(
+                sim.shape_mask, upright,
+                "{:?}: two flips did not return the structure to upright",
+                shape
+            );
+        }
+    }
+
+    #[test]
     fn test_serpentine_no_sand_leaking() {
         let mut sim = super::DrawingSimulation::new();
         sim.sandbox_shape = SandboxShape::MultiStageHourglass;
@@ -1351,6 +1549,59 @@ mod tests {
     }
 
     #[test]
+    // A Galton board only does anything if every grain is forced to hit a peg and pick a side.
+    // Sand used to fall straight through it in visible vertical lines, for two compounding
+    // reasons, both of which this pins:
+    //
+    //  1. The row stagger was a no-op. Rows were centred on their own peg count, and
+    //     `(count - 1) / 2` with `count = row + 3` is a half-integer on exactly the odd rows —
+    //     the same rows an explicit `spacing * 0.5` offset shifted — so the two cancelled and
+    //     every peg of every row landed on a multiple of the spacing.
+    //  2. Even staggered, the pegs were too small to close the gap: the union of two rows offset
+    //     by `s / 2` covers the line only when the radius is at least `s / 4`, and the radius was
+    //     1.8 against a spacing of 8.
+    //
+    // The metric is what the user actually sees: a column of the board with no obstruction
+    // anywhere down it. Measured on the shipped geometry before the fix, four such shafts about
+    // 4.2 cells wide sat between every pair of peg columns.
+    fn test_galton_board_has_no_clear_vertical_shafts() {
+        let mut sim = super::DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::GaltonBoard;
+        sim.generate_shape_mask();
+
+        let w = GRID_SIZE;
+        let h = GRID_SIZE;
+        // The peg field lives below the neck, in `dy` in (6, 0.38 * h) — see the GaltonBoard arm
+        // of `eval_sandbox_shape`. Sample the interior of that band only, so the funnel's own
+        // taper cannot be mistaken for an obstruction.
+        let y_lo = h / 2 + 8;
+        let y_hi = h / 2 + (0.34 * h as f32) as usize;
+
+        let mut open_shafts = Vec::new();
+        for x in 0..w {
+            // Only columns that are actually open at the top of the band can be a shaft; a column
+            // buried in the wall is not sand's path.
+            if sim.shape_mask[y_lo * w + x] == MASK_OUTSIDE {
+                continue;
+            }
+            let blocked = (y_lo..y_hi).any(|y| sim.shape_mask[y * w + x] == MASK_OUTSIDE);
+            if !blocked {
+                open_shafts.push(x);
+            }
+        }
+
+        assert!(
+            open_shafts.is_empty(),
+            "Sand falls straight through the Galton board at {} column(s) {:?} — no peg obstructs \
+             them anywhere between rows {} and {}",
+            open_shafts.len(),
+            open_shafts,
+            y_lo,
+            y_hi
+        );
+    }
+
+    #[test]
     fn test_quantile_lines_descend_as_hourglass_drains() {
         let mut sim = DrawingSimulation::new();
         sim.sandbox_shape = SandboxShape::Hourglass;
@@ -1407,3 +1658,4 @@ mod tests {
         assert!(sim.quantile_positions().is_empty());
     }
 }
+

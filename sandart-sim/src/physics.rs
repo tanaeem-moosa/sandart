@@ -991,11 +991,18 @@ pub fn eval_sandbox_shape(
     shape: crate::SandboxShape,
     neck_width: f32,
     hourglass_curve: f32,
+    flipped: bool,
 ) -> (bool, bool) {
     let center_x = w as f32 / 2.0;
     let center_y = h as f32 / 2.0;
     let dx = cx as f32 - center_x;
-    let dy = cy as f32 - center_y;
+    // Turning the apparatus over inverts the *structure*, not just its contents. Every shape
+    // below is written in terms of `dy`, so negating it here mirrors the geometry about
+    // `center_y` and nothing else needs to know. Negating the continuous `dy` rather than
+    // remapping the integer row is what keeps this consistent with `flip_hourglass`'s content
+    // mirror (`y2 = h - y`, i.e. the same axis at `h / 2`) and well defined for row 0, which
+    // has no partner row under that mapping.
+    let dy = (cy as f32 - center_y) * if flipped { -1.0 } else { 1.0 };
     let w_f = w as f32;
     let h_f = h as f32;
 
@@ -1081,22 +1088,39 @@ pub fn eval_sandbox_shape(
                 }
                 
                 if dy > 6.0 && dy < 0.38 * h_f {
-                    let spacing = 8.0;
-                    let row = ((dy - 6.0) / spacing) as i32;
-                    let peg_radius_sq = 1.8 * 1.8;
-                    let row_y = 6.0 + row as f32 * spacing;
-                    if (dy - row_y).abs() < 2.0 {
-                        let count = row + 3;
-                        let offset_x = if row % 2 == 1 { spacing * 0.5 } else { 0.0 };
-                        let start_x = - (count as f32 - 1.0) * spacing * 0.5 + offset_x;
-                        for i in 0..count {
-                            let peg_x = start_x + i as f32 * spacing;
-                            let pdx = dx - peg_x;
-                            let pdy = dy - row_y;
-                            if pdx * pdx + pdy * pdy < peg_radius_sq {
-                                return (false, false);
-                            }
-                        }
+                    // Pegs sit on a fixed lattice with a genuine half-spacing stagger between
+                    // consecutive rows, so no column of the board is ever clear from top to
+                    // bottom.
+                    //
+                    // The previous arrangement centred each row on its own peg count and then
+                    // added an explicit half-spacing offset on odd rows. `(count - 1) / 2` with
+                    // `count = row + 3` is a half-integer on exactly those odd rows, so it had
+                    // already shifted them by half a spacing and the explicit offset cancelled it:
+                    // every peg of every row landed on a multiple of `spacing`, leaving open
+                    // shafts 4.2 cells wide that sand fell straight down without ever being
+                    // deflected. The same count-based centring also pushed the odd rows off-axis
+                    // (row 1 spanned -8..16 rather than being symmetric about 0).
+                    //
+                    // Deriving the peg from the lattice instead of enumerating a row's pegs also
+                    // drops the inner loop: the only candidate is the nearest lattice column.
+                    // The triangular Galton silhouette still emerges on its own, because the
+                    // `allowed_hw` test above has already rejected anything outside the funnel and
+                    // the funnel widens with depth.
+                    const PEG_SPACING: f32 = 8.0;
+                    // Staggered rows only close the gap if a peg is at least a quarter of a
+                    // spacing wide: even rows cover `[j*s - r, j*s + r]`, odd rows the same
+                    // shifted by `s/2`, and the union has no gap exactly when `r >= s/4`. At the
+                    // old `r = 1.8` against `s = 8` a 0.4-wide shaft survived at every `8j +- 2`
+                    // even once the stagger was fixed, so the radius has to move too.
+                    const PEG_RADIUS: f32 = 2.2;
+                    let row = ((dy - 6.0) / PEG_SPACING).round();
+                    let row_y = 6.0 + row * PEG_SPACING;
+                    let stagger = if (row as i32) % 2 != 0 { PEG_SPACING * 0.5 } else { 0.0 };
+                    let peg_x = ((dx - stagger) / PEG_SPACING).round() * PEG_SPACING + stagger;
+                    let pdx = dx - peg_x;
+                    let pdy = dy - row_y;
+                    if pdx * pdx + pdy * pdy < PEG_RADIUS * PEG_RADIUS {
+                        return (false, false);
                     }
                 }
                 let is_safe = dx.abs() < (allowed_hw - 1.5).max(1.0) && dy_abs < (chamber_h - 1.5);
@@ -1116,14 +1140,33 @@ pub fn eval_sandbox_shape(
             // original fixed 4, each with a slightly randomized slope (deterministic per
             // step index) plus a randomized gap ("hole") sand can filter straight through,
             // in addition to the usual open side at the end of each shelf.
-            let step_count: i32 = 8;
+            // Smaller steps: 13 shelves over the same span rather than 8, so each drop is ~31
+            // cells instead of ~53.
+            //
+            // The slope had to come down with it, and by more than it first looks. Consecutive
+            // shelves alternate both their slope sign and which wall they attach to, so they
+            // approach each other at the shared inner edge, `attach_limit`. The vertical gap
+            // there is `step_spacing - 2 * attach_limit * slope_max - shelf_thickness`, and it has
+            // to stay comfortably positive or two shelves fuse into one solid slab that dams the
+            // cascade. Worked at the shipped 512 grid:
+            //
+            //   steps  slope_max  spacing  clearance
+            //       8       0.20     52.7        6.3   <- previous, already near collision
+            //      13       0.10     30.7        4.0   too tight
+            //      13       0.08     30.7        8.0   <- this
+            //      15       0.08     26.3        3.6   too tight
+            //
+            // So 13 steps at a 0.04..0.08 slope is both finer *and* has more clearance than the
+            // 8-step version it replaces. Raising the count further needs a shallower slope than
+            // still reads as a slope.
+            let step_count: i32 = 13;
             let attach_limit = 0.20 * w_f;
             let y_start = -0.36 * h_f;
             let step_spacing = 0.72 * h_f / (step_count as f32 - 1.0);
 
             for k in 0..step_count {
                 let y_k = y_start + k as f32 * step_spacing;
-                let slope_mag = 0.10 + 0.10 * step_hash(k as u32 * 3);
+                let slope_mag = 0.04 + 0.04 * step_hash(k as u32 * 3);
                 let slope = if k % 2 == 0 { slope_mag } else { -slope_mag };
                 let y_shelf = y_k + dx * slope;
                 if (dy - y_shelf).abs() < 3.5 {
@@ -1135,7 +1178,9 @@ pub fn eval_sandbox_shape(
                         (-attach_limit + 4.0, max_hw - 4.0)
                     };
                     let hole_center = span_lo + step_hash(k as u32 * 3 + 1) * (span_hi - span_lo);
-                    let hole_width = (0.05 + 0.05 * step_hash(k as u32 * 3 + 2)) * w_f;
+                    // Scaled down alongside the step size so a hole stays a hole rather than
+                    // becoming most of the shelf it is cut into.
+                    let hole_width = (0.035 + 0.035 * step_hash(k as u32 * 3 + 2)) * w_f;
                     let in_hole = (dx - hole_center).abs() < hole_width * 0.5;
 
                     if is_left_attached && dx < attach_limit && !in_hole {
@@ -1187,20 +1232,38 @@ pub fn eval_sandbox_shape(
             // pull apart into two distinct openings approaching the pinch line, forming a
             // "W" (draining) / "M" (refilling) silhouette.
             let chamber_h = 0.40 * h_f;
-            let max_hw = 0.30 * w_f;
-            let neck_offset = 0.15 * w_f;
+            // THREE necks rather than two. A symmetric pair reads unmistakably as a bust; an odd
+            // count does not, and the centre neck also gives the silhouette a "W"/"M" with a
+            // middle spike instead of a single cleavage.
+            //
+            // The spacing is set by the neck-width slider's top end, not by looks. Adjacent necks
+            // merge into one opening once `neck_hw` exceeds half the spacing, so with the slider
+            // capped at 0.12 the necks stay distinct across its whole range only if the spacing is
+            // above 0.24 * w. `0.22 * w` keeps them separate to 0.11 and lets them merge in the
+            // last sliver of slider travel, which is the graceful end of that trade — a very wide
+            // neck *should* read as one mouth.
+            //
+            // `max_hw` drops 0.30 -> 0.24 to pay for the wider spacing: the outermost extent is
+            // `neck_offset + max_hw`, and it has to stay inside the same 0.46 * w the other shapes
+            // respect. At 0.22 + 0.24 = 0.46 the chambers still overlap (each neck's top spans
+            // +/- 0.24 about a centre 0.22 away from its neighbour), so the tops fuse into one
+            // continuous chamber exactly as the two-neck version did.
+            let max_hw = 0.24 * w_f;
+            let neck_offset = 0.22 * w_f;
             let dy_abs = dy.abs();
             if dy_abs < chamber_h {
                 let t = dy_abs / chamber_h;
                 let neck_hw = neck_width * w_f;
                 let allowed_hw = neck_hw + t.powf(hourglass_curve) * (max_hw - neck_hw);
-                let dist_left = (dx + neck_offset).abs();
-                let dist_right = (dx - neck_offset).abs();
-                if dist_left >= allowed_hw && dist_right >= allowed_hw {
+                let nearest_neck = [-neck_offset, 0.0, neck_offset]
+                    .iter()
+                    .map(|c| (dx - c).abs())
+                    .fold(f32::INFINITY, f32::min);
+                if nearest_neck >= allowed_hw {
                     return (false, false);
                 }
                 let safe_hw = (allowed_hw - 1.5).max(1.0);
-                let is_safe = (dist_left < safe_hw || dist_right < safe_hw) && dy_abs < (chamber_h - 1.5);
+                let is_safe = nearest_neck < safe_hw && dy_abs < (chamber_h - 1.5);
                 (true, is_safe)
             } else {
                 (false, false)
@@ -2445,7 +2508,7 @@ mod tests {
         // Pass 1: inside/outside
         for y in 0..h {
             for x in 0..w {
-                let (inside, _) = eval_sandbox_shape(x, y, w, h, shape, neck_width, hourglass_curve);
+                let (inside, _) = eval_sandbox_shape(x, y, w, h, shape, neck_width, hourglass_curve, false);
                 mask[y * w + x] = if inside { crate::MASK_INSIDE } else { crate::MASK_OUTSIDE };
             }
         }
