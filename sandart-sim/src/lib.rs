@@ -128,23 +128,15 @@ pub struct DrawingSimulation {
     pub heightmap: Heightmap,
     /// Pre-allocated temp buffer for double-buffering settling flows.
     pub temp_heights: Vec<f32>,
-    /// Per-cell RGBA color buffer, derived from `cell_colors_f32`. This is a render/upload
-    /// view only — external consumers (sandart-wasm, the native app) read it for GPU upload
-    /// and for `set_cell_colors`'s external `&[u8]` contract. It is NOT the simulation's
-    /// source of truth for color and must be regenerated (via `sync_cell_colors_u8`) any
-    /// time `cell_colors_f32` changes.
+    /// Per-cell RGBA color buffer, RGBA interleaved. This is the simulation's single source of
+    /// truth for colour and is also exactly what external consumers (sandart-wasm's GPU upload,
+    /// the native renderer, `set_cell_colors`'s `&[u8]` contract) read — there is no separate
+    /// render view and no conversion step.
+    ///
+    /// `physics::advect_properties` blends in f32 internally and rounds back to `u8`
+    /// *stochastically*, which is what keeps sub-LSB increments from being systematically
+    /// discarded; see `physics::stochastic_round`.
     pub cell_colors: Vec<u8>,
-    /// Per-cell RGBA color buffer in f32, RGBA interleaved, same `GRID_SIZE*GRID_SIZE*4`
-    /// layout as `cell_colors`. This is the simulation's source of truth: `advect_properties`
-    /// and all solver paths blend colors here without ever rounding to u8, so small flows
-    /// (sub-1-LSB contributions) are no longer discarded the way they were when colors were
-    /// blended directly in u8. `cell_colors` (u8) is regenerated from this buffer for
-    /// external consumption; it is never blended directly.
-    pub cell_colors_f32: Vec<f32>,
-    /// Dither amplitude used when quantizing `cell_colors_f32` down to the `u8` render view.
-    /// 0.0 = plain rounding (the original behaviour). 1.0 = true stochastic rounding, spread
-    /// over one LSB. Higher values speckle wider for a coarser, grainier look.
-    pub color_dither: f32,
     /// Per-cell physics & render properties. Advected with height.
     /// Layout: [wetness, threshold, flow_rate, grain_size] interleaved.
     pub cell_props: Vec<f32>,
@@ -288,14 +280,13 @@ impl DrawingSimulation {
         let sliding = vec![false; GRID_SIZE * GRID_SIZE];
         let edge_vel_h = vec![0.0f32; GRID_SIZE * GRID_SIZE];
         let edge_vel_v = vec![0.0f32; GRID_SIZE * GRID_SIZE];
-        let mut cell_colors_f32 = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
-        for chunk in cell_colors_f32.chunks_exact_mut(4) {
-            chunk[0] = 210.0;
-            chunk[1] = 180.0;
-            chunk[2] = 140.0;
-            chunk[3] = 255.0;
+        let mut cell_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
+        for chunk in cell_colors.chunks_exact_mut(4) {
+            chunk[0] = 210;
+            chunk[1] = 180;
+            chunk[2] = 140;
+            chunk[3] = 255;
         }
-        let cell_colors = cell_colors_f32.iter().map(|&v| v.clamp(0.0, 255.0).round() as u8).collect();
         let mut cell_props = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
         // Initialize with default DrySand preset
         for chunk in cell_props.chunks_exact_mut(4) {
@@ -318,8 +309,6 @@ impl DrawingSimulation {
             heightmap,
             temp_heights,
             cell_colors,
-            cell_colors_f32,
-            color_dither: 0.0,
             cell_props,
             marble_pos: Vec2::ZERO,
             prev_marble_pos: Vec2::ZERO,
@@ -412,166 +401,6 @@ impl DrawingSimulation {
         self.shape_mask.len()
     }
 
-    /// Force a full regeneration of the `u8` colour view. Needed when the quantisation itself
-    /// changes (e.g. `color_dither`), since the per-frame path only reconverts blocks whose
-    /// colours moved and would otherwise leave a settled bed on its old quantisation.
-    pub fn resync_cell_colors(&mut self) {
-        self.sync_cell_colors_u8();
-    }
-
-    /// Quantize one f32 colour channel to u8, optionally dithering.
-    ///
-    /// With `strength == 0.0` this is a plain round, i.e. the previous behaviour exactly.
-    ///
-    /// Otherwise the fractional part becomes the probability of rounding up, so the result is
-    /// unbiased: a channel sitting at 180.3 lands on 181 in 30% of cells and 180 in the other
-    /// 70%, and reads as 180.3 across any small region. That is what makes it look grainy
-    /// rather than banded — an 8-bit gradient posterizes into flat steps, a dithered one
-    /// breaks the step edges up into speckle, which for sand is texture rather than error.
-    ///
-    /// The "probability" is a hash of the buffer index, NOT a per-frame random draw. That
-    /// choice is the whole difference between grain and static:
-    ///
-    /// - Position-hashed, the pattern is fixed to the grid. A cell's threshold never changes,
-    ///   so a still image is still, and only cells whose colour actually crossed their own
-    ///   threshold flip. It reads as texture sitting on the sand.
-    /// - Re-drawn each frame, the same cell would flip between 180 and 181 at random forever,
-    ///   which reads as crawling TV static over the whole bed.
-    ///
-    /// It also has to be stable for `sync_cell_colors_u8_dirty` to be correct: that only
-    /// reconverts blocks which changed this tick, so a frame-varying dither would leave
-    /// untouched blocks frozen at an old pattern while active ones shimmered, making the
-    /// 32x32 block grid show up as visible seams. Being a pure function of the index, the
-    /// dirty path and the full path agree cell-for-cell — which is what
-    /// `test_dirty_color_sync_matches_full_sync` already pins down.
-    ///
-    /// `strength` scales the dither amplitude: 1.0 spreads over one LSB (true stochastic
-    /// rounding), higher values spread wider for a coarser, more granular look.
-    #[inline]
-    fn quantize_color(src: f32, index: usize, strength: f32) -> u8 {
-        let v = src.clamp(0.0, 255.0);
-        if strength <= 0.0 {
-            return v.round() as u8;
-        }
-        // Cheap integer hash of the buffer index -> a fixed offset in [0, 1) for this channel.
-        let mut hsh = index as u32;
-        hsh ^= hsh >> 16;
-        hsh = hsh.wrapping_mul(0x7feb_352d);
-        hsh ^= hsh >> 15;
-        hsh = hsh.wrapping_mul(0x846c_a68b);
-        hsh ^= hsh >> 16;
-        let offset = (hsh >> 8) as f32 / 16_777_216.0; // [0, 1)
-
-        // floor(v + offset) rounds up exactly when frac(v) > 1 - offset, i.e. with probability
-        // frac(v) across the population of cells. `strength` widens the window around the
-        // value so coarser settings speckle over more than one level.
-        let dithered = v + (offset - 0.5) * strength + 0.5;
-        dithered.clamp(0.0, 255.0).floor() as u8
-    }
-
-    /// Regenerate the `u8` render/upload view (`cell_colors`) from the `f32` simulation
-    /// source of truth (`cell_colors_f32`). Must be called any time `cell_colors_f32` is
-    /// mutated and `cell_colors` may subsequently be read by an external consumer (GPU
-    /// upload in sandart-wasm, the native renderer, or a test reading `sim.cell_colors`
-    /// directly). This is the full-buffer regeneration, used on the paths that rewrite the
-    /// whole grid (`reset`, `draw_point`/`draw_line`). The per-frame path in `update()` uses
-    /// `sync_cell_colors_u8_dirty` instead — see there for why the narrow version is sound.
-    fn sync_cell_colors_u8(&mut self) {
-        let strength = self.color_dither;
-        for (i, (dst, &src)) in self
-            .cell_colors
-            .iter_mut()
-            .zip(self.cell_colors_f32.iter())
-            .enumerate()
-        {
-            *dst = Self::quantize_color(src, i, strength);
-        }
-    }
-
-    /// Per-frame variant of `sync_cell_colors_u8` that only regenerates the blocks whose colours
-    /// can have changed during this tick.
-    ///
-    /// The full version converts all 1,048,576 elements every frame; measured on the 512x512
-    /// Sand-fall benchmark that is ~2.7 ms/frame, which was 31% of a Water frame and 15% of a
-    /// DrySand one — more than the whole liquid solver. Almost all of it is wasted, because a
-    /// draining hourglass only touches a quarter of the grid per tick.
-    ///
-    /// **Why the dirty set below is a superset of what actually changed.** Colours are only ever
-    /// written by `physics::advect_properties`, which writes the *destination* cell of a transfer
-    /// (never the source). Every transfer site — `flux_edge` and `try_move` — calls
-    /// `activate_neighbor` on both endpoint blocks before advecting, and `activate_neighbor` does
-    /// two things: sets `modified[b]`, and raises `next_displacements[b]` to at least the
-    /// transferred flow, which is strictly positive at every call site. `next_displacements`
-    /// becomes `last_displacements` at the end of the tick (maxed with the previous value for
-    /// blocks that were not simulated, which only ever makes it larger). So any block containing
-    /// a changed cell ends the tick with `last_displacements[b] > 0`.
-    ///
-    /// The other way `modified[b]` is set is from `will_simulate[b]` at the start of the tick, and
-    /// `will_simulate` is exactly the union of the must/stale/budget lists — which is exactly the
-    /// set `active_blocks[b] != Inactive` marks. That also covers `displace_line`'s marble strokes:
-    /// `update()` forces `last_displacements = 1.0` over the stroke's blocks before calling
-    /// `settle_tick`, which puts them in the must-simulate list.
-    ///
-    /// Hence `active_blocks[b] != Inactive || last_displacements[b] > 0` covers every modified
-    /// block (and a few extra stale ones, which is harmless — it only means a redundant
-    /// conversion). `test_dirty_color_sync_matches_full_sync` pins this down against the full
-    /// regeneration so the invariant cannot silently rot.
-    fn sync_cell_colors_u8_dirty(&mut self) {
-        let strength = self.color_dither;
-        let w = self.heightmap.width;
-        let h = self.heightmap.height;
-        let block_size = self.block_size;
-        let cols = (w + block_size - 1) / block_size;
-        let rows = (h + block_size - 1) / block_size;
-        if self.active_blocks.len() != cols * rows || self.last_displacements.len() != cols * rows {
-            self.sync_cell_colors_u8();
-            return;
-        }
-
-        for by in 0..rows {
-            let start_y = by * block_size;
-            let end_y = ((by + 1) * block_size).min(h);
-            // Merge adjacent dirty block columns into one contiguous span per row, so the
-            // conversion runs over long slices instead of 16-cell fragments.
-            let mut bx = 0;
-            while bx < cols {
-                let b = by * cols + bx;
-                let dirty = self.active_blocks[b] != BlockActivity::Inactive
-                    || self.last_displacements[b] > 0.0;
-                if !dirty {
-                    bx += 1;
-                    continue;
-                }
-                let run_start = bx;
-                while bx < cols {
-                    let b2 = by * cols + bx;
-                    if self.active_blocks[b2] != BlockActivity::Inactive
-                        || self.last_displacements[b2] > 0.0
-                    {
-                        bx += 1;
-                    } else {
-                        break;
-                    }
-                }
-                let start_x = run_start * block_size;
-                let end_x = (bx * block_size).min(w);
-                for y in start_y..end_y {
-                    let s = (y * w + start_x) * 4;
-                    let e = (y * w + end_x) * 4;
-                    for (offset, (dst, &src)) in self.cell_colors[s..e]
-                        .iter_mut()
-                        .zip(self.cell_colors_f32[s..e].iter())
-                        .enumerate()
-                    {
-                        // Index must be the absolute buffer index, not the slice offset, or the
-                        // dither pattern would differ between this path and the full one.
-                        *dst = Self::quantize_color(src, s + offset, strength);
-                    }
-                }
-            }
-        }
-    }
-
     /// Reset the simulation state.
     pub fn reset(&mut self) {
         self.generate_shape_mask();
@@ -593,13 +422,12 @@ impl DrawingSimulation {
         self.sliding.fill(false);
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
-        for chunk in self.cell_colors_f32.chunks_exact_mut(4) {
-            chunk[0] = 210.0;
-            chunk[1] = 180.0;
-            chunk[2] = 140.0;
-            chunk[3] = 255.0;
+        for chunk in self.cell_colors.chunks_exact_mut(4) {
+            chunk[0] = 210;
+            chunk[1] = 180;
+            chunk[2] = 140;
+            chunk[3] = 255;
         }
-        self.sync_cell_colors_u8();
         self.apply_preset(self.material_mode);
         self.marble_pos = Vec2::ZERO;
         self.prev_marble_pos = Vec2::ZERO;
@@ -683,7 +511,6 @@ impl DrawingSimulation {
 
                 for ch in 0..4 {
                     self.cell_colors.swap(i1 * 4 + ch, i2 * 4 + ch);
-                    self.cell_colors_f32.swap(i1 * 4 + ch, i2 * 4 + ch);
                 }
                 for ch in 0..4 {
                     self.cell_props.swap(i1 * 4 + ch, i2 * 4 + ch);
@@ -801,12 +628,6 @@ impl DrawingSimulation {
     pub fn set_cell_colors(&mut self, rgba_data: &[u8]) {
         let len = self.cell_colors.len().min(rgba_data.len());
         self.cell_colors[..len].copy_from_slice(&rgba_data[..len]);
-        // This is the entry point for externally-supplied colors (u8), so the f32 source of
-        // truth must be brought into agreement too, or the next advection event would blend
-        // against stale f32 values and the just-set u8 colors would be overwritten.
-        for i in 0..len {
-            self.cell_colors_f32[i] = self.cell_colors[i] as f32;
-        }
     }
 
     /// Copy per-cell properties from a custom buffer
@@ -830,14 +651,13 @@ impl DrawingSimulation {
     pub fn draw_point(&mut self, pos: Vec2, radius: f32) {
         displace_line(
             &mut self.heightmap,
-            &mut self.cell_colors_f32,
+            &mut self.cell_colors,
             &mut self.cell_props,
             pos,
             pos,
             radius,
             &mut self.active_bounds,
         );
-        self.sync_cell_colors_u8();
     }
 
     /// Draw a line between start and end using interpolation to prevent gaps.
@@ -845,14 +665,13 @@ impl DrawingSimulation {
     pub fn draw_line(&mut self, start: Vec2, end: Vec2, radius: f32) {
         displace_line(
             &mut self.heightmap,
-            &mut self.cell_colors_f32,
+            &mut self.cell_colors,
             &mut self.cell_props,
             start,
             end,
             radius,
             &mut self.active_bounds,
         );
-        self.sync_cell_colors_u8();
     }
 
     fn clamp_to_sandbox(pos: Vec2, shape: SandboxShape, marble_radius: f32) -> Vec2 {
@@ -999,7 +818,7 @@ impl DrawingSimulation {
 
                     displace_line(
                         &mut self.heightmap,
-                        &mut self.cell_colors_f32,
+                        &mut self.cell_colors,
                         &mut self.cell_props,
                         self.marbles[j].prev_pos,
                         self.marbles[j].pos,
@@ -1012,7 +831,7 @@ impl DrawingSimulation {
                     self.marbles[j].vel = Vec2::ZERO;
                     displace_line(
                         &mut self.heightmap,
-                        &mut self.cell_colors_f32,
+                        &mut self.cell_colors,
                         &mut self.cell_props,
                         clamped_target,
                         clamped_target,
@@ -1077,7 +896,7 @@ impl DrawingSimulation {
                 settle_tick(
                     &mut self.heightmap,
                     &mut self.temp_heights,
-                    &mut self.cell_colors_f32,
+                    &mut self.cell_colors,
                     &mut self.cell_props,
                     &mut self.sliding,
                     &mut self.active_bounds,
@@ -1130,13 +949,6 @@ impl DrawingSimulation {
                 self.budget_n = (self.budget_n + BUDGET_STEP_UP).min(budget_max);
             }
         }
-
-        // Regenerate the u8 render/upload view once per tick, after every displace_line and
-        // settle_tick call above has finished mutating cell_colors_f32. This is the primary
-        // external read path (sandart-wasm's render() reads self.sim.cell_colors for GPU
-        // upload right after update() returns), so it must be fresh before returning here.
-        // Narrowed to the blocks that can have changed — see `sync_cell_colors_u8_dirty`.
-        self.sync_cell_colors_u8_dirty();
     }
 }
 
@@ -1583,102 +1395,5 @@ mod tests {
 
         sim.set_quantile_mode(QuantileMode::Off);
         assert!(sim.quantile_positions().is_empty());
-    }
-
-    /// The per-frame `sync_cell_colors_u8_dirty` only regenerates the `u8` colour view for blocks
-    /// the tick could have touched, on the argument (spelled out on that function) that
-    /// `active_blocks[b] != Inactive || last_displacements[b] > 0` is a superset of the blocks
-    /// `settle_tick` marked `modified`. That argument reaches across two files and would rot
-    /// silently — a missed block shows up as stale colours on screen, not as a failing assert
-    /// anywhere else in the suite — so pin it directly: after every tick, the narrow sync must
-    /// leave `cell_colors` byte-identical to what the full regeneration would have produced.
-    ///
-    /// Run for both a granular and a liquid material, and through the full drain lifecycle
-    /// (upper chamber settling, streaming through the neck, pooling below), because the three
-    /// stages exercise very different dirty-block patterns.
-    #[test]
-    fn test_color_dither_is_unbiased_and_stable() {
-        // strength 0 must be a plain round — the pre-dither behaviour, bit for bit.
-        for (v, want) in [(0.0f32, 0u8), (127.4, 127), (127.5, 128), (255.0, 255)] {
-            assert_eq!(DrawingSimulation::quantize_color(v, 12345, 0.0), want);
-        }
-
-        // Dithering must be unbiased: a constant value quantised across many cells should
-        // average back to that value, rather than all snapping to the same level. This is the
-        // property that stops slow sub-LSB drift being erased, and it is what makes a gradient
-        // speckle instead of band.
-        for value in [10.3f32, 128.5, 200.75] {
-            let n = 20_000usize;
-            let sum: f64 = (0..n)
-                .map(|i| DrawingSimulation::quantize_color(value, i, 1.0) as f64)
-                .sum();
-            let mean = sum / n as f64;
-            assert!(
-                (mean - value as f64).abs() < 0.05,
-                "dither biased at {}: mean {:.4}",
-                value,
-                mean
-            );
-
-            // ...and it must actually spread, not just round consistently.
-            let distinct = (0..256usize)
-                .map(|i| DrawingSimulation::quantize_color(value, i, 1.0))
-                .collect::<std::collections::HashSet<_>>();
-            assert!(distinct.len() > 1, "dither produced no speckle at {}", value);
-        }
-
-        // Stability: the pattern is a pure function of the buffer index, never of time. If this
-        // ever became frame-varying, a still image would crawl and — because the per-frame sync
-        // only reconverts changed blocks — the 32x32 block grid would appear as visible seams.
-        for i in [0usize, 1, 999, 1_048_575] {
-            let a = DrawingSimulation::quantize_color(77.6, i, 2.0);
-            let b = DrawingSimulation::quantize_color(77.6, i, 2.0);
-            assert_eq!(a, b, "dither not stable at index {}", i);
-        }
-
-        // Must stay in range at the rails even with a wide dither.
-        for i in 0..512usize {
-            let lo = DrawingSimulation::quantize_color(0.0, i, 4.0);
-            let hi = DrawingSimulation::quantize_color(255.0, i, 4.0);
-            assert!(lo <= 2, "underflowed at index {}: {}", i, lo);
-            assert!(hi >= 253, "overflowed at index {}: {}", i, hi);
-        }
-    }
-
-    #[test]
-    fn test_dirty_color_sync_matches_full_sync() {
-        for material in [MaterialMode::DrySand, MaterialMode::Water] {
-            let mut sim = DrawingSimulation::new();
-            sim.sandbox_shape = SandboxShape::Hourglass;
-            sim.gravity_dir = Vec2::new(0.0, 0.04);
-            sim.apply_preset(material);
-            sim.initialize_hourglass();
-
-            let targets = [None; 5];
-            for tick in 0..300 {
-                sim.update(
-                    0.016,
-                    &targets,
-                    0.08,
-                    material,
-                    SandboxShape::Hourglass,
-                    16.0,
-                    16.0,
-                );
-
-                let narrow = sim.cell_colors.clone();
-                sim.sync_cell_colors_u8();
-                let mismatches = narrow
-                    .iter()
-                    .zip(sim.cell_colors.iter())
-                    .filter(|(a, b)| a != b)
-                    .count();
-                assert_eq!(
-                    mismatches, 0,
-                    "{:?} tick {}: dirty colour sync missed {} bytes that a full sync would have written",
-                    material, tick, mismatches
-                );
-            }
-        }
     }
 }

@@ -6,8 +6,8 @@
 //!
 //! This example measures the thing that actually matters for Sand-fall: a 512x512 hourglass
 //! draining under in-plane gravity, driven through the real `DrawingSimulation::update()`
-//! entry point (so `sync_cell_colors_u8`, the quantile gate, and the budget bookkeeping are
-//! all in the measurement, not just `settle_tick`).
+//! entry point (so the quantile gate and the budget bookkeeping are all in the measurement,
+//! not just `settle_tick`).
 //!
 //! Run:
 //!   cargo run --release --example bench_sandfall
@@ -23,7 +23,6 @@
 //!   --shape s          hourglass | multistage (default hourglass)
 //!   --phases           also report a per-third breakdown (fill / stream / pool)
 //!   --descent          report centre-of-mass descent (for the iterations experiment)
-//!   --sync             report the isolated cost of the f32 -> u8 colour conversion
 
 use glam::Vec2;
 use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape, GRID_SIZE};
@@ -164,21 +163,6 @@ fn run_scenario(
     }
 }
 
-fn measure_sync_cost(sim: &DrawingSimulation) -> f64 {
-    // Standalone replica of `sync_cell_colors_u8` (private), to price the full-buffer
-    // f32 -> u8 conversion that `update()` performs once per frame.
-    let mut dst = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
-    let reps = 200;
-    let start = Instant::now();
-    for _ in 0..reps {
-        for (d, &s) in dst.iter_mut().zip(sim.cell_colors_f32.iter()) {
-            *d = s.clamp(0.0, 255.0).round() as u8;
-        }
-        std::hint::black_box(&dst);
-    }
-    start.elapsed().as_secs_f64() * 1000.0 / reps as f64
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get = |name: &str| -> Option<String> {
@@ -314,14 +298,5 @@ fn main() {
             report.flamegraph(file).unwrap();
             println!("\nwrote {out}");
         }
-    }
-
-    if has("--sync") {
-        let sim = make_sim(MaterialMode::DrySand, shape);
-        println!(
-            "\nsync_cell_colors_u8 equivalent (full {} element f32 -> u8): {:.4} ms/frame",
-            GRID_SIZE * GRID_SIZE * 4,
-            measure_sync_cost(&sim)
-        );
     }
 }
