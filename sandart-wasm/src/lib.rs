@@ -6,7 +6,7 @@ use js_sys;
 use web_sys;
 use wasm_bindgen::JsCast;
 
-use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape, SimulatorMode};
+use sandart_sim::{DrawingSimulation, MaterialMode, QuantileMode, SandboxShape, SimulatorMode, MAX_QUANTILE_LINES};
 use sandart_render::{HeightmapRenderer, CameraUniforms, LightingUniforms, MarbleUniform};
 use sandart_pattern::{PlaybackController, PlaybackState, parse_gcode, parse_thr};
 
@@ -53,6 +53,17 @@ pub struct WasmSimulationState {
     elapsed_time: f32,
     clock_minute: u32,
     color_mode: u32,
+
+    // Quantile mass-distribution overlay (UI-facing setting; only actually applied to `sim`
+    // while `simulator_mode == SandFall` — see `set_quantile_mode`/`set_simulator_mode`).
+    quantile_mode: QuantileMode,
+    // Last dt seen by `step()`, used to make the per-frame easing below frame-rate independent.
+    last_dt: f32,
+    // Displayed (eased) quantile line positions, plus whether they hold a meaningful previous
+    // value yet — false right after the feature is (re-)enabled, so the first frame snaps
+    // straight to the target instead of easing in from stale/zeroed state.
+    quantile_eased: [f32; MAX_QUANTILE_LINES],
+    quantile_eased_valid: bool,
 }
 
 #[wasm_bindgen]
@@ -190,6 +201,10 @@ impl WasmSimulationState {
             elapsed_time: 0.0,
             clock_minute: 99,
             color_mode: 0,
+            quantile_mode: QuantileMode::Off,
+            last_dt: 1.0 / 60.0,
+            quantile_eased: [0.0; MAX_QUANTILE_LINES],
+            quantile_eased_valid: false,
         })
     }
 
@@ -204,6 +219,9 @@ impl WasmSimulationState {
 
     pub fn step(&mut self, dt: f32, cursor_x: f32, cursor_y: f32, shift_pressed: bool, last_frame_time_ms: f32, target_frame_time_ms: f32) {
         self.elapsed_time += dt;
+        // Recorded for the quantile-line easing in `render()`, which runs after `step()` every
+        // frame but doesn't otherwise receive dt.
+        self.last_dt = dt;
 
         let shape = if self.simulator_mode == SimulatorMode::SandFall {
             SandboxShape::Hourglass
@@ -276,7 +294,43 @@ impl WasmSimulationState {
             1 => SimulatorMode::SandFall,
             _ => SimulatorMode::Sandbox,
         };
+        // The quantile overlay only makes sense in Sand-fall (Sandbox has zero gravity and a
+        // top-down heightmap, so "how far down has mass fallen" measures nothing). Re-derive
+        // the effective mode on every simulator-mode switch rather than only in
+        // `set_quantile_mode`, so leaving Sand-fall always turns the sim-side bookkeeping back
+        // off even though the UI's own remembered selection (`self.quantile_mode`) is left
+        // alone, ready to be restored if the user switches back.
+        self.sim.set_quantile_mode(self.effective_quantile_mode());
+        self.quantile_eased_valid = false;
         self.reset();
+    }
+
+    /// The quantile-line mode actually applied to the simulation: the UI's selection while in
+    /// Sand-fall mode, forced to `Off` otherwise. Kept as a single source of truth so
+    /// `set_simulator_mode` and `set_quantile_mode` can't disagree about when the feature is
+    /// really active.
+    fn effective_quantile_mode(&self) -> QuantileMode {
+        if self.simulator_mode == SimulatorMode::SandFall {
+            self.quantile_mode
+        } else {
+            QuantileMode::Off
+        }
+    }
+
+    /// UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
+    /// selection even while in Sandbox (so it's remembered if the user switches back to
+    /// Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
+    pub fn set_quantile_mode(&mut self, mode: u32) {
+        self.quantile_mode = match mode {
+            0 => QuantileMode::Off,
+            1 => QuantileMode::Quartiles,
+            2 => QuantileMode::Deciles,
+            _ => QuantileMode::Off,
+        };
+        self.sim.set_quantile_mode(self.effective_quantile_mode());
+        // Next render should snap straight to the fresh targets rather than easing in from
+        // whatever (possibly stale, possibly zeroed) values were last displayed.
+        self.quantile_eased_valid = false;
     }
 
     pub fn set_gravity(&mut self, x: f32, y: f32) {
@@ -720,6 +774,57 @@ impl WasmSimulationState {
             (self.sandbox_shape as u32, self.marble_count)
         };
 
+        // --- Quantile mass-distribution lines (Sand-fall only) ---
+        //
+        // `sim.quantile_positions()` gives the *raw* targets, recomputed at most every 5 ticks
+        // (see `DrawingSimulation::update`), so displaying them directly would visibly step
+        // every 5th frame. We ease the displayed value toward the target every render instead,
+        // decoupling visual smoothness from the compute cadence.
+        //
+        // The easing is an EMA (the same shape as `EMA_ALPHA` in sandart-sim for frame time),
+        // not a fixed lerp fraction, so it looks the same regardless of frame rate: alpha is
+        // derived from actual dt and a time constant, rather than being a fixed per-frame step
+        // that would visibly speed up or slow down as the adaptive frame budget reacts to load.
+        let effective_quantile_mode = self.effective_quantile_mode();
+        let quantile_count = effective_quantile_mode.line_count() as u32;
+
+        if quantile_count > 0 {
+            let targets = self.sim.quantile_positions();
+            const TAU_SECONDS: f32 = 0.20;
+            // A jump bigger than this fraction of the grid height (reset, hourglass flip, mode
+            // just switched on) snaps instead of easing — otherwise a discontinuity plays back
+            // as a slow crawl across the whole screen instead of an instant re-place.
+            const SNAP_FRACTION: f32 = 0.25;
+            let alpha = 1.0 - (-self.last_dt.max(0.0) / TAU_SECONDS).exp();
+
+            for i in 0..MAX_QUANTILE_LINES {
+                let target = targets.get(i).copied().unwrap_or(0.0);
+                let next = if !self.quantile_eased_valid {
+                    target
+                } else {
+                    let prev = self.quantile_eased[i];
+                    if (target - prev).abs() > SNAP_FRACTION {
+                        target
+                    } else {
+                        prev + alpha * (target - prev)
+                    }
+                };
+                self.quantile_eased[i] = next;
+            }
+            self.quantile_eased_valid = true;
+        } else {
+            // Feature off/hidden this frame: next time it turns on, snap rather than ease in
+            // from stale state.
+            self.quantile_eased_valid = false;
+        }
+
+        let mut quantile_positions_uniform = [[0.0f32; 4]; 3];
+        if quantile_count > 0 {
+            for i in 0..MAX_QUANTILE_LINES {
+                quantile_positions_uniform[i / 4][i % 4] = self.quantile_eased[i];
+            }
+        }
+
         let current_uniforms = LightingUniforms {
             light_dir: current_light_dir,
             light_color: self.led_color,
@@ -734,8 +839,9 @@ impl WasmSimulationState {
             color_mode: self.color_mode,
             neck_width: self.sim.neck_width,
             hourglass_curve: self.sim.hourglass_curve,
-            _pad1: 0.0,
+            quantile_count,
             _pad2: 0.0,
+            quantile_positions: quantile_positions_uniform,
             marbles: current_marbles,
         };
         self.renderer.update_uniforms(&self.queue, &current_uniforms);

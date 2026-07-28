@@ -48,8 +48,13 @@ pub struct LightingUniforms {
     pub color_mode: u32,       // active color mode (0 = Solid, 1 = Gradient/Pattern)
     pub neck_width: f32,       // user-controlled neck width
     pub hourglass_curve: f32,  // user-controlled hourglass shape curvature
-    pub _pad1: f32,
+    pub quantile_count: u32,  // active quantile lines: 0 = off, 3 = quartiles, 9 = deciles
     pub _pad2: f32,
+    // Quantile line positions, normalised 0.0 (top row edge) .. 1.0 (bottom row edge).
+    // Packed as 3x vec4 (12 slots, only the first `quantile_count` used) rather than
+    // `[f32; 9]` because WGSL pads array-of-f32 elements to 16 bytes each in a uniform buffer
+    // block (144 bytes wasted for 9 floats), whereas array<vec4<f32>, 3> has zero padding.
+    pub quantile_positions: [[f32; 4]; 3],
     pub marbles: [MarbleUniform; 5], // array of up to 5 marbles
 }
 
@@ -630,8 +635,9 @@ mod tests {
                 color_mode: 0,
                 neck_width: 0.005,
                 hourglass_curve: 0.6,
-                _pad1: 0.0,
+                quantile_count: 0,
                 _pad2: 0.0,
+                quantile_positions: [[0.0; 4]; 3],
                 marbles: [
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
@@ -908,8 +914,9 @@ mod tests {
                     color_mode: 0,
                     neck_width: 0.005,
                     hourglass_curve: 0.6,
-                    _pad1: 0.0,
+                    quantile_count: 0,
                     _pad2: 0.0,
+                    quantile_positions: [[0.0; 4]; 3],
                     marbles: [
                         MarbleUniform { pos: [m_x, m_y], radius: 0.018, z_pos: m_z },
                         MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
@@ -1003,5 +1010,5 @@ mod tests {
 }
 
 // Compile-time layout/size verification assertions for WebGPU uniform alignments
-const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 176);
+const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 224);
 const _: () = assert!(std::mem::size_of::<CameraUniforms>() == 80);

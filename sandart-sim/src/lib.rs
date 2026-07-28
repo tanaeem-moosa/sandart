@@ -1,8 +1,13 @@
 pub mod grid;
 pub mod physics;
+pub mod quantiles;
 
 pub use grid::Heightmap;
 pub use physics::{ActiveBounds, displace_line, settle_tick};
+pub use quantiles::{
+    compute_quantile_positions, refresh_row_mass_active, refresh_row_mass_full, QuantileMode,
+    DECILE_FRACTIONS, MAX_QUANTILE_LINES, QUARTILE_FRACTIONS,
+};
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
@@ -191,6 +196,20 @@ pub struct DrawingSimulation {
     pub block_size: usize,
     /// Tick count for multi-rate LOD scheduling.
     pub tick_count: u32,
+
+    /// Mass-weighted "how much has fallen" overlay setting (Sand-fall mode only). Off by
+    /// default; setting this to anything other than `Off` is what turns on the per-row mass
+    /// bookkeeping below — see `set_quantile_mode`.
+    pub quantile_mode: QuantileMode,
+    /// Cached per-*row* (not per-block) mass sum, `heightmap.height` entries long. Refreshed by
+    /// `refresh_row_mass_active`/`refresh_row_mass_full`; only touched at all while
+    /// `quantile_mode != QuantileMode::Off`, so it costs nothing when the feature is off.
+    pub row_mass: Vec<f32>,
+    /// The current quantile line targets (normalised 0.0..1.0, 0.0 = top row edge, 1.0 = bottom
+    /// row edge), recomputed alongside `row_mass`. Length is 0 (Off), 3 (Quartiles), or 9
+    /// (Deciles). These are raw targets, not eased for display — frame-to-frame smoothing is a
+    /// rendering concern and belongs to the consumer (sandart-wasm), not the simulation.
+    quantile_targets: Vec<f32>,
 }
 
 fn generate_smooth_noise(seed_val: u32) -> Heightmap {
@@ -328,6 +347,9 @@ impl DrawingSimulation {
             ema_frame_ms,
             block_size,
             tick_count: 0,
+            quantile_mode: QuantileMode::default(),
+            row_mass: vec![0.0f32; GRID_SIZE],
+            quantile_targets: Vec::new(),
         };
         sim.generate_shape_mask();
         sim
@@ -448,6 +470,7 @@ impl DrawingSimulation {
         self.budget_n = 256;
         self.ema_frame_ms = 33.3;
         self.tick_count = 0;
+        self.refresh_quantiles_full();
     }
 
     pub fn initialize_hourglass(&mut self) {
@@ -540,6 +563,61 @@ impl DrawingSimulation {
         self.active_blocks.fill(BlockActivity::Inactive);
         self.last_displacements.fill(0.5); // Force all blocks to be re-simulated
         self.tick_count = 0;
+        self.refresh_quantiles_full();
+    }
+
+    /// Set the quantile-line overlay mode (off/quartiles/deciles) and immediately bring the
+    /// row-mass cache and quantile targets up to date. A full recompute here (rather than
+    /// waiting for the next periodic partial refresh) means turning the feature on never shows
+    /// a stale/zero reading left over from whatever the cache last held while it was off.
+    pub fn set_quantile_mode(&mut self, mode: QuantileMode) {
+        self.quantile_mode = mode;
+        self.refresh_quantiles_full();
+    }
+
+    /// Current quantile line targets, normalised 0.0 (top row edge) .. 1.0 (bottom row edge).
+    /// Empty when `quantile_mode` is `Off`. These are raw targets refreshed at most every 5
+    /// ticks — easing them for smooth frame-to-frame motion is left to the renderer/consumer.
+    pub fn quantile_positions(&self) -> &[f32] {
+        &self.quantile_targets
+    }
+
+    /// Full (all `GRID_SIZE` rows) row-mass recompute plus a fresh quantile target computation.
+    /// O(GRID_SIZE^2); only meant for discontinuities (reset, flip, mode just switched on) — the
+    /// steady-state per-tick path is `refresh_quantiles_partial`, which only re-sums rows whose
+    /// block was actually simulated this tick. A no-op (aside from clearing the cached targets)
+    /// when the feature is off, so resets/flips stay free of this cost in the common case.
+    fn refresh_quantiles_full(&mut self) {
+        if self.quantile_mode == QuantileMode::Off {
+            self.quantile_targets.clear();
+            return;
+        }
+        refresh_row_mass_full(
+            &self.heightmap.data,
+            self.heightmap.width,
+            self.heightmap.height,
+            &mut self.row_mass,
+        );
+        self.quantile_targets =
+            compute_quantile_positions(&self.row_mass, self.quantile_mode.fractions());
+    }
+
+    /// Steady-state per-tick refresh: only re-sums rows belonging to a block that
+    /// `settle_tick` actually simulated this tick (per `active_blocks`), then recomputes the
+    /// quantile targets from the (mostly-cached) row_mass array. Called at most once every 5
+    /// ticks from `update`, and only while `quantile_mode != Off` — see the call site for the
+    /// full cost-gating rationale.
+    fn refresh_quantiles_partial(&mut self) {
+        refresh_row_mass_active(
+            &self.heightmap.data,
+            self.heightmap.width,
+            self.heightmap.height,
+            self.block_size,
+            &self.active_blocks,
+            &mut self.row_mass,
+        );
+        self.quantile_targets =
+            compute_quantile_positions(&self.row_mass, self.quantile_mode.fractions());
     }
 
     /// Apply a preset to the per-cell properties buffer.
@@ -871,6 +949,15 @@ impl DrawingSimulation {
             self.active_bounds.active = false;
         }
         self.tick_count = self.tick_count.wrapping_add(1);
+
+        // Quantile mass-distribution lines (Sand-fall overlay): recompute at most every 5 ticks,
+        // and only while the feature is switched on. `has_active` being false means nothing
+        // moved this tick, so row_mass couldn't have changed either — skip in that case too.
+        // This is the whole cost-gating story: when `quantile_mode == Off` (the default), this
+        // branch — and therefore the O(width) row re-sums it guards — never runs at all.
+        if has_active && self.quantile_mode != QuantileMode::Off && self.tick_count % 5 == 0 {
+            self.refresh_quantiles_partial();
+        }
 
         // Update EMA of frame time and adjust budget_n
         const EMA_ALPHA: f32 = 0.1;
@@ -1263,5 +1350,85 @@ mod tests {
             final_mass,
             mass_err
         );
+    }
+
+    #[test]
+    fn test_quantile_mode_off_by_default_and_costs_nothing() {
+        let sim = DrawingSimulation::new();
+        assert_eq!(sim.quantile_mode, QuantileMode::Off);
+        assert!(sim.quantile_positions().is_empty());
+    }
+
+    #[test]
+    fn test_quantile_positions_stay_empty_while_off_during_hourglass_run() {
+        let mut sim = DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::Hourglass;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.initialize_hourglass();
+
+        let targets = [None; 5];
+        for _ in 0..120 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 16.0, 16.0);
+        }
+
+        // Never opted in: no positions should ever be computed.
+        assert!(sim.quantile_positions().is_empty());
+    }
+
+    #[test]
+    fn test_quantile_lines_descend_as_hourglass_drains() {
+        let mut sim = DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::Hourglass;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.initialize_hourglass();
+        sim.set_quantile_mode(QuantileMode::Quartiles);
+
+        // Immediately after init (all mass in the upper chamber), the median line should be
+        // some finite position sitting up in the top half of the grid.
+        let initial = sim.quantile_positions().to_vec();
+        assert_eq!(initial.len(), 3);
+        for &p in &initial {
+            assert!(p.is_finite() && (0.0..=1.0).contains(&p));
+        }
+        // Ordered ascending (25% above 50% above 75%, all descending together over time).
+        assert!(initial[0] <= initial[1] && initial[1] <= initial[2]);
+
+        let targets = [None; 5];
+        for _ in 0..600 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 16.0, 16.0);
+        }
+
+        let later = sim.quantile_positions().to_vec();
+        assert_eq!(later.len(), 3);
+        for &p in &later {
+            assert!(p.is_finite() && (0.0..=1.0).contains(&p));
+        }
+        assert!(later[0] <= later[1] && later[1] <= later[2]);
+
+        // As sand drains from the upper chamber into the lower one, every quantile line should
+        // have moved further down the grid (larger normalised position) — mesmerizing descent,
+        // not sideways drift or staying put.
+        for (i, (&before, &after)) in initial.iter().zip(later.iter()).enumerate() {
+            assert!(
+                after > before,
+                "quantile line {} should have descended: before={}, after={}",
+                i,
+                before,
+                after
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_quantile_mode_off_clears_targets() {
+        let mut sim = DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::Hourglass;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.initialize_hourglass();
+        sim.set_quantile_mode(QuantileMode::Deciles);
+        assert_eq!(sim.quantile_positions().len(), 9);
+
+        sim.set_quantile_mode(QuantileMode::Off);
+        assert!(sim.quantile_positions().is_empty());
     }
 }

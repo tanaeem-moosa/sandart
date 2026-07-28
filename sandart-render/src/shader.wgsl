@@ -26,8 +26,13 @@ struct LightingUniforms {
     color_mode: u32,
     neck_width: f32,
     hourglass_curve: f32,
-    _pad1: f32,
+    quantile_count: u32,
     _pad2: f32,
+    // Quantile line positions, normalised 0.0 (top row edge) .. 1.0 (bottom row edge), packed
+    // 3 lines per vec4 (12 slots total, only the first `quantile_count` used). Must mirror the
+    // Rust-side `[[f32; 4]; 3]` exactly: a plain `array<f32, 9>` here would pad each element to
+    // 16 bytes in a uniform buffer block and silently desync every field that follows it.
+    quantile_positions: array<vec4<f32>, 3>,
     marbles: array<MarbleUniform, 5>,
 };
 
@@ -731,6 +736,25 @@ fn fs_main(
         let liquid_factor = (wetness - 0.75) / 0.25;
         let liquid_shaded = mix(final_color, liquid_refracted + specular_reflect * sand_opacity, liquid_factor);
         final_color = mix(table_color, liquid_shaded, sand_opacity);
+    }
+
+    // Mass-distribution quantile lines (Sand-fall overlay). This point in the shader is only
+    // reached once we're past the `in_casing` early-return above and the marble-hit return, so
+    // a line drawn here is guaranteed to be inside the shape and never over the casing/LED ring,
+    // and never on top of a marble. `quantile_count` is 0 whenever the feature is off (the
+    // default) or the sim isn't in Sand-fall mode, so this costs nothing in the common case.
+    if (uniforms.quantile_count > 0u) {
+        let row_f = uv.y * 512.0;
+        let half_width_px = 1.0; // texel half-width — a soft ~2-texel-wide antialiased line
+        for (var i = 0u; i < uniforms.quantile_count; i = i + 1u) {
+            let target_row = uniforms.quantile_positions[i / 4u][i % 4u] * 512.0;
+            let d = abs(row_f - target_row);
+            if (d < half_width_px) {
+                let line_alpha = smoothstep(half_width_px, 0.0, d) * 0.85;
+                let line_color = vec3<f32>(0.35, 0.85, 1.0);
+                final_color = mix(final_color, line_color, line_alpha);
+            }
+        }
     }
 
     return vec4<f32>(final_color, 1.0);
