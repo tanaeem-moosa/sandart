@@ -1,5 +1,14 @@
 import init, { WasmSimulationState } from '../pkg/sandart_wasm.js';
 
+// Sand-fall gravity magnitude. Used to be a user-facing slider (#gravity-slider, range
+// 0.04..=0.10 step 0.005); removed because measurement showed both Hourglass drain rate and
+// terminal free-fall speed were flat across that whole range for DrySand and Water alike — the
+// per-tick mass-transfer clamp in flux_edge (sandart-sim/src/physics.rs) saturates by g = 0.04
+// already, so higher g raises a quantity that's already being clipped. Mirrors
+// SANDFALL_GRAVITY_STRENGTH in sandart-sim/src/lib.rs (the desktop app's source of truth); keep
+// the two in sync by hand if this ever changes, since JS can't import the Rust constant.
+const SANDFALL_GRAVITY_STRENGTH = 0.06;
+
 let state = null;
 let canvas = null;
 let lastTime = 0;
@@ -969,9 +978,6 @@ function setupPanelInput() {
         }
     });
 
-    // Gravity Strength Slider
-    const gravitySlider = document.getElementById('gravity-slider');
-    const gravityVal = document.getElementById('gravity-val');
     const neckSlider = document.getElementById('neck-slider');
     const curvatureSlider = document.getElementById('curvature-slider');
     const quantileSelect = document.getElementById('quantile-select');
@@ -987,10 +993,9 @@ function setupPanelInput() {
 
     function syncSandFallSettings() {
         if (!state) return;
-        const val = parseFloat(gravitySlider.value);
-        gravityVal.innerText = val.toFixed(3);
-        // Force downward gravity (0.0, strength)
-        state.set_gravity(0.0, val);
+        // Force downward gravity (0.0, strength). No longer user-adjustable; see
+        // SANDFALL_GRAVITY_STRENGTH above.
+        state.set_gravity(0.0, SANDFALL_GRAVITY_STRENGTH);
 
         const neckVal = parseFloat(neckSlider.value);
         document.getElementById('neck-val').innerText = neckVal.toFixed(3);
@@ -1002,7 +1007,6 @@ function setupPanelInput() {
 
         syncQuantileSetting();
     }
-    gravitySlider.addEventListener('input', syncSandFallSettings);
 
     // Neck Width Slider
     neckSlider.addEventListener('input', () => {

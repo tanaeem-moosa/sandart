@@ -14,6 +14,22 @@ use serde::{Deserialize, Serialize};
 pub const GRID_SIZE: usize = 512;
 pub const DEFAULT_SAND_HEIGHT: f32 = 0.35;
 
+/// Gravity magnitude for Sand-fall mode, shared by both front ends (`sandart/src/app.rs`'s
+/// desktop build and `sandart-wasm/web/demo.js`'s hardcoded mirror — JS can't `use` this
+/// constant, so keep the two in sync by hand if this ever changes).
+///
+/// This used to be a user-facing slider (`#gravity-slider`, range 0.04..=0.10 step 0.005). It was
+/// removed after measuring both materials across that whole range and finding it flat: DrySand's
+/// Hourglass upper-chamber drain time to 50% was bit-identical (143 ticks) at every step from 0.04
+/// to 0.10, and the terminal free-fall speed of a dropped block pinned at exactly 1.0 rows/tick
+/// for every gravity value tested, for both DrySand and Water. The reason is `flux_edge`'s per-tick
+/// transfer clamp (`cell_capacity_for`: 1.5 granular / 1.0 liquid) — the driving head this gravity
+/// magnitude produces (`g * GRAVITY_HEAD_SCALE`, see `physics.rs`) already exceeds that clamp at
+/// g = 0.04, so raising g further only raises a quantity that is already being clipped every tick.
+/// 0.06 keeps clear margin above the g >= 0.04 boiling threshold without being any more "correct"
+/// than any other value in the measured range.
+pub const SANDFALL_GRAVITY_STRENGTH: f32 = 0.06;
+
 /// Shape mask cell values: the single source of truth for container geometry.
 pub const MASK_OUTSIDE: u8 = 0;
 pub const MASK_INSIDE: u8 = 1;

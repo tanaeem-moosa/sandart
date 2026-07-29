@@ -1178,7 +1178,7 @@ impl eframe::App for SandArtApp {
                     | crate::config::SandboxShape::ProceduralFunnel
                     | crate::config::SandboxShape::MultiNeckHourglass
             ) {
-                self.sim.gravity_dir = glam::Vec2::new(0.0, 0.04);
+                self.sim.gravity_dir = glam::Vec2::new(0.0, sandart_sim::SANDFALL_GRAVITY_STRENGTH);
             } else {
                 self.sim.gravity_dir = glam::Vec2::ZERO;
             }
