@@ -249,24 +249,36 @@ const GRAVITY_HEAD_SCALE: f32 = 25.0;
 /// should feel it. In practice `column_depth` is a cheap, single-tick, no-lookahead estimate (see
 /// its doc comment in `settle_tick`), not an exact column integral.
 ///
-/// `LATERAL_PRESSURE_SCALE` is measured, not derived: swept against
-/// `test_liquid_flowing_liquid_does_not_stand_in_walls` (an hourglass chamber tens of cells deep),
-/// the 400-tick enclosed-void total falls from 30060 (the pre-existing in-transit-only fix) to
-/// 23526 at scale = 2, 21938 at scale = 5, and flattens out around there (22085 at scale = 10), so
-/// 5 was picked as past the knee of that curve. That sweep predates the fix described below; after
-/// it, the same scale and test now measures 12106 (`test_liquid_stream_stays_coherent`'s max_width
-/// still holds at the required 8, peak_h 1.0000) — scale was not re-swept against the new number,
-/// so a lower total may well be reachable here too, but that is future work, not this constant's
-/// current justification.
+/// `LATERAL_PRESSURE_SCALE` is measured, not derived. It was originally swept against
+/// `test_liquid_flowing_liquid_does_not_stand_in_walls` (an hourglass chamber tens of cells deep)
+/// under the old regime described below, where a phantom "resting" depth at the continuous
+/// source cell inflated `column_depth` and `LATERAL_PRESSURE_DEPTH_FLOOR` (since removed) was
+/// clipping the term at 1.5: that sweep read 30060 (no lateral pressure) -> 23526 at scale = 2 ->
+/// 21938 at scale = 5 -> 22085 at scale = 10, and looked like it flattened past 5. With the
+/// phantom fixed at its source (see below) and the floor deleted, the same test at scale = 5 reads
+/// 12106 instead of 21938 — a large enough shift that the old sweep's shape could not be trusted,
+/// so it was redone from scratch against the corrected solver:
 ///
-/// `LATERAL_PRESSURE_DEPTH_FLOOR` no longer does anything and is kept at `0.0` — effectively a
-/// no-op, since `column_depth` is already `>= 0` by construction (`resting_above` is clamped with
-/// `.max(0.0)` before being added to the prior row's already-non-negative value) — rather than
-/// removed outright, so the call site's `(column_depth - LATERAL_PRESSURE_DEPTH_FLOOR).max(0.0)`
-/// shape stays available if a future regression ever needs a deadband again. It used to be load
-/// bearing: `column_depth`'s `resting_above` term is `temp_heights[above] - in_transit_at(above)`,
-/// and `in_transit_at` only sees mass that moved through `edge_vel_v` — it had no way to see mass a
-/// caller wrote directly into `heightmap.data`, which is exactly how a continuous source (e.g.
+/// scale = 0 (no lateral pressure): total = 30060, `test_liquid_stream_stays_coherent`'s
+/// max_width = 8 (passes, but the void count is the worst in the sweep). scale in roughly (0,
+/// 3.2]: max_width jumps to 9 and that test fails outright, regardless of total — this whole band
+/// is disqualified by stream coherence, not by the void metric. max_width recovers to 8 at
+/// scale ~3.5 and holds through at least scale = 18, then fails again (back to 9) by scale = 20.
+/// Inside that valid window the total is noisy and not monotonic — 12097 at 4, 11848 at 4.2,
+/// 11743 at 4.8, 12106 at 5, 12107 at 8, 13014 at 6, 13648 at 9, drifting up to 13183 at 12 and
+/// 14451 at 14 — with no point anywhere in the window meaningfully beating what scale = 4-5
+/// already gets, and no improving trend to chase by going higher (the opposite, if anything,
+/// plus eventual failure at 20). So the old regime's "knee past 5" really was a floor artifact as
+/// suspected, but the corrected picture is not "still falling" either: it is a flat, noisy
+/// plateau, bottomed out already at the low end of the valid range. `5` stays the chosen value —
+/// it sits with comfortable margin above the ~3.2-3.5 coherence cliff on one side and the failure
+/// at 20 on the other, and is statistically tied for the lowest total anywhere in the plateau, so
+/// there is nothing to buy by moving off it in either direction.
+///
+/// A depth floor/deadband used to be load bearing here: `column_depth`'s `resting_above` term is
+/// `temp_heights[above] - in_transit_at(above)`, and `in_transit_at` only sees mass that moved
+/// through `edge_vel_v` — it had no way to see mass a caller wrote directly into
+/// `heightmap.data`, which is exactly how a continuous source (e.g.
 /// `test_liquid_stream_stays_coherent`'s tap) used to be fed. That made an always-full source cell
 /// read as a few cells of phantom "resting" depth every tick, and the floor was sized (1.5) as a
 /// deadband wide enough to swallow that phantom without also swallowing genuine shallow
@@ -274,10 +286,11 @@ const GRAVITY_HEAD_SCALE: f32 = 25.0;
 /// `grid.rs`): callers that add mass from outside the flux solver now go through `inject`, which
 /// records the full injected height, and `resting_above`'s computation in `settle_tick` subtracts
 /// it the same way it subtracts `in_transit_at`'s edge-arrived estimate. The phantom depth is
-/// eliminated at its source instead of masked after the fact, so the deadband has nothing left to
-/// do and the floor can sit at `0.0`.
+/// eliminated at its source instead of masked after the fact, so `column_depth` is now `>= 0` by
+/// construction (`resting_above` is `.max(0.0)`-clamped before being added to the prior row's
+/// already-non-negative value) and no floor/deadband is needed at all — if a future regression
+/// ever reintroduces a phantom, git history has the deadband.
 const LATERAL_PRESSURE_SCALE: f32 = 5.0;
-const LATERAL_PRESSURE_DEPTH_FLOOR: f32 = 0.0;
 
 fn cell_capacity_for(wetness: f32) -> f32 {
     let l = liquidity(wetness);
@@ -2020,8 +2033,8 @@ pub fn settle_tick(
                         // after this one, or hasn't run yet this tick — harmless, since (like
                         // `GRAVITY_HEAD_SCALE`) it only ever feeds `driving`, never the mass limits.
                         let head_a = h_a + gravity_dir.x * GRAVITY_HEAD_SCALE
-                            + LATERAL_PRESSURE_SCALE * (column_depth[center_idx] - LATERAL_PRESSURE_DEPTH_FLOOR).max(0.0);
-                        let head_b_full = h_b + LATERAL_PRESSURE_SCALE * (column_depth[nb_idx] - LATERAL_PRESSURE_DEPTH_FLOOR).max(0.0);
+                            + LATERAL_PRESSURE_SCALE * column_depth[center_idx];
+                        let head_b_full = h_b + LATERAL_PRESSURE_SCALE * column_depth[nb_idx];
                         // Sleeping edge (see `edge_sleeps`), tested *before* the in-transit
                         // computation below rather than after, because that computation is the
                         // expensive part of this edge: two neighbour loads, a capacity lookup and
