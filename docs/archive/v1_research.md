@@ -1,5 +1,12 @@
 # Sand Art Simulator: Version 1 Architectural & Research Plan
 
+> **Status: HISTORICAL / LARGELY IMPLEMENTED.** Predates the crate split — references to
+> `src/renderer.rs`, `src/app.rs`, `src/shader.wgsl` are the old single-crate paths (now
+> `sandart-render/src/lib.rs`, `sandart/src/app.rs`, `sandart-render/src/shader.wgsl`). The
+> 3D camera and shading work this document researches was carried out and shipped (see
+> `v1_plan.md`, itself marked `[COMPLETE]`). Kept as background/rationale for those
+> decisions, not as a current plan. Recommended: archive.
+
 This document outlines the technical research, feasibility analysis, and implementation strategy for migrating the Sand Art Simulator from the v0 2.5D rendering pipeline to a fully interactive 3D camera model with hyper-realistic sand rendering.
 
 ---

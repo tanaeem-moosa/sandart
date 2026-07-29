@@ -1,5 +1,11 @@
 # Sand Art Simulator: Version 2 Plan
 
+> **Status: IMPLEMENTED.** The crate split this document plans (`sandart-sim`,
+> `sandart-render`, `sandart-pattern`, `sandart-wasm`, `sandart`) is exactly the current
+> workspace layout — see `Cargo.toml`'s `[workspace] members` and `docs/ARCHITECTURE.md` §1.
+> Kept as the rationale for why the crates are divided the way they are. Recommended:
+> archive as a completed migration record.
+
 This document captures the design, module division, and implementation roadmap for v2 of the Sand Art Simulator, focused on modular refactoring and Web/WASM support.
 
 ---

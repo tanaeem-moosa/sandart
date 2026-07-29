@@ -1,5 +1,14 @@
 # Sandart: Per-Cell Property Advection — Design
 
+> **Status: IMPLEMENTED.** This design shipped — `sandart-sim` carries a 4-wide per-cell
+> `cell_props` buffer (`PROP_WETNESS`/`PROP_THRESHOLD`/`PROP_FLOW_RATE`/`PROP_GRAIN_SIZE` in
+> `sandart-sim/src/lib.rs`) advected alongside mass in `advect_properties`
+> (`sandart-sim/src/physics.rs`), exactly as proposed below. IronFilings/Ferrofluid and
+> their magnetism were removed as part of this change, as planned. The "Ready to implement"
+> line below is stale — kept for the rationale, not as a live TODO. See
+> `docs/ARCHITECTURE.md` for how this fits into the current physics model. Recommended:
+> archive as a completed design record.
+
 **Status**: Ready to implement. Multicolor UI already ships.
 **Scope**: Replace global `MaterialMode` enum with per-cell conserved scalar properties.
 Magnetism (`IronFilings`, `Ferrofluid`) is removed outright.

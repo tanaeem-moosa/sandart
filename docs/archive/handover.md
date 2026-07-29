@@ -1,5 +1,13 @@
 # Project Handover: Sandart Simulator Optimizations & Fixes
 
+> **Status: HISTORICAL.** A snapshot from just after the v2 crate split (June 2026); the
+> "Current Workspace Status" section's crate list is still accurate, but everything about
+> Sand-fall mode, the liquid flux solver, directional gravity, container shapes, and the
+> "Shoal & Swell" rename postdates this document entirely. Sections A/B/C at the top
+> reference pre-split paths (`src/sim/physics.rs`, `src/sim.rs`, `src/shader.wgsl`,
+> `src/pattern.rs`) that no longer exist. See `docs/ARCHITECTURE.md` for the current state.
+> Recommended: archive.
+
 This document describes the findings from the Senior Software Architect & Critic subagent review, the optimizations implemented, and outstanding tasks for the next steps.
 
 ---

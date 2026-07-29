@@ -1,5 +1,13 @@
 # Critique and Review Report: Block 2 (WGPU Render Pipeline Hook)
 
+> **Status: HISTORICAL.** Written before the workspace was split into `sandart-sim` /
+> `sandart-render` / `sandart-pattern` / `sandart-wasm` / `sandart` crates (see
+> `docs/ARCHITECTURE.md`). File paths below (`src/renderer.rs`, `src/app.rs`) refer to a
+> single-crate layout that no longer exists — the bugs it describes were fixed long ago and
+> the code has since moved to `sandart-render/src/lib.rs` and `sandart/src/app.rs`
+> respectively. Kept for historical record only; recommended for archiving (e.g. into a
+> `docs/archive/` directory) rather than continued use as a live reference.
+
 This document provides a comprehensive review and critique of the Block 2 (WGPU Render Pipeline Hook) implementation for the Kinetic Sand Art Simulator. It identifies rendering and layout bugs, discusses WGPU resource management and compatibility, outlines best practices for headless GPU testing in CI/CD, and proposes a complete implementation plan and test suite.
 
 ---

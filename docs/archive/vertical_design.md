@@ -1,5 +1,22 @@
 # Vertical Mode: Hourglass Simulation — Design
 
+> **Status: IMPLEMENTED AND SUPERSEDED — the line below ("Proposal — awaiting review") is
+> stale and actively misleading; do not trust it.** This document was committed in the same
+> commit that shipped Sand-fall mode's first version, and the feature has since been
+> extended well beyond what's described here: `SandboxShape` now also includes
+> `MultiStageHourglass`, `GaltonBoard`, `StaircaseCascade`, `ProceduralFunnel`, and
+> `MultiNeckHourglass` (see `sandart-sim/src/lib.rs`), grouped in the UI into "Sand-fall
+> Funnels" vs. "Flat Sandbox Beds" with automatic solver-mode switching. The gravitational
+> head model also evolved past what's sketched below — see `docs/ARCHITECTURE.md` §4 for
+> `H = h + Phi`, `GRAVITY_HEAD_SCALE`, and `column_depth`/lateral pressure, none of which are
+> in this document's original proposal. One specific implementation detail below is
+> superseded, not just extended: this document proposes shader-side branching on
+> `sandbox_shape` (e.g. "add `sandbox_shape == 3u` branch"); the shipped design instead
+> rasterises geometry once into a shape-mask texture that the shader merely samples, and the
+> shader's `sandbox_shape` uniform field is dead code (see `docs/ARCHITECTURE.md` §1).
+> Recommended: archive as a historical design record — it is valuable for the original
+> motivation, but nothing about "current status" in it should be trusted.
+
 **Status**: Proposal — awaiting review.
 **Scope**: Add directional gravity + hourglass boundary shape to the existing simulation.
 No new crate; no new rendering pipeline. Same UI with additional controls.

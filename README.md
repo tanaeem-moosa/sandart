@@ -1,43 +1,47 @@
 # Shoal & Swell: a sand and water simulator
 
-A beautiful, high-performance simulation of a kinetic sand art table (like the Sisyphus table) written in Rust. The application simulates a physical steel ball rolling through a sand bed, carving intricate mathematical and path-based designs, illuminated by a dynamic RGB LED ring.
+A beautiful, high-performance simulation of a kinetic sand art table (like the Sisyphus table), written in Rust, that has grown a second identity: a gravity-driven granular/liquid flow sandbox (hourglasses, funnels, Galton boards, pourable water and sand) sharing the same engine. The original mode simulates a physical steel ball rolling through a sand bed, carving intricate mathematical and path-based designs, illuminated by a dynamic RGB LED ring; the newer "Sand-fall" mode simulates material falling and settling under directional gravity inside a chosen container shape.
+
+**For how the codebase is put together — crate responsibilities, the physics model, and the invariants that have burned people before — see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Read it before making non-trivial changes to `sandart-sim` or `sandart-render`.**
 
 ### 🌐 Live Web Sandbox
 👉 **[tanaeem-moosa.github.io/sandart/](https://tanaeem-moosa.github.io/sandart/)**
+
+This WebAssembly build (`sandart-wasm`, auto-deployed from `main` — see `docs/ARCHITECTURE.md` §2 and §10) is the **only** surface the project is actually tested against. The native desktop app below shares the same simulation and rendering crates but is not part of that testing loop.
 
 ![Kinetic Sand Art Simulation](assets/screenshot.png)
 
 ## Project Goals
 
-1. **Realistic Sand Physics & Displacement**:
-   - **Heightmap Simulation**: Simulate the sand bed using a dynamic 2D heightmap.
-   - **Displacement**: As the marble rolls, it pushes sand outward, creating realistic grooves and side ridges.
-   - **Settle/Slide Effect**: Simulate gravity pulling sand back down if slopes exceed the natural angle of repose.
-   
+1. **Realistic Sand & Liquid Physics**:
+   - **Heightmap Simulation**: A dynamic 2D heightmap, settled by a conservative per-edge flux solver (see `docs/ARCHITECTURE.md` §4) rather than an unconstrained cellular automaton.
+   - **Marble Displacement Mode**: As the marble rolls, it pushes sand outward, creating realistic grooves and side ridges, with gravity pulling sand back down past its angle of repose.
+   - **Sand-fall Mode**: Directional gravity, pourable materials (sand and liquid presets), and a library of container shapes — Hourglass, MultiStageHourglass, GaltonBoard, StaircaseCascade, ProceduralFunnel, MultiNeckHourglass (funnel-style) plus Circle/Square/Oval (flat bed style), switching solver behavior automatically per shape.
+   - **Per-Cell Material Properties**: Wetness, threshold, flow rate, and grain size are conserved, advected scalars per cell, not a single global material — a cell of wet sand and a cell of dry sand can sit side by side and mix physically as material flows between them.
+
 2. **Stunning Visuals & Lighting**:
    - **Height-Based Shading**: Real-time normal mapping of the sand surface to render realistic 32-step raymarched soft shadows, tactile normal sparkles, and ambient occlusion.
    - **Dynamic & Rotating RGB LED Ring**: An 8-LED ring that gently rotates around the perimeter, casting sweeping chromatic shadows (with dynamic 8-step raymarching per light) for a premium kinetic art table effect.
    - **Customizable Styles & Colors**: Integrated a real-time sand color picker widget, customizable LED brightness up to 3.0, and a toggle for soft raymarched shadows.
 
 3. **Intricate Pattern Generation**:
-   - **Mathematical Patterns**: Built-in generators for Spirographs, Lissajous curves, Rose curves, Trochoids, and Fourier-series-based art.
+   - **Mathematical Patterns**: Built-in generators for Spirographs, Lissajous curves, Rose curves, Trochoids, Gosper/Sierpinski space-filling curves, and Fourier-series-based art.
    - **Theta-Rho (`.thr`) File Support**: Support loading and playing standard `.thr` coordinate files widely used by physical kinetic sand tables.
    - **Interactive Drawing**: Drag the marble manually with the mouse/touchscreen to draw custom paths in real-time.
 
 4. **Modern, Responsive User Interface**:
    - Built-in control panel to adjust ball speed, size, pattern parameters, color profiles, LED animations, and physics constants.
-   - Cross-platform support (runs natively on Linux, Steam Deck, Windows, macOS, and potentially WebAssembly).
+   - Runs natively on Linux, Steam Deck, Windows, and macOS (`sandart` desktop app), and in-browser via WebAssembly (`sandart-wasm`) — see the live sandbox link above.
 
 ---
 
 ## Architecture & Tech Stack
 
 - **Language**: Rust 🦀
-- **Graphics & Rendering**: 
-  - `wgpu` or `pixels` for hardware-accelerated GPU rendering.
-  - Custom fragment shader for sand surface heightmap reconstruction, lighting (normal map generation), and LED ring ambient illumination.
-- **User Interface**: `egui` (via `eframe`) for a clean, lightweight, immediate-mode GUI.
-- **Physics**: Lightweight cellular automata or grid-based heightmap filters written in Rust (parallelized with `rayon` or run on the GPU via compute shaders).
+- **Workspace**: five crates — `sandart-sim` (physics/state), `sandart-render` (WGPU pipeline + shader), `sandart-pattern` (marble path generators), `sandart-wasm` (browser front end), `sandart` (desktop front end). See `docs/ARCHITECTURE.md` §1 for the full breakdown and crate boundaries.
+- **Graphics & Rendering**: `wgpu`, with a custom fragment/vertex shader (`sandart-render/src/shader.wgsl`) for heightmap surface reconstruction, lighting, and LED ring illumination.
+- **User Interface**: `egui`/`eframe` for the native desktop app; a hand-written HTML/JS page (`sandart-wasm/web/`) for the browser build.
+- **Physics**: a conservative per-edge flux solver for gravity/liquid flow, alongside the original displacement-based cellular automaton for marble carving — both in `sandart-sim/src/physics.rs`. See `docs/ARCHITECTURE.md` §4 onward for the model, its invariants, and its current known gaps.
 
 ---
 
@@ -101,6 +105,8 @@ Once compiled, you can copy the binary from `target/release/sandart` directly to
 ## Development Roadmap
 
 The project is built in incremental, testable blocks:
+
+> This log is historical and stops at v1.5+ (June 2026), before the crate split (`sandart-sim`/`sandart-render`/`sandart-pattern`/`sandart-wasm`) and before Sand-fall mode, the liquid solver, and per-cell material properties existed — see `docs/ARCHITECTURE.md` for the current architecture and `docs/archive/v2_plan.md`, `docs/archive/vertical_design.md` and `docs/archive/design.md` for how those later phases were planned (each carries a status banner noting how it relates to what shipped). One item below is stale as a *feature*, not just as a changelog entry: **Iron Filings and its Magnetic Pull behaviour were removed** during the per-cell property advection redesign (see `docs/archive/design.md`) and are not in the current material list (`MaterialMode::ALL` in `sandart-sim/src/lib.rs`, 14 materials, none of them magnetic).
 
 - [x] **Block 1: Basic Scaffolding & Windowing**: Set up the `egui` layout, menus, panel widgets, and a placeholder canvas.
 - [x] **Block 2: WGPU Render Pipeline Hook**: Integrate `egui_wgpu` with custom paint callbacks.
