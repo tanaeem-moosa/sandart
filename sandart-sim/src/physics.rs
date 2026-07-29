@@ -247,29 +247,37 @@ const GRAVITY_HEAD_SCALE: f32 = 25.0;
 /// pre-existing `head_a = h_a + gravity_dir.x * GRAVITY_HEAD_SCALE` formula regardless of this
 /// constant, so in principle any positive scale is "correct" and only the genuinely deep case
 /// should feel it. In practice `column_depth` is a cheap, single-tick, no-lookahead estimate (see
-/// its doc comment in `settle_tick`), not an exact column integral, and it is not perfectly zero
-/// for a falling stream — a saturated stream's *own re-fed source* (a small block of cells held
-/// at capacity by continuous inflow, as opposed to the stream's interior, which the `in_transit`
-/// subtraction does handle exactly) still reads as a few cells of "resting" depth. Below
-/// `LATERAL_PRESSURE_DEPTH_FLOOR` cells of accumulated depth, that noise floor and genuine
-/// shallow overburden are not distinguishable from each other, so the term is held off entirely
-/// there (see the `.max(0.0)` on `column_depth - LATERAL_PRESSURE_DEPTH_FLOOR` at the call site)
-/// and only engages past it, where a real hydrostatic stack lives.
+/// its doc comment in `settle_tick`), not an exact column integral.
 ///
-/// Both constants are measured, not derived: swept jointly against
-/// `test_liquid_stream_stays_coherent` (a 4-cell tap, whose peak `column_depth` sits at ~3 cells
-/// right at its own always-full source — this is the floor's binding case) and
-/// `test_liquid_flowing_liquid_does_not_stand_in_walls` (an hourglass chamber tens of cells deep —
-/// this is what the scale is for). Floor swept at fixed scale = 1: 1.25 already lets the tap's
-/// source push a 9th column (fails), 1.5 holds it at the required 8 with room to spare. Scale then
-/// swept at that floor: the walls test's 400-tick enclosed-void total falls from 30060 (the
-/// pre-existing in-transit-only fix) to 23526 at scale = 2, 21938 at scale = 5, and flattens out
-/// around there (22085 at scale = 10) — comparable to full removal of the in-transit limiter
-/// (6304) is not reachable this way without also reopening the stream (removing the limiter
-/// outright fans it to 59 cells wide), so 5 is picked as past the knee of that curve rather than
-/// at either extreme.
+/// `LATERAL_PRESSURE_SCALE` is measured, not derived: swept against
+/// `test_liquid_flowing_liquid_does_not_stand_in_walls` (an hourglass chamber tens of cells deep),
+/// the 400-tick enclosed-void total falls from 30060 (the pre-existing in-transit-only fix) to
+/// 23526 at scale = 2, 21938 at scale = 5, and flattens out around there (22085 at scale = 10), so
+/// 5 was picked as past the knee of that curve. That sweep predates the fix described below; after
+/// it, the same scale and test now measures 12106 (`test_liquid_stream_stays_coherent`'s max_width
+/// still holds at the required 8, peak_h 1.0000) — scale was not re-swept against the new number,
+/// so a lower total may well be reachable here too, but that is future work, not this constant's
+/// current justification.
+///
+/// `LATERAL_PRESSURE_DEPTH_FLOOR` no longer does anything and is kept at `0.0` — effectively a
+/// no-op, since `column_depth` is already `>= 0` by construction (`resting_above` is clamped with
+/// `.max(0.0)` before being added to the prior row's already-non-negative value) — rather than
+/// removed outright, so the call site's `(column_depth - LATERAL_PRESSURE_DEPTH_FLOOR).max(0.0)`
+/// shape stays available if a future regression ever needs a deadband again. It used to be load
+/// bearing: `column_depth`'s `resting_above` term is `temp_heights[above] - in_transit_at(above)`,
+/// and `in_transit_at` only sees mass that moved through `edge_vel_v` — it had no way to see mass a
+/// caller wrote directly into `heightmap.data`, which is exactly how a continuous source (e.g.
+/// `test_liquid_stream_stays_coherent`'s tap) used to be fed. That made an always-full source cell
+/// read as a few cells of phantom "resting" depth every tick, and the floor was sized (1.5) as a
+/// deadband wide enough to swallow that phantom without also swallowing genuine shallow
+/// overburden. The real fix is `Heightmap::apply_external_mass` / `Heightmap::external_mass_this_tick` (see
+/// `grid.rs`): callers that add mass from outside the flux solver now go through `inject`, which
+/// records the full injected height, and `resting_above`'s computation in `settle_tick` subtracts
+/// it the same way it subtracts `in_transit_at`'s edge-arrived estimate. The phantom depth is
+/// eliminated at its source instead of masked after the fact, so the deadband has nothing left to
+/// do and the floor can sit at `0.0`.
 const LATERAL_PRESSURE_SCALE: f32 = 5.0;
-const LATERAL_PRESSURE_DEPTH_FLOOR: f32 = 1.5;
+const LATERAL_PRESSURE_DEPTH_FLOOR: f32 = 0.0;
 
 fn cell_capacity_for(wetness: f32) -> f32 {
     let l = liquidity(wetness);
@@ -1961,9 +1969,20 @@ pub fn settle_tick(
                     if gravity_active && cell_liquidity > 0.0 {
                         let above_idx = center_idx - w; // safe: the CA guard above requires y > 0
                         let depth_above = if is_inside(x, y - 1) {
+                            // `external_mass_this_tick` is signed (see its doc comment in
+                            // grid.rs): positive means externally-added mass, which is real and
+                            // should reduce `resting_above` exactly like `in_transit_at` does.
+                            // Negative is reserved for a future drain/sink and its meaning *here*
+                            // is deliberately undecided — subtracting a negative would currently
+                            // just ADD to `resting_above`, which is not unreasoned about by
+                            // accident but IS a placeholder: nothing has designed what a drain
+                            // should do to perceived overburden yet. `.max(0.0)` below neutralizes
+                            // that case rather than silently letting it through, until the drain's
+                            // `column_depth` semantics get designed on their own.
                             let resting_above =
                                 (temp_heights[above_idx]
-                                    - in_transit_at(above_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask))
+                                    - in_transit_at(above_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask)
+                                    - heightmap.external_mass_this_tick[above_idx].max(0.0))
                                 .max(0.0);
                             resting_above + column_depth[above_idx]
                         } else {
@@ -2523,6 +2542,16 @@ pub fn settle_tick(
         }
     }
     *last_displacements = next_displacements;
+
+    // Clear the external-mass-exchange buffer now that this tick's per-cell loop (section 2
+    // above, which is the only reader — see `column_depth`'s `resting_above` computation) has
+    // consumed it. This must happen exactly once per tick, after that loop and not before it: a
+    // caller (e.g. a waterfall/pour feature, or `test_liquid_stream_stays_coherent`) calls
+    // `Heightmap::apply_external_mass` *before* `tick()`, so the buffer has to survive from that
+    // call, through `temp_heights.copy_from_slice(&heightmap.data)` at this function's start, all
+    // the way to section 2's per-cell pass — then must be zeroed here so the next tick's calls
+    // aren't added on top of this tick's stale leftovers.
+    heightmap.external_mass_this_tick.fill(0.0);
 
     total_flow
 }
@@ -4003,7 +4032,7 @@ mod tests {
         for _ in 0..40 {
             for y in 6..10 {
                 for x in 30..34 {
-                    sim.hm.data[y * w + x] = 1.0;
+                    sim.hm.apply_external_mass(x, y, 1.0);
                 }
             }
             sim.tick(gravity_dir, 256);
