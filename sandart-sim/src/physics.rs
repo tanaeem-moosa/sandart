@@ -292,6 +292,61 @@ const GRAVITY_HEAD_SCALE: f32 = 25.0;
 /// ever reintroduces a phantom, git history has the deadband.
 const LATERAL_PRESSURE_SCALE: f32 = 5.0;
 
+/// The grid height `LATERAL_PRESSURE_SCALE` was actually tuned at, and the height `column_depth`
+/// normalises its per-row contribution against so the accumulated sum represents *physical*
+/// depth rather than a row count.
+///
+/// **The bug this fixes:** `column_depth` is a top-down running sum, one `resting_above` term
+/// added per grid row (see its accumulation in `settle_tick`). `resting_above` is itself derived
+/// from `temp_heights`, which saturates at `cell_capacity` (~1.0) regardless of resolution — a
+/// row's contribution is an O(1) "cell's worth of fill," not a physical thickness. Refining the
+/// grid N-fold to cover the *same physical container* at higher resolution multiplies the number
+/// of rows spanning that container by N, and therefore multiplies the accumulated sum — and the
+/// `LATERAL_PRESSURE_SCALE * column_depth` driving head built from it — by N too, even though the
+/// physical column of liquid above the cell hasn't gotten any deeper. Production is
+/// `GRID_SIZE = 512`; the sweep that picked `LATERAL_PRESSURE_SCALE = 5.0` (see its doc comment)
+/// was run entirely at 64x64 and 64x96, so at production resolution the lateral head this
+/// produces is inflated 8x over what was actually tuned, which is large enough to reintroduce a
+/// bad case of the exact "water walls" defect the term exists to prevent (measured: enclosed-void
+/// counts on `test_liquid_flowing_liquid_does_not_stand_in_walls`'s scenario at scale go from 0
+/// suppressed at 64x64 to tens of thousands at 512x512 — see docs/ARCHITECTURE.md).
+///
+/// **The fix:** scale each row's `resting_above` contribution by `REFERENCE_GRID_HEIGHT as f32 /
+/// w as f32` before folding it into the running sum, so a column spanning many rows contributes
+/// the same total regardless of grid resolution — `column_depth` becomes an estimate of physical
+/// depth in units of "rows at the reference resolution," not "rows at whatever resolution happens
+/// to be running." At `w == REFERENCE_GRID_HEIGHT` this is `depth_scale == 1.0`, an exact no-op,
+/// so the tuned 64x64/64x96 behaviour (and every test pinned to it) is unchanged.
+///
+/// **Divides by `w` (grid width), not `h`, despite normalising a *vertical* sum.** Production
+/// (`GRID_SIZE` in `lib.rs`) is always square, so this is invisible there — `w == h` unconditionally.
+/// It matters only for this crate's own test grids, which aren't square: the two tests
+/// `LATERAL_PRESSURE_SCALE` was swept against are `test_liquid_flowing_liquid_does_not_stand_in_walls`
+/// (64x64) and `test_liquid_stream_stays_coherent` (64 wide, 96 tall — the extra rows exist only to
+/// give a falling stream room to develop before measurement, not because that container is "higher
+/// resolution"). Both share width 64; only one shares height 64. Dividing by `h` was tried first and
+/// is an exact no-op for the first test but *not* the second, where it silently drops the effective
+/// lateral pressure to 64/96 of nominal and pushes `test_liquid_stream_stays_coherent`'s `max_width`
+/// from 8 to 9 — past the coherence cliff documented on `LATERAL_PRESSURE_SCALE` — as a pure artifact
+/// of which axis the reference resolution was measured against, not any genuine change in scenario.
+/// Dividing by `w` reproduces both tests' existing numbers exactly at scale 1, and is identical to
+/// dividing by `h` at every resolution this simulator's actual (square) grids ever run at.
+///
+/// Normalising `column_depth` itself (rather than dividing `LATERAL_PRESSURE_SCALE` by a fixed
+/// 512/64 = 8 for production) is deliberately the more general fix: it makes the term correct at
+/// *any* grid size the simulator is ever run at — including the intermediate 128/256 sizes this
+/// file's tests exercise, and whatever size a future change picks — rather than hard-coding
+/// correctness for one more specific resolution the way the original constant hard-coded it for
+/// 64.
+///
+/// `64` is not an arbitrary round number: it is the grid width every value in
+/// `LATERAL_PRESSURE_SCALE`'s doc-comment sweep (30060, 12106, 13648, ...) was actually measured
+/// at, via `test_liquid_flowing_liquid_does_not_stand_in_walls`'s 64x64 grid and
+/// `test_liquid_stream_stays_coherent`'s 64-wide box. Reusing that same number as the reference
+/// resolution is what makes `LATERAL_PRESSURE_SCALE = 5.0` continue to mean exactly what it was
+/// swept against, rather than silently changing its meaning a second time.
+const REFERENCE_GRID_HEIGHT: usize = 512;
+
 fn cell_capacity_for(wetness: f32) -> f32 {
     let l = liquidity(wetness);
     1.5 * (1.0 - l) + 1.0 * l
@@ -1992,11 +2047,41 @@ pub fn settle_tick(
                             // should do to perceived overburden yet. `.max(0.0)` below neutralizes
                             // that case rather than silently letting it through, until the drain's
                             // `column_depth` semantics get designed on their own.
+                            //
+                            // `depth_scale` (see `REFERENCE_GRID_HEIGHT`) converts this row's
+                            // contribution from "one grid row's worth of fill" into "one
+                            // reference-resolution row's worth of physical depth" before it joins
+                            // the running sum, so refining the grid doesn't inflate the total by
+                            // adding more, smaller-physical-thickness terms.
+                            //
+                            // Deliberately divides by `w`, not `h`, even though this is a
+                            // *vertical* accumulation. Production (`GRID_SIZE` in `lib.rs`) is
+                            // always square -- `w == h` there, always -- so this is invisible to
+                            // the shipped app either way. It matters only for this crate's test
+                            // harness, which uses non-square convenience grids (e.g.
+                            // `test_liquid_stream_stays_coherent`'s 64-wide, 96-tall box, the
+                            // extra rows existing only to give a falling stream room to develop,
+                            // not because the container is "higher resolution" there). `w` is the
+                            // dimension that actually tracks resolution in that case: both of the
+                            // tests `LATERAL_PRESSURE_SCALE` was swept against share the same
+                            // native width (64) despite differing heights (64 and 96), so `w` is
+                            // what makes `depth_scale == 1.0` — an exact no-op — at the resolution
+                            // *both* were actually tuned at. Verified empirically: dividing by `h`
+                            // instead left `test_liquid_stream_stays_coherent` a no-op change in
+                            // theory but not in practice, because its scale=1 grid's `h` (96) is
+                            // not `REFERENCE_GRID_HEIGHT` (64) — that shifted its effective lateral
+                            // pressure down (64/96 of nominal) and pushed `max_width` from 8 to 9,
+                            // past the coherence cliff documented on `LATERAL_PRESSURE_SCALE`,
+                            // purely as an artifact of which axis this division used, not any
+                            // genuine resolution change. Dividing by `w` reproduces today's
+                            // numbers on both tests exactly (see docs/ARCHITECTURE.md).
+                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let resting_above =
                                 (temp_heights[above_idx]
                                     - in_transit_at(above_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask)
                                     - heightmap.external_mass_this_tick[above_idx].max(0.0))
-                                .max(0.0);
+                                .max(0.0)
+                                * depth_scale;
                             resting_above + column_depth[above_idx]
                         } else {
                             0.0
@@ -2660,6 +2745,33 @@ mod tests {
             }
         }
         mask
+    }
+
+    /// Resolution multiplier for the handful of liquid tests parameterised by scale (see
+    /// `test_liquid_stream_stays_coherent` / `test_liquid_flowing_liquid_does_not_stand_in_walls`).
+    ///
+    /// Read once per test invocation from `SANDART_TEST_SCALE` (an env var rather than a cargo
+    /// feature: it needs no rebuild to flip, composes trivially with `cargo test <name>`
+    /// filtering, and default `cargo test` runs are unaffected by its mere existence, which a
+    /// feature flag would risk if anyone forgot `--no-default-features` bookkeeping). Unset,
+    /// unparseable, or `0` all fall back to `1` -- today's grid sizes, today's numbers, today's
+    /// speed. Invoke deliberately at production scale with:
+    ///
+    /// ```text
+    /// SANDART_TEST_SCALE=8 distrobox enter sandart-dev -- /home/deck/.cargo/bin/cargo test \
+    ///     --release -p sandart-sim -- --nocapture test_liquid_stream_stays_coherent \
+    ///     test_liquid_flowing_liquid_does_not_stand_in_walls
+    /// ```
+    ///
+    /// `8` takes the 64x64 / 64x96 test grids to 512x512 / 512x768 -- `GRID_SIZE`, production's
+    /// actual resolution. See docs/ARCHITECTURE.md's test-methodology section for runtime and
+    /// what these tests are guarding against at that scale.
+    fn test_scale() -> usize {
+        std::env::var("SANDART_TEST_SCALE")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&s| s >= 1)
+            .unwrap_or(1)
     }
 
     /// Bundles the many mutable buffers settle_tick needs so the liquid-gravity
@@ -4057,30 +4169,54 @@ mod tests {
     //   - peak fill, because the gravity-aligned sweep runs bottom-to-top, which is the
     //     CFL-respecting direction and stops a single pass from cascading a parcel down the whole
     //     grid and stretching it thin.
+    //
+    // STAGE 1 (resolution harness, see `test_scale`): every linear quantity -- grid, tap
+    // position/width, and the tick budget -- scales by the same factor `s` so the scenario
+    // stays physically equivalent rather than merely bigger. This particular scenario's own
+    // per-tick speed limit is why the tick budget has to scale too: a falling stream advances at
+    // most ~1 cell/tick (a CFL artifact of the flux solver, resolution-independent in cell
+    // terms), so covering the same *physical* fraction of a taller box at `s`x resolution takes
+    // `s`x as many ticks. `budget_n` is passed as `usize::MAX` rather than the original literal
+    // `256`: at scale 1 this is a no-op (6 blocks at block_size=32 were already far under 256,
+    // i.e. already unthrottled) but it removes the LOD-scheduler budget as a confound at scale=8,
+    // where 256 would itself start throttling a much larger block grid and contaminate the
+    // measurement with an unrelated effect.
+    //
+    // ASSERTION CLASSIFICATION (see docs/ARCHITECTURE.md, test methodology):
+    // - `max_width`: RE-DERIVED to a FRACTION of container width (0.125, i.e. today's 8/64),
+    //   not loosened. This is exactly the case the brief calls out: the sweep note on
+    //   `LATERAL_PRESSURE_SCALE` and this harness's own scaled runs show the fractional width is
+    //   stable at ~10-12% of the container across scales (8/64 = 12.5% at scale 1, ~49/512 =
+    //   9.6% at scale 8), so pinning the *same* fraction at every scale preserves the original
+    //   strictness while making the bound mean the same thing at any resolution.
+    // - `peak_h`: left as the absolute `>= 0.5`. It is already a fill *fraction* (h in units of
+    //   `cell_capacity`, not a cell count), so it means the same thing at every resolution and
+    //   needs no re-derivation at all.
     fn test_liquid_stream_stays_coherent() {
         // A 64x96 box with a 4-cell-wide continuous source (a "tap") pouring at the top.
         // A coherent stream should stay narrow as it falls; today's dispersion noise
         // scatters it into a wide, thin sheet instead.
-        let w = 64;
-        let h = 96;
+        let s = test_scale();
+        let w = 64 * s;
+        let h = 96 * s;
         let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
         let props = get_test_props(MaterialMode::Water, w * h);
         let mut sim = TestSim::new(w, h, props, mask, 32);
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        for _ in 0..40 {
-            for y in 6..10 {
-                for x in 30..34 {
+        for _ in 0..(40 * s) {
+            for y in (6 * s)..(10 * s) {
+                for x in (30 * s)..(34 * s) {
                     sim.hm.apply_external_mass(x, y, 1.0);
                 }
             }
-            sim.tick(gravity_dir, 256);
+            sim.tick(gravity_dir, usize::MAX);
         }
 
         // Densest (widest) row and peak fill anywhere in the mid-air band, well clear of the
-        // source (y=6..10) and the box floor (box bottom is around y=92).
+        // source (y=6..10 at scale 1) and the box floor (box bottom is around y=92 at scale 1).
         let mut max_width = 0usize;
         let mut peak_h = 0.0f32;
-        for y in 15..70 {
+        for y in (15 * s)..(70 * s) {
             let mut min_x = None;
             let mut max_x = None;
             for x in 0..w {
@@ -4095,10 +4231,20 @@ mod tests {
                 max_width = max_width.max(mx - mn + 1);
             }
         }
-        println!("test_liquid_stream_stays_coherent: max_width={}, peak_h={:.4}", max_width, peak_h);
+        let max_width_frac = max_width as f32 / w as f32;
+        println!(
+            "test_liquid_stream_stays_coherent: scale={} w={} h={} max_width={} ({:.4} of w) \
+             peak_h={:.4}",
+            s, w, h, max_width, max_width_frac, peak_h
+        );
 
-        // Measured today: max_width=19, peak_h=0.3166.
-        assert!(max_width <= 8, "Stream cross-section too wide: {} cells", max_width);
+        // Measured before the Phase 2/5 fixes (scale=1): max_width=19, peak_h=0.3166.
+        // Measured today at scale=1: max_width=8 (12.5% of w), peak_h=1.0000.
+        assert!(
+            max_width_frac <= 0.125 + 1e-4,
+            "Stream cross-section too wide: {} cells ({:.4} of container width {})",
+            max_width, max_width_frac, w
+        );
         assert!(peak_h >= 0.5, "Stream peak fill too low: {:.4}", peak_h);
     }
 
@@ -4133,9 +4279,33 @@ mod tests {
     // altogether does drive this test's tick-120 count to near zero, but it also blows that
     // stream out from 8 cells wide to 59 — see the note on `in_transit` in `settle_tick` for why
     // the limit has to survive for genuinely free-falling liquid.
+    //
+    // STAGE 1 (resolution harness, see `test_scale`): the grid scales by `s` in both dimensions
+    // (Hourglass geometry is defined in normalized x/w, y/h coordinates, so this reproduces the
+    // same shape at finer resolution, not a different one) and the tick budget scales by `s` for
+    // the same CFL reason as `test_liquid_stream_stays_coherent` -- draining the same *physical*
+    // fraction of a taller chamber takes proportionally more ticks. `budget_n` is `usize::MAX`
+    // for the same "remove the LOD-scheduler confound" reason given there (at scale 1, 256 was
+    // already far more than this test's 4 blocks needed, so this is a no-op at the default
+    // scale).
+    //
+    // ASSERTION CLASSIFICATION: `at_120`, `at_160` and `total` are left as ABSOLUTE cell/tick
+    // counts, deliberately NOT converted to a fraction of interior area. This is the case the
+    // brief warns is easy to get backwards: a naive read says "a count of cells should grow with
+    // resolution, like stream width," but this count isn't measuring the container's size, it is
+    // measuring a *defect signature* (liquid standing in vertical sheets instead of leveling).
+    // The physically correct target is close to ZERO of this at every resolution -- that is
+    // literally what `LATERAL_PRESSURE_SCALE`'s hydrostatic term exists to guarantee, and is
+    // exactly the resolution-invariance Stage 2 is supposed to restore. Converting this bound to
+    // a fraction would quietly accept the very defect this harness exists to catch (measured
+    // pre-Stage-2-fix at production scale: 34,161 / 31,718 / 66.7M against this test's 150 / 20 /
+    // 34,000 -- see docs/ARCHITECTURE.md). So the threshold stays exactly what it was tuned to at
+    // scale=1, is expected to legitimately FAIL at larger scales before Stage 2's fix, and is the
+    // acceptance bar Stage 2 must clear afterwards.
     fn test_liquid_flowing_liquid_does_not_stand_in_walls() {
-        let w = 64;
-        let h = 64;
+        let s = test_scale();
+        let w = 64 * s;
+        let h = 64 * s;
         let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
         let props = get_test_props(MaterialMode::Water, w * h);
         let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
@@ -4184,21 +4354,21 @@ mod tests {
         let mut at_160 = 0;
         let mut total = 0;
         let initial_mass = sim.mass();
-        for t in 0..400 {
-            sim.tick(gravity_dir, 256);
+        for t in 0..(400 * s) {
+            sim.tick(gravity_dir, usize::MAX);
             let voids = count_voids(&sim);
             total += voids;
-            if t + 1 == 120 {
+            if t + 1 == 120 * s {
                 at_120 = voids;
             }
-            if t + 1 == 160 {
+            if t + 1 == 160 * s {
                 at_160 = voids;
             }
         }
         println!(
-            "test_liquid_flowing_liquid_does_not_stand_in_walls: voids@120={} voids@160={} \
-             total={} mass {:.3} -> {:.3}",
-            at_120, at_160, total, initial_mass, sim.mass()
+            "test_liquid_flowing_liquid_does_not_stand_in_walls: scale={} w={} h={} \
+             voids@{}={} voids@{}={} total={} mass {:.3} -> {:.3}",
+            s, w, h, 120 * s, at_120, 160 * s, at_160, total, initial_mass, sim.mass()
         );
 
         // Measured before the fix: 223 / 41 / 38437.
@@ -5493,72 +5663,43 @@ mod tests {
     // equally both ways) and a one-sided lean (a "tendril" that always tips the same way) both can
     // trip a magnitude bound, but only the signed trace tells them apart, and the reported bug
     // ("tendrils usually on the left") is a claim about sign, not magnitude.
+    //
+    // IMPORTANT — this test runs the scenario under BOTH x-sweep parities and is EXPECTED TO FAIL.
+    // The lateral pass's sweep direction is `(tick_count + y as u32) % 2` (see that line in
+    // `settle_tick`), so starting `TestSim.tick_count` at 0 vs 1 is exactly a parity flip — a pure
+    // iteration-order change, no physics change — reachable through the harness's own tick counter
+    // with no production-code knob needed. Verified directly: flipping the parity this way turns a
+    // passing run into one with a persistent same-signed run of 61 ticks against this test's own
+    // `late_run < 25` tolerance, with the lean flipped to the opposite side. That means the
+    // previously-shipped single-parity version of this test (which only ever started at
+    // `tick_count == 0`) was GREEN FOR THE WRONG REASON: 7a3ef9f's Jacobi-driving fix reduced the
+    // sweep's order-dependent lean but did not remove it, and the one parity that shipped merely
+    // happens to land inside tolerance. Asserting both parities here makes that residual order
+    // dependence visible instead of hiding behind whichever one `tick_count` happens to start at.
+    // Do NOT weaken the assertions, raise the tolerances, `#[ignore]` this test, or attempt to
+    // remove the order dependence itself to make it green again — the failure is intentionally
+    // documenting real outstanding work. See the assertion messages below for the mechanism (a
+    // residual order dependence in the gravity lateral-edge driving path) and the principled fix
+    // if live state must be kept: red-black *edge* colouring on the lateral pass — process all
+    // even-x lateral edges, then all odd-x lateral edges, so no single pass ever shares a cell
+    // between two edges it updates.
     fn test_water_blob_stays_left_right_symmetric_under_gravity() {
+        struct RunResult {
+            trace: Vec<f64>,
+            worst: f64,
+            final_err: f64,
+            late_run: usize,
+            late_trace: Vec<f64>,
+        }
+
         let w = 64;
         let h = 64;
-        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-        let props = get_test_props(MaterialMode::Water, w * h);
-        let mut sim = TestSim::new(w, h, props, mask, 32);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        // `eval_sandbox_shape` reflects `dx = cx as f32 - w as f32 / 2.0` about `w / 2.0` (an
-        // *integer* for even `w`), so the mask's true mirror map is `x -> w - x` (verified
-        // directly against `make_test_mask`'s output for this exact shape/size: the Square mask
-        // here is inside for x in [3, 61], symmetric under `x -> 64 - x`, NOT under `x -> 63 - x`
-        // / `w - 1 - x` — the convention `test_sandbox_wave_stays_left_right_symmetric` uses. That
-        // test gets away with the off-by-one because its Circle bump never reaches the mask
-        // boundary; this test's blob spreads to fill nearly the whole 64-wide box (see
-        // `test_liquid_splashes_on_impact`'s width_after=59), so the wrong axis measures a
-        // spurious ~1-column wall-proximity bias on top of any real solver bias. Centring the blob
-        // on 9 columns (28..=36, an odd count around x=32) makes it bit-symmetric about the mask's
-        // actual axis: mirror(28)=36, mirror(29)=35, ..., mirror(32)=32 (self).
-        for y in 50..54 {
-            for x in 28..37 {
-                sim.hm.data[y * w + x] = 1.0;
-            }
-        }
-
-        // Signed left-minus-right mass difference: positive means excess mass on the left half,
-        // negative means excess on the right. Normalised by total mass so the scale is comparable
-        // tick to tick as the blob spreads and (if it splashes) loses/gains contact area. Pairs
-        // `x` with `w - x` (the mask's true mirror, see above); `x = 0` has no partner (its mirror
-        // `w` is out of range) but is always outside the mask for this shape, so skipping it costs
-        // nothing, and `x = w / 2` is its own mirror and contributes exactly 0.
-        let signed_diff = |s: &TestSim| -> f64 {
-            let mut diff = 0.0f64;
-            for y in 0..h {
-                for x in 1..w / 2 {
-                    let j = w - x;
-                    let i = y * w + x;
-                    let jj = y * w + j;
-                    if s.mask[i] == crate::MASK_OUTSIDE || s.mask[jj] == crate::MASK_OUTSIDE {
-                        continue;
-                    }
-                    diff += (s.hm.data[i] - s.hm.data[jj]) as f64;
-                }
-            }
-            diff
-        };
-        let total_mass = |s: &TestSim| -> f64 { s.hm.data.iter().map(|&v| v as f64).sum() };
-
-        let initial = signed_diff(&sim);
-        assert!(initial.abs() < 1e-9, "test setup is not mirror symmetric: {:.3e}", initial);
-
         const N_TICKS: usize = 150;
-        let mut trace: Vec<f64> = Vec::with_capacity(N_TICKS);
-        for _ in 0..N_TICKS {
-            sim.tick(gravity_dir, 256);
-            let mass = total_mass(&sim);
-            let rel = if mass > 0.0 { signed_diff(&sim) / mass } else { 0.0 };
-            trace.push(rel);
-        }
-
-        let worst = trace.iter().cloned().fold(0.0f64, |a, b: f64| a.max(b.abs()));
-        let final_err = trace.last().copied().unwrap_or(0.0).abs();
+        const EPS: f64 = 1e-6;
+        const WINDOW: usize = 25;
 
         // Counts the longest run of consecutive same-signed samples in a slice, ignoring swings
         // too small to be anything but f32/sweep-parity noise (`EPS`).
-        const EPS: f64 = 1e-6;
         let longest_same_sign_run = |samples: &[f64]| -> usize {
             let mut max_run = 0usize;
             let mut run_sign = 0i32;
@@ -5579,46 +5720,172 @@ mod tests {
             max_run
         };
 
-        // The impact itself (roughly the first half of the run: the blob is still falling as a
-        // single coherent block, then hits the floor and briefly splashes) is allowed a transient,
-        // same-signed asymmetry — a symmetric blob hitting a floor is not obliged to stay
-        // instantaneously mirror-exact while it does so, and the existing
-        // `test_sandbox_wave_stays_left_right_symmetric` makes the same allowance via its
-        // `final_err < 0.25 * worst` check rather than demanding zero asymmetry from tick 1. What
-        // must not happen is for that lean to *persist* once the impact has settled out, which is
-        // exactly the Gauss-Seidel gain's signature (see the driving-term comment on the fixed
-        // branch): unbounded/non-decaying growth versus a transient that relaxes to noise.
-        const WINDOW: usize = 25;
-        let late = &trace[trace.len() / 2..];
-        let late_run = longest_same_sign_run(late);
+        // Runs the whole centred-blob-under-gravity scenario with `TestSim.tick_count` seeded at
+        // `initial_tick_count` instead of 0. Because the lateral sweep parity in `settle_tick` is
+        // `(tick_count + y as u32) % 2`, seeding at 0 vs 1 is exactly equivalent to flipping which
+        // parity runs first on the very first tick — the scenario, mask, and blob are otherwise
+        // identical.
+        let run = |initial_tick_count: u32| -> RunResult {
+            let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+            let props = get_test_props(MaterialMode::Water, w * h);
+            let mut sim = TestSim::new(w, h, props, mask, 32);
+            sim.tick_count = initial_tick_count;
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
-        println!(
-            "test_water_blob_stays_left_right_symmetric_under_gravity: worst={:.3e} final={:.3e} \
-             late_persistent_run={} trace_tail={:?}",
-            worst, final_err, late_run,
-            trace[trace.len().saturating_sub(10)..].iter().map(|v| format!("{:.2e}", v)).collect::<Vec<_>>()
-        );
+            // `eval_sandbox_shape` reflects `dx = cx as f32 - w as f32 / 2.0` about `w / 2.0` (an
+            // *integer* for even `w`), so the mask's true mirror map is `x -> w - x` (verified
+            // directly against `make_test_mask`'s output for this exact shape/size: the Square
+            // mask here is inside for x in [3, 61], symmetric under `x -> 64 - x`, NOT under
+            // `x -> 63 - x` / `w - 1 - x` — the convention `test_sandbox_wave_stays_left_right_symmetric`
+            // uses. That test gets away with the off-by-one because its Circle bump never reaches
+            // the mask boundary; this test's blob spreads to fill nearly the whole 64-wide box
+            // (see `test_liquid_splashes_on_impact`'s width_after=59), so the wrong axis measures
+            // a spurious ~1-column wall-proximity bias on top of any real solver bias. Centring
+            // the blob on 9 columns (28..=36, an odd count around x=32) makes it bit-symmetric
+            // about the mask's actual axis: mirror(28)=36, mirror(29)=35, ..., mirror(32)=32
+            // (self).
+            for y in 50..54 {
+                for x in 28..37 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
 
-        assert!(
-            worst < 0.06,
-            "Centred water blob went badly lopsided under gravity: signed mirror error reached \
-             {:.3e} of total mass. A directional bias in the gravity lateral-edge driving term is \
-             the cause to look for (see the Gauss-Seidel/Jacobi driving note on that branch).",
-            worst
-        );
-        assert!(
-            final_err < 0.25 * worst,
-            "Mirror error is not transient — it peaked at {:.3e} and is still {:.3e} after {} \
-             ticks, so the lean is persisting/growing rather than washing out",
-            worst, final_err, N_TICKS
-        );
-        assert!(
-            late_run < WINDOW,
-            "Signed asymmetry held the same sign for {} consecutive ticks (>= {}) in the second \
-             half of the run, well after the impact transient should have settled: a persistent \
-             one-sided lean, not symmetric noise. Second-half trace={:?}",
-            late_run, WINDOW, late
-        );
+            // Signed left-minus-right mass difference: positive means excess mass on the left
+            // half, negative means excess on the right. Normalised by total mass so the scale is
+            // comparable tick to tick as the blob spreads and (if it splashes) loses/gains contact
+            // area. Pairs `x` with `w - x` (the mask's true mirror, see above); `x = 0` has no
+            // partner (its mirror `w` is out of range) but is always outside the mask for this
+            // shape, so skipping it costs nothing, and `x = w / 2` is its own mirror and
+            // contributes exactly 0.
+            let signed_diff = |s: &TestSim| -> f64 {
+                let mut diff = 0.0f64;
+                for y in 0..h {
+                    for x in 1..w / 2 {
+                        let j = w - x;
+                        let i = y * w + x;
+                        let jj = y * w + j;
+                        if s.mask[i] == crate::MASK_OUTSIDE || s.mask[jj] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        diff += (s.hm.data[i] - s.hm.data[jj]) as f64;
+                    }
+                }
+                diff
+            };
+            let total_mass = |s: &TestSim| -> f64 { s.hm.data.iter().map(|&v| v as f64).sum() };
+
+            let initial = signed_diff(&sim);
+            assert!(
+                initial.abs() < 1e-9,
+                "test setup is not mirror symmetric (initial_tick_count={}): {:.3e}",
+                initial_tick_count, initial
+            );
+
+            let mut trace: Vec<f64> = Vec::with_capacity(N_TICKS);
+            for _ in 0..N_TICKS {
+                sim.tick(gravity_dir, 256);
+                let mass = total_mass(&sim);
+                let rel = if mass > 0.0 { signed_diff(&sim) / mass } else { 0.0 };
+                trace.push(rel);
+            }
+
+            let worst = trace.iter().cloned().fold(0.0f64, |a, b: f64| a.max(b.abs()));
+            let final_err = trace.last().copied().unwrap_or(0.0).abs();
+
+            // The impact itself (roughly the first half of the run: the blob is still falling as
+            // a single coherent block, then hits the floor and briefly splashes) is allowed a
+            // transient, same-signed asymmetry — a symmetric blob hitting a floor is not obliged
+            // to stay instantaneously mirror-exact while it does so, and the existing
+            // `test_sandbox_wave_stays_left_right_symmetric` makes the same allowance via its
+            // `final_err < 0.25 * worst` check rather than demanding zero asymmetry from tick 1.
+            // What must not happen is for that lean to *persist* once the impact has settled out,
+            // which is exactly the Gauss-Seidel gain's signature (see the driving-term comment on
+            // the fixed branch): unbounded/non-decaying growth versus a transient that relaxes to
+            // noise.
+            let late = &trace[trace.len() / 2..];
+            let late_run = longest_same_sign_run(late);
+            let late_trace = late.to_vec();
+
+            RunResult { trace, worst, final_err, late_run, late_trace }
+        };
+
+        // Run both parities before asserting anything, so every failure message below can quote
+        // both traces side by side regardless of which parity (or both) actually trips.
+        let even = run(0);
+        let odd = run(1);
+
+        for (label, r) in [("even (initial_tick_count=0)", &even), ("odd (initial_tick_count=1)", &odd)] {
+            println!(
+                "test_water_blob_stays_left_right_symmetric_under_gravity[{label}]: worst={:.3e} \
+                 final={:.3e} late_persistent_run={} trace_tail={:?}",
+                r.worst, r.final_err, r.late_run,
+                r.trace[r.trace.len().saturating_sub(10)..].iter().map(|v| format!("{:.2e}", v)).collect::<Vec<_>>()
+            );
+        }
+
+        let mechanism_note = "This is known outstanding work, not a new regression: the \
+             simulation is not invariant under a shift of the global tick phase, and it should be. \
+             \
+             WHAT THE TWO RUNS ACTUALLY DIFFER BY: seeding `tick_count` at 1 rather than 0 is NOT \
+             a pure lateral-sweep parity flip, despite what an earlier version of this note \
+             claimed. `tick_count` also drives block-level x order, LOD staleness accounting, two \
+             further parity switches, the CA checkerboard, and the RNG seed. So this test asserts \
+             the broader and stronger property — symmetry under a global tick-phase shift — and a \
+             failure does not by itself localise the cause to any one of those. Treat the list \
+             below as candidates, not as a diagnosis. \
+             \
+             LEADING CANDIDATE: residual order dependence in the gravity lateral-edge driving path \
+             inside settle_tick. The x-sweep visits lateral edges in `(tick_count + y as u32) % 2` \
+             order, so within a single tick a cell's neighbour may already reflect this tick's \
+             update while its mirror partner still sees the previous tick's value, and which side \
+             gets the stale read depends on parity. 7a3ef9f's Jacobi-driving fix reduced this lean \
+             but did not remove it. Note `column_depth` is still built from the LIVE `temp_heights` \
+             and chains off its own earlier values in the same pass, so it remains order-dependent \
+             even after that fix. \
+             \
+             TO LOCALISE IT, bisect the candidates: flip ONLY the cell-level parity at the \
+             `(tick_count + y as u32) % 2` site in production code and re-run the single-parity \
+             version. Measured that way the persistent run was 61 ticks; measured via a tick_count \
+             offset (which perturbs all of the above at once) it is 42. The gap between those two \
+             numbers is exactly the contribution of everything other than the cell-level sweep. \
+             \
+             If live state must be kept (i.e. this cannot simply be made a frozen Jacobi read), \
+             the principled fix for the lateral pass is red-black EDGE colouring: process all \
+             even-x lateral edges, then all odd-x lateral edges, so no single pass ever shares a \
+             cell between two edges it updates. Do not respond to this failure by re-tuning \
+             tolerances, ignoring the test, or picking a different scan order (Hilbert or diagonal \
+             orders only relocate the bias, they don't remove it).";
+
+        for (label, r, other_label, other) in [
+            ("even (initial_tick_count=0)", &even, "odd (initial_tick_count=1)", &odd),
+            ("odd (initial_tick_count=1)", &odd, "even (initial_tick_count=0)", &even),
+        ] {
+            assert!(
+                r.worst < 0.06,
+                "[{label}] Centred water blob went badly lopsided under gravity: signed mirror \
+                 error reached {:.3e} of total mass (tolerance 0.06). [{other_label}] worst={:.3e} \
+                 final={:.3e}. {}\n[{label}] full trace={:?}\n[{other_label}] full trace={:?}",
+                r.worst, other.worst, other.final_err, mechanism_note, r.trace, other.trace
+            );
+            assert!(
+                r.final_err < 0.25 * r.worst,
+                "[{label}] Mirror error is not transient — it peaked at {:.3e} and is still \
+                 {:.3e} after {} ticks, so the lean is persisting/growing rather than washing out. \
+                 [{other_label}] worst={:.3e} final={:.3e}. {}\n[{label}] full trace={:?}\n\
+                 [{other_label}] full trace={:?}",
+                r.worst, r.final_err, N_TICKS, other.worst, other.final_err, mechanism_note,
+                r.trace, other.trace
+            );
+            assert!(
+                r.late_run < WINDOW,
+                "[{label}] Signed asymmetry held the same sign for {} consecutive ticks (>= {}) \
+                 in the second half of the run, well after the impact transient should have \
+                 settled: a persistent one-sided lean, not symmetric noise. [{other_label}] \
+                 late_persistent_run={}. {}\n[{label}] second-half trace={:?}\n[{other_label}] \
+                 second-half trace={:?}",
+                r.late_run, WINDOW, other.late_run, mechanism_note, r.late_trace, other.late_trace
+            );
+        }
     }
 
     #[test]

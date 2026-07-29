@@ -188,6 +188,37 @@ not a clean optimum, so don't expect to "improve" it by re-sweeping without also
 why the old sweep's shape couldn't be trusted (a phantom-depth bug at the source, since
 fixed — see section 6).
 
+**That entire sweep was run at 64x64/64x96 and is invalid at production's `GRID_SIZE = 512`.**
+`column_depth` used to accumulate one `resting_above` term per *grid row* with no correction
+for resolution, so refining the grid inflated the accumulated sum — and the driving head built
+from it — by the same factor, even though the physical column hadn't gotten any deeper. This
+was invisible at test scale (defect fully suppressed at 64x64) and reintroduced a bad case of
+exactly the "water walls" defect `LATERAL_PRESSURE_SCALE` exists to prevent at 512x512
+(measured: enclosed-void counts of tens of thousands, versus zero at 64x64, on an otherwise
+identical scenario). The fix is `REFERENCE_GRID_HEIGHT` (`physics.rs`): each row's contribution
+to `column_depth` is scaled by `REFERENCE_GRID_HEIGHT / w` (deliberately the grid *width*, not
+height — see that constant's doc comment for why; production is always square so it makes no
+difference there) before being folded into the sum, so the total represents physical depth in
+reference-resolution units rather than raw row count. `REFERENCE_GRID_HEIGHT = 64` because that
+is the resolution the sweep above was actually run at; at `w == 64` this is an exact no-op, so
+today's tuned behaviour and every test pinned to it are unchanged.
+
+Verified after this fix (via the `SANDART_TEST_SCALE` harness, section 11): the *magnitude* of
+`column_depth` is now flat across 64/128/256/512 (peaks around 26-28 at every scale, versus
+growing without bound before). `test_liquid_stream_stays_coherent`'s coherence metric is
+healthy at every scale with this fix in place. **`test_liquid_flowing_liquid_does_not_stand_in_walls`'s
+enclosed-void count, however, still grows substantially with resolution at the current
+`LATERAL_PRESSURE_SCALE = 5.0`** even with `column_depth` itself now resolution-invariant — a
+real, open, unexplained finding, not swept under the rug: something downstream of `column_depth`
+still scales badly with resolution (candidates include the previously-inflated lateral pressure
+having incidentally masked a genuine *under*-tuning of `LATERAL_PRESSURE_SCALE` at true physical
+scale, and/or the constant needing to be materially larger once it means what it was actually
+supposed to mean at every resolution). **Re-sweeping `LATERAL_PRESSURE_SCALE` at 512 with this
+fix in place is necessary follow-up work and has not been done** — the old plateau (roughly
+3.5-18, "no headroom") was measured entirely at 64x64/64x96 and says nothing reliable about the
+right value at production scale now that the constant's meaning no longer silently drifts with
+resolution.
+
 ### 4.2 The invariant that keeps conservation exact
 
 `column_depth`, `GRAVITY_HEAD_SCALE`, and `LATERAL_PRESSURE_SCALE` feed **only** the
@@ -407,3 +438,42 @@ The methodology this has forced, and that new tests should follow:
   the file while being 2.7x more expensive per tick. `edge_sleep_stats` (test-only,
   thread-local, in `physics.rs`) exists purely to make that mechanism observable, since its
   correctness has no other externally visible trace.
+- **A bug can be invisible at test scale and real at production scale.** `column_depth`'s
+  resolution-scaling defect (see `REFERENCE_GRID_HEIGHT` in `physics.rs`) was fully
+  suppressed at the 64x64/64x96 grids every liquid test uses, and reappeared badly at
+  `GRID_SIZE = 512`, production's actual resolution. Ordinary `cargo test` cannot catch this
+  class of bug — it would have to run at 512 on every invocation to do so, which costs
+  ~20s per test instead of ~0.03s. `test_liquid_stream_stays_coherent` and
+  `test_liquid_flowing_liquid_does_not_stand_in_walls` are parameterised by a resolution
+  multiplier (`test_scale()` in `physics.rs`, read from the `SANDART_TEST_SCALE` env var) for
+  exactly this reason: default `cargo test` runs at scale 1 (today's 64x64/64x96 grids,
+  today's numbers, today's ~0.03s combined), and running deliberately before a change that
+  touches `column_depth`, `LATERAL_PRESSURE_SCALE`, `GRAVITY_HEAD_SCALE`, or grid-size
+  handling in general is:
+
+  ```bash
+  SANDART_TEST_SCALE=8 distrobox enter sandart-dev -- /home/deck/.cargo/bin/cargo test \
+      --release -p sandart-sim -- --nocapture test_liquid_stream_stays_coherent \
+      test_liquid_flowing_liquid_does_not_stand_in_walls
+  ```
+
+  `8` takes both tests to `GRID_SIZE`-scale grids (512x512 and 512x768). Measured cost:
+  ~18-22s combined at scale 8 (single-threaded), against ~0.03s at the default scale 1 — an
+  intentional, occasional-use-only cost, not something to run on every `cargo test`. An
+  env var was chosen over a cargo feature because it needs no rebuild to flip and composes
+  directly with `cargo test <name>` filtering; unset, unparsable, or `0` all fall back to
+  scale 1.
+
+  When scaling a test like this, scale the *whole* physical setup (grid, source position and
+  width, and the tick budget — a falling stream or draining chamber advances at a roughly
+  fixed number of cells per tick regardless of resolution, so reaching the same *physical*
+  point in the scenario at finer resolution takes proportionally more ticks), not just the
+  grid. And classify every assertion explicitly: a bound that is fundamentally a *fraction*
+  of the container (e.g. stream width, which is empirically stable at ~10-12% of container
+  width across scales) should be re-expressed as that fraction, at the same numeric
+  strictness, so it means the same thing at every resolution; a bound that is a *defect
+  signature* which should be near-zero regardless of resolution (e.g. the enclosed-void count
+  that catches liquid "standing in walls") must **not** be converted to a fraction of
+  interior area — doing so would quietly accept the exact resolution-scaling defect this
+  mechanism exists to catch, since the physically correct target for that metric doesn't grow
+  with resolution at all.
