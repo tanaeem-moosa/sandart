@@ -18,6 +18,37 @@ export class WasmSimulationState {
         wasm.__wbg_wasmsimulationstate_free(ptr, 0);
     }
     /**
+     * Short git SHA of the commit this wasm bundle was built from, baked in at compile time by
+     * `build.rs` (see `SANDART_GIT_SHA` there). Falls back to `"unknown"` if the build ran
+     * without a git checkout available — never a fabricated or stale-looking value. Paired with
+     * `build_timestamp_epoch` to render the diagnostic "Build" readout in the panel footer, so
+     * the user can tell a fresh deploy apart from a stale cached page.
+     * @returns {string}
+     */
+    static build_git_sha() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmsimulationstate_build_git_sha();
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Wall-clock time this wasm bundle was compiled, as seconds since the Unix epoch, baked in
+     * at compile time by `build.rs` (see `SANDART_BUILD_EPOCH` there). Left as a raw epoch
+     * rather than formatted here so the JS side can render it with `Date`, which already knows
+     * how to do that correctly.
+     * @returns {number}
+     */
+    static build_timestamp_epoch() {
+        const ret = wasm.wasmsimulationstate_build_timestamp_epoch();
+        return ret;
+    }
+    /**
      * @param {string} canvas_id
      * @param {number} width
      * @param {number} height
