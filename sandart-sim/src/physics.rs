@@ -1046,33 +1046,78 @@ pub fn eval_sandbox_shape(
             }
         }
         crate::SandboxShape::MultiStageHourglass => {
-            let chamber_h = 0.42 * h_f;
-            if dy.abs() >= chamber_h {
+            // Binary merging cascade: 8 chambers at the top, each adjacent pair merging
+            // into one shared chamber below, halving every tier -- 8 -> 4 -> 2 -> 1 --
+            // until everything collects in a single chamber at the bottom. Four tiers of
+            // equal height stacked from `-total_half` (top) to `+total_half` (bottom).
+            let total_half = 0.42 * h_f;
+            if dy < -total_half || dy >= total_half {
                 return (false, false);
             }
-            let max_hw = 0.35 * w_f;
-            let neck_hw = (neck_width * w_f).max(3.0);
+            const TIER_CHAMBERS: [u32; 4] = [8, 4, 2, 1];
+            let tier_h = (2.0 * total_half) / TIER_CHAMBERS.len() as f32;
+            let tier = (((dy + total_half) / tier_h).floor() as i32)
+                .clamp(0, TIER_CHAMBERS.len() as i32 - 1) as usize;
+            let y0 = -total_half + tier as f32 * tier_h;
+            let y1 = y0 + tier_h;
+            let n_t = TIER_CHAMBERS[tier] as f32;
+            let chamber_w = w_f / n_t;
 
-            let (start_center, end_center, stage_y0) = if dy < -0.14 * h_f {
-                (-0.12 * w_f, -0.12 * w_f, -0.42 * h_f)
-            } else if dy < 0.14 * h_f {
-                (-0.12 * w_f, 0.12 * w_f, -0.14 * h_f)
-            } else {
-                (0.12 * w_f, 0.0, 0.14 * h_f)
-            };
+            // Chamber `i` of an `n`-chamber tier is centred at `(i + 0.5) * chamber_w`
+            // (measured from the left edge). Chamber `i` of the `n/2`-chamber tier
+            // beneath it is centred at `(i/2 + 0.5) * (2 * chamber_w)`, which is exactly
+            // the average of chambers `2k` and `2k+1` above it -- so centring each
+            // chamber in its own slot is all that is needed for the pairing the brief
+            // asks for (child `i` -> parent `i/2`) to fall out automatically; nothing
+            // below has to compute a parent index at all.
+            let slot = (((dx + w_f / 2.0) / chamber_w).floor() as i32).clamp(0, n_t as i32 - 1);
+            let chamber_center = (slot as f32 + 0.5) * chamber_w - w_f / 2.0;
+            let dx_local = dx - chamber_center;
 
-            let t = ((dy - stage_y0) / (0.28 * h_f)).clamp(0.0, 1.0);
-            // Smoothstep easing (zero derivative at t=0 and t=1) gives each stage's
-            // center-line a gentle S-curve, and keeps the slope continuous across stage
-            // boundaries so the three chambers join in a smooth serpentine flow instead
-            // of the sharp angular kinks a plain linear blend produces.
-            let t_curve = t * t * (3.0 - 2.0 * t);
-            let center_x = start_center + t_curve * (end_center - start_center);
-            let allowed_hw = neck_hw + (1.0 - t_curve) * (max_hw - neck_hw);
+            // Each chamber is its own small funnel: widest at the top of its tier,
+            // narrowing to a neck at the bottom. `max_hw` reuses the 0.35 fraction every
+            // other funnel shape in this file uses for its chamber half-width -- and at
+            // tier 3 (one chamber spanning the full width) it reduces to exactly that:
+            // 0.35 * w, the same top width as the plain `Hourglass`.
+            //
+            // The neck cannot just be `neck_width * w_f` here the way it is everywhere
+            // else: that slider tops out at 0.12 * w, but tier 0's chambers are only
+            // w/8 = 0.125 * w wide, so an unscaled neck at the top of the slider would be
+            // nearly as wide as its own chamber and the 8 chambers would merge into open
+            // space -- the specific failure this design invites. The neck half-width is
+            // instead capped at 0.30 of *that tier's own* chamber width (comfortably
+            // under the 0.35 used for the chamber's own widest point, so the funnel can
+            // never invert with the neck wider than its own top) and floored at 3 cells
+            // so it never collapses to nothing at the bottom of the slider.
+            //
+            // Tabulated in fractions of `w` (grid-size independent) and in cells on the
+            // shipped 512 grid, at the slider's low/mid/high ends (neck_width = .005 / .06 / .12):
+            //
+            //   tier  n   chamber_w       max_hw           neck_cap         neck_hw @ .005 / .06 / .12
+            //     0   8   .125  ( 64px)   .0438 ( 22.4px)  .0375 ( 19.2px)   3.0px / 19.2px(cap) / 19.2px(cap)
+            //     1   4   .25   (128px)   .0875 ( 44.8px)  .075  ( 38.4px)   3.0px / 30.7px      / 38.4px(cap)
+            //     2   2   .5    (256px)   .175  ( 89.6px)  .15   ( 76.8px)   3.0px / 30.7px      / 61.4px
+            //     3   1   1.0   (512px)   .35   (179.2px)  .30   (153.6px)   3.0px / 30.7px      / 61.4px
+            //
+            // The cap only ever bites tiers 0 and 1 -- the two tiers small enough for the
+            // raw slider value to threaten them. By tier 2 the cap already exceeds the
+            // slider's maximum (0.15 * w > 0.12 * w), so the two wide bottom chambers see
+            // exactly the neck width the slider asked for, uncapped.
+            let max_hw = 0.35 * chamber_w;
+            let neck_cap = 0.30 * chamber_w;
+            let neck_hw = (neck_width * w_f).min(neck_cap).max(3.0);
 
-            let dx_local = dx - center_x;
+            // t_local: 1 at the top of the tier (widest), 0 at its bottom (the neck) --
+            // the same sense as `Hourglass`'s `t` (0 at the neck, 1 at the chamber's
+            // outer edge) so `hourglass_curve` biases the taper identically here.
+            let t_local = ((y1 - dy) / tier_h).clamp(0.0, 1.0);
+            let allowed_hw = neck_hw + t_local.powf(hourglass_curve) * (max_hw - neck_hw);
+
             let inside = dx_local.abs() < allowed_hw;
-            let is_safe = dx_local.abs() < (allowed_hw - 1.5).max(1.0);
+            let safe_allowed_hw = (allowed_hw - 1.5).max(1.0);
+            let is_safe = dx_local.abs() < safe_allowed_hw
+                && dy > (-total_half + 1.5)
+                && dy < (total_half - 1.5);
             (inside, is_safe)
         }
         crate::SandboxShape::GaltonBoard => {
@@ -5481,6 +5526,102 @@ mod tests {
     }
 
     #[test]
+    // The failure mode mass conservation cannot see: a cascade whose necks are too pinched (or
+    // structurally wrong) to actually pass sand within a reasonable number of ticks would trap
+    // almost everything in tier 0 -- or stack it up in an intermediate tier -- while still
+    // conserving mass perfectly, because nothing is leaking out of the shape mask, it just never
+    // reaches the bottom. Fills tier 0 (the top 8 chambers) and lets the cascade run long enough
+    // to settle, then checks that most of that sand made it all the way down to tier 3's single
+    // bottom chamber.
+    //
+    // Uses a wider-than-default neck (0.06, versus the slider's default 0.005) the same way
+    // `test_hourglass_full_drainage` does above -- the point here is whether the *geometry*
+    // lets sand reach the bottom at all, not how slowly the default neck throttles it.
+    //
+    // Measured today: bottom_frac climbs from 0.197 (80 ticks) to 0.967 (500 ticks) to 1.000
+    // (1500+ ticks) -- a genuinely gradual multi-tier drain, not an initialization artifact.
+    // 1500 ticks is used here for margin against the 0.5 threshold while keeping the test cheap
+    // (~0.2s on the 128x128 grid used below).
+    fn test_cascade_drains_to_bottom_chamber() {
+        let w = 128;
+        let h = 128;
+        let neck_width = 0.06;
+        let curve = 0.6;
+        let mask = make_test_mask(w, h, SandboxShape::MultiStageHourglass, neck_width, curve);
+
+        let center_y = h as f32 / 2.0;
+        let total_half = 0.42 * h as f32;
+        let tier_h = (2.0 * total_half) / 4.0;
+        // Fill tier 0 only: dy < -total_half + tier_h, matching the fill threshold
+        // `initialize_hourglass` uses for this shape.
+        let fill_row_end = (center_y - total_half + tier_h).round() as usize;
+        // Tier 3 (bottom, single chamber) starts here; must match `y1` for tier index 2 in
+        // `eval_sandbox_shape`'s MultiStageHourglass branch.
+        let bottom_tier_row0 = (center_y + total_half - tier_h).round() as usize;
+
+        let mut hm = Heightmap::new(w, h, 0.0);
+        for y in 0..fill_row_end {
+            for x in 0..w {
+                let idx = y * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE {
+                    hm.data[idx] = 0.55;
+                }
+            }
+        }
+        let initial_mass: f64 = hm.data.iter().map(|&v| v as f64).sum();
+        assert!(initial_mass > 0.0, "tier 0 was not filled with any sand");
+
+        let mut temp_heights = hm.data.clone();
+        let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut cell_colors = vec![0u8; w * h * 4];
+        let mut sliding = vec![false; w * h];
+        let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
+
+        let mut edge_vel_h = vec![0.0; w * h];
+        let mut edge_vel_v = vec![0.0; w * h];
+        let mut column_depth = vec![0.0; w * h];
+        let block_size = 32;
+        let (cols, rows) = (w / block_size, h / block_size);
+        let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
+        let mut last_displacements = vec![1.0; cols * rows];
+        let mut last_simulated_ticks = vec![0; cols * rows];
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        for i in 0..1500u32 {
+            settle_tick(
+                &mut hm, &mut temp_heights, &mut cell_colors, &mut cell_props,
+                &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
+                &mut last_simulated_ticks, cols * rows, block_size, &[],
+                12345u32.wrapping_add(i),
+                &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir,
+            );
+        }
+
+        let final_mass: f64 = hm.data.iter().map(|&v| v as f64).sum();
+        let bottom_mass: f64 = hm.data[bottom_tier_row0 * w..].iter().map(|&v| v as f64).sum();
+        let mass_err = (final_mass - initial_mass).abs() / initial_mass;
+        let bottom_frac = bottom_mass / final_mass;
+
+        println!(
+            "test_cascade_drains_to_bottom_chamber: init_mass={:.6} final_mass={:.6} mass_err={:.8} \
+             bottom_mass={:.6} bottom_frac={:.4}",
+            initial_mass, final_mass, mass_err, bottom_mass, bottom_frac
+        );
+
+        assert!(mass_err < 1e-4, "Mass not conserved during drainage: mass_err={:.8}", mass_err);
+        assert!(
+            bottom_frac > 0.5,
+            "Cascade failed to drain to the bottom chamber: only {:.1}% of the mass reached \
+             tier 3 after 1500 ticks (bottom_mass={:.6}, final_mass={:.6}). Sand is stuck in an \
+             upper tier.",
+            bottom_frac * 100.0,
+            bottom_mass,
+            final_mass
+        );
+    }
+
+    #[test]
     fn test_residual_sand_drains_to_zero() {
         let w = 64;
         let h = 64;
@@ -6429,6 +6570,75 @@ mod tests {
     }
 
     #[test]
+    // Sweeps the full neck_width slider (0.005..=0.12) crossed with several hourglass_curve
+    // values (0.1..=3.0) against MultiStageHourglass's 8 -> 4 -> 2 -> 1 cascade, and checks the
+    // two ways this geometry could break silently while mass conservation stays perfectly happy:
+    //
+    //   1. A dam: the neck at the bottom of some chamber closes completely, trapping its sand
+    //      above it forever. Checked by sampling the mask at each chamber's own neck centre.
+    //
+    //   2. Neighbouring chambers in the same tier fusing into one opening at the neck -- the
+    //      specific failure the per-tier neck cap in `eval_sandbox_shape` exists to prevent.
+    //      Tier 0's chambers are only w/8 wide; an unclamped neck near the slider's top of
+    //      0.12 * w would be nearly as wide as the chamber itself and adjacent necks would
+    //      overlap into open space. Checked by sampling the mask at the wall *between* two
+    //      adjacent necks (the slot boundary, equidistant from both) -- if the cap is doing its
+    //      job this stays MASK_OUTSIDE across the entire sweep; without it, it would flip to
+    //      MASK_INSIDE well before the slider reaches its top end.
+    fn test_cascade_no_dam_or_neck_merge_across_full_slider_range() {
+        let w = 512;
+        let h = 512;
+        let center = h as f32 / 2.0;
+        let total_half = 0.42 * h as f32;
+        let tier_h = (2.0 * total_half) / 4.0;
+        let tier_chambers = [8usize, 4, 2, 1];
+
+        let neck_steps = 12;
+        for step in 0..=neck_steps {
+            let neck_width = 0.005 + (0.12 - 0.005) * (step as f32 / neck_steps as f32);
+            for &curve in &[0.1f32, 0.6, 1.0, 2.0, 3.0] {
+                let mask = make_test_mask(w, h, SandboxShape::MultiStageHourglass, neck_width, curve);
+
+                for (tier, &n) in tier_chambers.iter().enumerate() {
+                    // Bottom boundary of this tier in dy-space (must match `y1` in
+                    // `eval_sandbox_shape`'s MultiStageHourglass branch), sampled 2 rows above
+                    // the boundary so it lands solidly inside this tier's own neck rather than
+                    // the wide top of the tier below.
+                    let y1 = -total_half + (tier as f32 + 1.0) * tier_h;
+                    let neck_row = (center + y1 - 2.0).round() as usize;
+                    let chamber_w = w as f32 / n as f32;
+
+                    for c in 0..n {
+                        // (1) no dam: the chamber's own neck centre must stay open.
+                        let cx = ((c as f32 + 0.5) * chamber_w).round() as usize;
+                        assert_ne!(
+                            mask[neck_row * w + cx],
+                            crate::MASK_OUTSIDE,
+                            "neck_width={:.4} curve={:.2} tier={} chamber={}: neck closed at its \
+                             own centre (row={}, col={}) -- sand above it can never drain",
+                            neck_width, curve, tier, c, neck_row, cx
+                        );
+
+                        // (2) no merge: the wall between this chamber's neck and the next
+                        // chamber's neck (the slot boundary) must stay closed.
+                        if c + 1 < n {
+                            let boundary_x = ((c as f32 + 1.0) * chamber_w).round() as usize;
+                            assert_eq!(
+                                mask[neck_row * w + boundary_x],
+                                crate::MASK_OUTSIDE,
+                                "neck_width={:.4} curve={:.2} tier={} chambers {}/{}: the wall \
+                                 between adjacent necks has opened (row={}, col={}) -- chambers \
+                                 have merged into open space",
+                                neck_width, curve, tier, c, c + 1, neck_row, boundary_x
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_no_mass_leaks_into_out_of_mask_cells() {
         // The granular CA flow path never checked whether the *destination* neighbor was inside
         // the shape mask before transferring into it (only the sandbox wave branch did, at the
@@ -6437,7 +6647,7 @@ mod tests {
         // again and anything landing there is frozen inside a wall permanently.
         //
         // This was invisible to every existing test: total mass is still conserved, so the
-        // mass-conservation suite (including test_serpentine_no_sand_leaking, the tightest at
+        // mass-conservation suite (including test_cascade_no_sand_leaking, the tightest at
         // 1e-4) passes regardless. It was invisible on screen too, because the renderer draws
         // MASK_OUTSIDE as opaque casing.
         //

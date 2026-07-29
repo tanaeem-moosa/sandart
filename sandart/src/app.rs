@@ -826,7 +826,7 @@ impl eframe::App for SandArtApp {
                             crate::config::SandboxShape::Square => "Square",
                             crate::config::SandboxShape::Oval => "Oval",
                             crate::config::SandboxShape::Hourglass => "Hourglass",
-                            crate::config::SandboxShape::MultiStageHourglass => "Serpentine 3-Stage Hourglass",
+                            crate::config::SandboxShape::MultiStageHourglass => "Cascade, 8 to 1",
                             crate::config::SandboxShape::GaltonBoard => "Galton Board (Pascal Peg Grid)",
                             crate::config::SandboxShape::StaircaseCascade => "Staircase Cascade (Plinko)",
                             crate::config::SandboxShape::ProceduralFunnel => "Procedural Cave Funnel",
@@ -837,7 +837,7 @@ impl eframe::App for SandArtApp {
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Square, "Square");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Oval, "Oval");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Hourglass, "Hourglass");
-                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::MultiStageHourglass, "Serpentine 3-Stage Hourglass");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::MultiStageHourglass, "Cascade, 8 to 1");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::GaltonBoard, "Galton Board (Pascal Peg Grid)");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::StaircaseCascade, "Staircase Cascade (Plinko)");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::ProceduralFunnel, "Procedural Cave Funnel");

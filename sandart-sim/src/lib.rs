@@ -200,7 +200,7 @@ pub struct DrawingSimulation {
     pub shape_mask_dirty: bool,
     /// Whether the apparatus is currently upside down. Consumed by `generate_shape_mask` (it
     /// negates `dy` in the shape evaluator), so the *structure* inverts along with its contents
-    /// — asymmetric shapes like StaircaseCascade and the Serpentine stages used to keep their
+    /// — asymmetric shapes like StaircaseCascade and the MultiStageHourglass cascade's tiers used to keep their
     /// original orientation while the sand mirrored into them. Stored rather than applied to the
     /// mask in place because the mask is rebuilt from scratch whenever neck width, curvature or
     /// the shape itself changes, which would silently discard an in-place mirror.
@@ -504,7 +504,11 @@ impl DrawingSimulation {
                 let inside = self.shape_mask[idx] != MASK_OUTSIDE;
 
                 let fill_threshold = if self.sandbox_shape == SandboxShape::MultiStageHourglass {
-                    -0.14 * h as f32
+                    // Fills exactly tier 0 (the top 8 chambers) of the merging cascade:
+                    // `total_half = 0.42h`, 4 equal tiers of height `0.21h` each, so tier 0
+                    // spans `[-0.42h, -0.21h)` and this is its bottom boundary. Must match
+                    // the tier math in `eval_sandbox_shape`'s `MultiStageHourglass` branch.
+                    -0.21 * h as f32
                 } else if self.sandbox_shape == SandboxShape::StaircaseCascade {
                     -0.26 * h as f32
                 } else {
@@ -565,7 +569,7 @@ impl DrawingSimulation {
 
         // Turn the *structure* over too, not just what is in it. Symmetric shapes are unaffected
         // by construction; the asymmetric ones (StaircaseCascade's alternating shelves, the
-        // Serpentine's three offset stages, ProceduralFunnel's noise) used to stay upright while
+        // MultiStageHourglass cascade's tiered chambers, ProceduralFunnel's noise) used to stay upright while
         // their contents mirrored into them.
         //
         // This must run BEFORE the out-of-bounds cleanup below, or that loop culls the mirrored
@@ -1339,7 +1343,7 @@ mod tests {
     }
 
     #[test]
-    // `test_serpentine_no_sand_leaking` pinned exactly one shape. Every funnel geometry has the
+    // `test_cascade_no_sand_leaking` pinned exactly one shape. Every funnel geometry has the
     // same failure mode — a shelf, peg or neck that does not quite close lets sand cross into
     // MASK_OUTSIDE, where `settle_tick`'s mask guards freeze it permanently — so all of them are
     // worth the same check, and the ones whose geometry just changed most of all: the Galton peg
@@ -1347,8 +1351,9 @@ mod tests {
     //
     // Run at the default neck width only — sweeping the slider here costs 20s of suite time, and
     // what the slider actually threatens is *geometric* (necks merging, shelves fusing into a
-    // dam), which `test_sandfall_funnel_geometry_has_no_dam` checks across the full travel for
-    // free.
+    // slab). That is covered per-shape instead, for free, by mask inspection:
+    // `test_staircase_steps_stay_separated` and
+    // `test_cascade_no_dam_or_neck_merge_across_full_slider_range`.
     fn test_all_sandfall_funnels_conserve_sand_mass() {
         for shape in SANDFALL_FUNNEL_SHAPES {
             let mut sim = super::DrawingSimulation::new();
@@ -1375,9 +1380,10 @@ mod tests {
     }
 
     #[test]
-    // The geometric companion to the mass test above, and the one that actually covers the
-    // neck-width slider: pure mask inspection, so all three shapes x the full slider travel costs
-    // nothing to run.
+    // The geometric companion to the mass test above: pure mask inspection, so it costs nothing
+    // to run. This one covers StaircaseCascade only, at the default neck width — the staircase's
+    // geometry does not depend on the neck slider. The cascade's slider sweep lives in
+    // `test_cascade_no_dam_or_neck_merge_across_full_slider_range`.
     //
     // The failure it exists for is the staircase. Consecutive shelves alternate slope sign and
     // which wall they attach to, so they converge at the shared inner edge; reduce the step
@@ -1503,17 +1509,17 @@ mod tests {
     }
 
     #[test]
-    fn test_serpentine_no_sand_leaking() {
+    fn test_cascade_no_sand_leaking() {
         let mut sim = super::DrawingSimulation::new();
         sim.sandbox_shape = SandboxShape::MultiStageHourglass;
         sim.gravity_dir = Vec2::new(0.0, 0.04);
         sim.initialize_hourglass();
 
         let initial_mass: f32 = sim.heightmap.data.iter().sum();
-        assert!(initial_mass > 0.0, "MultiStageHourglass should be initialized with sand in Stage 1");
+        assert!(initial_mass > 0.0, "MultiStageHourglass should be initialized with sand in tier 0");
 
         let targets = [None; 5];
-        // Run gravity simulation for 500 ticks across all 3 stages
+        // Run gravity simulation for 500 ticks across all 4 tiers
         for _ in 0..500 {
             sim.update(
                 0.016,
@@ -1532,12 +1538,18 @@ mod tests {
         // Verify 100.0000% sand mass conservation with ZERO leaks out of bounds
         assert!(
             mass_err < 0.0001,
-            "Serpentine sandbox leaked sand mass under gravity! Init={:.4}, Final={:.4}, Error={:.6}",
+            "Cascade sandbox leaked sand mass under gravity! Init={:.4}, Final={:.4}, Error={:.6}",
             initial_mass,
             final_mass,
             mass_err
         );
     }
+
+    // The "does sand actually reach the bottom chamber" check lives in physics.rs as
+    // `test_cascade_drains_to_bottom_chamber`, alongside `test_hourglass_full_drainage` which it
+    // mirrors -- both drive `settle_tick` directly on a small custom grid instead of the full
+    // `DrawingSimulation` pipeline, which is the difference between this suite taking seconds and
+    // taking minutes.
 
     #[test]
     fn test_quantile_mode_off_by_default_and_costs_nothing() {
@@ -1674,4 +1686,5 @@ mod tests {
         assert!(sim.quantile_positions().is_empty());
     }
 }
+
 
