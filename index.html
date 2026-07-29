@@ -669,42 +669,16 @@
                     <option value="checkerboard">Checkerboard</option>
                 </select>
 
+                <!-- Options are populated at startup from WasmSimulationState.list_materials(),
+                     the single source of truth for material ids/labels — do not hand-add
+                     <option> entries here, that duplication is what broke material selection
+                     during a past UI rewrite. -->
                 <div class="row gap-above"><label for="material-1" id="label-material-1">Primary</label></div>
-                <select id="material-1">
-                    <option value="0">Dry sand</option>
-                    <option value="1">Kinetic sand</option>
-                    <option value="2">Wet sand</option>
-                    <option value="3">Coarse sand</option>
-                    <option value="4">Buttercream</option>
-                    <option value="5">Snow</option>
-                    <option value="6">Fine powder</option>
-                    <option value="7">Oobleck</option>
-                    <option value="8">Moon dust</option>
-                    <option value="10">Water</option>
-                    <option value="11">Milk</option>
-                    <option value="13">Vegetable oil</option>
-                    <option value="14">Calm water</option>
-                    <option value="15">Yogurt</option>
-                </select>
+                <select id="material-1"></select>
 
                 <div id="material-2-group" style="display: none;">
                     <div class="row gap-above"><label for="material-2">Secondary</label></div>
-                    <select id="material-2">
-                    <option value="0">Dry sand</option>
-                    <option value="1">Kinetic sand</option>
-                    <option value="2">Wet sand</option>
-                    <option value="3">Coarse sand</option>
-                    <option value="4">Buttercream</option>
-                    <option value="5">Snow</option>
-                    <option value="6">Fine powder</option>
-                    <option value="7">Oobleck</option>
-                    <option value="8">Moon dust</option>
-                    <option value="10">Water</option>
-                    <option value="11">Milk</option>
-                    <option value="13">Vegetable oil</option>
-                    <option value="14">Calm water</option>
-                    <option value="15">Yogurt</option>
-                </select>
+                    <select id="material-2"></select>
                 </div>
 
                 <div id="material-properties-preview" class="material-preview-card"></div>

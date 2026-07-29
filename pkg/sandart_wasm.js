@@ -65,6 +65,18 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * List every material as `[id, label, wetness, threshold, flow_rate, grain_size]` rows, in
+     * menu order. The web UI should build its material `<select>` options from this at
+     * startup rather than hardcoding its own copy of the material list — that hardcoded-copy
+     * pattern is exactly what caused the material selection to silently point at the wrong
+     * material after a past UI rewrite.
+     * @returns {Array<any>}
+     */
+    static list_materials() {
+        const ret = wasm.wasmsimulationstate_list_materials();
+        return ret;
+    }
+    /**
      * @param {string} format
      * @param {string} file_content
      * @param {number} arms
@@ -212,10 +224,19 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_marble_size(this.__wbg_ptr, size);
     }
     /**
-     * @param {number} mode
+     * Select a material by its stable string id (see `MaterialMode::as_str`/`from_str`).
+     * Returns an `Err` for an unrecognized id instead of silently falling back to a default —
+     * a caller passing a stale/wrong id should see it fail loudly rather than quietly select
+     * the wrong material.
+     * @param {string} name
      */
-    set_material_mode(mode) {
-        wasm.wasmsimulationstate_set_material_mode(this.__wbg_ptr, mode);
+    set_material_preset(name) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmsimulationstate_set_material_preset(this.__wbg_ptr, ptr0, len0);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * @param {number} width
@@ -1996,17 +2017,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2109, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2110, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_ca9fd0ef817516ab___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 59, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 59, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue______true__2);
             return ret;
         },
