@@ -95,6 +95,117 @@ impl Default for MaterialMode {
     }
 }
 
+impl MaterialMode {
+    /// Every material, in menu order. Single source of truth for anything that needs to
+    /// enumerate materials (e.g. populating a UI select) — iterate this rather than hand-writing
+    /// a parallel list, so there is nothing to fall out of sync.
+    pub const ALL: [MaterialMode; 14] = [
+        MaterialMode::DrySand,
+        MaterialMode::KineticSand,
+        MaterialMode::WetSand,
+        MaterialMode::CoarseSand,
+        MaterialMode::ButterCream,
+        MaterialMode::Snow,
+        MaterialMode::FinePowder,
+        MaterialMode::Oobleck,
+        MaterialMode::MoonDust,
+        MaterialMode::Water,
+        MaterialMode::Milk,
+        MaterialMode::VegetableOil,
+        MaterialMode::CalmWater,
+        MaterialMode::Yogurt,
+    ];
+
+    /// Stable string id. This — not the enum's numeric discriminant, and not array position —
+    /// is the identity that should ever cross a language/process boundary (wasm, JSON, URLs).
+    /// It only ever grows; never repurpose or remove an existing id, even for a deleted
+    /// material, since old links/saved configs may still reference it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            MaterialMode::DrySand => "dry_sand",
+            MaterialMode::KineticSand => "kinetic_sand",
+            MaterialMode::WetSand => "wet_sand",
+            MaterialMode::CoarseSand => "coarse_sand",
+            MaterialMode::ButterCream => "butter_cream",
+            MaterialMode::Snow => "snow",
+            MaterialMode::FinePowder => "fine_powder",
+            MaterialMode::Oobleck => "oobleck",
+            MaterialMode::MoonDust => "moon_dust",
+            MaterialMode::Water => "water",
+            MaterialMode::Milk => "milk",
+            MaterialMode::VegetableOil => "vegetable_oil",
+            MaterialMode::CalmWater => "calm_water",
+            MaterialMode::Yogurt => "yogurt",
+        }
+    }
+
+    /// Parse a stable string id back into a `MaterialMode`. Returns `None` for anything
+    /// unrecognized rather than silently falling back to a default — callers at a language
+    /// boundary (e.g. `sandart-wasm`) should surface that as an error, not eat it.
+    pub fn from_str(s: &str) -> Option<MaterialMode> {
+        Some(match s {
+            "dry_sand" => MaterialMode::DrySand,
+            "kinetic_sand" => MaterialMode::KineticSand,
+            "wet_sand" => MaterialMode::WetSand,
+            "coarse_sand" => MaterialMode::CoarseSand,
+            "butter_cream" => MaterialMode::ButterCream,
+            "snow" => MaterialMode::Snow,
+            "fine_powder" => MaterialMode::FinePowder,
+            "oobleck" => MaterialMode::Oobleck,
+            "moon_dust" => MaterialMode::MoonDust,
+            "water" => MaterialMode::Water,
+            "milk" => MaterialMode::Milk,
+            "vegetable_oil" => MaterialMode::VegetableOil,
+            "calm_water" => MaterialMode::CalmWater,
+            "yogurt" => MaterialMode::Yogurt,
+            _ => return None,
+        })
+    }
+
+    /// Human-readable display label for UI menus.
+    pub fn label(&self) -> &'static str {
+        match self {
+            MaterialMode::DrySand => "Dry sand",
+            MaterialMode::KineticSand => "Kinetic sand",
+            MaterialMode::WetSand => "Wet sand",
+            MaterialMode::CoarseSand => "Coarse sand",
+            MaterialMode::ButterCream => "Buttercream",
+            MaterialMode::Snow => "Snow",
+            MaterialMode::FinePowder => "Fine powder",
+            MaterialMode::Oobleck => "Oobleck",
+            MaterialMode::MoonDust => "Moon dust",
+            MaterialMode::Water => "Water",
+            MaterialMode::Milk => "Milk",
+            MaterialMode::VegetableOil => "Vegetable oil",
+            MaterialMode::CalmWater => "Calm water",
+            MaterialMode::Yogurt => "Yogurt",
+        }
+    }
+
+    /// (wetness, threshold, flow_rate, grain_size) physics preset values. The single source of
+    /// truth for these constants — `apply_preset` just writes them into `cell_props`, and
+    /// external consumers that need them (e.g. the web UI's material-blend preview) should call
+    /// this instead of keeping their own copy.
+    pub fn preset_props(&self) -> (f32, f32, f32, f32) {
+        match self {
+            MaterialMode::DrySand => (0.00, 0.08, 0.25, 0.45),
+            MaterialMode::CoarseSand => (0.00, 0.11, 0.22, 0.80),
+            MaterialMode::KineticSand => (0.20, 0.10, 0.15, 0.35),
+            MaterialMode::WetSand => (0.45, 0.14, 0.08, 0.40),
+            MaterialMode::FinePowder => (0.00, 0.05, 0.30, 0.05),
+            MaterialMode::Snow => (0.05, 0.15, 0.20, 0.20),
+            MaterialMode::MoonDust => (0.00, 0.20, 0.20, 0.10),
+            MaterialMode::Oobleck => (0.55, 0.04, 0.12, 0.15),
+            MaterialMode::ButterCream => (0.70, 0.04, 0.15, 0.08),
+            MaterialMode::Water => (1.00, 0.00, 0.00, 0.00),
+            MaterialMode::CalmWater => (0.90, 0.00, 0.00, 0.00),
+            MaterialMode::Milk => (0.95, 0.00, 0.00, 0.00),
+            MaterialMode::VegetableOil => (0.85, 0.00, 0.00, 0.00),
+            MaterialMode::Yogurt => (0.75, 0.00, 0.00, 0.08),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum BlockActivity {
@@ -650,22 +761,7 @@ impl DrawingSimulation {
 
     /// Apply a preset to the per-cell properties buffer.
     pub fn apply_preset(&mut self, mode: MaterialMode) {
-        let (wetness, threshold, flow_rate, grain_size) = match mode {
-            MaterialMode::DrySand => (0.00, 0.08, 0.25, 0.45),
-            MaterialMode::CoarseSand => (0.00, 0.11, 0.22, 0.80),
-            MaterialMode::KineticSand => (0.20, 0.10, 0.15, 0.35),
-            MaterialMode::WetSand => (0.45, 0.14, 0.08, 0.40),
-            MaterialMode::FinePowder => (0.00, 0.05, 0.30, 0.05),
-            MaterialMode::Snow => (0.05, 0.15, 0.20, 0.20),
-            MaterialMode::MoonDust => (0.00, 0.20, 0.20, 0.10),
-            MaterialMode::Oobleck => (0.55, 0.04, 0.12, 0.15),
-            MaterialMode::ButterCream => (0.70, 0.04, 0.15, 0.08),
-            MaterialMode::Water => (1.00, 0.00, 0.00, 0.00),
-            MaterialMode::CalmWater => (0.90, 0.00, 0.00, 0.00),
-            MaterialMode::Milk => (0.95, 0.00, 0.00, 0.00),
-            MaterialMode::VegetableOil => (0.85, 0.00, 0.00, 0.00),
-            MaterialMode::Yogurt => (0.75, 0.00, 0.00, 0.08),
-        };
+        let (wetness, threshold, flow_rate, grain_size) = mode.preset_props();
         for chunk in self.cell_props.chunks_exact_mut(4) {
             chunk[PROP_WETNESS] = wetness;
             chunk[PROP_THRESHOLD] = threshold;
@@ -1052,6 +1148,32 @@ mod tests {
         SandboxShape::ProceduralFunnel,
         SandboxShape::MultiNeckHourglass,
     ];
+
+    /// Every material's string id must round-trip through `from_str`/`as_str`, and `ALL` must
+    /// list each variant exactly once. This is the guarantee the web UI's material `<select>`
+    /// relies on: it builds its options from `MaterialMode::ALL` (via `list_materials`) and
+    /// sends the id straight back through `from_str` on selection, so a stable id-per-variant
+    /// with no duplicates/gaps is what keeps a selection pointing at the right material — the
+    /// exact property that a past UI rewrite silently broke when materials were keyed by array
+    /// index instead.
+    #[test]
+    fn test_material_mode_string_ids_round_trip() {
+        use std::collections::HashSet;
+        let mut seen_ids = HashSet::new();
+        for mode in MaterialMode::ALL {
+            let id = mode.as_str();
+            assert!(seen_ids.insert(id), "duplicate material id: {}", id);
+            assert_eq!(
+                MaterialMode::from_str(id),
+                Some(mode),
+                "round-trip failed for {:?} -> {:?}",
+                mode,
+                id
+            );
+        }
+        assert_eq!(seen_ids.len(), MaterialMode::ALL.len());
+        assert_eq!(MaterialMode::from_str("not_a_real_material"), None);
+    }
 
     #[test]
     fn test_simulation_reset() {
