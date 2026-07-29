@@ -48,8 +48,8 @@ fn parse_material(s: &str) -> MaterialMode {
     }
 }
 
-fn make_sim(material: MaterialMode, shape: SandboxShape) -> DrawingSimulation {
-    let mut sim = DrawingSimulation::new();
+fn make_sim(material: MaterialMode, shape: SandboxShape, grid_size: usize) -> DrawingSimulation {
+    let mut sim = DrawingSimulation::new_with_size(grid_size);
     sim.sandbox_shape = shape;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(material);
@@ -105,8 +105,9 @@ fn run_scenario(
     budget: usize,
     ticks: usize,
     warmup: usize,
+    grid_size: usize,
 ) -> Run {
-    let mut sim = make_sim(material, shape);
+    let mut sim = make_sim(material, shape, grid_size);
     let targets = [None; 5];
     // last_frame_time_ms = 0.0 disables the adaptive budget block in `update()`, pinning
     // budget_n at the value under test for the whole run.
@@ -189,10 +190,14 @@ fn main() {
         "multistage" | "multistagehourglass" => SandboxShape::MultiStageHourglass,
         _ => SandboxShape::Hourglass,
     };
+    // Grid resolution the scenario runs at. Defaults to GRID_SIZE (the shipped 512 default);
+    // pass e.g. `--grid-size 64` to measure the user-selectable resolutions from the web UI's
+    // resolution selector (see sandart-wasm's set_grid_size) against this same scenario.
+    let grid_size: usize = get("--grid-size").map(|v| v.parse().unwrap()).unwrap_or(GRID_SIZE);
 
     println!(
         "Sand-fall benchmark — {}x{} grid, shape {:?}, gravity (0.0, 0.04), {} ticks/scenario ({} warmup)",
-        GRID_SIZE, GRID_SIZE, shape, ticks, warmup
+        grid_size, grid_size, shape, ticks, warmup
     );
     println!(
         "budget_n: 1024 = full (32x32 blocks), 256 = app start value, 32 = BUDGET_MIN (throttled)\n"
@@ -212,7 +217,7 @@ fn main() {
     for _ in 0..reps.saturating_sub(1) {
         for (mi, &m) in materials.iter().enumerate() {
             for (bi, &b) in budgets.iter().enumerate() {
-                let r = run_scenario(m, shape, b, ticks, warmup);
+                let r = run_scenario(m, shape, b, ticks, warmup, grid_size);
                 let e = best.entry((mi, bi)).or_insert(f64::MAX);
                 *e = e.min(r.ms_per_tick);
             }
@@ -222,7 +227,7 @@ fn main() {
     let mut results = Vec::new();
     for (mi, &m) in materials.iter().enumerate() {
         for (bi, &b) in budgets.iter().enumerate() {
-            let mut r = run_scenario(m, shape, b, ticks, warmup);
+            let mut r = run_scenario(m, shape, b, ticks, warmup, grid_size);
             let e = best.entry((mi, bi)).or_insert(f64::MAX);
             *e = e.min(r.ms_per_tick);
             r.ms_per_tick = *e;
@@ -282,7 +287,7 @@ fn main() {
 
     if let Some(out) = get("--flamegraph") {
         let m = materials[0];
-        let mut sim = make_sim(m, shape);
+        let mut sim = make_sim(m, shape, grid_size);
         let targets = [None; 5];
         for _ in 0..warmup {
             sim.budget_n = budgets[0];

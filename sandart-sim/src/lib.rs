@@ -347,8 +347,8 @@ pub struct DrawingSimulation {
     quantile_targets: Vec<f32>,
 }
 
-fn generate_smooth_noise(seed_val: u32) -> Heightmap {
-    let mut heightmap = Heightmap::new(GRID_SIZE, GRID_SIZE, DEFAULT_SAND_HEIGHT);
+fn generate_smooth_noise(seed_val: u32, grid_size: usize) -> Heightmap {
+    let mut heightmap = Heightmap::new(grid_size, grid_size, DEFAULT_SAND_HEIGHT);
     let mut seed = seed_val;
 
     // Helper to generate a low-res random grid via XORShift
@@ -372,8 +372,8 @@ fn generate_smooth_noise(seed_val: u32) -> Heightmap {
 
     // Bilinear interpolation helper with smoothstep
     let sample_octave = |grid: &[f32], size: usize, x: usize, y: usize| -> f32 {
-        let fx = (x as f32 / (GRID_SIZE - 1) as f32) * (size - 1) as f32;
-        let fy = (y as f32 / (GRID_SIZE - 1) as f32) * (size - 1) as f32;
+        let fx = (x as f32 / (grid_size - 1) as f32) * (size - 1) as f32;
+        let fy = (y as f32 / (grid_size - 1) as f32) * (size - 1) as f32;
 
         let x0 = fx.floor() as usize;
         let x1 = (x0 + 1).min(size - 1);
@@ -397,9 +397,9 @@ fn generate_smooth_noise(seed_val: u32) -> Heightmap {
         h0 * (1.0 - sy) + h1 * sy
     };
 
-    for y in 0..GRID_SIZE {
-        let row_offset = y * GRID_SIZE;
-        for x in 0..GRID_SIZE {
+    for y in 0..grid_size {
+        let row_offset = y * grid_size;
+        for x in 0..grid_size {
             // Combine octaves: 8x8 primary (amp 0.025), 16x16 secondary (amp 0.008)
             let val1 = sample_octave(&grid1, grid_size1, x, y) * 0.025;
             let val2 = sample_octave(&grid2, grid_size2, x, y) * 0.008;
@@ -414,20 +414,37 @@ fn generate_smooth_noise(seed_val: u32) -> Heightmap {
 
 impl DrawingSimulation {
     pub fn new() -> Self {
-        let heightmap = generate_smooth_noise(12345u32);
+        Self::new_with_size(GRID_SIZE)
+    }
+
+    /// Construct a simulation over a `grid_size` x `grid_size` grid. `GRID_SIZE` (512) is the
+    /// shipped default (`new()` calls this with `GRID_SIZE`); the web UI additionally offers
+    /// 64/128/256 as a debugging/perf instrument — see `docs/ARCHITECTURE.md` and the
+    /// resolution-selector plumbing in `sandart-wasm`.
+    ///
+    /// `block_size` (the LOD scheduler's block edge length in cells) scales with `grid_size`
+    /// rather than staying an absolute constant, specifically `(grid_size / 32).max(1)`, so the
+    /// grid is always tiled into the same 32x32 = 1024 blocks regardless of resolution. This
+    /// keeps `budget_n` (and `BUDGET_MIN`/`BUDGET_STEP_*` in `update`) meaningful as the *same
+    /// fraction* of the grid at every resolution. Keeping `block_size` absolute instead would
+    /// have made low resolutions (e.g. 64/16 = 4x4 = 16 total blocks) fall entirely under
+    /// `budget_n`'s minimum, disabling the LOD scheduler's throttling outright at low res and
+    /// making 64 behave differently from 512 for scheduling reasons unrelated to physics.
+    pub fn new_with_size(grid_size: usize) -> Self {
+        let heightmap = generate_smooth_noise(12345u32, grid_size);
         let temp_heights = heightmap.data.clone();
-        let sliding = vec![false; GRID_SIZE * GRID_SIZE];
-        let edge_vel_h = vec![0.0f32; GRID_SIZE * GRID_SIZE];
-        let edge_vel_v = vec![0.0f32; GRID_SIZE * GRID_SIZE];
-        let column_depth = vec![0.0f32; GRID_SIZE * GRID_SIZE];
-        let mut cell_colors = vec![0u8; GRID_SIZE * GRID_SIZE * 4];
+        let sliding = vec![false; grid_size * grid_size];
+        let edge_vel_h = vec![0.0f32; grid_size * grid_size];
+        let edge_vel_v = vec![0.0f32; grid_size * grid_size];
+        let column_depth = vec![0.0f32; grid_size * grid_size];
+        let mut cell_colors = vec![0u8; grid_size * grid_size * 4];
         for chunk in cell_colors.chunks_exact_mut(4) {
             chunk[0] = 210;
             chunk[1] = 180;
             chunk[2] = 140;
             chunk[3] = 255;
         }
-        let mut cell_props = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
+        let mut cell_props = vec![0.0f32; grid_size * grid_size * 4];
         // Initialize with default DrySand preset
         for chunk in cell_props.chunks_exact_mut(4) {
             chunk[PROP_WETNESS] = 0.00;
@@ -436,9 +453,11 @@ impl DrawingSimulation {
             chunk[PROP_GRAIN_SIZE] = 0.45;
         }
 
-        let block_size = 16;
-        let cols = (GRID_SIZE + block_size - 1) / block_size;
-        let rows = (GRID_SIZE + block_size - 1) / block_size;
+        // See the doc comment above: this scales with grid_size so the block-count (and
+        // therefore the meaning of budget_n) stays resolution-invariant.
+        let block_size = (grid_size / 32).max(1);
+        let cols = (grid_size + block_size - 1) / block_size;
+        let rows = (grid_size + block_size - 1) / block_size;
         let active_blocks = vec![BlockActivity::Inactive; cols * rows];
         let last_displacements = vec![0.0f32; cols * rows];
         let last_simulated_ticks = vec![0u32; cols * rows];
@@ -473,7 +492,7 @@ impl DrawingSimulation {
             gravity_dir: Vec2::ZERO,
             neck_width: 0.005,
             hourglass_curve: 0.6,
-            shape_mask: vec![MASK_OUTSIDE; GRID_SIZE * GRID_SIZE],
+            shape_mask: vec![MASK_OUTSIDE; grid_size * grid_size],
             shape_mask_dirty: true,
             flipped: false,
             active_blocks,
@@ -484,7 +503,7 @@ impl DrawingSimulation {
             block_size,
             tick_count: 0,
             quantile_mode: QuantileMode::default(),
-            row_mass: vec![0.0f32; GRID_SIZE],
+            row_mass: vec![0.0f32; grid_size],
             quantile_targets: Vec::new(),
         };
         sim.generate_shape_mask();
@@ -494,8 +513,8 @@ impl DrawingSimulation {
     /// Regenerate the shape mask from the current sandbox_shape, neck_width, and hourglass_curve.
     /// Call this whenever these parameters change. Sets shape_mask_dirty for GPU re-upload.
     pub fn generate_shape_mask(&mut self) {
-        let w = GRID_SIZE;
-        let h = GRID_SIZE;
+        let w = self.heightmap.width;
+        let h = self.heightmap.height;
 
         // Pass 1: Evaluate inside/safe for every cell using the existing physics evaluator
         for y in 0..h {
@@ -562,7 +581,7 @@ impl DrawingSimulation {
             self.heightmap.reset(0.0);
             self.initialize_hourglass();
         } else {
-            self.heightmap = generate_smooth_noise(54321u32);
+            self.heightmap = generate_smooth_noise(54321u32, self.heightmap.width);
             self.temp_heights.copy_from_slice(&self.heightmap.data);
         }
         self.sliding.fill(false);
@@ -603,8 +622,8 @@ impl DrawingSimulation {
         // done so already for the current sandbox_shape/neck_width/hourglass_curve.
         self.generate_shape_mask();
 
-        let w = GRID_SIZE;
-        let h = GRID_SIZE;
+        let w = self.heightmap.width;
+        let h = self.heightmap.height;
         let center_y = h as f32 / 2.0;
         
         for y in 0..h {
@@ -1121,7 +1140,7 @@ impl HeightmapSimulation for DrawingSimulation {
     }
 
     fn dimensions(&self) -> (usize, usize) {
-        (GRID_SIZE, GRID_SIZE)
+        (self.heightmap.width, self.heightmap.height)
     }
 
     fn marbles(&self) -> &[MarbleState; 5] {

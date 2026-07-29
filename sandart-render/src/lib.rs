@@ -1,5 +1,9 @@
 use wgpu;
 
+/// Default/shipped grid resolution. `HeightmapRenderer::new` now takes an explicit `grid_size`
+/// so the renderer's textures can be sized for 64/128/256/512 (see the resolution selector in
+/// `sandart-wasm`); this constant remains the value used wherever a caller doesn't need a
+/// different size (tests, the desktop app).
 pub const GRID_SIZE: usize = 512;
 
 #[repr(C)]
@@ -49,7 +53,12 @@ pub struct LightingUniforms {
     pub neck_width: f32,       // user-controlled neck width
     pub hourglass_curve: f32,  // user-controlled hourglass shape curvature
     pub quantile_count: u32,  // active quantile lines: 0 = off, 3 = quartiles, 9 = deciles
-    pub _pad2: f32,
+    /// Current simulation grid resolution (64/128/256/512), as f32 for direct use in shader
+    /// texel-coordinate math. Replaces what used to be a pure alignment-padding field
+    /// (`_pad2`) that sat here purely to 16-byte-align `quantile_positions` below — repurposing
+    /// it costs no layout change (still 4 bytes at the same offset) and lets the shader stop
+    /// hardcoding `512.0` for texture size, LOD grain scale, and the quantile-line row math.
+    pub grid_size: f32,
     // Quantile line positions, normalised 0.0 (top row edge) .. 1.0 (bottom row edge).
     // Packed as 3x vec4 (12 slots, only the first `quantile_count` used) rather than
     // `[f32; 9]` because WGSL pads array-of-f32 elements to 16 bytes each in a uniform buffer
@@ -85,10 +94,14 @@ pub struct HeightmapRenderer {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
+    /// Resolution the GPU textures above were allocated at. Changing resolution requires a full
+    /// `HeightmapRenderer::new` teardown/rebuild (textures cannot be resized in place), not a
+    /// mutation of this field alone — see `sandart-wasm`'s `set_grid_size`.
+    pub grid_size: usize,
 }
 
 impl HeightmapRenderer {
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, grid_size: usize) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sand_art_shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
@@ -140,10 +153,10 @@ impl HeightmapRenderer {
 
         let num_indices = indices.len() as u32;
 
-        // 1. Create heightmap texture (GRID_SIZE x GRID_SIZE R8Unorm)
+        // 1. Create heightmap texture (grid_size x grid_size R8Unorm)
         let texture_size = wgpu::Extent3d {
-            width: GRID_SIZE as u32,
-            height: GRID_SIZE as u32,
+            width: grid_size as u32,
+            height: grid_size as u32,
             depth_or_array_layers: 1,
         };
 
@@ -241,7 +254,11 @@ impl HeightmapRenderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // Was FRAGMENT-only; `vs_main` now reads `uniforms.grid_size` too (via
+                    // `sample_height_bilinear`'s `tex_size`, formerly a hardcoded 512.0), so the
+                    // vertex stage needs visibility into this binding as well or pipeline
+                    // creation fails validation ("Invisible" binding error).
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -373,11 +390,13 @@ impl HeightmapRenderer {
             vertex_buffer,
             index_buffer,
             num_indices,
+            grid_size,
         }
     }
 
     /// Upload CPU float heightmap data directly to the WGPU texture.
     pub fn update_heightmap(&mut self, queue: &wgpu::Queue, data: &[f32]) {
+        let grid_size = self.grid_size as u32;
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.heightmap_texture,
@@ -388,12 +407,12 @@ impl HeightmapRenderer {
             bytemuck::cast_slice(data),
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some((GRID_SIZE * 16) as u32),
-                rows_per_image: Some(GRID_SIZE as u32),
+                bytes_per_row: Some(grid_size * 16),
+                rows_per_image: Some(grid_size),
             },
             wgpu::Extent3d {
-                width: GRID_SIZE as u32,
-                height: GRID_SIZE as u32,
+                width: grid_size,
+                height: grid_size,
                 depth_or_array_layers: 1,
             },
         );
@@ -401,6 +420,7 @@ impl HeightmapRenderer {
 
     /// Upload the shape mask (R8Uint) to GPU. Call when shape changes.
     pub fn update_shape_mask(&mut self, queue: &wgpu::Queue, data: &[u8]) {
+        let grid_size = self.grid_size as u32;
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.shape_mask_texture,
@@ -411,12 +431,12 @@ impl HeightmapRenderer {
             data,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some(GRID_SIZE as u32), // 1 byte per pixel for R8Uint
-                rows_per_image: Some(GRID_SIZE as u32),
+                bytes_per_row: Some(grid_size), // 1 byte per pixel for R8Uint
+                rows_per_image: Some(grid_size),
             },
             wgpu::Extent3d {
-                width: GRID_SIZE as u32,
-                height: GRID_SIZE as u32,
+                width: grid_size,
+                height: grid_size,
                 depth_or_array_layers: 1,
             },
         );
@@ -458,6 +478,7 @@ impl HeightmapRenderer {
 
     /// Upload CPU RGBA colormap data directly to the WGPU texture.
     pub fn update_colormap(&mut self, queue: &wgpu::Queue, data: &[u8]) {
+        let grid_size = self.grid_size as u32;
         queue.write_texture(
             wgpu::ImageCopyTexture {
                 texture: &self.colormap_texture,
@@ -468,12 +489,12 @@ impl HeightmapRenderer {
             data,
             wgpu::ImageDataLayout {
                 offset: 0,
-                bytes_per_row: Some((GRID_SIZE * 4) as u32),
-                rows_per_image: Some(GRID_SIZE as u32),
+                bytes_per_row: Some(grid_size * 4),
+                rows_per_image: Some(grid_size),
             },
             wgpu::Extent3d {
-                width: GRID_SIZE as u32,
-                height: GRID_SIZE as u32,
+                width: grid_size,
+                height: grid_size,
                 depth_or_array_layers: 1,
             },
         );
@@ -583,7 +604,7 @@ mod tests {
             device.push_error_scope(wgpu::ErrorFilter::Validation);
 
             let target_format = wgpu::TextureFormat::Rgba8Unorm;
-            let _resources = HeightmapRenderer::new(&device, target_format);
+            let _resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE);
 
             let error = device.pop_error_scope().await;
             assert!(
@@ -606,7 +627,7 @@ mod tests {
             let height = 256;
             let target_format = wgpu::TextureFormat::Rgba8Unorm;
 
-            let mut resources = HeightmapRenderer::new(&device, target_format);
+            let mut resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE);
 
             let mut heightmap_data = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
             for y in 0..256 {
@@ -636,7 +657,7 @@ mod tests {
                 neck_width: 0.005,
                 hourglass_curve: 0.6,
                 quantile_count: 0,
-                _pad2: 0.0,
+                grid_size: GRID_SIZE as f32,
                 quantile_positions: [[0.0; 4]; 3],
                 marbles: [
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
@@ -794,7 +815,7 @@ mod tests {
             let height = 512;
             let target_format = wgpu::TextureFormat::Rgba8Unorm;
 
-            let mut resources = HeightmapRenderer::new(&device, target_format);
+            let mut resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE);
 
             let camera_uniforms = CameraUniforms {
                 view_proj: [
@@ -915,7 +936,7 @@ mod tests {
                     neck_width: 0.005,
                     hourglass_curve: 0.6,
                     quantile_count: 0,
-                    _pad2: 0.0,
+                    grid_size: GRID_SIZE as f32,
                     quantile_positions: [[0.0; 4]; 3],
                     marbles: [
                         MarbleUniform { pos: [m_x, m_y], radius: 0.018, z_pos: m_z },

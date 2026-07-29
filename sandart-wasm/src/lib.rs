@@ -19,6 +19,15 @@ pub struct WasmSimulationState {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
+    /// Surface/target color format, kept around so `set_grid_size` can rebuild `renderer` from
+    /// scratch (GPU textures can't be resized in place — a resolution change is a full
+    /// teardown/rebuild of both `sim` and `renderer`, not a mutation of either).
+    target_format: wgpu::TextureFormat,
+    /// Current simulation grid resolution (64/128/256/512, default 512). Single source of truth
+    /// for sizing CPU-side upload buffers in `render()` — replaces the old hardcoded module-level
+    /// `GRID_SIZE` constant at every read site that depends on the *current* grid, not the
+    /// compile-time default.
+    grid_size: usize,
     full_upload_needed: bool,
 
     // Config state
@@ -161,7 +170,7 @@ impl WasmSimulationState {
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = HeightmapRenderer::new(&device, target_format);
+        let renderer = HeightmapRenderer::new(&device, target_format, GRID_SIZE);
         let sim = DrawingSimulation::new();
         let playback = PlaybackController::new();
 
@@ -173,6 +182,8 @@ impl WasmSimulationState {
             device,
             queue,
             surface_config,
+            target_format,
+            grid_size: GRID_SIZE,
             full_upload_needed: true,
             simulator_mode: SimulatorMode::Sandbox,
             marble_count: 1,
@@ -286,6 +297,61 @@ impl WasmSimulationState {
         self.full_upload_needed = true;
         self.playback.state = PlaybackState::Stopped;
         self.playback.current_indices = [0; 5];
+    }
+
+    /// Change the simulation/render grid resolution to 64, 128, 256, or 512 (`GRID_SIZE`, the
+    /// shipped default, is unchanged by this feature). This is a debugging/perf instrument, not
+    /// just a performance knob: the test suite and the shipped app used to run at different,
+    /// never-compared resolutions, which is exactly how a lateral-pressure term that scaled with
+    /// grid resolution instead of physical depth went unnoticed — see `docs/ARCHITECTURE.md`.
+    /// Comparing behaviour across resolutions is the point, so this is meant to be switched at
+    /// will while the user is looking at the sim, not just read once on startup.
+    ///
+    /// This is a full teardown/rebuild of both `sim` and `renderer`, never a partial resize:
+    /// every CPU buffer inside `DrawingSimulation` (and every GPU texture inside
+    /// `HeightmapRenderer`) is a fixed-size allocation made at construction time, so there is no
+    /// in-place "resize" — only "replace with a freshly constructed one of the right size". That
+    /// necessarily discards the current sand/water contents (same as any other reset), but current
+    /// material, shape, gravity, neck width and chamber curvature survive via `sim.reset()`'s
+    /// normal contract (it never touches those fields) rather than reverting to defaults.
+    pub fn set_grid_size(&mut self, size: u32) -> Result<(), JsValue> {
+        let size = size as usize;
+        if !matches!(size, 64 | 128 | 256 | 512) {
+            return Err(JsValue::from_str(&format!(
+                "Unsupported grid size: {} (must be 64, 128, 256, or 512)",
+                size
+            )));
+        }
+        if size == self.grid_size {
+            return Ok(());
+        }
+
+        let gravity_dir = self.sim.gravity_dir;
+        let neck_width = self.sim.neck_width;
+        let hourglass_curve = self.sim.hourglass_curve;
+
+        let mut sim = DrawingSimulation::new_with_size(size);
+        sim.material_mode = self.material_mode;
+        sim.sandbox_shape = self.sandbox_shape;
+        sim.gravity_dir = gravity_dir;
+        sim.neck_width = neck_width;
+        sim.hourglass_curve = hourglass_curve;
+        sim.reset();
+        sim.set_quantile_mode(self.effective_quantile_mode());
+        self.sim = sim;
+
+        self.grid_size = size;
+        self.renderer = HeightmapRenderer::new(&self.device, self.target_format, size);
+        self.full_upload_needed = true;
+        self.playback.state = PlaybackState::Stopped;
+        self.playback.current_indices = [0; 5];
+        Ok(())
+    }
+
+    /// Current simulation grid resolution (64/128/256/512). Lets the web UI display the actual
+    /// backing value rather than assuming its `<select>`'s own default matches Rust's.
+    pub fn get_grid_size(&self) -> u32 {
+        self.grid_size as u32
     }
 
     pub fn set_simulator_mode(&mut self, mode: u32) {
@@ -708,9 +774,10 @@ impl WasmSimulationState {
         }
 
         // Update GPU heightmap and colormap
+        let grid_size = self.grid_size;
         if self.full_upload_needed {
-            let mut interleaved = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
-            for i in 0..GRID_SIZE * GRID_SIZE {
+            let mut interleaved = vec![0.0f32; grid_size * grid_size * 4];
+            for i in 0..grid_size * grid_size {
                 interleaved[i * 4 + 0] = self.sim.heightmap.data[i];
                 interleaved[i * 4 + 1] = self.sim.cell_props[i * 4 + sandart_sim::PROP_WETNESS];
                 interleaved[i * 4 + 2] = self.sim.cell_props[i * 4 + sandart_sim::PROP_GRAIN_SIZE];
@@ -734,7 +801,7 @@ impl WasmSimulationState {
                 
                 let mut interleaved = vec![0.0f32; sub_width * sub_height * 4];
                 for y in bounds.min_y..=bounds.max_y {
-                    let src_row_offset = y * GRID_SIZE;
+                    let src_row_offset = y * grid_size;
                     let dest_row_offset = (y - bounds.min_y) * sub_width;
                     for x in bounds.min_x..=bounds.max_x {
                         let src_idx = src_row_offset + x;
@@ -753,7 +820,7 @@ impl WasmSimulationState {
 
                 let mut colormap_sub = vec![0u8; sub_width * sub_height * 4];
                 for y in bounds.min_y..=bounds.max_y {
-                    let src_row_offset = y * GRID_SIZE * 4;
+                    let src_row_offset = y * grid_size * 4;
                     let dest_row_offset = (y - bounds.min_y) * sub_width * 4;
                     let bytes_to_copy = sub_width * 4;
                     colormap_sub[dest_row_offset..(dest_row_offset + bytes_to_copy)].copy_from_slice(
@@ -785,8 +852,8 @@ impl WasmSimulationState {
         for j in 0..5 {
             let (gx, gy) = DrawingSimulation::norm_to_grid(
                 self.sim.marbles[j].pos,
-                GRID_SIZE,
-                GRID_SIZE,
+                grid_size,
+                grid_size,
             );
             let z = self.sim.heightmap.get(gx, gy);
             current_marbles[j] = MarbleUniform {
@@ -868,7 +935,7 @@ impl WasmSimulationState {
             neck_width: self.sim.neck_width,
             hourglass_curve: self.sim.hourglass_curve,
             quantile_count,
-            _pad2: 0.0,
+            grid_size: self.grid_size as f32,
             quantile_positions: quantile_positions_uniform,
             marbles: current_marbles,
         };

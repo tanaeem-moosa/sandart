@@ -27,7 +27,7 @@ struct LightingUniforms {
     neck_width: f32,
     hourglass_curve: f32,
     quantile_count: u32,
-    _pad2: f32,
+    grid_size: f32,
     // Quantile line positions, normalised 0.0 (top row edge) .. 1.0 (bottom row edge), packed
     // 3 lines per vec4 (12 slots total, only the first `quantile_count` used). Must mirror the
     // Rust-side `[[f32; 4]; 3]` exactly: a plain `array<f32, 9>` here would pad each element to
@@ -71,7 +71,7 @@ fn hue_to_rgb(h: f32) -> vec3<f32> {
 // Manual Bilinear Texture Filtering to support linear height interpolation
 // on platforms without float32_filterable extension support
 fn sample_height_bilinear(uv: vec2<f32>) -> f32 {
-    let tex_size = 512.0;
+    let tex_size = uniforms.grid_size;
     let texel_coords = uv * tex_size - 0.5;
     let f = fract(texel_coords);
     let index = floor(texel_coords);
@@ -170,8 +170,9 @@ fn fs_main(
     
     // Determine casing and LED channel from the precomputed shape mask texture
     // Mask values: 0 = OUTSIDE (wall/casing), 1 = INSIDE (safe), 2 = BOUNDARY (inside, near wall → LED strip)
-    let mask_coord = vec2<i32>(i32(uv.x * 512.0), i32(uv.y * 512.0));
-    let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(511)), 0).r;
+    let grid_size_i = i32(uniforms.grid_size);
+    let mask_coord = vec2<i32>(i32(uv.x * uniforms.grid_size), i32(uv.y * uniforms.grid_size));
+    let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(grid_size_i - 1)), 0).r;
 
     var in_casing = mask_val == 0u;
     // LED strip: boundary cells (mask=2) OR outside cells adjacent to inside cells
@@ -333,7 +334,7 @@ fn fs_main(
     
     // 1. Compute finite difference normal from neighbor heightmap pixels
     // Normal tilting scale (high factor creates visual depth)
-    let tex_size = 512.0;
+    let tex_size = uniforms.grid_size;
     let texel_size = 1.0 / tex_size;
     let texel_coords = uv * tex_size - 0.5;
     let index = floor(texel_coords);
@@ -692,8 +693,8 @@ fn fs_main(
     }
 
     // Base sand color from presets with grain color variation locked to texel resolution (1024)
-    // Grain noise locked to actual grid resolution (512) to avoid sub-texel aliasing
-    let color_grain = hash(floor(uv * 512.0));
+    // Grain noise locked to actual grid resolution to avoid sub-texel aliasing
+    let color_grain = hash(floor(uv * uniforms.grid_size));
     let sand_base_color = mat_base_color * (1.0 + (color_grain - 0.5) * 0.025);
 
     // Warm ambient reflection for soft sand look (darker charcoal for Moon Dust)
@@ -746,10 +747,10 @@ fn fs_main(
     // and never on top of a marble. `quantile_count` is 0 whenever the feature is off (the
     // default) or the sim isn't in Sand-fall mode, so this costs nothing in the common case.
     if (uniforms.quantile_count > 0u) {
-        let row_f = uv.y * 512.0;
+        let row_f = uv.y * uniforms.grid_size;
         let half_width_px = 1.0; // texel half-width — a soft ~2-texel-wide antialiased line
         for (var i = 0u; i < uniforms.quantile_count; i = i + 1u) {
-            let target_row = uniforms.quantile_positions[i / 4u][i % 4u] * 512.0;
+            let target_row = uniforms.quantile_positions[i / 4u][i % 4u] * uniforms.grid_size;
             let d = abs(row_f - target_row);
             if (d < half_width_px) {
                 // Recycled-glass green, and quieter than the cyan it replaces. These lines are a

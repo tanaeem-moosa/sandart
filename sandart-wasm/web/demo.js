@@ -74,6 +74,11 @@ async function start() {
     // Create simulator state
     state = await WasmSimulationState.create('sand-canvas', w, h, forceWebGL);
 
+    // Reflect the sim's actual starting resolution (currently always 512, see GRID_SIZE in
+    // sandart-sim/src/lib.rs) rather than assuming the <select>'s hardcoded `selected` option
+    // agrees with it.
+    document.getElementById('resolution-select').value = String(state.get_grid_size());
+
     // Populate material <select> options from the wasm module's canonical material list before
     // anything reads them (syncMaterialTheme below, or the user changing the selection).
     populateMaterialSelects();
@@ -356,7 +361,12 @@ function hueToRgbBytes(h) {
 }
 
 function generateColormap(pattern, color1Hex, color2Hex) {
-    const size = 512;
+    // Must track the sim's actual current grid resolution, not a hardcoded 512 — the buffer
+    // this builds is uploaded verbatim via state.update_colormap(), and a size mismatch against
+    // whatever resolution the sim is actually running at would silently truncate/garble the
+    // pattern (Rust's set_cell_colors copies only overlapping_len bytes, no bounds error) rather
+    // than fail loudly. See WasmSimulationState.set_grid_size in sandart-wasm/src/lib.rs.
+    const size = state ? state.get_grid_size() : 512;
     const data = new Uint8Array(size * size * 4);
     const c1 = hexToRgbBytes(color1Hex);
     const c2 = hexToRgbBytes(color2Hex);
@@ -554,7 +564,10 @@ function populateMaterialSelects() {
 }
 
 function generateMaterialProps(pattern, mat1Id, mat2Id) {
-    const size = 512;
+    // See the matching comment in generateColormap: must track the sim's actual current grid
+    // resolution, not a hardcoded 512, or this buffer (uploaded via state.set_cell_props())
+    // silently truncates/garbles against a differently-sized sim.
+    const size = state ? state.get_grid_size() : 512;
     const data = new Float32Array(size * size * 4);
     const m1 = MATERIAL_PRESETS[mat1Id] || MATERIAL_PRESETS['dry_sand'];
     const m2 = MATERIAL_PRESETS[mat2Id] || MATERIAL_PRESETS['dry_sand'];
@@ -912,6 +925,24 @@ function setupPanelInput() {
         } else {
             syncSettings();
             loadActivePattern();
+        }
+    });
+
+    document.getElementById('resolution-select').addEventListener('change', () => {
+        if (!state) return;
+        const size = parseInt(document.getElementById('resolution-select').value);
+        try {
+            // A full sim + renderer teardown/rebuild (see set_grid_size in sandart-wasm/src/lib.rs)
+            // — same "contents are gone" contract as the Reset button, so re-apply the current
+            // material/color theme afterward exactly like btn-reset does below.
+            state.set_grid_size(size);
+            syncMaterialTheme(true);
+            syncColorTheme();
+        } catch (e) {
+            console.error('Failed to change grid resolution:', e);
+            // Roll the control back to what the sim is actually running at, rather than leaving
+            // it showing a value that silently didn't take.
+            document.getElementById('resolution-select').value = String(state.get_grid_size());
         }
     });
 

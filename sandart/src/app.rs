@@ -97,7 +97,7 @@ impl SandArtApp {
         if let Some(wgpu_state) = &cc.wgpu_render_state {
             let device = &wgpu_state.device;
             let target_format = wgpu_state.target_format;
-            let mut resources = crate::renderer::HeightmapRenderer::new(device, target_format);
+            let mut resources = crate::renderer::HeightmapRenderer::new(device, target_format, sandart_sim::GRID_SIZE);
             let default_color = vec![255u8; sandart_sim::GRID_SIZE * sandart_sim::GRID_SIZE * 4];
             resources.update_colormap(&wgpu_state.queue, &default_color);
             wgpu_state
@@ -1028,7 +1028,7 @@ impl eframe::App for SandArtApp {
                 // The mass-distribution quantile overlay is a sandart-wasm/web feature only;
                 // the native desktop app doesn't have a control for it, so it stays off here.
                 quantile_count: 0,
-                _pad2: 0.0,
+                grid_size: sandart_sim::GRID_SIZE as f32,
                 quantile_positions: [[0.0; 4]; 3],
                 marbles: [
                     crate::renderer::MarbleUniform {
