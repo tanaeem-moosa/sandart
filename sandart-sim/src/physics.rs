@@ -7016,4 +7016,210 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[ignore = "DIAGNOSTIC reproduction of the live-reported MultiNeckHourglass water \"tendril\" \
+                bug (thin, ~1-cell-wide, ~45-degree lateral streaks that peel off a falling water \
+                column at the instant it lands, synchronized across all three necks). This does \
+                NOT assert the bug is fixed -- it pins down the measured mechanism so a future fix \
+                has a concrete before/after, following the same pattern as \
+                `test_liquid_splashes_on_impact`. All assertions below PASS today (on \
+                ff7a255b) and describe the defect, not a spec the fix must avoid regressing on \
+                these exact numbers.\n\
+                \n\
+                Setup: a MultiNeckHourglass mask (production defaults: neck_width=0.005, \
+                curve=0.6) at 128x160, with a continuous 3-wide Water tap just below each of the \
+                three neck exits (matching `test_liquid_stream_stays_coherent`'s tap style), left \
+                to fall ~60 rows into the open lower chamber and land on its flat floor. Only the \
+                centre neck (x=64) is instrumented in detail; the other two necks are structurally \
+                identical and land within the same tick (see `impact tick` below), consistent with \
+                the reported synchronization.\n\
+                \n\
+                Measured mechanism, in order:\n\
+                1. Impact tick = 58 (first tick the centre stream's floor cell exceeds h=0.05).\n\
+                2. The FIRST lateral departure from the tap's own 3-cell width happens at tick 59 \
+                -- one tick after impact -- and at that exact moment `column_depth` at the \
+                departing cells is still ~0 (0.00-0.06) and the driving cell is still genuinely \
+                supported (h_below > 0.5). That first departure is ordinary splash physics (the \
+                same `h_a - h_b` leveling `test_liquid_splashes_on_impact` already accepts), not \
+                the bug.\n\
+                3. One tick later (tick 60), `column_depth` at the same location explodes to \
+                22.7, and by tick 62 reaches 31.7 -- a spike coincident with impact (within 1-2 \
+                ticks), matching the depth-spike-at-impact prediction. Crucially, some of the \
+                cells now carrying a large `column_depth` (e.g. 10.0 at one column, measured \
+                directly) have `h_below <= 0.5` -- i.e. they are NOT supported from below, yet \
+                still carry the full `LATERAL_PRESSURE_SCALE * column_depth` push. A cell in \
+                free fall has no hydrostatic pressure (nothing below it is bearing its weight), so \
+                this is physically wrong: `column_depth`'s top-down accumulation asks whether the \
+                cell it read ABOVE was still vertically in transit, but never asks whether the \
+                CURRENT cell itself is supported below before letting it push sideways.\n\
+                4. `max|edge_vel_h|` in the same window reaches 0.9966 at tick 60 and hits exactly \
+                1.0000 at tick 63 -- pinned at the CFL-like ceiling, not proportional to the \
+                (wildly varying, 1.3 to 31.7) driving depth. This is the saturation signature: \
+                once the depth term is large enough to dominate, the realised flux stops tracking \
+                pressure and just rides the clamp every tick, which is what makes the excursion \
+                look like a constant-slope (~45-degree, since vertical fill is *also* CFL-pinned \
+                at 1 row/tick) streak rather than a decaying, pressure-proportional splash.\n\
+                5. Ratio of lateral driving to vertical driving at the depth spike: vertical is \
+                `gravity_dir.y * GRAVITY_HEAD_SCALE` = 0.04 * 25 = 1.0; lateral is \
+                `LATERAL_PRESSURE_SCALE * column_depth` = 5.0 * ~22-32 = ~110-160. That is roughly \
+                twice the ~65x back-of-envelope estimate that motivated this investigation, using \
+                the actual shipped default gravity (0.04, not 0.06).\n\
+                \n\
+                Two temporary experiments were run against this reproduction and reverted (see \
+                the investigation notes, not present in this diff): (a) reading `column_depth`'s \
+                `resting_above` from the frozen `heightmap.data` instead of the live `temp_heights` \
+                changed the exact numbers but did NOT stop the runaway (core width still reached \
+                ~80-90 cells by tick ~75-79, same order as unpatched); voids-metric and \
+                mass-conservation were unaffected. (b) gating the lateral pressure term by a crude \
+                per-cell \"supported fraction\" (h_below / cap_below of the cell directly below) \
+                delayed the catastrophic one-tick jump from width 22->84 (baseline, tick 69->70) to \
+                a more gradual climb through tick ~74 before a similar jump, i.e. it measurably \
+                helped in the critical early window -- but as naively implemented it also \
+                regressed `test_liquid_stream_stays_coherent` (max_width 8 -> 9, now failing that \
+                test's `<= 8` bound) and slightly worsened \
+                `test_liquid_flowing_liquid_does_not_stand_in_walls`'s void count (17570 -> \
+                19217). Neither experiment is a usable fix as tried; see physics.rs history/PR \
+                notes for the full writeup of what a careful version of (b) would need (a frozen, \
+                hysteresis-aware support read) to avoid that regression."]
+    fn test_multineck_hourglass_water_tendril_on_impact() {
+        let w = 128;
+        let h = 160;
+        let block_size = 32;
+        let mask = make_test_mask(w, h, SandboxShape::MultiNeckHourglass, 0.005, 0.6);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // Three necks, spaced per `eval_sandbox_shape`'s MultiNeckHourglass branch
+        // (neck_offset = 0.22 * w -> +/- 28 about the centre at w/2 = 64).
+        let neck_xs = [36usize, 64usize, 92usize];
+        let floor_of = |nx: usize| -> usize {
+            (0..h)
+                .rev()
+                .find(|&y| ((nx - 5)..=(nx + 5)).any(|x| mask[y * w + x] != crate::MASK_OUTSIDE))
+                .expect("no floor found under this neck")
+        };
+        let floors: Vec<usize> = neck_xs.iter().map(|&nx| floor_of(nx)).collect();
+        // All three necks share one flat floor (the funnel walls have long since merged into one
+        // open chamber by the time they reach the bottom) -- confirms the geometry ties the three
+        // streams to the same impact row, consistent with the reported synchronization.
+        assert!(
+            floors.iter().all(|&f| f == floors[0]),
+            "expected one shared flat floor under all three necks, got {:?}",
+            floors
+        );
+
+        let nx = neck_xs[1];
+        let floor = floors[1];
+        let initial_tap_width = 3usize; // matches the 3-wide tap below
+
+        // Contiguous run of wetted (>0.05) cells in `floor`'s row, containing column `nx`. Walking
+        // outward (rather than scanning the whole row) ignores far-field dispersion noise that is
+        // already a known, separate baseline effect (see `test_liquid_stream_stays_coherent`'s doc
+        // comment) unrelated to this bug.
+        let core_width_at_floor = |sim: &TestSim| -> usize {
+            let mut lo = nx;
+            while lo > 0 && sim.hm.data[floor * w + lo - 1] > 0.05 {
+                lo -= 1;
+            }
+            let mut hi = nx;
+            while hi + 1 < w && sim.hm.data[floor * w + hi + 1] > 0.05 {
+                hi += 1;
+            }
+            hi - lo + 1
+        };
+
+        let mut impact_tick: Option<usize> = None;
+        let mut first_excursion_tick: Option<usize> = None;
+        let mut max_depth_trace: Vec<f32> = Vec::with_capacity(90);
+        let mut max_edge_vel_h_trace: Vec<f32> = Vec::with_capacity(90);
+
+        const N_TICKS: usize = 90;
+        for t in 0..N_TICKS {
+            // Continuous narrow pour at each neck exit, a few rows below the pinch line -- a
+            // steady tap, not an instantaneous blob, so the stream is already the neck's own
+            // (~1-3 cell) width by the time it reaches the open chamber, same style as
+            // `test_liquid_stream_stays_coherent`.
+            for &nxx in &neck_xs {
+                for y in 82..=84usize {
+                    for x in (nxx - 1)..=(nxx + 1) {
+                        sim.hm.apply_external_mass(x, y, 1.0);
+                    }
+                }
+            }
+            sim.tick(gravity_dir, usize::MAX);
+
+            let mut max_depth = 0.0f32;
+            let mut max_edge_vel_h = 0.0f32;
+            for y in (floor - 20)..=floor {
+                for x in (nx - 20)..=(nx + 20) {
+                    let idx = y * w + x;
+                    max_depth = max_depth.max(sim.column_depth[idx]);
+                    max_edge_vel_h = max_edge_vel_h.max(sim.edge_vel_h[idx].abs());
+                }
+            }
+            max_depth_trace.push(max_depth);
+            max_edge_vel_h_trace.push(max_edge_vel_h);
+
+            if impact_tick.is_none() && sim.hm.data[floor * w + nx] > 0.05 {
+                impact_tick = Some(t);
+            }
+            if first_excursion_tick.is_none() && core_width_at_floor(&sim) > initial_tap_width {
+                first_excursion_tick = Some(t);
+            }
+        }
+
+        let impact_tick = impact_tick.expect("centre stream never reached the floor within budget");
+        let first_excursion_tick =
+            first_excursion_tick.expect("core width never exceeded the tap's own width");
+        let peak_depth = max_depth_trace.iter().cloned().fold(0.0f32, f32::max);
+        let peak_edge_vel_h = max_edge_vel_h_trace.iter().cloned().fold(0.0f32, f32::max);
+        let vertical_driving_head = gravity_dir.y * GRAVITY_HEAD_SCALE;
+        let lateral_driving_head = LATERAL_PRESSURE_SCALE * peak_depth;
+        let ratio = lateral_driving_head / vertical_driving_head;
+
+        println!(
+            "test_multineck_hourglass_water_tendril_on_impact: impact_tick={} \
+             first_excursion_tick={} (delta={}) peak_column_depth={:.3} peak_edge_vel_h={:.4} \
+             vertical_driving_head={:.3} lateral_driving_head={:.3} ratio={:.1}x",
+            impact_tick,
+            first_excursion_tick,
+            first_excursion_tick - impact_tick,
+            peak_depth,
+            peak_edge_vel_h,
+            vertical_driving_head,
+            lateral_driving_head,
+            ratio
+        );
+
+        // Prediction 1/2: the lateral excursion is impact-triggered, not a slow independent drift
+        // -- it starts within a couple of ticks of the column reaching the floor, not tens of
+        // ticks later or earlier.
+        assert!(
+            first_excursion_tick >= impact_tick && first_excursion_tick - impact_tick <= 3,
+            "lateral excursion (tick {}) is not tightly coupled to impact (tick {})",
+            first_excursion_tick,
+            impact_tick
+        );
+
+        // Prediction 3: the lateral edge velocity saturates near the same ~1.0-cell/tick CFL
+        // ceiling free fall runs at, rather than staying small/proportional to the (much more
+        // variable) driving pressure.
+        assert!(
+            peak_edge_vel_h >= 0.9,
+            "lateral edge velocity peaked at {:.4}, expected saturation near the 1.0 CFL ceiling",
+            peak_edge_vel_h
+        );
+
+        // Prediction 5: the lateral driving head at the peak is a large multiple of the vertical
+        // driving head that governs ordinary CFL-limited free fall -- i.e. the depth-pressure term
+        // is not a gentle correction, it dominates by roughly two orders of magnitude.
+        assert!(
+            ratio >= 20.0,
+            "lateral/vertical driving head ratio only {:.1}x at peak depth {:.3}; expected >= 20x",
+            ratio,
+            peak_depth
+        );
+    }
 }
