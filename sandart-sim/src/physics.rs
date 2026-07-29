@@ -1626,14 +1626,33 @@ pub fn settle_tick(
                         let h_b = temp_heights[nb_idx];
                         let cap_a = cell_capacity_for(wetness);
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
-                        let head_a = h_a + gravity_dir.y * GRAVITY_HEAD_SCALE;
+                        // Driving head on this edge, fill term normalised to fraction-of-capacity
+                        // (dimensionless, 0..1) rather than raw mass. Without this, "one saturated
+                        // cell of fill" is 1.5 for granular material (`cell_capacity_for` at
+                        // `liquidity == 0`) but only 1.0 for liquid, so `g * GRAVITY_HEAD_SCALE`
+                        // — tuned to cancel exactly one *liquid* cell's fill per row — cancelled
+                        // only 1/1.5 of a granular cell's fill, leaving a net upward driving head
+                        // on the gravity-aligned edge under a resting, at-capacity granular slab
+                        // for any `g < cap / GRAVITY_HEAD_SCALE` (0.06 for `cap = 1.5`), and the
+                        // whole slab climbed into the empty air above it. Water has `cap_a ==
+                        // cap_b == 1.0` always, so `h / cap == h` and this is an exact no-op for
+                        // fully liquid material (see `test_gravity_head_normalization_...` in the
+                        // test module for the bit-identity check against the un-normalised form).
+                        //
+                        // The normalisation applies only to the *driving* term passed as
+                        // `head_a`/`head_b` below. `avail_a`/`avail_b`/`cap_a`/`cap_b` — the
+                        // donor-mass and acceptor-room clamps inside `flux_edge` — stay in raw
+                        // mass units; normalising those too would break conservation (see
+                        // `flux_edge`'s doc comment on why those clamps must stay in mass units).
+                        let head_a = h_a / cap_a + gravity_dir.y * GRAVITY_HEAD_SCALE;
+                        let head_b = h_b / cap_b;
                         // Sleeping edge (see `edge_sleeps`). This is the pass where sleeping pays
                         // most, because it is the one every cell in the domain enters: the
                         // interior of a filled chamber/pile is room-blocked in both directions,
                         // empty space above the free surface/heap has nothing to donate in either,
                         // and only the surface itself — a few cells per column — survives the test.
                         if edge_sleeps(
-                            head_a - h_b, 0.0, edge_vel_v[center_idx],
+                            head_a - head_b, 0.0, edge_vel_v[center_idx],
                             h_a, h_b, cap_a - h_a, cap_b - h_b,
                         ) {
                             if edge_vel_v[center_idx] != 0.0 {
@@ -1664,7 +1683,7 @@ pub fn settle_tick(
                         flux_edge(
                             b, nb_b, center_idx, nb_idx,
                             head_a,
-                            h_b,
+                            head_b,
                             c_sq, damping, 0.0,
                             cap_a,
                             cap_b,
@@ -6474,5 +6493,109 @@ mod tests {
             total,
             100.0 * outside / total
         );
+    }
+
+    #[test]
+    // REGRESSION (was DIAGNOSTIC-only; promoted once the fix landed): sweeps gravity strength
+    // across the slider's full range on a *flat, uniform* resting slab filled to
+    // `cell_capacity_for` for the material, with clear air above and no lateral height gradient
+    // anywhere (every column is identical, so the lateral/CA path — repose, avalanche — has
+    // nothing to do and cannot contaminate the measurement). This isolates exactly the
+    // gravity-aligned flux edge between the slab's flat top surface and the empty air cell
+    // directly above it. Run for both DrySand (cap 1.5, the material that exposed the bug) and
+    // Water (cap 1.0, the material that must be provably unaffected by the fix).
+    //
+    // Mechanism that used to be under test (now fixed, see `head_a`/`head_b` at the gravity-
+    // aligned edge in `settle_tick`'s phase 0): the driving head on that edge was
+    // `head_a - h_b = (0 + g * GRAVITY_HEAD_SCALE) - cap`, `a` being the empty air cell above,
+    // `b` the full surface cell below, with the fill terms in raw mass units. If
+    // `g * GRAVITY_HEAD_SCALE < cap`, that was negative, and `flux_edge` has no sign check
+    // against "which way is down" — it only checks `driving` — so a negative driving head on a
+    // *donor-and-acceptor-eligible* edge (b has mass to give, a has room to receive) drove mass
+    // from the resting slab UP into the empty cell above it. That is "boiling": a settled,
+    // physically-at-rest configuration spontaneously erupting. The fix normalises the fill terms
+    // by `cell_capacity_for` so a full cell contributes exactly -1.0 regardless of material,
+    // making the threshold `g * GRAVITY_HEAD_SCALE >= 1.0` (g >= 0.04) uniform across materials
+    // instead of scaling with `cap`.
+    //
+    // Metric: `leaked_mass(t)` = total height summed over every row strictly above the slab's
+    // initial top row, which started at exactly 0. A non-boiling material must keep this at 0 (or
+    // vanishingly close, sensor noise aside) for as long as the slab is genuinely flat and full;
+    // a boiling material pushes mass upward every tick, tick after tick, with no settling.
+    //
+    // The full sweep (0.005..=0.10) is still printed for future diagnosis, but the pass/fail
+    // assertion only pins the shipped-and-reachable range: g >= 0.04 (the slider's new minimum,
+    // see `sandart-wasm/web/index.html`) must show (numerically) zero climbed mass, for every
+    // material.
+    fn test_diagnostic_boiling_vs_gravity_sweep() {
+        let w = 48;
+        let h = 64;
+        let block_size = 16;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+
+        // Find, per column, the bottom-most inside row (the floor) so the slab sits flush on it.
+        let mut floor_row = vec![None; w];
+        for x in 0..w {
+            for y in (0..h).rev() {
+                if mask[y * w + x] != crate::MASK_OUTSIDE {
+                    floor_row[x] = Some(y);
+                    break;
+                }
+            }
+        }
+        let bottom = floor_row.iter().filter_map(|f| *f).max().unwrap();
+        let slab_rows = 12usize;
+        let top_row = bottom - slab_rows + 1; // first filled row
+        let empty_row_above = top_row - 1; // known to start at exactly 0 for every sweep
+
+        for (mode, name) in [
+            (crate::MaterialMode::DrySand, "DrySand"),
+            (crate::MaterialMode::Water, "Water"),
+        ] {
+            let props = get_test_props(mode, w * h);
+            let cap = cell_capacity_for(props[PROP_WETNESS]);
+
+            for step in 1..=20 {
+                let g = step as f32 * 0.005; // 0.005 .. 0.10, matching the slider's range/step
+                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+                for y in top_row..=bottom {
+                    for x in 0..w {
+                        if mask[y * w + x] != crate::MASK_OUTSIDE {
+                            sim.hm.data[y * w + x] = cap;
+                        }
+                    }
+                }
+                let start_mass = sim.mass();
+                let gravity_dir = glam::Vec2::new(0.0, g);
+
+                let mut max_leak = 0.0f32;
+                for _t in 0..30 {
+                    sim.tick(gravity_dir, usize::MAX);
+                    let leaked: f32 = (0..=empty_row_above)
+                        .flat_map(|y| (0..w).map(move |x| y * w + x))
+                        .filter(|&i| mask[i] != crate::MASK_OUTSIDE)
+                        .map(|i| sim.hm.data[i])
+                        .sum();
+                    max_leak = max_leak.max(leaked);
+                }
+                let end_mass = sim.mass();
+                println!(
+                    "boiling_sweep material={} g={:.3} gravity_term={:.3} cap={:.2} \
+                     max_leak_above_slab={:.6} mass_start={:.4} mass_end={:.4} mass_drift={:.2e}",
+                    name, g, g * GRAVITY_HEAD_SCALE, cap, max_leak, start_mass, end_mass,
+                    (end_mass - start_mass).abs()
+                );
+
+                if g >= 0.04 - 1e-6 {
+                    assert!(
+                        max_leak < 1e-3,
+                        "{name}: mass climbed above the resting slab at g={g:.3} (>= the \
+                         shipped/slider-reachable minimum 0.04): max_leak_above_slab={max_leak:.6}. \
+                         This is the boiling defect; it must not reproduce at or above the \
+                         slider's floor.",
+                    );
+                }
+            }
+        }
     }
 }

@@ -619,7 +619,11 @@
                     <div class="field row">
                         <label for="gravity-slider">Gravity</label>
                         <span id="gravity-val" class="val-display">0.04</span>
-                        <input type="range" id="gravity-slider" min="0.0" max="0.10" step="0.005" value="0.04">
+                        <!-- min is clamped to 0.04, not 0.0: below that, a resting slab's own
+                             gravity-aligned edges drive upward instead of down (see
+                             GRAVITY_HEAD_SCALE in sandart-sim/src/physics.rs) and settled material
+                             "boils" back up into empty space above it. -->
+                        <input type="range" id="gravity-slider" min="0.04" max="0.10" step="0.005" value="0.04">
                     </div>
                     <div class="row">
                         <label for="quantile-select">Weight lines</label>
@@ -662,10 +666,11 @@
                 <div class="group-title">Material</div>
                 <div class="row"><label for="material-pattern">Distribution</label></div>
                 <select id="material-pattern">
-                    <option value="uniform">Uniform</option>
-                    <option value="layers">Horizontal layers</option>
-                    <option value="blend">Gradient blend</option>
-                    <option value="checker">Checkerboard</option>
+                    <option value="solid">Uniform</option>
+                    <option value="gradient">Linear gradient</option>
+                    <option value="stripes">Stripes</option>
+                    <option value="concentric">Concentric rings</option>
+                    <option value="checkerboard">Checkerboard</option>
                 </select>
 
                 <div class="row gap-above"><label for="material-1" id="label-material-1">Primary</label></div>
@@ -679,31 +684,31 @@
                     <option value="6">Fine powder</option>
                     <option value="7">Oobleck</option>
                     <option value="8">Moon dust</option>
-                    <option value="9">Water</option>
-                    <option value="10">Milk</option>
-                    <option value="11">Vegetable oil</option>
-                    <option value="12">Calm water</option>
-                    <option value="13">Yogurt</option>
+                    <option value="10">Water</option>
+                    <option value="11">Milk</option>
+                    <option value="13">Vegetable oil</option>
+                    <option value="14">Calm water</option>
+                    <option value="15">Yogurt</option>
                 </select>
 
                 <div id="material-2-group" style="display: none;">
                     <div class="row gap-above"><label for="material-2">Secondary</label></div>
                     <select id="material-2">
-                        <option value="0">Dry sand</option>
-                        <option value="1">Kinetic sand</option>
-                        <option value="2">Wet sand</option>
-                        <option value="3">Coarse sand</option>
-                        <option value="4">Buttercream</option>
-                        <option value="5">Snow</option>
-                        <option value="6">Fine powder</option>
-                        <option value="7">Oobleck</option>
-                        <option value="8">Moon dust</option>
-                        <option value="9">Water</option>
-                        <option value="10">Milk</option>
-                        <option value="11">Vegetable oil</option>
-                        <option value="12">Calm water</option>
-                        <option value="13">Yogurt</option>
-                    </select>
+                    <option value="0">Dry sand</option>
+                    <option value="1">Kinetic sand</option>
+                    <option value="2">Wet sand</option>
+                    <option value="3">Coarse sand</option>
+                    <option value="4">Buttercream</option>
+                    <option value="5">Snow</option>
+                    <option value="6">Fine powder</option>
+                    <option value="7">Oobleck</option>
+                    <option value="8">Moon dust</option>
+                    <option value="10">Water</option>
+                    <option value="11">Milk</option>
+                    <option value="13">Vegetable oil</option>
+                    <option value="14">Calm water</option>
+                    <option value="15">Yogurt</option>
+                </select>
                 </div>
 
                 <div id="material-properties-preview" class="material-preview-card"></div>
@@ -736,16 +741,24 @@
                     <div class="group-title">Pattern</div>
                     <div class="row"><label for="pattern-select">Curve</label></div>
                     <select id="pattern-select">
-                        <option value="none">None (freehand)</option>
-                        <option value="spiral">Spiral</option>
-                        <option value="lissajous">Lissajous</option>
-                        <option value="rose">Rose</option>
-                        <option value="spirograph">Spirograph</option>
-                        <option value="hilbert">Hilbert curve</option>
-                        <option value="gosper">Gosper curve</option>
-                        <option value="sierpinski">Sierpinski curve</option>
-                        <option value="random_walk">Random walk</option>
-                    </select>
+                    <option value="manual">Manual draw</option>
+                    <option value="spiral">Archimedean spiral</option>
+                    <option value="lissajous">Lissajous curve</option>
+                    <option value="rose">Rose curve</option>
+                    <option value="spirograph">Spirograph</option>
+                    <option value="gosper">Gosper curve</option>
+                    <option value="hilbert">Hilbert curve</option>
+                    <option value="fermat">Fermat spiral</option>
+                    <option value="sierpinski">Sierpinski curve</option>
+                    <option value="random_walk">Random walk</option>
+                    <option value="lemniscate">Lemniscate</option>
+                    <option value="butterfly">Butterfly curve</option>
+                    <option value="zen_waves">Zen waves</option>
+                    <option value="zen_mandala">Zen mandala</option>
+                    <option value="dinosaur">Dinosaur outline</option>
+                    <option value="unicorn">Unicorn outline</option>
+                    <option value="clock">Clock mode</option>
+                </select>
 
                     <div id="spiral-params" style="display: none;">
                         <div class="field row gap-above">
@@ -821,20 +834,23 @@
                 <div class="group-title">Colour</div>
                 <div class="row"><label for="color-pattern">Scheme</label></div>
                 <select id="color-pattern">
-                    <option value="solid">Single colour</option>
-                    <option value="layers">Layers</option>
-                    <option value="gradient">Gradient</option>
-                    <option value="rings">Rings</option>
-                    <option value="rainbow">Rainbow</option>
+                    <option value="solid">Solid colour</option>
+                    <option value="gradient">Linear gradient</option>
+                    <option value="stripes">Stripes</option>
+                    <option value="concentric">Concentric rings</option>
+                    <option value="checkerboard">Checkerboard</option>
+                    <option value="rainbow_linear">Rainbow, linear</option>
+                    <option value="rainbow_radial">Rainbow, radial</option>
                 </select>
                 <select id="color-preset" style="display: none;">
-                    <option value="desert">Desert</option>
-                    <option value="ocean">Ocean</option>
-                    <option value="forest">Forest</option>
-                    <option value="vaporwave">Vaporwave</option>
-                    <option value="sunset">Sunset</option>
-                    <option value="black_white">Monochrome</option>
+                    <option value="custom">Custom</option>
                     <option value="rainbow">Rainbow</option>
+                    <option value="black_white">Black &amp; white</option>
+                    <option value="desert">Desert sand</option>
+                    <option value="ocean">Ocean teal</option>
+                    <option value="forest">Forest gold</option>
+                    <option value="vaporwave">Vaporwave</option>
+                    <option value="sunset">Sunset gold</option>
                 </select>
 
                 <div class="row gap-above"><span class="row-label">Presets</span></div>
