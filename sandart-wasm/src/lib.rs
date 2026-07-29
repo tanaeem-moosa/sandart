@@ -369,27 +369,38 @@ impl WasmSimulationState {
         self.full_upload_needed = true;
     }
 
-    pub fn set_material_mode(&mut self, mode: u32) {
-        let preset = match mode {
-            0 => MaterialMode::DrySand,
-            1 => MaterialMode::KineticSand,
-            2 => MaterialMode::WetSand,
-            3 => MaterialMode::CoarseSand,
-            4 => MaterialMode::ButterCream,
-            5 => MaterialMode::Snow,
-            6 => MaterialMode::FinePowder,
-            7 => MaterialMode::Oobleck,
-            8 => MaterialMode::MoonDust,
-            10 => MaterialMode::Water,
-            11 => MaterialMode::Milk,
-            13 => MaterialMode::VegetableOil,
-            14 => MaterialMode::CalmWater,
-            15 => MaterialMode::Yogurt,
-            _ => MaterialMode::DrySand,
-        };
+    /// Select a material by its stable string id (see `MaterialMode::as_str`/`from_str`).
+    /// Returns an `Err` for an unrecognized id instead of silently falling back to a default —
+    /// a caller passing a stale/wrong id should see it fail loudly rather than quietly select
+    /// the wrong material.
+    pub fn set_material_preset(&mut self, name: &str) -> Result<(), JsValue> {
+        let preset = MaterialMode::from_str(name)
+            .ok_or_else(|| JsValue::from_str(&format!("Unknown material preset: {}", name)))?;
         self.material_mode = preset;
         self.sim.apply_preset(preset);
         self.full_upload_needed = true;
+        Ok(())
+    }
+
+    /// List every material as `[id, label, wetness, threshold, flow_rate, grain_size]` rows, in
+    /// menu order. The web UI should build its material `<select>` options from this at
+    /// startup rather than hardcoding its own copy of the material list — that hardcoded-copy
+    /// pattern is exactly what caused the material selection to silently point at the wrong
+    /// material after a past UI rewrite.
+    pub fn list_materials() -> js_sys::Array {
+        let out = js_sys::Array::new();
+        for mode in MaterialMode::ALL {
+            let (wetness, threshold, flow_rate, grain_size) = mode.preset_props();
+            let row = js_sys::Array::new();
+            row.push(&JsValue::from_str(mode.as_str()));
+            row.push(&JsValue::from_str(mode.label()));
+            row.push(&JsValue::from_f64(wetness as f64));
+            row.push(&JsValue::from_f64(threshold as f64));
+            row.push(&JsValue::from_f64(flow_rate as f64));
+            row.push(&JsValue::from_f64(grain_size as f64));
+            out.push(&row);
+        }
+        out
     }
 
     pub fn set_sandbox_shape(&mut self, shape: u32) {

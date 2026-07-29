@@ -57,6 +57,10 @@ async function start() {
     // Create simulator state
     state = await WasmSimulationState.create('sand-canvas', w, h, forceWebGL);
 
+    // Populate material <select> options from the wasm module's canonical material list before
+    // anything reads them (syncMaterialTheme below, or the user changing the selection).
+    populateMaterialSelects();
+
     // Initial config sync
     syncSettings();
     syncMaterialTheme(true);
@@ -474,45 +478,44 @@ function syncColorTheme() {
 }
 
 // 4. Multi-Material Property Configuration
-const MATERIAL_PRESETS = {
-    0: [0.00, 0.08, 0.25, 0.45], // DrySand
-    1: [0.20, 0.10, 0.15, 0.35], // KineticSand
-    2: [0.45, 0.14, 0.08, 0.40], // WetSand
-    3: [0.00, 0.11, 0.22, 0.80], // CoarseSand
-    4: [0.70, 0.04, 0.15, 0.08], // ButterCream
-    5: [0.05, 0.15, 0.20, 0.20], // Snow
-    6: [0.00, 0.05, 0.30, 0.05], // FinePowder
-    7: [0.55, 0.04, 0.12, 0.15], // Oobleck
-    8: [0.00, 0.20, 0.20, 0.10], // MoonDust
-    10: [1.00, 0.00, 0.00, 0.00], // Water
-    11: [0.95, 0.00, 0.00, 0.00], // Milk
-    13: [0.85, 0.00, 0.00, 0.00], // VegetableOil
-    14: [0.90, 0.00, 0.00, 0.00], // CalmWater
-    15: [0.75, 0.00, 0.00, 0.08]  // Yogurt
-};
+//
+// MATERIAL_PRESETS/MATERIAL_LABELS are populated at startup from
+// WasmSimulationState.list_materials() (see populateMaterialSelects) rather than hardcoded here.
+// A hand-maintained copy of this table, numbered independently from the Rust `MaterialMode`
+// enum, is exactly what caused material selection to silently pick the wrong material after a
+// past UI rewrite — so this file must never define its own material list again.
+let MATERIAL_PRESETS = {};
+let MATERIAL_LABELS = {};
 
-const MATERIAL_LABELS = {
-    0: "Dry Sand",
-    1: "Kinetic Sand",
-    2: "Wet Sand",
-    3: "Coarse Sand",
-    4: "Butter-Cream",
-    5: "Snow",
-    6: "Fine Powder",
-    7: "Oobleck",
-    8: "Moon Dust",
-    10: "Water",
-    11: "Milk",
-    13: "Vegetable Oil",
-    14: "Calm Water",
-    15: "Yogurt"
-};
+/// Build the material <select> options and the local preset/label lookup tables from the wasm
+/// module's canonical material list. Must run once, after WASM init, before anything reads
+/// MATERIAL_PRESETS/MATERIAL_LABELS or a material <select>'s value.
+function populateMaterialSelects() {
+    const materials = WasmSimulationState.list_materials();
+    const mat1Select = document.getElementById('material-1');
+    const mat2Select = document.getElementById('material-2');
+    mat1Select.innerHTML = '';
+    mat2Select.innerHTML = '';
+    MATERIAL_PRESETS = {};
+    MATERIAL_LABELS = {};
+
+    for (const [id, label, wetness, threshold, flowRate, grainSize] of materials) {
+        MATERIAL_PRESETS[id] = [wetness, threshold, flowRate, grainSize];
+        MATERIAL_LABELS[id] = label;
+
+        const option = document.createElement('option');
+        option.value = id;
+        option.textContent = label;
+        mat1Select.appendChild(option);
+        mat2Select.appendChild(option.cloneNode(true));
+    }
+}
 
 function generateMaterialProps(pattern, mat1Id, mat2Id) {
     const size = 512;
     const data = new Float32Array(size * size * 4);
-    const m1 = MATERIAL_PRESETS[mat1Id] || MATERIAL_PRESETS[0];
-    const m2 = MATERIAL_PRESETS[mat2Id] || MATERIAL_PRESETS[0];
+    const m1 = MATERIAL_PRESETS[mat1Id] || MATERIAL_PRESETS['dry_sand'];
+    const m2 = MATERIAL_PRESETS[mat2Id] || MATERIAL_PRESETS['dry_sand'];
 
     if (pattern === 'solid') {
         for (let i = 0; i < size * size; i++) {
@@ -631,8 +634,8 @@ function syncMaterialTheme(resetBuffer = false) {
     if (!patternSelect || !mat1Select || !mat2Select) return;
 
     const pattern = patternSelect.value;
-    const mat1Id = parseInt(mat1Select.value);
-    const mat2Id = parseInt(mat2Select.value);
+    const mat1Id = mat1Select.value;
+    const mat2Id = mat2Select.value;
 
     const isBlend = pattern !== 'solid';
     if (isBlend) {
@@ -644,7 +647,11 @@ function syncMaterialTheme(resetBuffer = false) {
     renderMaterialPreview(mat1Id, mat2Id, isBlend);
 
     if (state) {
-        state.set_material_mode(mat1Id);
+        try {
+            state.set_material_preset(mat1Id);
+        } catch (e) {
+            console.error('Failed to set material preset:', mat1Id, e);
+        }
         if (resetBuffer) {
             const propData = generateMaterialProps(pattern, mat1Id, mat2Id);
             state.set_cell_props(propData);
