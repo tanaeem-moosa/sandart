@@ -2026,15 +2026,40 @@ pub fn settle_tick(
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        // *Jacobi driving.* This lateral edge is the conservative, energy-carrying
+                        // case the g = 0 branch's note above (`wetness >= 0.75 && !gravity_active`,
+                        // see the "Jacobi driving" comment there for the full derivation) says needs
+                        // a frozen snapshot: driving this tick's head off `temp_heights` mid-sweep
+                        // makes the update Gauss-Seidel on a sweep whose direction alternates by row
+                        // (`(tick_count + y) % 2`), and a cell's driving term can then already
+                        // reflect this tick's flux from the very neighbour it is being compared
+                        // against — measured at a per-tick spectral radius of 1.20 against 0.994 for
+                        // the frozen form, i.e. a gain, not just directional noise. So `head_a` and
+                        // `head_b_full` below are built from `heightmap.data`, the tick's frozen
+                        // starting heights, exactly like the g = 0 branch. This is the vertical/
+                        // gravity-aligned edge's Gauss-Seidel ordering (phase 0, load-bearing for
+                        // CFL there) but that justification is about advection down the gravity
+                        // axis; it does not extend to this sideways, non-advective edge.
+                        //
+                        // `avail_a`/`avail_b` and the `cap_*`/`cell_capacity` room clamps below stay
+                        // on the live `temp_heights`-derived buffer on purpose, unchanged: only the
+                        // *driving* term needs the snapshot, the donor-mass/acceptor-room limits
+                        // inside `flux_edge` must still see what the other edges incident on these
+                        // cells have already taken this pass, or a cell could be drained twice over.
+                        // `column_depth` itself is also left untouched (still read live below) — it
+                        // is already this tick's freshly computed value by construction (see its
+                        // doc comment above), not a mid-sweep artifact of this edge's own flux.
+                        let h_a_frozen = heightmap.data[center_idx];
+                        let h_b_frozen = heightmap.data[nb_idx];
                         // `head_b_full` folds the neighbour's own depth-integrated overburden in
                         // (see `LATERAL_PRESSURE_SCALE`), symmetrically with `head_a` below, so the
                         // driving term compares total column pressure rather than local fill alone.
                         // `column_depth[nb_idx]` may be a tick stale if the neighbour's block ran
                         // after this one, or hasn't run yet this tick — harmless, since (like
                         // `GRAVITY_HEAD_SCALE`) it only ever feeds `driving`, never the mass limits.
-                        let head_a = h_a + gravity_dir.x * GRAVITY_HEAD_SCALE
+                        let head_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
                             + LATERAL_PRESSURE_SCALE * column_depth[center_idx];
-                        let head_b_full = h_b + LATERAL_PRESSURE_SCALE * column_depth[nb_idx];
+                        let head_b_full = h_b_frozen + LATERAL_PRESSURE_SCALE * column_depth[nb_idx];
                         // Sleeping edge (see `edge_sleeps`), tested *before* the in-transit
                         // computation below rather than after, because that computation is the
                         // expensive part of this edge: two neighbour loads, a capacity lookup and
@@ -5453,6 +5478,147 @@ mod tests {
         // Measured today: lateral_spread=true, upward_move=false (structurally impossible).
         assert!(lateral_spread, "Blob did not spread laterally beyond its original width on impact");
         assert!(upward_move, "Blob did not move upward at all on impact (min_row_after={}, top_at_impact={})", min_row_after, top_at_impact);
+    }
+
+    #[test]
+    // Companion to `test_sandbox_wave_stays_left_right_symmetric`, for the gravity + liquid path
+    // that test never touches: `test_hourglass_statistical_symmetry` uses DrySand
+    // (`cell_liquidity == 0`), which is bit-identical to the pre-liquid CA and never reaches the
+    // `gravity_active && cell_liquidity > 0.0` lateral-edge branch at all. This is the first test
+    // to put WATER through gravity's lateral edge and check it does not lean.
+    //
+    // A centred, bit-symmetric blob dropped onto a floor must fall and spread without ever
+    // preferring one side. Unlike the Sandbox wave test, this tracks the *signed* left-minus-right
+    // difference, not just its worst absolute value: an explosion that stays symmetric (grows
+    // equally both ways) and a one-sided lean (a "tendril" that always tips the same way) both can
+    // trip a magnitude bound, but only the signed trace tells them apart, and the reported bug
+    // ("tendrils usually on the left") is a claim about sign, not magnitude.
+    fn test_water_blob_stays_left_right_symmetric_under_gravity() {
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let mut sim = TestSim::new(w, h, props, mask, 32);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // `eval_sandbox_shape` reflects `dx = cx as f32 - w as f32 / 2.0` about `w / 2.0` (an
+        // *integer* for even `w`), so the mask's true mirror map is `x -> w - x` (verified
+        // directly against `make_test_mask`'s output for this exact shape/size: the Square mask
+        // here is inside for x in [3, 61], symmetric under `x -> 64 - x`, NOT under `x -> 63 - x`
+        // / `w - 1 - x` — the convention `test_sandbox_wave_stays_left_right_symmetric` uses. That
+        // test gets away with the off-by-one because its Circle bump never reaches the mask
+        // boundary; this test's blob spreads to fill nearly the whole 64-wide box (see
+        // `test_liquid_splashes_on_impact`'s width_after=59), so the wrong axis measures a
+        // spurious ~1-column wall-proximity bias on top of any real solver bias. Centring the blob
+        // on 9 columns (28..=36, an odd count around x=32) makes it bit-symmetric about the mask's
+        // actual axis: mirror(28)=36, mirror(29)=35, ..., mirror(32)=32 (self).
+        for y in 50..54 {
+            for x in 28..37 {
+                sim.hm.data[y * w + x] = 1.0;
+            }
+        }
+
+        // Signed left-minus-right mass difference: positive means excess mass on the left half,
+        // negative means excess on the right. Normalised by total mass so the scale is comparable
+        // tick to tick as the blob spreads and (if it splashes) loses/gains contact area. Pairs
+        // `x` with `w - x` (the mask's true mirror, see above); `x = 0` has no partner (its mirror
+        // `w` is out of range) but is always outside the mask for this shape, so skipping it costs
+        // nothing, and `x = w / 2` is its own mirror and contributes exactly 0.
+        let signed_diff = |s: &TestSim| -> f64 {
+            let mut diff = 0.0f64;
+            for y in 0..h {
+                for x in 1..w / 2 {
+                    let j = w - x;
+                    let i = y * w + x;
+                    let jj = y * w + j;
+                    if s.mask[i] == crate::MASK_OUTSIDE || s.mask[jj] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    diff += (s.hm.data[i] - s.hm.data[jj]) as f64;
+                }
+            }
+            diff
+        };
+        let total_mass = |s: &TestSim| -> f64 { s.hm.data.iter().map(|&v| v as f64).sum() };
+
+        let initial = signed_diff(&sim);
+        assert!(initial.abs() < 1e-9, "test setup is not mirror symmetric: {:.3e}", initial);
+
+        const N_TICKS: usize = 150;
+        let mut trace: Vec<f64> = Vec::with_capacity(N_TICKS);
+        for _ in 0..N_TICKS {
+            sim.tick(gravity_dir, 256);
+            let mass = total_mass(&sim);
+            let rel = if mass > 0.0 { signed_diff(&sim) / mass } else { 0.0 };
+            trace.push(rel);
+        }
+
+        let worst = trace.iter().cloned().fold(0.0f64, |a, b: f64| a.max(b.abs()));
+        let final_err = trace.last().copied().unwrap_or(0.0).abs();
+
+        // Counts the longest run of consecutive same-signed samples in a slice, ignoring swings
+        // too small to be anything but f32/sweep-parity noise (`EPS`).
+        const EPS: f64 = 1e-6;
+        let longest_same_sign_run = |samples: &[f64]| -> usize {
+            let mut max_run = 0usize;
+            let mut run_sign = 0i32;
+            let mut run_len = 0usize;
+            for &d in samples {
+                let s = if d > EPS { 1 } else if d < -EPS { -1 } else { 0 };
+                if s != 0 && s == run_sign {
+                    run_len += 1;
+                } else if s != 0 {
+                    run_sign = s;
+                    run_len = 1;
+                } else {
+                    run_sign = 0;
+                    run_len = 0;
+                }
+                max_run = max_run.max(run_len);
+            }
+            max_run
+        };
+
+        // The impact itself (roughly the first half of the run: the blob is still falling as a
+        // single coherent block, then hits the floor and briefly splashes) is allowed a transient,
+        // same-signed asymmetry — a symmetric blob hitting a floor is not obliged to stay
+        // instantaneously mirror-exact while it does so, and the existing
+        // `test_sandbox_wave_stays_left_right_symmetric` makes the same allowance via its
+        // `final_err < 0.25 * worst` check rather than demanding zero asymmetry from tick 1. What
+        // must not happen is for that lean to *persist* once the impact has settled out, which is
+        // exactly the Gauss-Seidel gain's signature (see the driving-term comment on the fixed
+        // branch): unbounded/non-decaying growth versus a transient that relaxes to noise.
+        const WINDOW: usize = 25;
+        let late = &trace[trace.len() / 2..];
+        let late_run = longest_same_sign_run(late);
+
+        println!(
+            "test_water_blob_stays_left_right_symmetric_under_gravity: worst={:.3e} final={:.3e} \
+             late_persistent_run={} trace_tail={:?}",
+            worst, final_err, late_run,
+            trace[trace.len().saturating_sub(10)..].iter().map(|v| format!("{:.2e}", v)).collect::<Vec<_>>()
+        );
+
+        assert!(
+            worst < 0.06,
+            "Centred water blob went badly lopsided under gravity: signed mirror error reached \
+             {:.3e} of total mass. A directional bias in the gravity lateral-edge driving term is \
+             the cause to look for (see the Gauss-Seidel/Jacobi driving note on that branch).",
+            worst
+        );
+        assert!(
+            final_err < 0.25 * worst,
+            "Mirror error is not transient — it peaked at {:.3e} and is still {:.3e} after {} \
+             ticks, so the lean is persisting/growing rather than washing out",
+            worst, final_err, N_TICKS
+        );
+        assert!(
+            late_run < WINDOW,
+            "Signed asymmetry held the same sign for {} consecutive ticks (>= {}) in the second \
+             half of the run, well after the impact transient should have settled: a persistent \
+             one-sided lean, not symmetric noise. Second-half trace={:?}",
+            late_run, WINDOW, late
+        );
     }
 
     #[test]
