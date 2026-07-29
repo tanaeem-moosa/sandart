@@ -182,22 +182,34 @@ function tick(now) {
         const budgetN = state.get_budget_n();
         const emaMs = state.get_ema_frame_ms();
         const targetFps = 1000.0 / detectedVsyncMs;
-        document.getElementById('stat-fps').innerText = `FPS: ${frameCount} (EMA: ${emaMs.toFixed(1)} ms, Target: ${targetFps.toFixed(0)} FPS, Budget N: ${budgetN})`;
-        document.getElementById('stat-render-time').innerText = `Frame time: ${avgTotalTime.toFixed(1)} ms (CPU: ${avgStepTime.toFixed(1)} ms, GPU: ${avgRenderTime.toFixed(1)} ms)`;
-        
+        // The footer is a three-up readout: one number each, with the diagnostic detail
+        // moved to the hover title so it stays available without crowding the face.
+        const statFps = document.getElementById('stat-fps');
+        const statMs = document.getElementById('stat-render-time');
+        statFps.innerText = `${frameCount}`;
+        statFps.parentElement.title =
+            `EMA ${emaMs.toFixed(1)} ms · target ${targetFps.toFixed(0)} fps · budget N ${budgetN}`;
+        statMs.innerText = avgTotalTime.toFixed(1);
+        statMs.parentElement.title =
+            `CPU ${avgStepTime.toFixed(1)} ms · GPU ${avgRenderTime.toFixed(1)} ms`;
+
         const blockCounts = state.get_active_block_counts();
         const inactive = blockCounts[0];
         const slow = blockCounts[1];
         const medium = blockCounts[2];
         const fast = blockCounts[3];
-        document.getElementById('stat-blocks').innerText = `Blocks: Must(F): ${fast}, Budget(M): ${medium}, Stale(S): ${slow}, Inactive(I): ${inactive}`;
+        const statBlocks = document.getElementById('stat-blocks');
+        // Active blocks — the number that actually moves. Inactive is the remainder.
+        statBlocks.innerText = `${fast + medium + slow}`;
+        statBlocks.parentElement.title =
+            `must ${fast} · budgeted ${medium} · stale ${slow} · inactive ${inactive}`;
         
         // Update floating HUD stats
         const hudFps = document.getElementById('hud-fps');
         const hudTime = document.getElementById('hud-time');
         if (hudFps && hudTime) {
-            hudFps.innerText = `${frameCount} FPS`;
-            hudTime.innerText = `${avgTotalTime.toFixed(1)} ms (CPU: ${avgStepTime.toFixed(1)}ms, GPU: ${avgRenderTime.toFixed(1)}ms)`;
+            hudFps.innerText = `${frameCount} fps`;
+            hudTime.innerText = `${avgTotalTime.toFixed(1)} ms`;
         }
 
         frameCount = 0;
@@ -575,18 +587,18 @@ function renderMaterialPreview(m1Id, m2Id, isBlend) {
 
     let html = '';
     if (!isBlend) {
-        html += `<div class="material-preview-title">Profile: ${MATERIAL_LABELS[m1Id]}</div>`;
-        html += renderPropBar("💧 Wetness", m1[0]);
-        html += renderPropBar("📐 Repose", m1[1], 0.25);
-        html += renderPropBar("🏎️ Flow Rate", m1[2]);
-        html += renderPropBar("🌾 Grain Size", m1[3]);
+        html += `<div class="material-preview-title">${MATERIAL_LABELS[m1Id]}</div>`;
+        html += renderPropBar("Wetness", m1[0]);
+        html += renderPropBar("Repose", m1[1], 0.25);
+        html += renderPropBar("Flow rate", m1[2]);
+        html += renderPropBar("Grain size", m1[3]);
     } else {
-        html += `<div class="material-preview-title">Blend Profiles</div>`;
-        html += `<div style="color: var(--text-muted); margin-bottom: 6px; font-size: 10px;">${MATERIAL_LABELS[m1Id]} ➔ ${MATERIAL_LABELS[m2Id]}</div>`;
-        html += renderPropBar("💧 Wetness", m1[0], 1.0, m2[0]);
-        html += renderPropBar("📐 Repose", m1[1], 0.25, m2[1]);
-        html += renderPropBar("🏎️ Flow Rate", m1[2], 1.0, m2[2]);
-        html += renderPropBar("🌾 Grain Size", m1[3], 1.0, m2[3]);
+        html += `<div class="material-preview-title">Blend</div>`;
+        html += `<div class="blend-caption">${MATERIAL_LABELS[m1Id]} to ${MATERIAL_LABELS[m2Id]}</div>`;
+        html += renderPropBar("Wetness", m1[0], 1.0, m2[0]);
+        html += renderPropBar("Repose", m1[1], 0.25, m2[1]);
+        html += renderPropBar("Flow rate", m1[2], 1.0, m2[2]);
+        html += renderPropBar("Grain size", m1[3], 1.0, m2[3]);
     }
     previewDiv.innerHTML = html;
 }
@@ -597,18 +609,15 @@ function renderPropBar(label, val, maxVal = 1.0, blendVal = null) {
     
     let barStyle = `width: ${percent}%;`;
     if (blendPercent !== null) {
-        barStyle = `width: 100%; background: linear-gradient(90deg, var(--accent-color) ${percent}%, #00f0ff ${blendPercent}%);`;
+        barStyle = `width: 100%; background: linear-gradient(90deg, var(--accent) ${percent}%, var(--accent-shade) ${blendPercent}%);`;
     }
 
-    const displayVal = blendVal !== null ? `${val.toFixed(2)}➔${blendVal.toFixed(2)}` : val.toFixed(2);
+    const displayVal = blendVal !== null ? `${val.toFixed(2)}–${blendVal.toFixed(2)}` : val.toFixed(2);
 
     return `
-        <div class="material-prop-bar-container">
-            <div class="material-prop-label">${label}</div>
-            <div class="material-prop-bar-outer">
-                <div class="material-prop-bar-inner" style="${barStyle}"></div>
-            </div>
-            <div class="material-prop-val">${displayVal}</div>
+        <div class="prop-row" title="${displayVal}">
+            <span>${label}</span>
+            <div class="prop-track"><div class="prop-fill" style="${barStyle}"></div></div>
         </div>
     `;
 }
@@ -706,7 +715,10 @@ function syncSettings() {
     state.set_led_color(ledColor[0], ledColor[1], ledColor[2]);
 
     // Lighting Angle & Shadows
-    state.set_light_angle(parseFloat(document.getElementById('angle-slider').value));
+    const angleRad = parseFloat(document.getElementById('angle-slider').value);
+    state.set_light_angle(angleRad);
+    const angleVal = document.getElementById('angle-val');
+    if (angleVal) angleVal.innerText = `${Math.round(angleRad * 180 / Math.PI)}\u00b0`;
     state.set_shadows_enabled(document.getElementById('check-shadows').checked);
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
@@ -747,17 +759,17 @@ function updateParamPanels(type) {
         const displayVal = document.getElementById('curve-order-val');
         
         let maxVal = 6;
-        let labelText = 'Recursion Order (Depth)';
+        let labelText = 'Detail';
         
         if (type === 'hilbert') {
             maxVal = 6;
-            labelText = 'Hilbert Curve Depth';
+            labelText = 'Hilbert depth';
         } else if (type === 'gosper') {
             maxVal = 5;
-            labelText = 'Gosper Curve Depth';
+            labelText = 'Gosper depth';
         } else if (type === 'sierpinski') {
             maxVal = 7;
-            labelText = 'Sierpinski Curve Depth';
+            labelText = 'Sierpinski depth';
         }
         
         if (orderLabel) orderLabel.textContent = labelText;

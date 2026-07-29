@@ -3,149 +3,76 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sands of Time: WebAssembly Sand Art Simulator</title>
+    <title>Shoal &amp; Swell — sand and water simulator</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap" rel="stylesheet">
     <style>
+        /* ============================================================================
+           Instrument console.
+
+           The canvas is the artwork; this panel is the machine face beside it, and it
+           is built to recede. Two rules carry the whole design:
+
+             1. Every control resolves to a value in one right-aligned column. Labels
+                left, readouts right, on a shared baseline grid. A form drifts as it
+                grows — that is how this panel got messy — but a gauge cluster cannot,
+                because a new control has exactly one place it can go.
+
+             2. One accent, and it is borrowed rather than invented: the same
+                recycled-glass green the mass-distribution lines are drawn in over the
+                sand. Panel and overlay agree, and nothing here competes with coloured
+                sand under coloured light.
+
+           Everything is set in mono except the wordmark. An instrument face has no
+           display type; it has etched labels and numeric readouts.
+           ============================================================================ */
+
         :root {
             color-scheme: dark;
-            --bg-base: #0c0d12;
-            --bg-panel: rgba(18, 20, 29, 0.75);
-            --border-color: rgba(255, 255, 255, 0.08);
-            --accent-color: #d4af37; /* Gold */
-            --accent-hover: #f3e5ab;
-            --text-main: #f0f1f5;
-            --text-muted: #8e92a2;
-            --glass-blur: blur(12px);
+
+            /* Ground tones. Deliberately lifted off pure black — the old #0c0d12 read
+               as a hole punched in the page rather than as a surface. */
+            --ink: #0e1116;
+            --face: #161a21;
+            --face-2: #1b2027;
+            --well: #10141a;
+
+            --rule: #262c36;
+            --rule-bright: #333b47;
+
+            --label: #7d8794;
+            --value: #e8ecf1;
+            --value-dim: #a7b0bd;
+
+            /* Recycled glass. Shared with the quantile overlay in shader.wgsl. */
+            --accent: #8fb8a1;
+            --accent-bright: #a9cdb9;
+            --accent-shade: #3f5f52;
+
+            --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono",
+                    Menlo, Consolas, "Liberation Mono", monospace;
+            --sans: "Outfit", "Helvetica Neue", system-ui, -apple-system, sans-serif;
+
+            --row: 30px;
+            --pad: 20px;
         }
 
-        /* Premium custom color pickers and preset swatches */
-        .color-picker-wrapper {
-            display: flex;
-            align-items: center;
-            gap: 16px;
-            margin-top: 8px;
-        }
-        .color-picker-container {
-            position: relative;
-            width: 38px;
-            height: 38px;
-            border-radius: 50%;
-            overflow: hidden;
-            border: 2px solid rgba(255, 255, 255, 0.15);
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        .color-picker-container:hover {
-            transform: scale(1.1);
-            border-color: var(--accent-color);
-        }
-        .color-picker-container input[type="color"] {
-            position: absolute;
-            top: -5px;
-            left: -5px;
-            width: 48px;
-            height: 48px;
-            border: none;
-            padding: 0;
-            cursor: pointer;
-            background: none;
-        }
-        .preset-swatches {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            margin-bottom: 12px;
-            margin-top: 6px;
-        }
-        .swatch {
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            cursor: pointer;
-            border: 1px solid rgba(255,255,255,0.15);
-            transition: all 0.2s ease;
-            position: relative;
-        }
-        .swatch:hover {
-            transform: scale(1.15);
-            border-color: var(--accent-color);
-        }
-        .swatch.active {
-            box-shadow: 0 0 0 2px var(--accent-color);
-        }
-        .swatch-split {
-            width: 100%;
-            height: 100%;
-            border-radius: 50%;
-            background: linear-gradient(135deg, var(--c1) 50%, var(--c2) 50%);
-        }
-        .material-preview-card {
-            background-color: rgba(255,255,255,0.02);
-            border: 1px solid rgba(255,255,255,0.05);
-            border-radius: 8px;
-            padding: 10px;
-            font-size: 11px;
-            margin-top: 10px;
-        }
-        .material-preview-title {
-            font-weight: 600;
-            color: var(--text-main);
-            margin-bottom: 6px;
-            font-size: 11px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .material-prop-bar-container {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 4px;
-        }
-        .material-prop-label {
-            width: 70px;
-            color: var(--text-muted);
-        }
-        .material-prop-bar-outer {
-            flex: 1;
-            height: 4px;
-            background-color: rgba(255,255,255,0.08);
-            border-radius: 2px;
-            overflow: hidden;
-        }
-        .material-prop-bar-inner {
-            height: 100%;
-            background-color: var(--accent-color);
-            border-radius: 2px;
-            width: 0%;
-            transition: width 0.3s ease;
-        }
-        .material-prop-val {
-            width: 25px;
-            text-align: right;
-            color: var(--text-main);
-            font-weight: 500;
-        }
+        * { box-sizing: border-box; }
 
-        * {
-            box-sizing: border-box;
+        html, body {
             margin: 0;
             padding: 0;
-            user-select: none;
-        }
-
-        body {
-            font-family: 'Outfit', sans-serif;
-            background-color: var(--bg-base);
-            color: var(--text-main);
-            overflow: hidden;
-            display: flex;
-            height: 100vh;
+            height: 100%;
             width: 100vw;
+            overflow: hidden;
+            background: var(--ink);
+            color: var(--value);
+            font-family: var(--mono);
+            font-size: 12px;
+            -webkit-font-smoothing: antialiased;
         }
 
-        /* Container layout */
         #app-container {
             display: flex;
             width: 100%;
@@ -153,27 +80,424 @@
             position: relative;
         }
 
-        /* Sidebar settings panel */
+        /* ---- The face ---------------------------------------------------------- */
+
         #settings-sidebar {
-            width: 320px;
+            width: 328px;
+            flex: 0 0 328px;
             height: 100%;
-            background-color: var(--bg-panel);
-            backdrop-filter: var(--glass-blur);
-            -webkit-backdrop-filter: var(--glass-blur);
-            border-right: 1px solid var(--border-color);
+            background: var(--face);
+            border-right: 1px solid var(--rule);
             display: flex;
             flex-direction: column;
-            padding: 24px;
+            padding: 0;
             overflow-y: auto;
+            overflow-x: hidden;
             z-index: 10;
-            transition: margin-left 0.3s ease;
+            transition: margin-left 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+            scrollbar-width: thin;
+            scrollbar-color: var(--rule-bright) transparent;
+        }
+        #settings-sidebar.collapsed { margin-left: -328px; }
+        #settings-sidebar::-webkit-scrollbar { width: 10px; }
+        #settings-sidebar::-webkit-scrollbar-thumb {
+            background: var(--rule-bright);
+            border: 3px solid var(--face);
+            border-radius: 5px;
         }
 
-        #settings-sidebar.collapsed {
-            margin-left: -320px;
+        /* Wordmark — the one place that is not mono. Etched, not shouted. */
+        .masthead {
+            padding: 22px var(--pad) 16px;
+            border-bottom: 1px solid var(--rule);
+        }
+        .masthead h1 {
+            margin: 0;
+            font-family: var(--sans);
+            font-size: 17px;
+            font-weight: 300;
+            letter-spacing: 0.22em;
+            text-transform: uppercase;
+            color: var(--value);
+        }
+        .masthead .amp {
+            color: var(--accent);
+            font-weight: 400;
+            margin: 0 0.06em;
+        }
+        .masthead .subtitle {
+            margin-top: 5px;
+            font-size: 10px;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--label);
         }
 
-        /* Main viewport */
+        /* ---- Mode selector ------------------------------------------------------ */
+
+        .mode-tabs {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1px;
+            margin: var(--pad) var(--pad) 4px;
+            padding: 1px;
+            background: var(--rule);
+            border-radius: 3px;
+        }
+        .tab-btn {
+            appearance: none;
+            border: 0;
+            margin: 0;
+            padding: 8px 0;
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--label);
+            background: var(--well);
+            cursor: pointer;
+            border-radius: 2px;
+            transition: color 0.15s, background 0.15s;
+        }
+        .tab-btn:hover { color: var(--value-dim); }
+        .tab-btn.active {
+            color: var(--ink);
+            background: var(--accent);
+            font-weight: 600;
+        }
+
+        /* ---- Groups ------------------------------------------------------------- */
+
+        .group { padding: 0 var(--pad); margin-top: 22px; }
+
+        /* Section heading: a micro-label with a rule running out to the panel edge,
+           so the eye can find the group boundary without a heavy title. */
+        .group-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 0 0 12px;
+            font-size: 9px;
+            font-weight: 600;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            color: var(--label);
+        }
+        .group-title::after {
+            content: "";
+            flex: 1;
+            height: 1px;
+            background: var(--rule);
+        }
+
+        /* ---- The row: label left, value right ----------------------------------- */
+
+        .row {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            gap: 10px;
+            min-height: var(--row);
+        }
+        .row > label,
+        .row > .row-label {
+            font-size: 11px;
+            color: var(--label);
+            letter-spacing: 0.02em;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        /* The readout column — the thing that makes this a gauge cluster. */
+        /* Label-only rows caption the control below them; no readout, no reserved height. */
+        .row:not(.field):not(.color-row):not(.checkbox-container) { min-height: 0; margin-bottom: 5px; }
+        .val-display {
+            font-variant-numeric: tabular-nums;
+            font-size: 11px;
+            color: var(--value);
+            text-align: right;
+            min-width: 46px;
+        }
+
+        /* A slider always occupies the full row below its own label/value pair. */
+        .field > input[type="range"] { grid-column: 1 / -1; }
+        .field { padding-bottom: 4px; }
+        .gap-above { margin-top: 11px; }
+        .group-last { margin-bottom: 22px; }
+        .field + .field { border-top: 1px solid var(--rule); }
+
+        /* ---- Controls ----------------------------------------------------------- */
+
+        select {
+            appearance: none;
+            width: 100%;
+            padding: 7px 26px 7px 9px;
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--value);
+            background: var(--well);
+            border: 1px solid var(--rule);
+            border-radius: 3px;
+            cursor: pointer;
+            background-image:
+                linear-gradient(45deg, transparent 50%, var(--label) 50%),
+                linear-gradient(135deg, var(--label) 50%, transparent 50%);
+            background-position: right 12px center, right 7px center;
+            background-size: 5px 5px, 5px 5px;
+            background-repeat: no-repeat;
+            transition: border-color 0.15s;
+        }
+        select:hover { border-color: var(--rule-bright); }
+        select:focus-visible {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-shade);
+        }
+        select optgroup {
+            background: var(--face);
+            color: var(--label);
+            font-style: normal;
+        }
+        select option { background: var(--face); color: var(--value); }
+
+        /* Slider as a machined track with a needle, not a bead on a string. */
+        input[type="range"] {
+            appearance: none;
+            width: 100%;
+            height: 18px;
+            margin: 0 0 2px;
+            background: transparent;
+            cursor: ew-resize;
+        }
+        input[type="range"]::-webkit-slider-runnable-track {
+            height: 2px;
+            background: var(--rule-bright);
+            border-radius: 1px;
+        }
+        input[type="range"]::-moz-range-track {
+            height: 2px;
+            background: var(--rule-bright);
+            border-radius: 1px;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            appearance: none;
+            width: 3px;
+            height: 14px;
+            margin-top: -6px;
+            background: var(--accent);
+            border: 0;
+            border-radius: 1px;
+            transition: background 0.15s, box-shadow 0.15s;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 3px;
+            height: 14px;
+            background: var(--accent);
+            border: 0;
+            border-radius: 1px;
+        }
+        input[type="range"]:hover::-webkit-slider-thumb { background: var(--accent-bright); }
+        input[type="range"]:focus-visible::-webkit-slider-thumb {
+            box-shadow: 0 0 0 3px var(--accent-shade);
+        }
+        input[type="range"]:focus-visible { outline: none; }
+
+        button {
+            width: 100%;
+            padding: 9px 12px;
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 0.16em;
+            text-transform: uppercase;
+            color: var(--value-dim);
+            background: var(--face-2);
+            border: 1px solid var(--rule);
+            border-radius: 3px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        button:hover {
+            color: var(--value);
+            border-color: var(--rule-bright);
+            background: #212832;
+        }
+        button:active { transform: translateY(1px); }
+        button:focus-visible {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 2px var(--accent-shade);
+        }
+        button.primary {
+            color: var(--ink);
+            background: var(--accent);
+            border-color: var(--accent);
+            font-weight: 600;
+        }
+        button.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); }
+        .btn-stack { display: grid; gap: 8px; }
+
+        /* Checkbox as a lamp: off is an empty bezel, on is lit. */
+        .checkbox-container {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            min-height: var(--row);
+            font-size: 11px;
+            color: var(--label);
+            cursor: pointer;
+            user-select: none;
+        }
+        .checkbox-container input { position: absolute; opacity: 0; width: 0; height: 0; }
+        .checkmark {
+            width: 14px;
+            height: 14px;
+            border: 1px solid var(--rule-bright);
+            border-radius: 2px;
+            background: var(--well);
+            transition: all 0.15s;
+        }
+        .checkbox-container:hover .checkmark { border-color: var(--label); }
+        .checkbox-container input:checked ~ .checkmark {
+            background: var(--accent);
+            border-color: var(--accent);
+        }
+        .checkbox-container input:focus-visible ~ .checkmark {
+            box-shadow: 0 0 0 3px var(--accent-shade);
+        }
+
+        /* ---- Colour ------------------------------------------------------------- */
+
+        .swatch-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 6px;
+            margin: 4px 0 12px;
+        }
+        .swatch {
+            aspect-ratio: 1;
+            width: 100%;
+            border-radius: 2px;
+            cursor: pointer;
+            border: 1px solid var(--rule);
+            overflow: hidden;
+            transition: transform 0.12s, border-color 0.12s;
+        }
+        .swatch:hover { transform: translateY(-2px); border-color: var(--label); }
+        .swatch.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+        .swatch-split {
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, var(--c1) 0 50%, var(--c2) 50% 100%);
+        }
+
+        .color-picker-wrapper { display: flex; gap: 14px; padding: 4px 0 2px; }
+        .color-field { display: grid; gap: 5px; justify-items: start; }
+        .color-field > span {
+            font-size: 10px;
+            color: var(--label);
+        }
+        .color-picker-container {
+            position: relative;
+            width: 30px;
+            height: 30px;
+            border-radius: 3px;
+            overflow: hidden;
+            border: 1px solid var(--rule-bright);
+            cursor: pointer;
+            transition: border-color 0.15s;
+        }
+        .color-picker-container:hover { border-color: var(--accent); }
+        .color-picker-container input[type="color"] {
+            position: absolute;
+            inset: -6px;
+            width: 46px;
+            height: 46px;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+            background: none;
+        }
+        .row.color-row { min-height: 38px; }
+        .row.color-row input[type="color"] {
+            width: 30px;
+            height: 30px;
+            padding: 0;
+            border: 1px solid var(--rule-bright);
+            border-radius: 3px;
+            background: none;
+            cursor: pointer;
+        }
+
+        /* ---- Material profile readout ------------------------------------------- */
+
+        .material-preview-card:empty { display: none; }
+        .material-preview-card {
+            margin-top: 10px;
+            padding: 11px 12px;
+            background: var(--well);
+            border: 1px solid var(--rule);
+            border-radius: 3px;
+        }
+        .material-preview-title {
+            font-size: 9px;
+            letter-spacing: 0.18em;
+            text-transform: uppercase;
+            color: var(--label);
+            margin-bottom: 9px;
+        }
+        .blend-caption {
+            margin: -3px 0 9px;
+            font-size: 10px;
+            color: var(--label);
+        }
+        .prop-row {
+            display: grid;
+            grid-template-columns: 74px 1fr;
+            align-items: center;
+            gap: 9px;
+            margin-bottom: 6px;
+            font-size: 10px;
+            color: var(--value-dim);
+        }
+        .prop-row:last-child { margin-bottom: 0; }
+        .prop-track {
+            height: 3px;
+            background: var(--rule);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+        .prop-fill { height: 100%; background: var(--accent); border-radius: 2px; }
+
+        /* ---- Footer readout ------------------------------------------------------ */
+
+        .console-footer {
+            margin-top: auto;
+            padding: 12px var(--pad);
+            border-top: 1px solid var(--rule);
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            font-size: 10px;
+            color: var(--label);
+            background: var(--well);
+            position: sticky;
+            bottom: 0;
+        }
+        .console-footer b {
+            display: block;
+            font-weight: 500;
+            font-variant-numeric: tabular-nums;
+            color: var(--value);
+            font-size: 12px;
+        }
+        .console-footer span {
+            font-size: 9px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+        }
+
+        /* ---- Viewport ----------------------------------------------------------- */
+
         #viewport-container {
             flex-grow: 1;
             height: 100%;
@@ -181,673 +505,423 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            background: radial-gradient(circle at center, #161824 0%, #08090d 100%);
+            /* Lifted with the casing, so the vessel sits in a room rather than a void. */
+            background: radial-gradient(circle at 50% 42%, #232833 0%, #12151b 68%, #0d1015 100%);
         }
+        canvas { display: block; width: 100%; height: 100%; }
 
-        canvas {
-            display: block;
-            width: 100%;
-            height: 100%;
-        }
-
-        /* UI elements styling */
-        h1 {
-            font-size: 20px;
-            font-weight: 700;
-            color: var(--accent-color);
-            margin-bottom: 4px;
-            letter-spacing: 0.5px;
-        }
-
-        .subtitle {
-            font-size: 11px;
-            color: var(--text-muted);
-            margin-bottom: 24px;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-
-        .section-title {
-            font-size: 13px;
-            font-weight: 600;
-            color: var(--text-main);
-            margin-bottom: 12px;
-            margin-top: 16px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            border-bottom: 1px solid rgba(255,255,255,0.05);
-            padding-bottom: 6px;
-        }
-
-        .control-group {
-            margin-bottom: 16px;
-        }
-
-        label {
-            display: block;
-            font-size: 12px;
-            color: var(--text-muted);
-            margin-bottom: 6px;
-        }
-
-        .label-val {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .val-display {
-            font-size: 12px;
-            color: var(--accent-color);
-            font-weight: 600;
-        }
-
-        /* Inputs */
-        select, input[type="range"], button {
-            width: 100%;
-            background-color: rgba(255,255,255,0.04);
-            border: 1px solid var(--border-color);
-            color: var(--text-main);
-            border-radius: 6px;
-            padding: 8px 12px;
-            font-family: inherit;
-            font-size: 13px;
-            outline: none;
-            transition: all 0.2s ease;
-        }
-
-        select:focus, button:hover {
-            border-color: var(--accent-color);
-            background-color: rgba(255,255,255,0.08);
-        }
-
-        select {
-            cursor: pointer;
-            appearance: none;
-            background-image: url("data:image/svg+xml;utf8,<svg fill='white' height='24' viewBox='0 0 24 24' width='24' xmlns='http://www.w3.org/2000/svg'><path d='M7 10l5 5 5-5z'/><path d='M0 0h24v24H0z' fill='none'/></svg>");
-            background-repeat: no-repeat;
-            background-position: right 8px center;
-            background-size: 18px;
-            padding-right: 32px;
-        }
-
-        select option {
-            background-color: #12141d;
-            color: #f0f1f5;
-        }
-
-        input[type="range"] {
-            -webkit-appearance: none;
-            height: 6px;
-            padding: 0;
-            background: rgba(255,255,255,0.1);
-            border: none;
-            border-radius: 3px;
-            cursor: pointer;
-        }
-
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: var(--accent-color);
-            transition: transform 0.1s ease;
-        }
-
-        input[type="range"]::-webkit-slider-thumb:hover {
-            transform: scale(1.2);
-        }
-
-        /* Buttons */
-        button {
-            cursor: pointer;
-            font-weight: 600;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 8px;
-        }
-
-        button.primary {
-            background-color: var(--accent-color);
-            color: #0c0d12;
-            border: none;
-        }
-
-        button.primary:hover {
-            background-color: var(--accent-hover);
-        }
-
-        .btn-row {
-            display: flex;
-            gap: 8px;
-        }
-
-        .btn-row button {
-            flex: 1;
-        }
-
-        /* Checkbox styling */
-        .checkbox-container {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            cursor: pointer;
-            font-size: 13px;
-            color: var(--text-main);
-            margin-top: 10px;
-        }
-
-        .checkbox-container input {
-            display: none;
-        }
-
-        .checkmark {
-            width: 18px;
-            height: 18px;
-            border: 1px solid var(--border-color);
-            border-radius: 4px;
-            background-color: rgba(255,255,255,0.04);
-            display: inline-block;
-            position: relative;
-            transition: all 0.2s ease;
-        }
-
-        .checkbox-container:hover .checkmark {
-            border-color: var(--accent-color);
-        }
-
-        .checkbox-container input:checked + .checkmark {
-            background-color: var(--accent-color);
-            border-color: var(--accent-color);
-        }
-
-        .checkbox-container input:checked + .checkmark::after {
-            content: "";
-            position: absolute;
-            left: 5px;
-            top: 2px;
-            width: 5px;
-            height: 9px;
-            border: solid #0c0d12;
-            border-width: 0 2px 2px 0;
-            transform: rotate(45deg);
-        }
-
-        /* Instructions overlay */
-        #instructions {
-            position: absolute;
-            top: 20px;
-            left: 340px;
-            background-color: rgba(12, 13, 18, 0.65);
-            backdrop-filter: var(--glass-blur);
-            -webkit-backdrop-filter: var(--glass-blur);
-            border: 1px solid var(--border-color);
-            padding: 10px 16px;
-            border-radius: 8px;
-            pointer-events: none;
-            font-size: 12px;
-            color: var(--text-muted);
-            z-index: 5;
-            transition: left 0.3s ease;
-        }
-
-        #settings-sidebar.collapsed ~ #instructions {
-            left: 20px;
-        }
-
-        .stat-display {
-            margin-top: auto;
-            border-top: 1px solid var(--border-color);
-            padding-top: 16px;
-            font-size: 11px;
-            color: var(--text-muted);
-        }
-
-        /* Tab Buttons styling */
-        .tab-btn {
-            background-color: rgba(255,255,255,0.02) !important;
-            border: 1px solid rgba(255,255,255,0.05) !important;
-            color: var(--text-muted) !important;
-            border-radius: 6px;
-            cursor: pointer;
-            font-weight: 600;
-            transition: all 0.2s ease;
-        }
-        .tab-btn.active {
-            background-color: var(--accent-color) !important;
-            color: #0c0d12 !important;
-            border-color: var(--accent-color) !important;
-        }
-
-        /* Color inputs */
-        .color-row {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .color-row input[type="color"] {
-            border: none;
-            background: none;
-            width: 32px;
-            height: 32px;
-            cursor: pointer;
-            outline: none;
-            border-radius: 4px;
-        }
-
-        /* Toggle Sidebar Button */
         #toggle-sidebar {
             position: absolute;
-            top: 20px;
-            left: 340px;
-            width: 40px;
-            height: 40px;
-            border-radius: 8px;
-            background-color: var(--bg-panel);
-            backdrop-filter: var(--glass-blur);
-            -webkit-backdrop-filter: var(--glass-blur);
-            border: 1px solid var(--border-color);
-            z-index: 100;
+            top: 16px;
+            left: calc(328px + 16px);
+            transition: left 0.28s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s, border-color 0.2s;
+            width: 30px;
+            height: 30px;
             display: flex;
-            justify-content: center;
             align-items: center;
-            color: var(--text-main);
-            font-size: 18px;
+            justify-content: center;
+            background: var(--face);
+            border: 1px solid var(--rule);
+            border-radius: 3px;
+            color: var(--label);
             cursor: pointer;
-            transition: left 0.3s ease;
+            z-index: 20;
+            transition: all 0.2s;
+        }
+        #toggle-sidebar:hover { color: var(--accent); border-color: var(--rule-bright); }
+        #settings-sidebar.collapsed ~ #toggle-sidebar { left: 16px; }
+        /* Keep the hint clear of the toggle when the sidebar is open. */
+        #settings-sidebar.collapsed ~ #viewport-container #instructions { left: 50%; }
+
+        #instructions {
+            position: absolute;
+            bottom: 16px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 7px 14px;
+            font-size: 10px;
+            letter-spacing: 0.04em;
+            color: var(--label);
+            background: rgba(14, 17, 22, 0.82);
+            border: 1px solid var(--rule);
+            border-radius: 3px;
+            white-space: nowrap;
+            z-index: 15;
+            pointer-events: none;
         }
 
-        #settings-sidebar.collapsed ~ #toggle-sidebar {
-            left: 20px;
-        }
-
-        /* Floating Stats HUD */
         #stats-hud {
             position: absolute;
-            top: 20px;
-            right: 20px;
-            background-color: var(--bg-panel);
-            backdrop-filter: var(--glass-blur);
-            -webkit-backdrop-filter: var(--glass-blur);
-            border: 1px solid var(--border-color);
-            padding: 8px 14px;
-            border-radius: 8px;
-            font-size: 12px;
-            font-weight: 600;
-            color: var(--accent-color);
-            z-index: 100;
-            pointer-events: none;
+            top: 16px;
+            right: 16px;
             display: flex;
-            gap: 6px;
-            align-items: center;
+            gap: 10px;
+            padding: 6px 11px;
+            font-size: 10px;
+            font-variant-numeric: tabular-nums;
+            color: var(--value-dim);
+            background: rgba(14, 17, 22, 0.82);
+            border: 1px solid var(--rule);
+            border-radius: 3px;
+            z-index: 15;
+        }
+        #stats-hud .sep { color: var(--rule-bright); }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                transition-duration: 0.01ms !important;
+                animation-duration: 0.01ms !important;
+            }
         }
 
-        #stats-hud span {
-            color: var(--text-main);
+        @media (max-width: 720px) {
+            #settings-sidebar { width: 100%; flex-basis: 100%; }
+            #settings-sidebar.collapsed { margin-left: -100%; }
+            #instructions { display: none; }
         }
     </style>
 </head>
 <body>
     <div id="app-container">
-        <!-- Settings Sidebar -->
+        <!-- ================= Instrument face ================= -->
         <div id="settings-sidebar">
-            <h1>Sands of Time</h1>
-            <div class="subtitle">Wasm Simulator v2</div>
-
-            <!-- Mode Selector Tabs -->
-            <div class="mode-tabs" style="display: flex; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 12px;">
-                <button id="tab-sandbox" class="tab-btn active" style="flex: 1; padding: 8px 12px; font-size: 13px; margin-bottom: 0;">Sandbox</button>
-                <button id="tab-sandfall" class="tab-btn" style="flex: 1; padding: 8px 12px; font-size: 13px; margin-bottom: 0;">Sand-fall</button>
+            <div class="masthead">
+                <h1>Shoal <span class="amp">&amp;</span> Swell</h1>
+                <div class="subtitle">Sand and water simulator</div>
             </div>
 
-            <!-- Marble settings (Sandbox only) -->
+            <div class="mode-tabs">
+                <button id="tab-sandbox" class="tab-btn active">Sandbox</button>
+                <button id="tab-sandfall" class="tab-btn">Sand-fall</button>
+            </div>
+
+            <!-- ---- Sand-fall: the vessel and what falls through it ---- -->
+            <!-- First in the panel, because in Sand-fall mode these are the only
+                 controls you reach for. It used to sit below two sandbox-only
+                 sections, so switching modes left you scrolling past hidden gaps. -->
+            <div id="sandfall-controls" style="display: none;">
+                <div class="group">
+                    <div class="group-title">Vessel</div>
+                    <div class="field row">
+                        <label for="neck-slider">Neck width</label>
+                        <span id="neck-val" class="val-display">0.005</span>
+                        <input type="range" id="neck-slider" min="0.005" max="0.12" step="0.005" value="0.005">
+                    </div>
+                    <div class="field row">
+                        <label for="curvature-slider">Chamber curve</label>
+                        <span id="curvature-val" class="val-display">0.6</span>
+                        <input type="range" id="curvature-slider" min="0.1" max="3.0" step="0.1" value="0.6">
+                    </div>
+                </div>
+
+                <div class="group">
+                    <div class="group-title">Flow</div>
+                    <div class="field row">
+                        <label for="gravity-slider">Gravity</label>
+                        <span id="gravity-val" class="val-display">0.04</span>
+                        <input type="range" id="gravity-slider" min="0.0" max="0.10" step="0.005" value="0.04">
+                    </div>
+                    <div class="row">
+                        <label for="quantile-select">Weight lines</label>
+                    </div>
+                    <select id="quantile-select">
+                        <option value="0">Off</option>
+                        <option value="1">Quartiles</option>
+                        <option value="2">Deciles</option>
+                    </select>
+                    <div class="btn-stack gap-above">
+                        <button id="btn-flip" class="primary">Flip</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ---- Sandbox: marbles ---- -->
             <div id="sandbox-only-marbles">
-                <div class="section-title">🔮 Marble Settings</div>
-                <div class="control-group">
-                    <div class="label-val">
-                        <label for="speed-slider">Speed</label>
-                        <span id="speed-val" class="val-display">0.50 R/s</span>
-                    </div>
-                    <input type="range" id="speed-slider" min="0.05" max="2.0" step="0.05" value="0.5">
-                </div>
-
-                <div class="control-group">
-                    <div class="label-val">
-                        <label for="size-slider">Marble Radius</label>
-                        <span id="size-val" class="val-display">0.018 R</span>
-                    </div>
-                    <input type="range" id="size-slider" min="0.015" max="0.045" step="0.001" value="0.018">
-                </div>
-
-                <div class="control-group">
-                    <div class="label-val">
-                        <label for="marble-count">Marble Count</label>
+                <div class="group">
+                    <div class="group-title">Marbles</div>
+                    <div class="field row">
+                        <label for="marble-count">Count</label>
                         <span id="count-val" class="val-display">1</span>
+                        <input type="range" id="marble-count" min="1" max="5" step="1" value="1">
                     </div>
-                    <input type="range" id="marble-count" min="1" max="5" step="1" value="1">
+                    <div class="field row">
+                        <label for="speed-slider">Speed</label>
+                        <span id="speed-val" class="val-display">0.50</span>
+                        <input type="range" id="speed-slider" min="0.05" max="2.0" step="0.05" value="0.5">
+                    </div>
+                    <div class="field row">
+                        <label for="size-slider">Radius</label>
+                        <span id="size-val" class="val-display">0.018</span>
+                        <input type="range" id="size-slider" min="0.015" max="0.045" step="0.001" value="0.018">
+                    </div>
                 </div>
             </div>
 
-            <!-- Simulation preset -->
-            <div class="section-title">🔬 Sand Physics & Materials</div>
-            <div class="control-group">
-                <label for="material-pattern">Material Distribution</label>
+            <!-- ---- Shared: what the sand is ---- -->
+            <div class="group">
+                <div class="group-title">Material</div>
+                <div class="row"><label for="material-pattern">Distribution</label></div>
                 <select id="material-pattern">
-                    <option value="solid" selected>Uniform Material</option>
-                    <option value="gradient">Linear Gradient (Blend)</option>
-                    <option value="stripes">Stripes (Alternating)</option>
-                    <option value="concentric">Concentric Rings</option>
-                    <option value="checkerboard">Checkerboard Grid</option>
+                    <option value="uniform">Uniform</option>
+                    <option value="layers">Horizontal layers</option>
+                    <option value="blend">Gradient blend</option>
+                    <option value="checker">Checkerboard</option>
                 </select>
-            </div>
-            <div class="control-group">
-                <label for="material-1" id="label-material-1">Primary Material</label>
-                <select id="material-1">
-                    <option value="0" selected>Dry Sand</option>
-                    <option value="1">Kinetic Sand</option>
-                    <option value="2">Wet Sand</option>
-                    <option value="3">Coarse Sand</option>
-                    <option value="4">Butter-Cream</option>
-                    <option value="5">Snow</option>
-                    <option value="6">Fine Powder</option>
-                    <option value="7">Oobleck</option>
-                    <option value="8">Moon Dust</option>
-                    <option value="10">Water</option>
-                    <option value="11">Milk</option>
-                    <option value="13">Vegetable Oil</option>
-                    <option value="14">Calm Water</option>
-                    <option value="15">Yogurt</option>
-                </select>
-            </div>
-            <div class="control-group" id="material-2-group" style="display: none;">
-                <label for="material-2">Secondary Material</label>
-                <select id="material-2">
-                    <option value="0">Dry Sand</option>
-                    <option value="1">Kinetic Sand</option>
-                    <option value="2" selected>Wet Sand</option>
-                    <option value="3">Coarse Sand</option>
-                    <option value="4">Butter-Cream</option>
-                    <option value="5">Snow</option>
-                    <option value="6">Fine Powder</option>
-                    <option value="7">Oobleck</option>
-                    <option value="8">Moon Dust</option>
-                    <option value="10">Water</option>
-                    <option value="11">Milk</option>
-                    <option value="13">Vegetable Oil</option>
-                    <option value="14">Calm Water</option>
-                    <option value="15">Yogurt</option>
-                </select>
-            </div>
-            <div id="material-properties-preview" class="material-preview-card"></div>
 
-            <div class="control-group">
-                <label for="shape-select">Container & Sandbox Shape</label>
+                <div class="row gap-above"><label for="material-1" id="label-material-1">Primary</label></div>
+                <select id="material-1">
+                    <option value="0">Dry sand</option>
+                    <option value="1">Kinetic sand</option>
+                    <option value="2">Wet sand</option>
+                    <option value="3">Coarse sand</option>
+                    <option value="4">Buttercream</option>
+                    <option value="5">Snow</option>
+                    <option value="6">Fine powder</option>
+                    <option value="7">Oobleck</option>
+                    <option value="8">Moon dust</option>
+                    <option value="9">Water</option>
+                    <option value="10">Milk</option>
+                    <option value="11">Vegetable oil</option>
+                    <option value="12">Calm water</option>
+                    <option value="13">Yogurt</option>
+                </select>
+
+                <div id="material-2-group" style="display: none;">
+                    <div class="row gap-above"><label for="material-2">Secondary</label></div>
+                    <select id="material-2">
+                        <option value="0">Dry sand</option>
+                        <option value="1">Kinetic sand</option>
+                        <option value="2">Wet sand</option>
+                        <option value="3">Coarse sand</option>
+                        <option value="4">Buttercream</option>
+                        <option value="5">Snow</option>
+                        <option value="6">Fine powder</option>
+                        <option value="7">Oobleck</option>
+                        <option value="8">Moon dust</option>
+                        <option value="9">Water</option>
+                        <option value="10">Milk</option>
+                        <option value="11">Vegetable oil</option>
+                        <option value="12">Calm water</option>
+                        <option value="13">Yogurt</option>
+                    </select>
+                </div>
+
+                <div id="material-properties-preview" class="material-preview-card"></div>
+            </div>
+
+            <!-- ---- Shared: the container ---- -->
+            <div class="group">
+                <div class="group-title">Container</div>
+                <div class="row"><label for="shape-select">Shape</label></div>
                 <select id="shape-select">
-                    <optgroup label="⭕ Flat Sandbox Beds" id="shape-group-flat">
-                        <option value="0" selected>Circle</option>
+                    <optgroup label="Flat sandbox beds" id="shape-group-flat">
+                        <option value="0">Circle</option>
                         <option value="1">Square</option>
                         <option value="2">Oval</option>
                     </optgroup>
-                    <optgroup label="⏳ Sand-fall Funnels" id="shape-group-sandfall" hidden>
-                        <option value="3">Classic Hourglass</option>
-                        <option value="4">Serpentine 3-Stage Hourglass</option>
-                        <option value="5">Galton Board (Pascal Peg Grid)</option>
-                        <option value="6">Staircase Cascade (Plinko Baffles)</option>
-                        <option value="7">Procedural Cave Funnel</option>
-                        <option value="8">Multi-Neck Hourglass</option>
+                    <optgroup label="Sand-fall funnels" id="shape-group-sandfall" hidden>
+                        <option value="3">Classic hourglass</option>
+                        <option value="4">Serpentine, 3 stages</option>
+                        <option value="5">Galton board</option>
+                        <option value="6">Staircase cascade</option>
+                        <option value="7">Procedural cave</option>
+                        <option value="8">Multi-neck, 3 necks</option>
                     </optgroup>
                 </select>
             </div>
 
+            <!-- ---- Sandbox: drawing ---- -->
             <div id="sandbox-only-patterns">
-
-                <!-- Pattern generator -->
-                <div class="section-title">📐 Drawing Pattern</div>
-                <div class="control-group">
-                    <label for="pattern-select">Active Pattern</label>
+                <div class="group">
+                    <div class="group-title">Pattern</div>
+                    <div class="row"><label for="pattern-select">Curve</label></div>
                     <select id="pattern-select">
-                        <option value="manual">Manual Draw</option>
-                        <option value="spiral">Archimedean Spiral</option>
-                        <option value="lissajous">Lissajous Curve</option>
-                        <option value="rose">Rose Flower Curve</option>
-                        <option value="spirograph">Spirograph (Hypotrochoid)</option>
-                        <option value="gosper">Gosper Space-Filling Curve</option>
-                        <option value="hilbert">Hilbert Space-Filling Curve</option>
-                        <option value="fermat">Fermat Spiral</option>
-                        <option value="sierpinski">Sierpinski Curve</option>
-                        <option value="random_walk">Random Walk</option>
-                        <option value="lemniscate">Lemniscate</option>
-                        <option value="butterfly">Butterfly Curve</option>
-                        <option value="zen_waves">Zen Waves</option>
-                        <option value="zen_mandala">Zen Mandala</option>
-                        <option value="dinosaur">Dinosaur Outline</option>
-                        <option value="unicorn">Unicorn Outline</option>
-                        <option value="clock">Clock Mode</option>
+                        <option value="none">None (freehand)</option>
+                        <option value="spiral">Spiral</option>
+                        <option value="lissajous">Lissajous</option>
+                        <option value="rose">Rose</option>
+                        <option value="spirograph">Spirograph</option>
+                        <option value="hilbert">Hilbert curve</option>
+                        <option value="gosper">Gosper curve</option>
+                        <option value="sierpinski">Sierpinski curve</option>
+                        <option value="random_walk">Random walk</option>
                     </select>
-                </div>
 
-                <!-- Pattern Parameters (Shown/Hidden dynamically based on selected pattern) -->
-                <div id="spiral-params" class="control-group" style="display: none;">
-                    <div class="label-val">
-                        <label for="spiral-spacing-slider">Spiral Spacing</label>
-                        <span id="spiral-spacing-val" class="val-display">0.030</span>
+                    <div id="spiral-params" style="display: none;">
+                        <div class="field row gap-above">
+                            <label for="spiral-spacing-slider">Spacing</label>
+                            <span id="spiral-spacing-val" class="val-display">0.030</span>
+                            <input type="range" id="spiral-spacing-slider" min="0.01" max="0.10" step="0.005" value="0.030">
+                        </div>
                     </div>
-                    <input type="range" id="spiral-spacing-slider" min="0.01" max="0.10" step="0.005" value="0.030">
-                </div>
 
-                <div id="lissajous-params" class="control-group" style="display: none;">
-                    <div class="label-val">
-                        <label for="lissajous-a-slider">Frequency A</label>
-                        <span id="lissajous-a-val" class="val-display">3.00</span>
+                    <div id="lissajous-params" style="display: none;">
+                        <div class="field row gap-above">
+                            <label for="lissajous-a-slider">Frequency A</label>
+                            <span id="lissajous-a-val" class="val-display">3</span>
+                            <input type="range" id="lissajous-a-slider" min="1" max="12" step="1" value="3">
+                        </div>
+                        <div class="field row">
+                            <label for="lissajous-b-slider">Frequency B</label>
+                            <span id="lissajous-b-val" class="val-display">4</span>
+                            <input type="range" id="lissajous-b-slider" min="1" max="12" step="1" value="4">
+                        </div>
                     </div>
-                    <input type="range" id="lissajous-a-slider" min="1" max="12" step="1" value="3">
-                    <div class="label-val" style="margin-top: 8px;">
-                        <label for="lissajous-b-slider">Frequency B</label>
-                        <span id="lissajous-b-val" class="val-display">4.00</span>
-                    </div>
-                    <input type="range" id="lissajous-b-slider" min="1" max="12" step="1" value="4">
-                </div>
 
-                <div id="rose-params" class="control-group" style="display: none;">
-                    <div class="label-val">
-                        <label for="rose-k-slider">Petal Parameter K</label>
-                        <span id="rose-k-val" class="val-display">5.00</span>
+                    <div id="rose-params" style="display: none;">
+                        <div class="field row gap-above">
+                            <label for="rose-k-slider">Petals</label>
+                            <span id="rose-k-val" class="val-display">5.0</span>
+                            <input type="range" id="rose-k-slider" min="1.0" max="15.0" step="0.5" value="5.0">
+                        </div>
                     </div>
-                    <input type="range" id="rose-k-slider" min="1.0" max="15.0" step="0.5" value="5.0">
-                </div>
 
-                <div id="spirograph-params" class="control-group" style="display: none;">
-                    <div class="label-val">
-                        <label for="spiro-r-slider">Inner Radius R</label>
-                        <span id="spiro-r-val" class="val-display">0.28</span>
+                    <div id="spirograph-params" style="display: none;">
+                        <div class="field row gap-above">
+                            <label for="spiro-r-slider">Inner radius</label>
+                            <span id="spiro-r-val" class="val-display">0.28</span>
+                            <input type="range" id="spiro-r-slider" min="0.05" max="0.95" step="0.01" value="0.28">
+                        </div>
+                        <div class="field row">
+                            <label for="spiro-d-slider">Pen offset</label>
+                            <span id="spiro-d-val" class="val-display">0.20</span>
+                            <input type="range" id="spiro-d-slider" min="0.05" max="0.95" step="0.01" value="0.20">
+                        </div>
                     </div>
-                    <input type="range" id="spiro-r-slider" min="0.05" max="0.95" step="0.01" value="0.28">
-                    <div class="label-val" style="margin-top: 8px;">
-                        <label for="spiro-d-slider">Pen Offset D</label>
-                        <span id="spiro-d-val" class="val-display">0.20</span>
-                    </div>
-                    <input type="range" id="spiro-d-slider" min="0.05" max="0.95" step="0.01" value="0.20">
-                </div>
 
-                <div id="curve-params" class="control-group" style="display: none;">
-                    <div class="label-val">
-                        <label for="curve-order-slider">Recursion Order (Depth)</label>
-                        <span id="curve-order-val" class="val-display">3</span>
+                    <div id="curve-params" style="display: none;">
+                        <div class="field row gap-above">
+                            <label for="curve-order-slider">Detail</label>
+                            <span id="curve-order-val" class="val-display">3</span>
+                            <input type="range" id="curve-order-slider" min="1" max="6" step="1" value="3">
+                        </div>
                     </div>
-                    <input type="range" id="curve-order-slider" min="1" max="6" step="1" value="3">
-                </div>
 
-                <div id="random-walk-params" class="control-group" style="display: none;">
-                    <div class="label-val">
-                        <label for="walk-steps-slider">Step Count</label>
-                        <span id="walk-steps-val" class="val-display">1000</span>
+                    <div id="random-walk-params" style="display: none;">
+                        <div class="field row gap-above">
+                            <label for="walk-steps-slider">Steps</label>
+                            <span id="walk-steps-val" class="val-display">1000</span>
+                            <input type="range" id="walk-steps-slider" min="100" max="5000" step="100" value="1000">
+                        </div>
+                        <div class="field row">
+                            <label for="walk-size-slider">Step size</label>
+                            <span id="walk-size-val" class="val-display">0.020</span>
+                            <input type="range" id="walk-size-slider" min="0.005" max="0.050" step="0.001" value="0.020">
+                        </div>
                     </div>
-                    <input type="range" id="walk-steps-slider" min="100" max="5000" step="100" value="1000">
-                    <div class="label-val" style="margin-top: 8px;">
-                        <label for="walk-size-slider">Step Size</label>
-                        <span id="walk-size-val" class="val-display">0.020</span>
-                    </div>
-                    <input type="range" id="walk-size-slider" min="0.005" max="0.050" step="0.001" value="0.020">
-                </div>
-                <button id="btn-load-pattern" class="primary" style="margin-bottom: 24px;">Load / Restart Pattern</button>
-            </div>
 
-            <!-- Sand-fall controls (hidden by default) -->
-            <div id="sandfall-controls" style="display: none; margin-bottom: 24px;">
-                <div class="section-title">⏳ Sand-fall Controls</div>
-                <button id="btn-flip" class="primary">Flip Hourglass</button>
-                
-                <div class="control-group" style="margin-top: 16px;">
-                    <div class="label-val">
-                        <label for="gravity-slider">Gravity Strength</label>
-                        <span id="gravity-val" class="val-display">0.04</span>
+                    <div class="btn-stack gap-above">
+                        <button id="btn-load-pattern" class="primary">Draw pattern</button>
                     </div>
-                    <input type="range" id="gravity-slider" min="0.0" max="0.10" step="0.005" value="0.04">
-                </div>
-
-                <div class="control-group">
-                    <div class="label-val">
-                        <label for="neck-slider">Neck Width</label>
-                        <span id="neck-val" class="val-display">0.005</span>
-                    </div>
-                    <input type="range" id="neck-slider" min="0.005" max="0.12" step="0.005" value="0.005">
-                </div>
-
-                <div class="control-group">
-                    <div class="label-val">
-                        <label for="curvature-slider">Chamber Curvature</label>
-                        <span id="curvature-val" class="val-display">0.6</span>
-                    </div>
-                    <input type="range" id="curvature-slider" min="0.1" max="3.0" step="0.1" value="0.6">
-                </div>
-
-                <div class="control-group">
-                    <label for="quantile-select">Mass Distribution Lines</label>
-                    <select id="quantile-select">
-                        <option value="0" selected>Off</option>
-                        <option value="1">Quartiles (25/50/75%)</option>
-                        <option value="2">Deciles (10% steps)</option>
-                    </select>
                 </div>
             </div>
 
-            <!-- Operations -->
-            <div class="section-title">⚙️ Operations</div>
-            <button id="btn-reset" class="primary">Reset Sand Bed</button>
-            <button id="btn-ripples">Draw Ripple Pattern</button>
-
-            <!-- Render Settings -->
-            <div class="section-title">💡 Rendering & Light</div>
-            <div class="control-group">
-                <label for="led-mode">LED Mode</label>
-                <select id="led-mode">
-                    <option value="0">Single LED</option>
-                    <option value="1">Rainbow Ring</option>
-                    <option value="2">Color Cycle</option>
-                    <option value="3">Overhead Moon Light</option>
-                    <option value="4">Rainbow Ring + Moon</option>
-                </select>
-            </div>
-
-            <div class="control-group color-row">
-                <label for="color-led">LED Color:</label>
-                <input type="color" id="color-led" value="#d4af37">
-            </div>
-
-            <!-- Sand Color Theme Section -->
-            <div class="section-title">🎨 Sand Color Theme</div>
-            <div class="control-group">
-                <label for="color-pattern">Color Pattern</label>
+            <!-- ---- Shared: colour ---- -->
+            <div class="group">
+                <div class="group-title">Colour</div>
+                <div class="row"><label for="color-pattern">Scheme</label></div>
                 <select id="color-pattern">
-                    <option value="solid" selected>Solid Color</option>
-                    <option value="gradient">Linear Gradient</option>
-                    <option value="stripes">Stripes (Alternating)</option>
-                    <option value="concentric">Concentric Rings</option>
-                    <option value="checkerboard">Checkerboard Grid</option>
-                    <option value="rainbow_linear">Rainbow (Linear)</option>
-                    <option value="rainbow_radial">Rainbow (Radial)</option>
+                    <option value="solid">Single colour</option>
+                    <option value="layers">Layers</option>
+                    <option value="gradient">Gradient</option>
+                    <option value="rings">Rings</option>
+                    <option value="rainbow">Rainbow</option>
                 </select>
-            </div>
+                <select id="color-preset" style="display: none;">
+                    <option value="desert">Desert</option>
+                    <option value="ocean">Ocean</option>
+                    <option value="forest">Forest</option>
+                    <option value="vaporwave">Vaporwave</option>
+                    <option value="sunset">Sunset</option>
+                    <option value="black_white">Monochrome</option>
+                    <option value="rainbow">Rainbow</option>
+                </select>
 
-            <!-- Hide the old select preset but keep a hidden one for backward compatibility if needed -->
-            <select id="color-preset" style="display: none;">
-                <option value="custom" selected>Custom</option>
-                <option value="rainbow">Rainbow</option>
-                <option value="black_white">Black & White</option>
-                <option value="desert">Desert Sand</option>
-                <option value="ocean">Ocean Teal</option>
-                <option value="forest">Forest Gold</option>
-                <option value="vaporwave">Vaporwave</option>
-                <option value="sunset">Sunset Gold</option>
-            </select>
+                <div class="row gap-above"><span class="row-label">Presets</span></div>
+                <div class="swatch-grid" id="preset-swatches">
+                    <div class="swatch" data-preset="desert" title="Desert" style="--c1: #ebd9bb; --c2: #8b5a2b;"><div class="swatch-split"></div></div>
+                    <div class="swatch" data-preset="ocean" title="Ocean" style="--c1: #008080; --c2: #e0f7fa;"><div class="swatch-split"></div></div>
+                    <div class="swatch" data-preset="forest" title="Forest" style="--c1: #228b22; --c2: #ffd700;"><div class="swatch-split"></div></div>
+                    <div class="swatch" data-preset="vaporwave" title="Vaporwave" style="--c1: #ff007f; --c2: #00f0ff;"><div class="swatch-split"></div></div>
+                    <div class="swatch" data-preset="sunset" title="Sunset" style="--c1: #ff4500; --c2: #ffd700;"><div class="swatch-split"></div></div>
+                    <div class="swatch" data-preset="black_white" title="Monochrome" style="--c1: #ffffff; --c2: #050505;"><div class="swatch-split"></div></div>
+                    <div class="swatch" data-preset="rainbow" title="Rainbow" style="--c1: #ff2d55; --c2: #2d9bff;"><div class="swatch-split"></div></div>
+                </div>
 
-            <!-- Quick Swatches -->
-            <label>Color Theme Swatches</label>
-            <div class="preset-swatches" id="preset-swatches">
-                <div class="swatch" data-preset="desert" title="Desert Sand" style="--c1: #ebd9bb; --c2: #8b5a2b;"><div class="swatch-split"></div></div>
-                <div class="swatch" data-preset="ocean" title="Ocean Teal" style="--c1: #008080; --c2: #e0f7fa;"><div class="swatch-split"></div></div>
-                <div class="swatch" data-preset="forest" title="Forest Gold" style="--c1: #228b22; --c2: #ffd700;"><div class="swatch-split"></div></div>
-                <div class="swatch" data-preset="vaporwave" title="Vaporwave" style="--c1: #ff007f; --c2: #00f0ff;"><div class="swatch-split"></div></div>
-                <div class="swatch" data-preset="sunset" title="Sunset Gold" style="--c1: #ff4500; --c2: #ffd700;"><div class="swatch-split"></div></div>
-                <div class="swatch" data-preset="black_white" title="Black & White" style="--c1: #ffffff; --c2: #050505;"><div class="swatch-split"></div></div>
-                <div class="swatch" data-preset="rainbow" title="Rainbow" style="background: linear-gradient(135deg, red, yellow, green, blue); border-radius: 50%; width: 28px; height: 28px;"></div>
-            </div>
-
-            <div class="control-group" id="custom-color-inputs">
-                <div class="color-picker-wrapper">
-                    <div style="display: flex; flex-direction: column; align-items: center;">
-                        <span style="font-size: 10px; color: var(--text-muted); margin-bottom: 2px;">Color 1</span>
-                        <div class="color-picker-container">
-                            <input type="color" id="color-sand-1" value="#ebd9bb">
+                <div id="custom-color-inputs">
+                    <div class="color-picker-wrapper">
+                        <div class="color-field">
+                            <span>Colour 1</span>
+                            <div class="color-picker-container">
+                                <input type="color" id="color-sand-1" value="#ebd9bb">
+                            </div>
                         </div>
-                    </div>
-                    <div id="color-sand-2-wrapper" style="display: none; flex-direction: column; align-items: center;">
-                        <span style="font-size: 10px; color: var(--text-muted); margin-bottom: 2px;">Color 2</span>
-                        <div class="color-picker-container">
-                            <input type="color" id="color-sand-2" value="#5c4033">
+                        <div id="color-sand-2-wrapper" class="color-field" style="display: none;">
+                            <span>Colour 2</span>
+                            <div class="color-picker-container">
+                                <input type="color" id="color-sand-2" value="#5c4033">
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <div class="control-group">
-                <div class="label-val">
-                    <label for="angle-slider">Light Direction</label>
+            <!-- ---- Shared: light ---- -->
+            <div class="group">
+                <div class="group-title">Light</div>
+                <div class="row"><label for="led-mode">Mode</label></div>
+                <select id="led-mode">
+                    <option value="0">Studio</option>
+                    <option value="1">LED ring</option>
+                    <option value="2">Ambient glow</option>
+                    <option value="3">Moonlight</option>
+                    <option value="4">Night</option>
+                </select>
+
+                <div class="row color-row gap-above">
+                    <label for="color-led">LED colour</label>
+                    <input type="color" id="color-led" value="#ffffff">
                 </div>
-                <input type="range" id="angle-slider" min="0" max="6.28" step="0.05" value="0">
+
+                <div class="field row">
+                    <label for="angle-slider">Direction</label>
+                    <span class="val-display" id="angle-val">0&deg;</span>
+                    <input type="range" id="angle-slider" min="0" max="6.28" step="0.05" value="0">
+                </div>
+
+                <label class="checkbox-container">
+                    Raymarched shadows
+                    <input type="checkbox" id="check-shadows" checked>
+                    <span class="checkmark"></span>
+                </label>
             </div>
 
-            <label class="checkbox-container">
-                <input type="checkbox" id="check-shadows" checked>
-                <span class="checkmark"></span>
-                Raymarched Shadows
-            </label>
+            <!-- ---- Shared: actions ---- -->
+            <div class="group group-last">
+                <div class="group-title">Actions</div>
+                <div class="btn-stack">
+                    <button id="btn-reset">Reset sand bed</button>
+                    <button id="btn-ripples">Draw ripples</button>
+                </div>
+            </div>
 
-            <div class="stat-display">
-                <div id="stat-fps">FPS: 60</div>
-                <div id="stat-render-time">Frame time: -- ms</div>
-                <div id="stat-blocks" style="margin-top: 5px; font-size: 0.85em; opacity: 0.85; line-height: 1.3;">Blocks: F: 0, M: 0, S: 0, I: 1024</div>
+            <!-- Readouts live here only; the floating HUD used to duplicate them. -->
+            <div class="console-footer">
+                <div><b id="stat-fps">60</b><span>fps</span></div>
+                <div><b id="stat-render-time">--</b><span>ms/frame</span></div>
+                <div><b id="stat-blocks">1024</b><span>blocks</span></div>
             </div>
         </div>
 
-        <!-- Toggle Sidebar Button -->
-        <div id="toggle-sidebar">⚙</div>
+        <div id="toggle-sidebar">&#9881;</div>
 
-        <!-- Viewport -->
         <div id="viewport-container">
-            <!-- Instruction Overlay -->
             <div id="instructions">
-                💡 Left Click + Drag to rotate camera • Scroll to zoom • Shift + Left Click & Drag to move magnet/marble
+                Drag to rotate &middot; Scroll to zoom &middot; Shift-drag to move the magnet
             </div>
-            <!-- Floating HUD for Stats -->
             <div id="stats-hud">
-                <span id="hud-fps">-- FPS</span>
-                <span style="color: var(--border-color);">|</span>
+                <span id="hud-fps">-- fps</span>
+                <span class="sep">/</span>
                 <span id="hud-time">-- ms</span>
             </div>
             <canvas id="sand-canvas"></canvas>

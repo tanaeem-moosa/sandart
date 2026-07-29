@@ -392,7 +392,7 @@ impl eframe::App for SandArtApp {
         // Draw the top panel for basic info
         egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("Sands of Time: Kinetic Sand Simulator");
+                ui.heading("Shoal & Swell");
 
                 ui.add_space(16.0);
                 let btn_text = if self.settings_open { "Hide Controls ⚙" } else { "Show Controls ⚙" };

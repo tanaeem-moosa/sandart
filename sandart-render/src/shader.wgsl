@@ -209,8 +209,10 @@ fn fs_main(
                 return vec4<f32>(led_color * 0.8 * uniforms.light_brightness, 1.0);
             }
         } else {
-            // Outer casing
-            return vec4<f32>(0.07, 0.07, 0.08, 1.0);
+            // Outer casing. Lifted from 0.07 — at that value the frame read as a hole in the page
+            // rather than as the body of an object, and the sand had nothing to sit against. This
+            // is still well below any lit sand, so it stays recessive, but it now has a surface.
+            return vec4<f32>(0.125, 0.13, 0.145, 1.0);
         }
     }
 
@@ -750,8 +752,12 @@ fn fs_main(
             let target_row = uniforms.quantile_positions[i / 4u][i % 4u] * 512.0;
             let d = abs(row_f - target_row);
             if (d < half_width_px) {
-                let line_alpha = smoothstep(half_width_px, 0.0, d) * 0.85;
-                let line_color = vec3<f32>(0.35, 0.85, 1.0);
+                // Recycled-glass green, and quieter than the cyan it replaces. These lines are a
+                // reading aid laid over the artwork, so they should be legible without becoming
+                // the brightest thing on screen — the old 0.85 alpha on a saturated cyan won every
+                // staring contest with the sand underneath it.
+                let line_alpha = smoothstep(half_width_px, 0.0, d) * 0.55;
+                let line_color = vec3<f32>(0.561, 0.722, 0.631);
                 final_color = mix(final_color, line_color, line_alpha);
             }
         }

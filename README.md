@@ -1,4 +1,4 @@
-# Sands of Time: Kinetic Sand Art Simulator
+# Shoal & Swell: a sand and water simulator
 
 A beautiful, high-performance simulation of a kinetic sand art table (like the Sisyphus table) written in Rust. The application simulates a physical steel ball rolling through a sand bed, carving intricate mathematical and path-based designs, illuminated by a dynamic RGB LED ring.
 
