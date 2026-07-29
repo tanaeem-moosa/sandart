@@ -38,6 +38,14 @@ async function start() {
     // Initialize WASM module
     await init();
 
+    // Show which build is actually running, before anything else can fail. The value is baked
+    // in at compile time (see sandart-wasm/build.rs + build_git_sha/build_timestamp_epoch in
+    // sandart-wasm/src/lib.rs) from the git commit and wall-clock time of the build that
+    // produced this exact bundle. Deliberately not cache-busted: if the browser is serving a
+    // stale cached bundle, this readout is supposed to keep showing the OLD value, so a refresh
+    // that "doesn't take" is visibly distinguishable from one that does.
+    displayBuildStamp();
+
     canvas = document.getElementById('sand-canvas');
     
     // Adjust size for High DPI screens
@@ -86,6 +94,31 @@ async function start() {
     lastTime = performance.now();
     fpsTime = lastTime;
     requestAnimationFrame(tick);
+}
+
+// Renders the "Build" diagnostic readout in the panel footer (#build-stamp-value) from the
+// compile-time git SHA + build timestamp baked into the wasm module. Static call, mirroring
+// WasmSimulationState.list_materials() — no live instance is needed. Never throws: a broken
+// readout here shouldn't take down the rest of the app, so failures fall back to a visible
+// "unknown" rather than propagating.
+function displayBuildStamp() {
+    const el = document.getElementById('build-stamp-value');
+    if (!el) return;
+    try {
+        const sha = WasmSimulationState.build_git_sha();
+        const epochSeconds = WasmSimulationState.build_timestamp_epoch();
+        const builtAt = new Date(epochSeconds * 1000);
+        // en-CA-ish "YYYY-MM-DD HH:MM UTC" — sortable and unambiguous, unlike locale-formatted
+        // dates. toISOString() slice keeps this free of any manual date-math bugs.
+        const stamp = `${sha} · ${builtAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+        el.textContent = stamp;
+        el.title = `Built from commit ${sha} at ${builtAt.toISOString()}. If this still reads `
+            + `the old value after a refresh, the browser is serving a cached bundle — hard `
+            + `refresh to confirm you're looking at the latest deploy.`;
+    } catch (err) {
+        el.textContent = 'unknown';
+        console.warn('Could not read build stamp from wasm module:', err);
+    }
 }
 
 function handleResize() {

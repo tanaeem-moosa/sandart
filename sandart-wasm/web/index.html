@@ -495,6 +495,34 @@
             letter-spacing: 0.12em;
             text-transform: uppercase;
         }
+        /* Diagnostic build identifier — deliberately quieter than the three stat readouts
+           above it (dimmer colour, no bold numerals): it exists to answer "am I looking at a
+           stale cached bundle?", not to compete with the live performance stats. Derived at
+           compile time; see sandart-wasm/build.rs and demo.js's displayBuildStamp(). */
+        .build-stamp {
+            grid-column: 1 / -1;
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--rule);
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            opacity: 0.65;
+        }
+        .build-stamp .build-label {
+            font-size: 9px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--label);
+        }
+        .build-stamp .build-value {
+            font-size: 9px;
+            font-variant-numeric: tabular-nums;
+            color: var(--value-dim);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
 
         /* ---- Viewport ----------------------------------------------------------- */
 
@@ -896,6 +924,13 @@
                 <div><b id="stat-fps">60</b><span>fps</span></div>
                 <div><b id="stat-render-time">--</b><span>ms/frame</span></div>
                 <div><b id="stat-blocks">1024</b><span>blocks</span></div>
+                <!-- Populated from the wasm module at startup (see displayBuildStamp() in
+                     demo.js) with the git SHA + build time baked in by sandart-wasm/build.rs.
+                     Never hand-edit this value. -->
+                <div class="build-stamp">
+                    <span class="build-label">Build</span>
+                    <span class="build-value" id="build-stamp-value">--</span>
+                </div>
             </div>
         </div>
 

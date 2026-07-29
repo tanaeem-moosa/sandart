@@ -403,6 +403,23 @@ impl WasmSimulationState {
         out
     }
 
+    /// Short git SHA of the commit this wasm bundle was built from, baked in at compile time by
+    /// `build.rs` (see `SANDART_GIT_SHA` there). Falls back to `"unknown"` if the build ran
+    /// without a git checkout available — never a fabricated or stale-looking value. Paired with
+    /// `build_timestamp_epoch` to render the diagnostic "Build" readout in the panel footer, so
+    /// the user can tell a fresh deploy apart from a stale cached page.
+    pub fn build_git_sha() -> String {
+        env!("SANDART_GIT_SHA").to_string()
+    }
+
+    /// Wall-clock time this wasm bundle was compiled, as seconds since the Unix epoch, baked in
+    /// at compile time by `build.rs` (see `SANDART_BUILD_EPOCH` there). Left as a raw epoch
+    /// rather than formatted here so the JS side can render it with `Date`, which already knows
+    /// how to do that correctly.
+    pub fn build_timestamp_epoch() -> f64 {
+        env!("SANDART_BUILD_EPOCH").parse::<u64>().unwrap_or(0) as f64
+    }
+
     pub fn set_sandbox_shape(&mut self, shape: u32) {
         let new_shape = match shape {
             0 => SandboxShape::Circle,
