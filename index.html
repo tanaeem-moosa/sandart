@@ -616,15 +616,11 @@
 
                 <div class="group">
                     <div class="group-title">Flow</div>
-                    <div class="field row">
-                        <label for="gravity-slider">Gravity</label>
-                        <span id="gravity-val" class="val-display">0.04</span>
-                        <!-- min is clamped to 0.04, not 0.0: below that, a resting slab's own
-                             gravity-aligned edges drive upward instead of down (see
-                             GRAVITY_HEAD_SCALE in sandart-sim/src/physics.rs) and settled material
-                             "boils" back up into empty space above it. -->
-                        <input type="range" id="gravity-slider" min="0.04" max="0.10" step="0.005" value="0.04">
-                    </div>
+                    <!-- Gravity used to be a user-facing slider (range 0.04..=0.10, step 0.005).
+                         Removed: measurement (see SANDFALL_GRAVITY_STRENGTH in
+                         sandart-sim/src/lib.rs) showed drain rate and terminal fall speed were
+                         flat across the whole range for both DrySand and Water, so it was a
+                         control with nothing to feel. Gravity is now hardcoded in demo.js. -->
                     <div class="row">
                         <label for="quantile-select">Weight lines</label>
                     </div>
