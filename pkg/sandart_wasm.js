@@ -89,6 +89,15 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * Current simulation grid resolution (64/128/256/512). Lets the web UI display the actual
+     * backing value rather than assuming its `<select>`'s own default matches Rust's.
+     * @returns {number}
+     */
+    get_grid_size() {
+        const ret = wasm.wasmsimulationstate_get_grid_size(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * @returns {Float32Array}
      */
     get_heightmap() {
@@ -195,6 +204,30 @@ export class WasmSimulationState {
      */
     set_gravity(x, y) {
         wasm.wasmsimulationstate_set_gravity(this.__wbg_ptr, x, y);
+    }
+    /**
+     * Change the simulation/render grid resolution to 64, 128, 256, or 512 (`GRID_SIZE`, the
+     * shipped default, is unchanged by this feature). This is a debugging/perf instrument, not
+     * just a performance knob: the test suite and the shipped app used to run at different,
+     * never-compared resolutions, which is exactly how a lateral-pressure term that scaled with
+     * grid resolution instead of physical depth went unnoticed — see `docs/ARCHITECTURE.md`.
+     * Comparing behaviour across resolutions is the point, so this is meant to be switched at
+     * will while the user is looking at the sim, not just read once on startup.
+     *
+     * This is a full teardown/rebuild of both `sim` and `renderer`, never a partial resize:
+     * every CPU buffer inside `DrawingSimulation` (and every GPU texture inside
+     * `HeightmapRenderer`) is a fixed-size allocation made at construction time, so there is no
+     * in-place "resize" — only "replace with a freshly constructed one of the right size". That
+     * necessarily discards the current sand/water contents (same as any other reset), but current
+     * material, shape, gravity, neck width and chamber curvature survive via `sim.reset()`'s
+     * normal contract (it never touches those fields) rather than reverting to defaults.
+     * @param {number} size
+     */
+    set_grid_size(size) {
+        const ret = wasm.wasmsimulationstate_set_grid_size(this.__wbg_ptr, size);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * @param {number} order

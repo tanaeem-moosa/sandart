@@ -733,6 +733,22 @@
                 </select>
             </div>
 
+            <!-- ---- Shared: simulation grid resolution ----
+                 A debugging/perf instrument first, a quality knob second: it lets the
+                 same simulation be compared at different grid resolutions instead of
+                 just run faster. Options are fixed (not populated from Rust like the
+                 material select), since the set of supported sizes is small and static. -->
+            <div class="group">
+                <div class="group-title">Resolution</div>
+                <div class="row"><label for="resolution-select">Grid</label></div>
+                <select id="resolution-select">
+                    <option value="64">64 &times; 64</option>
+                    <option value="128">128 &times; 128</option>
+                    <option value="256">256 &times; 256</option>
+                    <option value="512" selected>512 &times; 512</option>
+                </select>
+            </div>
+
             <!-- ---- Sandbox: drawing ---- -->
             <div id="sandbox-only-patterns">
                 <div class="group">
