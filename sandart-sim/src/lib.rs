@@ -40,6 +40,17 @@ pub const PROP_THRESHOLD: usize = 1;
 pub const PROP_FLOW_RATE: usize = 2;
 pub const PROP_GRAIN_SIZE: usize = 3;
 
+/// How often (in ticks) the quantile-line overlay pays a full `O(width*height)` row-mass
+/// recompute, independent of `active_blocks`. See the call site in `update` for why this is
+/// necessary in addition to the cheap every-5-tick `refresh_quantiles_partial` path: that path
+/// only re-sums a row when some block in its block-row is active *in the exact tick it runs on*
+/// (a single-tick snapshot, not an OR across skipped ticks), so a row a block touched and then
+/// went permanently INACTIVE on an unsampled tick is never revisited and can hold a stale,
+/// possibly nonzero, cached mass indefinitely. Bounds the staleness of any quantile line to at
+/// most this many ticks. 100 is cheap amortised (one full grid sum per hundred single-tick
+/// solver steps) against how rarely it needs to fire.
+const QUANTILE_FULL_RESYNC_TICKS: u32 = 100;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SimulatorMode {
     Sandbox,
@@ -588,12 +599,16 @@ impl DrawingSimulation {
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
         self.column_depth.fill(0.0);
-        for chunk in self.cell_colors.chunks_exact_mut(4) {
-            chunk[0] = 210;
-            chunk[1] = 180;
-            chunk[2] = 140;
-            chunk[3] = 255;
-        }
+        // Deliberately does NOT touch `cell_colors`. A reset is a physics-state reset (heights,
+        // velocities, bounds) — the colour theme the caller pushed via `set_cell_colors` is a
+        // separate concern and has no reason to revert to the placeholder tan `new_with_size`
+        // seeds a brand-new sim with. This used to unconditionally overwrite every cell back to
+        // that placeholder here, which silently discarded whatever colour theme was active any
+        // time `reset()` ran — including from `set_sandbox_shape` on every Hourglass-family shape
+        // change, not just the explicit Reset button. Preserving the buffer by simply not writing
+        // to it means every current and future caller of `reset()` gets this for free, rather than
+        // needing to remember to re-push the theme afterward (which is exactly the bug: one such
+        // call site — `set_sandbox_shape` — was missed).
         self.apply_preset(self.material_mode);
         self.marble_pos = Vec2::ZERO;
         self.prev_marble_pos = Vec2::ZERO;
@@ -1086,13 +1101,27 @@ impl DrawingSimulation {
         }
         self.tick_count = self.tick_count.wrapping_add(1);
 
-        // Quantile mass-distribution lines (Sand-fall overlay): recompute at most every 5 ticks,
-        // and only while the feature is switched on. `has_active` being false means nothing
-        // moved this tick, so row_mass couldn't have changed either — skip in that case too.
-        // This is the whole cost-gating story: when `quantile_mode == Off` (the default), this
-        // branch — and therefore the O(width) row re-sums it guards — never runs at all.
-        if has_active && self.quantile_mode != QuantileMode::Off && self.tick_count % 5 == 0 {
-            self.refresh_quantiles_partial();
+        // Quantile mass-distribution lines (Sand-fall overlay): the steady-state path recomputes
+        // at most every 5 ticks, and only while the feature is switched on. `has_active` being
+        // false means nothing moved this tick, so row_mass couldn't have changed either — skip in
+        // that case too.
+        //
+        // That per-5-tick path alone is not enough: `refresh_quantiles_partial` only re-sums rows
+        // whose block-row is active in the exact tick sampled, so a row that changed and then went
+        // INACTIVE again on a tick this gate never lands on keeps a stale cached mass forever —
+        // see `QUANTILE_FULL_RESYNC_TICKS`'s doc comment. So every `QUANTILE_FULL_RESYNC_TICKS`
+        // ticks we pay one full recompute regardless of `has_active`, deliberately *not*
+        // has_active-gated, because the whole point is to catch mass that changed on a tick this
+        // tick's activity snapshot cannot see.
+        //
+        // This is the whole cost-gating story: when `quantile_mode == Off` (the default), none of
+        // this — the every-5-tick partial re-sum or the every-100-tick full recompute — ever runs.
+        if self.quantile_mode != QuantileMode::Off {
+            if self.tick_count % QUANTILE_FULL_RESYNC_TICKS == 0 {
+                self.refresh_quantiles_full();
+            } else if has_active && self.tick_count % 5 == 0 {
+                self.refresh_quantiles_partial();
+            }
         }
 
         // Update EMA of frame time and adjust budget_n
@@ -1812,6 +1841,80 @@ mod tests {
                 after
             );
         }
+    }
+
+    #[test]
+    // Regression test for a reported bug: with Deciles active on a draining Hourglass, one
+    // quantile line stayed pinned at the top instead of descending like every other line. The
+    // scan in `compute_quantile_positions` is a true cumulative-mass walk from row 0, so a small
+    // stranded remnant cannot pin a line by itself -- the scan would walk past a thin remnant and
+    // follow the pile down. The real defect is upstream: `row_mass` itself goes stale, because
+    // `refresh_row_mass_active` only re-sums a row when some block in its block-row is active *in
+    // the exact tick sampled* (every 5th tick), and that snapshot is not an OR across the ticks in
+    // between. A row a block touched on ticks N+1..N+4 and then went INACTIVE on N+5 (or any later
+    // unsampled tick) keeps its old, too-high cached mass forever -- inflating a thin remnant into
+    // a phantom double-digit percentage of the total.
+    //
+    // This must be caught by comparing the cached row_mass to a from-scratch recompute over the
+    // *same* heights, not by asserting the lines merely move: `test_quantile_lines_descend_as_hourglass_drains`
+    // already asserts movement and already passes, because most lines genuinely do move even with
+    // this bug present -- only the specific stale row is wrong, which a "did it move" check cannot
+    // see.
+    fn test_row_mass_cache_does_not_go_stale_after_blocks_deactivate() {
+        // Matches the user's exact repro: Deciles + Circle + Sand-fall gravity.
+        let mut sim = DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::Circle;
+        sim.gravity_dir = Vec2::new(0.0, SANDFALL_GRAVITY_STRENGTH);
+        sim.reset();
+        sim.set_quantile_mode(QuantileMode::Deciles);
+
+        let targets = [None; 5];
+        // 300 ticks: comfortably enough for the upper chamber to drain down to a thin remnant and
+        // for blocks near the top to fall fully INACTIVE well before the run ends, and an exact
+        // multiple of `QUANTILE_FULL_RESYNC_TICKS` (100) so the fix's periodic full recompute has
+        // just run on this very last tick -- making the cached row_mass and a fresh recompute
+        // directly (not just approximately) comparable.
+        for _ in 0..300 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Circle, 16.0, 16.0);
+        }
+
+        // Guard against the scenario going quiescent too early: if nothing of substance ever
+        // moved, a stale cache and a correct one would trivially agree and this test would pass
+        // vacuously (see docs/ARCHITECTURE.md section 11).
+        let total_mass: f32 = sim.row_mass.iter().sum();
+        assert!(
+            total_mass > 1.0,
+            "scenario went quiescent with almost no mass ({}) -- test would be vacuous",
+            total_mass
+        );
+
+        let mut fresh_row_mass = Vec::new();
+        refresh_row_mass_full(
+            &sim.heightmap.data,
+            sim.heightmap.width,
+            sim.heightmap.height,
+            &mut fresh_row_mass,
+        );
+
+        let mut worst_row = 0usize;
+        let mut worst_diff = 0.0f32;
+        for (y, (&cached, &fresh)) in sim.row_mass.iter().zip(fresh_row_mass.iter()).enumerate() {
+            let diff = (cached - fresh).abs();
+            if diff > worst_diff {
+                worst_diff = diff;
+                worst_row = y;
+            }
+        }
+
+        assert!(
+            worst_diff < 1e-4,
+            "cached row_mass has gone stale at row {}: cached={}, fresh recompute={} (diff={}) \
+             -- the periodic full resync should keep these in sync",
+            worst_row,
+            sim.row_mass[worst_row],
+            fresh_row_mass[worst_row],
+            worst_diff
+        );
     }
 
     #[test]

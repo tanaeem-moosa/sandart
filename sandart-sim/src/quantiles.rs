@@ -15,6 +15,13 @@
 //!   the simulation doesn't otherwise need. Instead we reuse `active_blocks`, which
 //!   `settle_tick` already populates with "was this block simulated this tick" — a row only
 //!   needs to be re-summed if some block in its block-row was touched.
+//! - **Bounded staleness via a periodic full resync.** The incremental refresh above only
+//!   samples `active_blocks` on ticks it actually runs on (every 5th), which is a single-tick
+//!   snapshot, not an OR across the ticks in between — a row a block changed and then went
+//!   INACTIVE on an unsampled tick is never revisited, and can hold a stale cached mass
+//!   indefinitely. `DrawingSimulation::update` (`sandart-sim/src/lib.rs`) calls
+//!   `refresh_row_mass_full` unconditionally every `QUANTILE_FULL_RESYNC_TICKS` ticks (100) to
+//!   bound how long that staleness can persist, independent of `has_active`/`active_blocks`.
 //! - **No incremental accumulation.** Touched rows are always recomputed from scratch (a full
 //!   sum over that row's cells), never adjusted by a running delta, so no f32 drift can
 //!   accumulate in the cache over a long-running simulation.
