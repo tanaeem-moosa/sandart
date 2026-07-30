@@ -921,7 +921,12 @@ function setupPanelInput() {
         const shapeVal = parseInt(document.getElementById('shape-select').value);
         state.set_sandbox_shape(shapeVal);
         if (isSandFall) {
-            state.reset_simulation();
+            // `reset_simulation` was never a real wasm-bound method (checked
+            // sandart-wasm/src/lib.rs — only `reset` exists), so this always threw and never
+            // ran. `set_sandbox_shape` already calls `sim.reset()` itself for the Hourglass-family
+            // shapes, but not for the flat-bed shapes (Circle/Square/Oval), so an explicit reset
+            // here is still needed to give Sand-fall a clean start on every shape change.
+            state.reset();
         } else {
             syncSettings();
             loadActivePattern();
