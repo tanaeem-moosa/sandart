@@ -105,6 +105,15 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * Current `multistage_chambers` value, so the web UI can initialise its slider/readout
+     * from the actual backing value rather than assuming its own hard-coded default matches.
+     * @returns {number}
+     */
+    get_multistage_chambers() {
+        const ret = wasm.wasmsimulationstate_get_multistage_chambers(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * List every material as `[id, label, wetness, threshold, flow_rate, grain_size]` rows, in
      * menu order. The web UI should build its material `<select>` options from this at
      * startup rather than hardcoding its own copy of the material list — that hardcoded-copy
@@ -159,6 +168,21 @@ export class WasmSimulationState {
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmsimulationstate_load_preset_pattern(this.__wbg_ptr, ptr0, len0);
         return ret !== 0;
+    }
+    /**
+     * The rasterised neck HALF-width, in cells, that `eval_sandbox_shape` actually uses for
+     * the current shape/neck_width/multistage_chambers/grid-size combination -- i.e. after
+     * the per-tier cap and floor (and, for MultiStageHourglass, the anti-merge ceiling) have
+     * been applied, not just the raw slider fraction. Exists purely for the UI cell-count
+     * readout next to the neck-width slider: the floor/cap logic means the slider's fraction
+     * alone is a poor guide to what actually rasterises, especially at small grid sizes,
+     * which is exactly what prompted adding this readout in the first place. Display-only;
+     * does not affect geometry.
+     * @returns {number}
+     */
+    neck_half_width_cells() {
+        const ret = wasm.wasmsimulationstate_neck_half_width_cells(this.__wbg_ptr);
+        return ret;
     }
     render() {
         const ret = wasm.wasmsimulationstate_render(this.__wbg_ptr);
@@ -219,8 +243,9 @@ export class WasmSimulationState {
      * `HeightmapRenderer`) is a fixed-size allocation made at construction time, so there is no
      * in-place "resize" — only "replace with a freshly constructed one of the right size". That
      * necessarily discards the current sand/water contents (same as any other reset), but current
-     * material, shape, gravity, neck width and chamber curvature survive via `sim.reset()`'s
-     * normal contract (it never touches those fields) rather than reverting to defaults.
+     * material, shape, gravity, neck width, chamber curvature and multistage chamber count
+     * survive via `sim.reset()`'s normal contract (it never touches those fields) rather than
+     * reverting to defaults.
      * @param {number} size
      */
     set_grid_size(size) {
@@ -301,6 +326,19 @@ export class WasmSimulationState {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
+    }
+    /**
+     * The widest (top) tier's chamber count for `SandboxShape::MultiStageHourglass`'s
+     * merging cascade -- user-selectable 5..=16, default 8. Clamped defensively even though
+     * the UI slider (`chambers-slider` in `index.html`) already enforces the range, matching
+     * `set_marble_count`'s pattern below. Follows the exact same contract as
+     * `set_neck_width`/`set_hourglass_curve`: only regenerates the mask, does not reset the
+     * sim (the caller in `demo.js` resets explicitly afterward, same as it does for those
+     * two, since changing the chamber count changes the boundary as much as they do).
+     * @param {number} chambers
+     */
+    set_multistage_chambers(chambers) {
+        wasm.wasmsimulationstate_set_multistage_chambers(this.__wbg_ptr, chambers);
     }
     /**
      * @param {number} width
