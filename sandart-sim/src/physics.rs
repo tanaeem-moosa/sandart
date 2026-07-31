@@ -1686,6 +1686,100 @@ fn try_move(
     *flow_occurred = true;
 }
 
+// --- Per-mechanism tick-phase offsets (diagnostic instrumentation, test builds only) --------
+//
+// `settle_tick` derives several independent scan/schedule decisions from the same `tick_count`:
+// LOD staleness, block-level scan order, three separate row/column parity switches, the
+// cell-level lateral-sweep direction, the CA neighbour-order checkerboard, and (in the test
+// harness only) the flow RNG seed. `test_water_blob_stays_left_right_symmetric_under_gravity`
+// shows the solver as a whole is not invariant under a shift of the global tick phase, but
+// seeding `TestSim.tick_count` at 1 instead of 0 shifts ALL of these at once, so that failure
+// can't be attributed to any single one of them.
+//
+// These offsets let a test flip exactly ONE logical mechanism (`phase_offset(K)` nonzero) while
+// every other site stays at its production phase (`phase_offset(K) == 0`), so each mechanism's
+// contribution to the lean can be measured in isolation. `K_*` indices are one per LOGICAL
+// MECHANISM, not one per code site — `K_BLOCK_ORDER` and `K_CA_CHECKERBOARD` each cover two call
+// sites that must move together.
+//
+// In non-test builds `phase_offset` is a `#[inline(always)]` function that always returns 0,
+// which the optimizer folds away entirely, so production codegen is unaffected — see
+// `test_multistage_n8_is_bit_identical_to_shipped_geometry` and the phase-offset self-test below
+// for the proof.
+//
+// The `K_*` indices themselves are NOT `#[cfg(test)]`-gated: `phase_offset(K_...)` call sites
+// live in production code (`settle_tick` itself), so the index constants must exist in every
+// build configuration. Only the backing storage and the non-zero read path are test-only.
+pub(crate) const K_LOD_STALENESS: usize = 0;
+pub(crate) const K_BLOCK_ORDER: usize = 1;
+pub(crate) const K_NONDOWN_BLOCK_PARITY: usize = 2;
+pub(crate) const K_NONDOWN_ROW_PARITY: usize = 3;
+pub(crate) const K_LATERAL_SWEEP: usize = 4;
+pub(crate) const K_NONGRAVITY_X_PARITY: usize = 5;
+pub(crate) const K_CA_CHECKERBOARD: usize = 6;
+pub(crate) const K_RNG_SEED: usize = 7;
+#[cfg(test)]
+pub(crate) const PHASE_MECHANISM_COUNT: usize = 8;
+
+// THREAD-LOCAL, not a global static, and that is load-bearing rather than stylistic. cargo's
+// test harness runs tests on many threads at once. With shared global storage, one test setting
+// a non-zero offset would silently perturb every other test running concurrently that touches
+// `settle_tick` — producing flaky failures with no visible connection to the diagnostic that
+// caused them. The measurement test is `#[ignore]`d, which keeps it out of a plain `cargo test`,
+// but `cargo test -- --include-ignored` is an ordinary thing to run and would walk straight into
+// it. Thread-local storage makes the offsets private to the thread performing the measurement,
+// so the hazard cannot arise at all and no discipline is required of anyone. `settle_tick` is
+// always called on the calling test's own thread, so the offsets are visible where they matter.
+#[cfg(test)]
+thread_local! {
+    static PHASE_OFFSETS: [std::cell::Cell<u32>; PHASE_MECHANISM_COUNT] = [
+        std::cell::Cell::new(0),
+        std::cell::Cell::new(0),
+        std::cell::Cell::new(0),
+        std::cell::Cell::new(0),
+        std::cell::Cell::new(0),
+        std::cell::Cell::new(0),
+        std::cell::Cell::new(0),
+        std::cell::Cell::new(0),
+    ];
+}
+
+/// Read the diagnostic tick-phase offset for mechanism `k` (test builds only; always 0 in
+/// production). See the module comment above.
+#[cfg(test)]
+#[inline]
+pub(crate) fn phase_offset(k: usize) -> u32 {
+    PHASE_OFFSETS.with(|o| o[k].get())
+}
+
+/// Set the diagnostic tick-phase offset for mechanism `k` (test builds only). Scoped to the
+/// calling thread, so it cannot disturb tests running concurrently on other threads; a
+/// measurement must still reset its own offsets between rows so they don't leak from one row of
+/// the sweep to the next.
+#[cfg(test)]
+pub(crate) fn set_phase(k: usize, v: u32) {
+    PHASE_OFFSETS.with(|o| o[k].set(v));
+}
+
+/// Reset every mechanism's phase offset to 0, on the calling thread.
+#[cfg(test)]
+pub(crate) fn reset_phase_offsets() {
+    PHASE_OFFSETS.with(|o| {
+        for c in o.iter() {
+            c.set(0);
+        }
+    });
+}
+
+/// Production build: always 0, `#[inline(always)]` so the optimizer folds every `phase_offset(K)`
+/// call site down to the literal `0` and production codegen is bit-identical to before this
+/// instrumentation existed.
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn phase_offset(_k: usize) -> u32 {
+    0
+}
+
 /// Perform a single gravity flow/settling iteration inside the active bounding box.
 pub fn settle_tick(
     heightmap: &mut Heightmap,
@@ -1785,7 +1879,15 @@ pub fn settle_tick(
     let active_threshold = MUST_SIMULATE_THRESHOLD;
     for b in 0..expected_len {
         let displacement = last_displacements[b];
-        let staleness = tick_count.saturating_sub(last_simulated_ticks[b]).min(MAX_STALENESS);
+        // `phase_offset(K_LOD_STALENESS)` is a diagnostic knob only: staleness is a DIFFERENCE, not a
+        // parity, so adding a constant offset here shifts *when* a block first crosses
+        // `MAX_STALENESS` (the LOD schedule), not which of two symmetric branches runs. It is
+        // still the right knob to isolate this mechanism's contribution to the global
+        // tick-phase-shift lean, because it's the only local perturbation that reproduces what a
+        // `tick_count` shift does to this site specifically, without touching any other site.
+        let staleness = (tick_count + phase_offset(K_LOD_STALENESS))
+            .saturating_sub(last_simulated_ticks[b])
+            .min(MAX_STALENESS);
 
         if displacement >= active_threshold {
             must_simulate.push(b);
@@ -1905,7 +2007,7 @@ pub fn settle_tick(
             let by_fwd = idx_b / cols;
             let by = if against_gravity_is_up { rows - 1 - by_fwd } else { by_fwd };
             let bx_idx = idx_b % cols;
-            let bx = if (tick_count + by as u32) % 2 == 0 {
+            let bx = if (tick_count + phase_offset(K_BLOCK_ORDER) + by as u32) % 2 == 0 {
                 bx_idx
             } else {
                 cols - 1 - bx_idx
@@ -1915,13 +2017,13 @@ pub fn settle_tick(
             // Under downward gravity, process blocks top-to-bottom so falling sand advects across block boundaries without trapping
             let by = idx_b / cols;
             let bx_idx = idx_b % cols;
-            let bx = if (tick_count + by as u32) % 2 == 0 {
+            let bx = if (tick_count + phase_offset(K_BLOCK_ORDER) + by as u32) % 2 == 0 {
                 bx_idx
             } else {
                 cols - 1 - bx_idx
             };
             by * cols + bx
-        } else if tick_count % 2 == 0 {
+        } else if (tick_count + phase_offset(K_NONDOWN_BLOCK_PARITY)) % 2 == 0 {
             idx_b
         } else {
             b_len - 1 - idx_b
@@ -1944,7 +2046,7 @@ pub fn settle_tick(
                 if against_gravity_is_up { end_y - 1 - idy } else { start_y + idy }
             } else if gravity_active && gravity_dir.y > 0.0 {
                 start_y + idy
-            } else if tick_count % 2 == 0 {
+            } else if (tick_count + phase_offset(K_NONDOWN_ROW_PARITY)) % 2 == 0 {
                 end_y - 1 - idy
             } else {
                 start_y + idy
@@ -1952,12 +2054,12 @@ pub fn settle_tick(
             let row_offset = y * w;
             for idx in 0..x_len {
                 let x = if gravity_active {
-                    if (tick_count + y as u32) % 2 == 0 {
+                    if (tick_count + phase_offset(K_LATERAL_SWEEP) + y as u32) % 2 == 0 {
                         start_x + idx
                     } else {
                         end_x - 1 - idx
                     }
-                } else if tick_count % 2 == 0 {
+                } else if (tick_count + phase_offset(K_NONGRAVITY_X_PARITY)) % 2 == 0 {
                     start_x + idx
                 } else {
                     end_x - 1 - idx
@@ -2547,7 +2649,7 @@ pub fn settle_tick(
                     let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
                     
                     let neighbors_info = if gravity_active && gravity_dir.y > 0.0 {
-                        if (tick_count + x as u32 + y as u32) % 2 == 0 {
+                        if (tick_count + phase_offset(K_CA_CHECKERBOARD) + x as u32 + y as u32) % 2 == 0 {
                             [
                                 (center_idx + w, 0.0, 1.0),  // Bottom (Gravity first)
                                 (center_idx - 1, -1.0, 0.0), // Left
@@ -2562,7 +2664,7 @@ pub fn settle_tick(
                                 (center_idx - w, 0.0, -1.0), // Top
                             ]
                         }
-                    } else if (tick_count + x as u32 + y as u32) % 2 == 0 {
+                    } else if (tick_count + phase_offset(K_CA_CHECKERBOARD) + x as u32 + y as u32) % 2 == 0 {
                         [
                             (center_idx - 1, -1.0, 0.0), // Left
                             (center_idx + 1, 1.0, 0.0),  // Right
@@ -3094,7 +3196,7 @@ mod tests {
                 budget_n,
                 self.block_size,
                 &[],
-                12345u32.wrapping_add(self.tick_count),
+                12345u32.wrapping_add(self.tick_count).wrapping_add(phase_offset(K_RNG_SEED)),
                 &mut self.edge_vel_h,
                 &mut self.edge_vel_v,
                 &mut self.column_depth,
@@ -5930,8 +6032,10 @@ mod tests {
     // `settle_tick`), so starting `TestSim.tick_count` at 0 vs 1 is exactly a parity flip — a pure
     // iteration-order change, no physics change — reachable through the harness's own tick counter
     // with no production-code knob needed. Verified directly: flipping the parity this way turns a
-    // passing run into one with a persistent same-signed run of 61 ticks against this test's own
-    // `late_run < 25` tolerance, with the lean flipped to the opposite side. That means the
+    // passing run into one with a persistent same-signed run of 75 ticks against this test's own
+    // `late_run < 25` tolerance, with the lean flipped to the opposite side. (This said 61 until
+    // the bisection was run; 61 does not reproduce against current code. See the correction in the
+    // failure message below.) That means the
     // previously-shipped single-parity version of this test (which only ever started at
     // `tick_count == 0`) was GREEN FOR THE WRONG REASON: 7a3ef9f's Jacobi-driving fix reduced the
     // sweep's order-dependent lean but did not remove it, and the one parity that shipped merely
@@ -6104,11 +6208,33 @@ mod tests {
              and chains off its own earlier values in the same pass, so it remains order-dependent \
              even after that fix. \
              \
-             TO LOCALISE IT, bisect the candidates: flip ONLY the cell-level parity at the \
-             `(tick_count + y as u32) % 2` site in production code and re-run the single-parity \
-             version. Measured that way the persistent run was 61 ticks; measured via a tick_count \
-             offset (which perturbs all of the above at once) it is 42. The gap between those two \
-             numbers is exactly the contribution of everything other than the cell-level sweep. \
+             THE BISECTION HAS NOW BEEN RUN, so the candidate list above is no longer where to \
+             start. `test_tick_phase_mechanism_isolation` (ignored; run it with \
+             `--ignored --nocapture`) flips each mechanism ALONE via the per-mechanism phase \
+             offsets and measures this same scenario. Result: SIX of the eight mechanisms are \
+             bit-identical to baseline here, because each is gated behind a condition this \
+             scenario never enters -- the three spare parity switches need non-down or inactive \
+             gravity, and the CA checkerboard and RNG seed live in the granular path a liquid \
+             scenario never reaches. Only TWO mechanisms move anything: the cell-level lateral \
+             sweep and block-level x order. Setting just those two reproduces the all-mechanisms \
+             reference bit-for-bit. \
+             \
+             Attribution, on this test's own three metrics (baseline -> that mechanism alone): \
+             the lateral sweep alone takes late_persistent_run 42 -> 75, which IS the full \
+             reference value, so it accounts for the whole of the persistence. Block order alone \
+             reaches 62. On `worst` and `final` the picture is not additive: the lateral sweep \
+             alone is BELOW baseline on both (7.04e-2 / 1.03e-2 against 1.11e-1 / 1.18e-2), block \
+             order alone overshoots `final`, and only the two together reproduce the reference \
+             magnitude. So the sweep governs how long the lean persists while the peak and final \
+             magnitude come from the two interacting. Expect edge colouring to fix persistence \
+             and NOT to close the magnitude gap on its own. \
+             \
+             AN EARLIER VERSION OF THIS NOTE QUOTED 61 ticks for a cell-parity-only flip and 42 \
+             for the full tick-phase offset, and said the gap between them was everything other \
+             than the sweep. Both numbers were wrong and the inference from them was wrong. \
+             Measured against current code: baseline is 42, full shift is 75, sweep-alone is 75. \
+             The 42 that was labelled \"full offset\" is in fact the BASELINE. Do not resurrect \
+             those figures. \
              \
              If live state must be kept (i.e. this cannot simply be made a frozen Jacobi read), \
              the principled fix for the lateral pass is red-black EDGE colouring: process all \
@@ -6147,6 +6273,204 @@ mod tests {
                 r.late_run, WINDOW, other.late_run, mechanism_note, r.late_trace, other.late_trace
             );
         }
+    }
+
+    #[test]
+    #[ignore]
+    // DIAGNOSTIC measurement, not a pass/fail spec — never assert on these numbers.
+    //
+    // `test_water_blob_stays_left_right_symmetric_under_gravity` (above) shows the whole solver
+    // is not invariant under a shift of the global tick phase, but seeding `TestSim.tick_count`
+    // at 1 perturbs all eight `tick_count`-driven mechanisms in `settle_tick` at once (LOD
+    // staleness, block-level x order, three independent parity switches, the cell-level lateral
+    // sweep, the CA checkerboard, and the harness's own RNG seed), so that failure cannot be
+    // attributed to any single one of them.
+    //
+    // This test isolates each mechanism in turn, using the `phase_offset(K_*)` diagnostic knobs
+    // defined just above `settle_tick`: it sets every offset to 0 except one mechanism's, which
+    // it sets to 1, runs the identical centred-water-blob-under-gravity scenario that the failing
+    // test above runs, and records the same three metrics (`worst`, `final_err`,
+    // `late_persistent_run`). It also records two references measured with the same harness:
+    // all offsets 0 (the symmetric baseline — must reproduce the failing test's own `even`/
+    // `initial_tick_count=0` numbers) and all offsets 1 (closely analogous to, but not perfectly
+    // identical to, the failing test's `odd`/`initial_tick_count=1` global tick-count shift — see
+    // the note at the `K_LOD_STALENESS` call site for why the LOD-staleness mechanism in
+    // particular differs slightly between "seed tick_count at 1" and "add 1 to every site that
+    // reads tick_count": a global shift also shifts `last_simulated_ticks[b]`'s write side, so its
+    // staleness bias is transient; the offset here only touches the read side, so its bias is a
+    // small constant every tick).
+    //
+    // SINGLE-THREADED BY CONSTRUCTION: `PHASE_OFFSETS` is process-global mutable state (see the
+    // module comment above `settle_tick`), so every measurement below happens sequentially inside
+    // this one function body — never across threads or interleaved with another test — and each
+    // is bracketed by `reset_phase_offsets()`. A `Guard` with a `Drop` impl resets the offsets
+    // again on the way out even if a measurement panics, so a failure here can't leave nonzero
+    // offsets live for whatever test runs next in the same process. This test is `#[ignore]`d (it
+    // does not run under plain `cargo test`) and touches global state no other test in this file
+    // writes to, but if it is ever run with other tests that also call `set_phase`, pass
+    // `--test-threads=1` to keep the two from interleaving.
+    //
+    // Run with:
+    //   cargo test -p sandart-sim --lib physics::tests::test_tick_phase_mechanism_isolation -- --ignored --nocapture
+    fn test_tick_phase_mechanism_isolation() {
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                reset_phase_offsets();
+            }
+        }
+        let _guard = Guard;
+        reset_phase_offsets();
+
+        let w = 64;
+        let h = 64;
+        const N_TICKS: usize = 150;
+        const EPS: f64 = 1e-6;
+
+        // Identical to the failing test's own helper (duplicated rather than shared, so this
+        // diagnostic can never accidentally change that test's behaviour).
+        let longest_same_sign_run = |samples: &[f64]| -> usize {
+            let mut max_run = 0usize;
+            let mut run_sign = 0i32;
+            let mut run_len = 0usize;
+            for &d in samples {
+                let s = if d > EPS { 1 } else if d < -EPS { -1 } else { 0 };
+                if s != 0 && s == run_sign {
+                    run_len += 1;
+                } else if s != 0 {
+                    run_sign = s;
+                    run_len = 1;
+                } else {
+                    run_sign = 0;
+                    run_len = 0;
+                }
+                max_run = max_run.max(run_len);
+            }
+            max_run
+        };
+
+        // Identical scenario to the failing test above: a centred, bit-symmetric water blob
+        // dropped under gravity onto a Square-mask floor. `TestSim.tick_count` always starts at
+        // 0 here — whatever lean shows up is driven entirely by the `PHASE_OFFSETS` set before
+        // calling this, not by seeding the tick counter.
+        let run_scenario = || -> (f64, f64, usize) {
+            let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+            let props = get_test_props(MaterialMode::Water, w * h);
+            let mut sim = TestSim::new(w, h, props, mask, 32);
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+            for y in 50..54 {
+                for x in 28..37 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+
+            let signed_diff = |s: &TestSim| -> f64 {
+                let mut diff = 0.0f64;
+                for y in 0..h {
+                    for x in 1..w / 2 {
+                        let j = w - x;
+                        let i = y * w + x;
+                        let jj = y * w + j;
+                        if s.mask[i] == crate::MASK_OUTSIDE || s.mask[jj] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        diff += (s.hm.data[i] - s.hm.data[jj]) as f64;
+                    }
+                }
+                diff
+            };
+            let total_mass = |s: &TestSim| -> f64 { s.hm.data.iter().map(|&v| v as f64).sum() };
+
+            let initial = signed_diff(&sim);
+            assert!(
+                initial.abs() < 1e-9,
+                "test setup is not mirror symmetric: {:.3e}",
+                initial
+            );
+
+            let mut trace: Vec<f64> = Vec::with_capacity(N_TICKS);
+            for _ in 0..N_TICKS {
+                sim.tick(gravity_dir, 256);
+                let mass = total_mass(&sim);
+                let rel = if mass > 0.0 { signed_diff(&sim) / mass } else { 0.0 };
+                trace.push(rel);
+            }
+
+            let worst = trace.iter().cloned().fold(0.0f64, |a, b: f64| a.max(b.abs()));
+            let final_err = trace.last().copied().unwrap_or(0.0).abs();
+            let late = &trace[trace.len() / 2..];
+            let late_run = longest_same_sign_run(late);
+
+            (worst, final_err, late_run)
+        };
+
+        let mechanisms: [(&str, usize); 8] = [
+            ("LOD staleness", K_LOD_STALENESS),
+            ("Block-level x order", K_BLOCK_ORDER),
+            ("Non-down-gravity block-order parity switch", K_NONDOWN_BLOCK_PARITY),
+            ("Non-down-gravity row-order parity switch", K_NONDOWN_ROW_PARITY),
+            ("Cell-level lateral sweep (leading candidate)", K_LATERAL_SWEEP),
+            ("Non-gravity-active x-order parity switch", K_NONGRAVITY_X_PARITY),
+            ("CA checkerboard", K_CA_CHECKERBOARD),
+            ("RNG seed", K_RNG_SEED),
+        ];
+
+        let mut rows: Vec<(String, f64, f64, usize)> = Vec::new();
+
+        // Reference 1: symmetric baseline, every offset 0.
+        reset_phase_offsets();
+        let (w0, f0, l0) = run_scenario();
+        rows.push(("REFERENCE: all offsets 0 (symmetric baseline)".to_string(), w0, f0, l0));
+        reset_phase_offsets();
+
+        // Each mechanism flipped alone.
+        for &(name, k) in &mechanisms {
+            reset_phase_offsets();
+            set_phase(k, 1);
+            let (worst, final_err, late_run) = run_scenario();
+            rows.push((format!("{name} (flipped alone)"), worst, final_err, late_run));
+            reset_phase_offsets();
+        }
+
+        // Reference 2: every offset 1, analogous to the failing test's global tick_count=1 shift.
+        reset_phase_offsets();
+        for &(_, k) in &mechanisms {
+            set_phase(k, 1);
+        }
+        let (wa, fa, la) = run_scenario();
+        rows.push(("REFERENCE: all offsets 1 (~= global tick-phase shift)".to_string(), wa, fa, la));
+        reset_phase_offsets();
+
+        // Bonus sanity check (not one of the requested rows): if every mechanism other than
+        // block order and the lateral sweep is a no-op in this scenario (as the single-flip rows
+        // above suggest — gravity here is active and points straight down, so the three
+        // non-down-gravity/non-gravity-active parity switches are dead branches, and this
+        // scenario never puts a granular/CA cell through the checkerboard or RNG-seeded tie
+        // break), then flipping just those two together should reproduce Reference 2 exactly.
+        reset_phase_offsets();
+        set_phase(K_BLOCK_ORDER, 1);
+        set_phase(K_LATERAL_SWEEP, 1);
+        let (wc, fc, lc) = run_scenario();
+        rows.push((
+            "COMBO CHECK: block order + lateral sweep only".to_string(),
+            wc, fc, lc,
+        ));
+        reset_phase_offsets();
+
+        println!();
+        println!(
+            "{:<58} {:>12} {:>12} {:>10}",
+            "mechanism", "worst", "final", "late_run"
+        );
+        println!("{}", "-".repeat(96));
+        for (name, worst, final_err, late_run) in &rows {
+            println!(
+                "{:<58} {:>12.4e} {:>12.4e} {:>10}",
+                name, worst, final_err, late_run
+            );
+        }
+        println!();
     }
 
     #[test]
