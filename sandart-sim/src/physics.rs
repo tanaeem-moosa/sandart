@@ -635,6 +635,56 @@ mod edge_sleep_stats {
     }
 }
 
+/// EXPERIMENTAL DIAGNOSTIC (see the tick-phase-order hypothesis test plan): per-tick, per-phase
+/// flux attribution. Not used by any assertion; `#[cfg(test)]`-gated and thread-local like
+/// `edge_sleep_stats`, so it costs nothing in production and cannot interact with parallel tests.
+/// Records the *magnitude* of every flux this tick, bucketed by which phase realised it (0 =
+/// gravity-aligned edge, 1 = everything else — lateral liquid edge and the granular CA's lateral
+/// `try_move`s). This is a direct, model-free measurement of "how much of the capacity that
+/// opened up this tick did each phase actually consume", with no assumption about mechanism.
+#[cfg(test)]
+mod phase_flow_stats {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FLOW: Cell<(f64, f64)> = const { Cell::new((0.0, 0.0)) };
+    }
+
+    #[inline(always)]
+    pub fn note(phase: usize, flux: f32) {
+        if flux == 0.0 {
+            return;
+        }
+        let mag = flux.abs() as f64;
+        FLOW.with(|c| {
+            let (p0, p1) = c.get();
+            if phase == 0 {
+                c.set((p0 + mag, p1));
+            } else {
+                c.set((p0, p1 + mag));
+            }
+        });
+    }
+
+    pub fn reset() {
+        FLOW.with(|c| c.set((0.0, 0.0)));
+    }
+
+    /// `(phase0_flow, phase1_flow)` since the last `reset`.
+    pub fn take() -> (f64, f64) {
+        FLOW.with(|c| c.get())
+    }
+}
+
+#[cfg(test)]
+#[inline(always)]
+fn note_phase_flow(phase: usize, flux: f32) {
+    phase_flow_stats::note(phase, flux);
+}
+#[cfg(not(test))]
+#[inline(always)]
+fn note_phase_flow(_phase: usize, _flux: f32) {}
+
 fn wave_params(wetness: f32) -> (f32, f32) {
     if wetness <= 0.75 {
         (0.08, 0.76)
@@ -2146,7 +2196,7 @@ pub fn settle_tick(
                         let c_sq = GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity;
                         let damping = GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity;
                         let nb_b = ((y + 1) / block_size) * cols + bx;
-                        flux_edge(
+                        let phase0_f = flux_edge(
                             b, nb_b, center_idx, nb_idx,
                             head_a,
                             head_b,
@@ -2160,6 +2210,8 @@ pub fn settle_tick(
                             &mut modified, &mut next_displacements,
                             &mut total_flow, &mut flow_occurred,
                         );
+                        #[cfg(test)]
+                        note_phase_flow(phase, phase0_f);
                     }
                     continue;
                 }
@@ -2264,6 +2316,8 @@ pub fn settle_tick(
                                 &mut total_flow, &mut flow_occurred,
                             );
                             max_flux = max_flux.max(f.abs());
+                            #[cfg(test)]
+                            note_phase_flow(phase, f);
                         }
                     }
 
@@ -2294,6 +2348,8 @@ pub fn settle_tick(
                                 &mut total_flow, &mut flow_occurred,
                             );
                             max_flux = max_flux.max(f.abs());
+                            #[cfg(test)]
+                            note_phase_flow(phase, f);
                         }
                     }
 
@@ -2574,7 +2630,7 @@ pub fn settle_tick(
                             let avail_b = (h_b
                                 - in_transit_at(nb_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask))
                                 .max(0.0);
-                            flux_edge(
+                            let lateral_f = flux_edge(
                                 b, nb_b, center_idx, nb_idx,
                                 head_a,
                                 head_b_full,
@@ -2587,6 +2643,8 @@ pub fn settle_tick(
                                 &mut modified, &mut next_displacements,
                                 &mut total_flow, &mut flow_occurred,
                             );
+                            #[cfg(test)]
+                            note_phase_flow(phase, lateral_f);
                         }
                     }
 
@@ -2735,6 +2793,8 @@ pub fn settle_tick(
                                         &mut modified, &mut next_displacements,
                                         &mut total_flow, &mut cell_flowed, &mut flow_occurred,
                                     );
+                                    #[cfg(test)]
+                                    note_phase_flow(phase, clamped_flow);
                                 }
                             }
                             avalanche_checked = true;
@@ -2943,6 +3003,8 @@ pub fn settle_tick(
                                         &mut modified, &mut next_displacements,
                                         &mut total_flow, &mut cell_flowed, &mut flow_occurred,
                                     );
+                                    #[cfg(test)]
+                                    note_phase_flow(phase, clamped_flow);
                                 }
                             }
                         }
@@ -9288,6 +9350,617 @@ mod tests {
                  ticks_with_tendril={} max_count={} max_length={}",
                 impact_tick, ticks_with_tendril, max_count, max_length
             );
+        }
+    }
+
+    // =====================================================================================
+    // EXPERIMENTAL DIAGNOSTIC (tick-phase-order hypothesis, step 1 -- measure before touching
+    // the solver). See `phase_flow_stats` above `wave_params` for the instrumentation this
+    // relies on.
+    //
+    // Both diagnostics below share the same measurement plan:
+    //   (a) free capacity (cap - h) in the packed interior vs the free surface vs the drain
+    //       channel around the neck, each tick, before the tick runs;
+    //   (b) of the flux that actually moves each tick, what fraction phase 0 (gravity-aligned)
+    //       realises versus phase 1 (everything else, including the lateral edge/CA);
+    //   (c) a source-depth profile: material is seeded in horizontal colour bands (by initial
+    //       row), and the mass-weighted mean band index of whatever has crossed below the neck
+    //       is tracked over time, so "did this drain from the top only, or from all depths"
+    //       becomes a number instead of an impression.
+    //
+    // The defect these diagnostics investigate is OUTLET-SIZE DEPENDENT, so -- exactly like
+    // `diag_mass_vs_core_flow_funnel` below -- the shared body takes `neck_width` as a
+    // parameter and both callers sweep the same [0.02, 0.04, 0.08, 0.12] the mass-vs-core
+    // diagnostics use, labelling output per width (e.g. `sand_nw0.02`) so the two families of
+    // diagnostic are directly comparable. 0.12 is the neck-width slider's MAXIMUM (widest,
+    // least-restrictive neck); a fixed run at 0.12 alone is blind to the defect by
+    // construction.
+    //
+    // NOTE on `band_mass_below`: an earlier version of these diagnostics binned the
+    // mass-weighted-blended colour tracer into discrete band indices. Binning a blended value
+    // piles everything into the middle band under exact mass conservation and produces a
+    // plausible-looking false signal (it once showed a band gaining 2.5x its initial mass with
+    // total mass exactly conserved). That histogram has been removed. The continuous
+    // mass-weighted `mean_source_band` below is not subject to that failure mode and is kept.
+    //
+    // DIAGNOSTIC ONLY: never asserts on these numbers. Run with:
+    //   cargo test -p sandart-sim --lib physics::tests::diag_step1 -- --ignored --nocapture
+    // =====================================================================================
+
+    /// Shared body for the sand/liquid variants below. `cap` is the material's cell capacity
+    /// (1.5 for DrySand at wetness 0.0, 1.0 for Water); `fill_height` is the seeded per-cell
+    /// height below that capacity; `surf_eps` is the height threshold used to detect the top
+    /// free surface of the settled pile (0.05 for sand, 0.02 for the thinner-settling liquid).
+    /// `neck_width` is passed straight through to `make_test_mask`'s neck-width slider (the
+    /// same slider exposed in the UI, range roughly [0.02, 0.12] with 0.12 == the slider's
+    /// maximum). Flow regime depends strongly on this, so callers sweep it rather than picking
+    /// one value.
+    fn diag_phase_capacity_attribution_funnel(
+        mode: MaterialMode,
+        cap: f32,
+        fill_height: f32,
+        surf_eps: f32,
+        label: &str,
+        neck_width: f32,
+    ) {
+        phase_flow_stats::reset();
+
+        let w = 64usize;
+        let h = 96usize;
+        let block_size = 16usize;
+        const NUM_BANDS: usize = 6;
+        const FILL_Y0: usize = 12;
+        const FILL_Y1: usize = 44; // exclusive; 32 rows, split into NUM_BANDS equal strips
+
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, neck_width, 0.6);
+        let props = get_test_props(mode, w * h);
+        let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
+
+        // Locate the neck: the row (nearest the grid's vertical centre, in case of ties) with
+        // the fewest inside cells.
+        let row_width = |y: usize| -> usize {
+            (0..w).filter(|&x| mask[y * w + x] != crate::MASK_OUTSIDE).count()
+        };
+        let neck_y = (0..h)
+            .filter(|&y| row_width(y) > 0)
+            .min_by_key(|&y| (row_width(y), (y as i64 - (h as i64 / 2)).abs()))
+            .expect("hourglass mask has no inside rows");
+        println!(
+            "diag_phase_cap[{label}]: neck_y={} neck_width={:.2} (row_width={}) fill rows=[{},{})",
+            neck_y, neck_width, row_width(neck_y), FILL_Y0, FILL_Y1
+        );
+
+        // Seed the upper chamber in horizontal colour bands and near-capacity fill.
+        let band_color = |band: usize| -> u8 { (band * (255 / (NUM_BANDS - 1))) as u8 };
+        let mut initial_band_mass = [0.0f64; NUM_BANDS];
+        for y in FILL_Y0..FILL_Y1 {
+            let band = ((y - FILL_Y0) * NUM_BANDS / (FILL_Y1 - FILL_Y0)).min(NUM_BANDS - 1);
+            for x in 0..w {
+                let idx = y * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE {
+                    sim.hm.data[idx] = fill_height;
+                    sim.cell_colors[idx * 4 + 0] = band_color(band);
+                    sim.cell_colors[idx * 4 + 3] = 255;
+                    initial_band_mass[band] += fill_height as f64;
+                }
+            }
+        }
+        let initial_mass = sim.mass();
+        println!(
+            "diag_phase_cap[{label}]: initial_mass={:.3} initial_band_mass={:?}",
+            initial_mass, initial_band_mass
+        );
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        const N_TICKS: usize = 400;
+        const REPORT_EVERY: usize = 40;
+
+        let mut cum_phase0 = 0.0f64;
+        let mut cum_phase1 = 0.0f64;
+        // Running sums for the capacity-by-region metric, averaged over the whole run at the
+        // end (also spot-printed every REPORT_EVERY ticks).
+        let mut sum_interior_cap = 0.0f64;
+        let mut sum_surface_cap = 0.0f64;
+        let mut sum_drain_cap = 0.0f64;
+        let mut n_interior_samples = 0u64;
+        let mut n_surface_samples = 0u64;
+        let mut n_drain_samples = 0u64;
+
+        for t in 0..N_TICKS {
+            // --- (a) free-capacity-by-region, measured on the PRE-tick heightmap ---
+            let mut surf_y = vec![usize::MAX; w];
+            for x in 0..w {
+                for y in FILL_Y0.saturating_sub(4)..neck_y {
+                    let idx = y * w + x;
+                    if mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] > surf_eps {
+                        surf_y[x] = y;
+                        break;
+                    }
+                }
+            }
+            let (mut interior_cap, mut surface_cap, mut drain_cap) = (0.0f64, 0.0f64, 0.0f64);
+            let (mut n_int, mut n_surf, mut n_drain) = (0u64, 0u64, 0u64);
+            for y in 0..neck_y + 4 {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    if mask[idx] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    let near_neck = y + 3 >= neck_y && y <= neck_y + 3;
+                    if near_neck {
+                        drain_cap += (cap - sim.hm.data[idx]).max(0.0) as f64;
+                        n_drain += 1;
+                        continue;
+                    }
+                    if surf_y[x] == usize::MAX || sim.hm.data[idx] <= surf_eps {
+                        continue; // empty air above the pile, not part of either region
+                    }
+                    if y <= surf_y[x] + 2 {
+                        surface_cap += (cap - sim.hm.data[idx]).max(0.0) as f64;
+                        n_surf += 1;
+                    } else if y + 4 <= neck_y {
+                        interior_cap += (cap - sim.hm.data[idx]).max(0.0) as f64;
+                        n_int += 1;
+                    }
+                }
+            }
+            sum_interior_cap += interior_cap;
+            sum_surface_cap += surface_cap;
+            sum_drain_cap += drain_cap;
+            n_interior_samples += n_int;
+            n_surface_samples += n_surf;
+            n_drain_samples += n_drain;
+
+            // --- (b) phase attribution for this tick's actual flux ---
+            phase_flow_stats::reset();
+            sim.tick(gravity_dir, 4096);
+            let (p0, p1) = phase_flow_stats::take();
+            cum_phase0 += p0;
+            cum_phase1 += p1;
+
+            if t % REPORT_EVERY == 0 || t == N_TICKS - 1 {
+                // --- (c) source-depth profile: mass-weighted mean band index below the neck.
+                // (See the family doc-comment above: no bucketed histogram here -- continuous
+                // mass-weighted mean only.) ---
+                let mut drained_mass = 0.0f64;
+                let mut drained_band_weighted = 0.0f64;
+                for y in (neck_y + 4)..h {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        let hgt = sim.hm.data[idx] as f64;
+                        if hgt <= 1e-4 {
+                            continue;
+                        }
+                        let band_est = sim.cell_colors[idx * 4 + 0] as f64
+                            / (255.0 / (NUM_BANDS as f64 - 1.0));
+                        drained_mass += hgt;
+                        drained_band_weighted += hgt * band_est;
+                    }
+                }
+                let mean_band = if drained_mass > 0.0 { drained_band_weighted / drained_mass } else { -1.0 };
+                let cap_total = interior_cap + surface_cap + drain_cap;
+                let phase_total = cum_phase0 + cum_phase1;
+                println!(
+                    "diag_phase_cap[{label}][t={t}]: drained_mass={:.4} mean_source_band={:.3} \
+                     | this-tick free-cap interior={:.4} surface={:.4} \
+                     drain={:.4} (n={}/{}/{}) | cumulative flux phase0={:.5} phase1={:.5} \
+                     phase1_frac={:.4} (of {cap_total:.4} cap seen, phase_total={phase_total:.5})",
+                    drained_mass, mean_band,
+                    interior_cap, surface_cap, drain_cap, n_int, n_surf, n_drain,
+                    cum_phase0, cum_phase1,
+                    if phase_total > 0.0 { cum_phase1 / phase_total } else { -1.0 },
+                );
+            }
+        }
+
+        let final_mass = sim.mass();
+        let run_phase1_frac = if cum_phase0 + cum_phase1 > 0.0 {
+            cum_phase1 / (cum_phase0 + cum_phase1)
+        } else {
+            -1.0
+        };
+        let run_avg_interior_cap = if n_interior_samples > 0 {
+            sum_interior_cap / n_interior_samples as f64
+        } else {
+            -1.0
+        };
+        let mass_rel_err = (final_mass - initial_mass).abs() / initial_mass;
+        println!(
+            "diag_phase_cap[{label}]: FINAL initial_mass={:.3} final_mass={:.3} mass_rel_err={:.3e} \
+             | run totals: cum_phase0={:.4} cum_phase1={:.4} phase1_frac={:.4} \
+             | avg free-cap/sample interior={:.5} surface={:.5} drain={:.5}",
+            initial_mass, final_mass, mass_rel_err,
+            cum_phase0, cum_phase1, run_phase1_frac,
+            run_avg_interior_cap,
+            if n_surface_samples > 0 { sum_surface_cap / n_surface_samples as f64 } else { -1.0 },
+            if n_drain_samples > 0 { sum_drain_cap / n_drain_samples as f64 } else { -1.0 },
+        );
+        // Cross-width comparison line (the two numbers that actually move with outlet width):
+        println!(
+            "diag_phase_cap[{label}]: SUMMARY neck_width={neck_width:.2} phase1_frac={:.4} \
+             avg_interior_free_cap_per_cell={:.5} mass_rel_err={:.3e}",
+            run_phase1_frac, run_avg_interior_cap, mass_rel_err,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn diag_step1_phase_capacity_attribution_sand_funnel() {
+        // DrySand, wetness 0.0 -> cell_capacity_for(0.0) == 1.5; fill_height=1.4 matches the
+        // near-capacity fill the mass-vs-core sand diagnostic uses; surf_eps=0.05.
+        for neck_width in [0.02f32, 0.04, 0.08, 0.12] {
+            let label = format!("sand_nw{neck_width:.2}");
+            diag_phase_capacity_attribution_funnel(
+                MaterialMode::DrySand,
+                1.5,
+                1.4,
+                0.05,
+                &label,
+                neck_width,
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn diag_step1_phase_capacity_attribution_liquid_funnel() {
+        // Water, liquidity == 1 -> cell_capacity_for == 1.0; fill_height=0.95 matches the
+        // mass-vs-core liquid diagnostic; surf_eps=0.02 (thinner settled surface than sand).
+        for neck_width in [0.02f32, 0.04, 0.08, 0.12] {
+            let label = format!("liquid_nw{neck_width:.2}");
+            diag_phase_capacity_attribution_funnel(
+                MaterialMode::Water,
+                1.0,
+                0.95,
+                0.02,
+                &label,
+                neck_width,
+            );
+        }
+    }
+
+    // =====================================================================================
+    // MEASUREMENT (mass-flow vs core/funnel-flow hypothesis) -- see the assigning brief.
+    // Seeds a triangular funnel (the upper, converging chamber of an Hourglass mask: wide
+    // mouth narrowing down to a small neck) with the BOTTOM half of the fill region (by row,
+    // i.e. the half closer to the neck) coloured black and the TOP half (the wide mouth, far
+    // from the neck) coloured white. Because the chamber narrows going down, the bottom
+    // half's rows are narrower and hold less area/mass than the top half's -- `m_black` is
+    // computed exactly from the actual seeded per-row mass below, never assumed to be 0.25.
+    //
+    // Colour is used as a mass-weighted-mean CONSERVED tracer (`advect_properties` blends
+    // colour mass-weighted with stochastic rounding; `test_color_conservation` asserts
+    // colour*mass conserved to 0.5%) -- the mean is read continuously, never bucketed into
+    // discrete bands (an earlier attempt binned blended greys into bands and produced a false
+    // signal: everything piled into the middle band and looked like a real effect). R = tone
+    // (0 black / 255 white), G = normalised source row, B = normalised source column, each an
+    // independent conserved tracer (alpha is forced to 255).
+    //
+    // MASS FLOW prediction: material leaves in depth order, so exited material stays
+    // essentially all-black until the cumulative drained fraction reaches m_black, then turns
+    // white -- i.e. f_50 (drained fraction at which exited material first reaches 50% white)
+    // approx equals m_black, and white_fraction_of_exited at drained_frac=0.10 approx equals 0.
+    // CORE/FUNNEL FLOW prediction: a narrow vertical channel drains fed from the top surface,
+    // so white appears almost immediately -- white_fraction_of_exited at 10% drained is well
+    // above 0, and f_50 is far below m_black.
+    //
+    // Real granular material in a steep funnel with a small outlet does exhibit SOME core
+    // flow -- the ideal mass-flow step is not necessarily the physical target. A modest
+    // shortfall of f_50 below m_black is not on its own proof of a defect; white appearing at
+    // a drained fraction near zero would be (see the printed PREDICTIONS line and the
+    // magnitude discussion in the final report).
+    //
+    // DIAGNOSTIC ONLY: never asserts on the mass-flow-vs-core-flow numbers themselves (only
+    // on the instrument self-check, which is what makes those numbers trustworthy). Run with:
+    //   cargo test -p sandart-sim --lib physics::tests::diag_step1_mass_vs_core_flow -- --ignored --nocapture
+    // =====================================================================================
+
+    /// Shared body for the sand/liquid variants below. `fill_height` is the seeded per-cell
+    /// height (below each material's cell capacity, matching the fill heights the existing
+    /// `diag_step1_phase_capacity_attribution_*` tests use for the same materials).
+    ///
+    /// `neck_width` is passed straight through to `make_test_mask`'s neck-width slider (the
+    /// same slider exposed in the UI, range roughly [0.02, 0.12] with 0.12 == the slider's
+    /// maximum, i.e. the widest/least-restrictive neck). Flow regime depends strongly on this,
+    /// so callers should sweep it rather than picking one value.
+    fn diag_mass_vs_core_flow_funnel(mode: MaterialMode, fill_height: f32, label: &str, neck_width: f32) {
+        let w = 64usize;
+        let h = 96usize;
+        let block_size = 16usize;
+
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, neck_width, 0.6);
+        let props = get_test_props(mode, w * h);
+        let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
+
+        let row_width = |y: usize| -> usize {
+            (0..w).filter(|&x| mask[y * w + x] != crate::MASK_OUTSIDE).count()
+        };
+        let neck_y = (0..h)
+            .filter(|&y| row_width(y) > 0)
+            .min_by_key(|&y| (row_width(y), (y as i64 - (h as i64 / 2)).abs()))
+            .expect("hourglass mask has no inside rows");
+
+        const FILL_Y0: usize = 12;
+        // Leave a gap above the neck (matches the existing diag_step1_* fill bounds) so the
+        // seeded region is purely the converging chamber, not the packed cells right at it.
+        let fill_y1 = neck_y.saturating_sub(4);
+        assert!(
+            fill_y1 > FILL_Y0 + 4,
+            "funnel fill region too small: FILL_Y0={FILL_Y0} fill_y1={fill_y1} neck_y={neck_y}"
+        );
+
+        // Global column bounding box across the whole fill region, used to normalise B --
+        // read from the mask itself (not derived from the shape formula), so it stays correct
+        // even if the mask geometry is retuned later.
+        let mut min_x = usize::MAX;
+        let mut max_x = 0usize;
+        for y in FILL_Y0..fill_y1 {
+            for x in 0..w {
+                if mask[y * w + x] != crate::MASK_OUTSIDE {
+                    min_x = min_x.min(x);
+                    max_x = max_x.max(x);
+                }
+            }
+        }
+        assert!(max_x > min_x, "degenerate fill region column bounds");
+
+        // Split the fill region into two equal-ROW halves (equal HEIGHT, not equal area):
+        // rows [FILL_Y0, mid) are the wide top of the funnel (far from the neck) -> white;
+        // rows [mid, fill_y1) are the narrow bottom (near the neck) -> black.
+        let mid = FILL_Y0 + (fill_y1 - FILL_Y0) / 2;
+
+        let mut mass_top = 0.0f64;
+        let mut mass_bottom = 0.0f64;
+        for y in FILL_Y0..mid {
+            mass_top += row_width(y) as f64 * fill_height as f64;
+        }
+        for y in mid..fill_y1 {
+            mass_bottom += row_width(y) as f64 * fill_height as f64;
+        }
+        let m_black = mass_bottom / (mass_top + mass_bottom);
+
+        let row_norm = |y: usize| -> u8 {
+            (((y - FILL_Y0) as f32 / (fill_y1 - FILL_Y0 - 1).max(1) as f32) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+        let col_norm = |x: usize| -> u8 {
+            (((x - min_x) as f32 / (max_x - min_x) as f32) * 255.0)
+                .round()
+                .clamp(0.0, 255.0) as u8
+        };
+
+        for y in FILL_Y0..fill_y1 {
+            let r: u8 = if y < mid { 255 } else { 0 };
+            let g = row_norm(y);
+            for x in 0..w {
+                let idx = y * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE {
+                    sim.hm.data[idx] = fill_height;
+                    sim.cell_colors[idx * 4 + 0] = r;
+                    sim.cell_colors[idx * 4 + 1] = g;
+                    sim.cell_colors[idx * 4 + 2] = col_norm(x);
+                    sim.cell_colors[idx * 4 + 3] = 255;
+                }
+            }
+        }
+
+        let initial_mass = sim.mass();
+        assert!(
+            (initial_mass - (mass_top + mass_bottom)).abs() / initial_mass < 1e-6,
+            "seeded mass {:.6} does not match row-summed mass {:.6}",
+            initial_mass, mass_top + mass_bottom
+        );
+
+        let color_mass = |cell_colors: &[u8], hm: &Heightmap, channel: usize| -> f64 {
+            hm.data
+                .iter()
+                .enumerate()
+                .map(|(idx, &hgt)| cell_colors[idx * 4 + channel] as f64 * hgt as f64)
+                .sum()
+        };
+        let initial_r_mass = color_mass(&sim.cell_colors, &sim.hm, 0);
+        let initial_g_mass = color_mass(&sim.cell_colors, &sim.hm, 1);
+        let initial_b_mass = color_mass(&sim.cell_colors, &sim.hm, 2);
+        let white_fraction_global = initial_r_mass / 255.0 / initial_mass;
+
+        println!(
+            "diag_mass_vs_core[{label}]: neck_width={neck_width:.2} neck_y={neck_y} FILL_Y0={FILL_Y0} \
+             fill_y1={fill_y1} mid={mid} min_x={min_x} max_x={max_x} | initial_mass={:.4} \
+             mass_top(white)={:.4} mass_bottom(black)={:.4} m_black={:.4} white_fraction_global={:.4}",
+            initial_mass, mass_top, mass_bottom, m_black, white_fraction_global,
+        );
+        // Predictions, stated BEFORE the run below is analysed (self-validation item 3):
+        println!(
+            "diag_mass_vs_core[{label}]: PREDICTIONS mass_flow=[white_frac@10%~=0.0, f_50~={:.4}] \
+             core_flow=[white_frac@10%>>0.0 (near 1.0 in the extreme), f_50<<{:.4} (near 0.0 in the extreme)]",
+            m_black, m_black,
+        );
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let schedule = [0.05f64, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.00];
+        let mut next_sched_idx = 0usize;
+        let mut f_50: Option<f64> = None;
+        let mut white_at_10: Option<f64> = None;
+
+        const MAX_TICKS: usize = 6000;
+        let mut last_drained_frac = 0.0f64;
+        let mut t = 0usize;
+        while t < MAX_TICKS && next_sched_idx < schedule.len() {
+            sim.tick(gravity_dir, 4096);
+            t += 1;
+
+            let mut drained_mass = 0.0f64;
+            let mut drained_r = 0.0f64;
+            let mut drained_g = 0.0f64;
+            let mut drained_b = 0.0f64;
+            for y in (neck_y + 4)..h {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    if mask[idx] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    let hgt = sim.hm.data[idx] as f64;
+                    if hgt <= 1e-4 {
+                        continue;
+                    }
+                    drained_mass += hgt;
+                    drained_r += hgt * sim.cell_colors[idx * 4 + 0] as f64;
+                    drained_g += hgt * sim.cell_colors[idx * 4 + 1] as f64;
+                    drained_b += hgt * sim.cell_colors[idx * 4 + 2] as f64;
+                }
+            }
+            let drained_frac = drained_mass / initial_mass;
+            last_drained_frac = drained_frac;
+
+            if drained_mass > 0.0 {
+                let white_frac = (drained_r / drained_mass) / 255.0;
+                if f_50.is_none() && white_frac >= 0.5 {
+                    f_50 = Some(drained_frac);
+                }
+            }
+
+            while next_sched_idx < schedule.len() && drained_frac >= schedule[next_sched_idx] {
+                let white_frac = if drained_mass > 0.0 { (drained_r / drained_mass) / 255.0 } else { -1.0 };
+                let mean_row = if drained_mass > 0.0 {
+                    FILL_Y0 as f64 + (drained_g / drained_mass) / 255.0 * (fill_y1 - FILL_Y0 - 1) as f64
+                } else {
+                    -1.0
+                };
+                let mean_col = if drained_mass > 0.0 {
+                    min_x as f64 + (drained_b / drained_mass) / 255.0 * (max_x - min_x) as f64
+                } else {
+                    -1.0
+                };
+                println!(
+                    "diag_mass_vs_core[{label}] t={t} drained_frac_target={:.2} drained_frac_actual={:.4} \
+                     drained_mass={:.4} white_fraction_of_exited={:.4} mean_source_row={:.2} mean_source_col={:.2}",
+                    schedule[next_sched_idx], drained_frac, drained_mass, white_frac, mean_row, mean_col,
+                );
+                if (schedule[next_sched_idx] - 0.10).abs() < 1e-9 {
+                    white_at_10 = Some(white_frac);
+                }
+                next_sched_idx += 1;
+            }
+        }
+
+        if next_sched_idx < schedule.len() {
+            println!(
+                "diag_mass_vs_core[{label}]: WARNING did not reach all schedule points within \
+                 {MAX_TICKS} ticks; max drained_frac achieved={:.4}, stalled before target={:.2}",
+                last_drained_frac, schedule[next_sched_idx]
+            );
+        }
+
+        // Run a bounded number of extra ticks past the schedule loop so the self-validation
+        // below sees as-settled a state as practical, whether that means genuinely full
+        // drainage or a plateaued residual pile above the neck (reported honestly either way).
+        const SETTLE_EXTRA_TICKS: usize = 400;
+        for _ in 0..SETTLE_EXTRA_TICKS {
+            sim.tick(gravity_dir, 4096);
+        }
+
+        // ---- Self-validation (2): engine-wide conservation, whole grid, start vs end ----
+        let final_mass_total = sim.mass();
+        let mass_rel_err = (final_mass_total - initial_mass).abs() / initial_mass;
+        let final_r_mass_total = color_mass(&sim.cell_colors, &sim.hm, 0);
+        let final_g_mass_total = color_mass(&sim.cell_colors, &sim.hm, 1);
+        let final_b_mass_total = color_mass(&sim.cell_colors, &sim.hm, 2);
+        let r_rel_err = (final_r_mass_total - initial_r_mass).abs() / initial_r_mass;
+        let g_rel_err = (final_g_mass_total - initial_g_mass).abs() / initial_g_mass;
+        let b_rel_err = (final_b_mass_total - initial_b_mass).abs() / initial_b_mass;
+
+        println!(
+            "diag_mass_vs_core[{label}]: SELF-VALIDATION (engine-wide conservation, whole grid) \
+             initial_mass={:.6} final_mass={:.6} mass_rel_err={:.3e} | \
+             initial_R_mass={:.4} final_R_mass={:.4} R_rel_err={:.3e} | \
+             initial_G_mass={:.4} final_G_mass={:.4} G_rel_err={:.3e} | \
+             initial_B_mass={:.4} final_B_mass={:.4} B_rel_err={:.3e}",
+            initial_mass, final_mass_total, mass_rel_err,
+            initial_r_mass, final_r_mass_total, r_rel_err,
+            initial_g_mass, final_g_mass_total, g_rel_err,
+            initial_b_mass, final_b_mass_total, b_rel_err,
+        );
+
+        // ---- Self-validation (1): composition of everything that exited vs global ----
+        let mut drained_mass = 0.0f64;
+        let mut drained_r = 0.0f64;
+        for y in (neck_y + 4)..h {
+            for x in 0..w {
+                let idx = y * w + x;
+                if mask[idx] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let hgt = sim.hm.data[idx] as f64;
+                if hgt <= 1e-4 {
+                    continue;
+                }
+                drained_mass += hgt;
+                drained_r += hgt * sim.cell_colors[idx * 4 + 0] as f64;
+            }
+        }
+        let final_drained_frac = drained_mass / initial_mass;
+        let white_fraction_of_exited_final =
+            if drained_mass > 0.0 { (drained_r / drained_mass) / 255.0 } else { -1.0 };
+        let rel_diff = (white_fraction_of_exited_final - white_fraction_global).abs() / white_fraction_global;
+
+        println!(
+            "diag_mass_vs_core[{label}]: SELF-VALIDATION (exited composition vs global) \
+             final_drained_frac={:.4} white_fraction_of_exited_final={:.4} white_fraction_global={:.4} \
+             rel_diff={:.4}",
+            final_drained_frac, white_fraction_of_exited_final, white_fraction_global, rel_diff,
+        );
+
+        if final_drained_frac > 0.98 {
+            assert!(
+                rel_diff < 0.005,
+                "instrument self-check FAILED: at drained_frac={:.4} (near-full), exited composition \
+                 white_fraction={:.4} does not match global white_fraction={:.4} (rel_diff={:.4} >= 0.005) \
+                 -- the instrument is measuring something other than the intended composition and the \
+                 mass-flow-vs-core-flow numbers above are not trustworthy",
+                final_drained_frac, white_fraction_of_exited_final, white_fraction_global, rel_diff,
+            );
+        } else {
+            println!(
+                "diag_mass_vs_core[{label}]: NOTE final_drained_frac={:.4} did not reach near-full \
+                 drainage (>0.98) within {} ticks -- a residual pile remains above the neck, so the \
+                 exited-vs-global check above is informative only, not asserted here",
+                final_drained_frac,
+                MAX_TICKS + SETTLE_EXTRA_TICKS,
+            );
+        }
+
+        // Two reference bounds for white_fraction_of_exited@10%, so a reader can place the
+        // observation between them without doing arithmetic:
+        //   - ideal_mass_flow: perfect depth order (top/white drains first) => 0.0
+        //   - no_ordering_null: drainage composition indistinguishable from the global mix,
+        //     i.e. no depth ordering at all => white_fraction_global
+        const IDEAL_MASS_FLOW_WHITE_AT_10: f64 = 0.0;
+        println!(
+            "diag_mass_vs_core[{label}]: SUMMARY neck_width={neck_width:.2} m_black={:.4} f_50={:?} \
+             white_fraction_of_exited@10%: ideal_mass_flow={:.4} observed={:?} no_ordering_null={:.4}",
+            m_black, f_50, IDEAL_MASS_FLOW_WHITE_AT_10, white_at_10, white_fraction_global,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn diag_step1_mass_vs_core_flow_sand_funnel() {
+        for neck_width in [0.02f32, 0.04, 0.08, 0.12] {
+            let label = format!("sand_nw{neck_width:.2}");
+            diag_mass_vs_core_flow_funnel(MaterialMode::DrySand, 1.4, &label, neck_width);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn diag_step1_mass_vs_core_flow_liquid_funnel() {
+        for neck_width in [0.02f32, 0.04, 0.08, 0.12] {
+            let label = format!("liquid_nw{neck_width:.2}");
+            diag_mass_vs_core_flow_funnel(MaterialMode::Water, 0.95, &label, neck_width);
         }
     }
 }
