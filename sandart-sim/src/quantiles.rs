@@ -64,10 +64,37 @@ pub const DECILE_FRACTIONS: [f32; 9] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 
 /// Also the flattening width used to pack line positions into GPU uniform buffer slots.
 pub const MAX_QUANTILE_LINES: usize = 9;
 
-/// Recompute the full per-row mass cache from scratch. Cost is O(width * height); intended to
-/// be called only on discontinuities (reset, hourglass flip, or the quantile feature being
-/// switched on) rather than every tick.
-pub fn refresh_row_mass_full(heights: &[f32], width: usize, height: usize, row_mass: &mut Vec<f32>) {
+/// Sum one row's mass, counting only cells the physics solver can actually reach (`mask[idx] !=
+/// MASK_OUTSIDE`). Every flux/CA path in `physics.rs` is gated on `is_inside`, so a cell outside
+/// the shape mask never has its height touched by the solver — whatever `generate_smooth_noise`
+/// or a stale pre-shape-switch value left there is frozen forever. Counting it as real, moving
+/// mass is exactly the bug this filter exists to close: a quantile scan that includes it can find
+/// a whole decile's worth of "mass" sitting in cells that will never move, and pin that line at
+/// the top forever while the others correctly descend. See the module doc comment and
+/// `docs/ARCHITECTURE.md` section 1 (`MASK_OUTSIDE`/`is_inside`) for the wider contract.
+fn row_mass_sum(heights: &[f32], mask: &[u8]) -> f32 {
+    heights
+        .iter()
+        .zip(mask.iter())
+        .filter(|&(_, &m)| m != crate::MASK_OUTSIDE)
+        .map(|(&h, _)| h)
+        .sum()
+}
+
+/// Recompute the full per-row mass cache from scratch, filtered by `mask` so cells the physics
+/// solver cannot reach (`mask[idx] == MASK_OUTSIDE`) never count towards a row's mass. Cost is
+/// O(width * height); intended to be called only on discontinuities (reset, hourglass flip, or the
+/// quantile feature being switched on) rather than every tick.
+///
+/// `mask` must be the same length as `heights` (`width * height`) — the same shape-mask buffer
+/// `DrawingSimulation` keeps alongside `heightmap.data`.
+pub fn refresh_row_mass_full(
+    heights: &[f32],
+    width: usize,
+    height: usize,
+    mask: &[u8],
+    row_mass: &mut Vec<f32>,
+) {
     if row_mass.len() != height {
         row_mass.resize(height, 0.0);
     }
@@ -76,7 +103,7 @@ pub fn refresh_row_mass_full(heights: &[f32], width: usize, height: usize, row_m
     }
     for (y, slot) in row_mass.iter_mut().enumerate() {
         let start = y * width;
-        *slot = heights[start..start + width].iter().sum();
+        *slot = row_mass_sum(&heights[start..start + width], &mask[start..start + width]);
     }
 }
 
@@ -84,10 +111,15 @@ pub fn refresh_row_mass_full(heights: &[f32], width: usize, height: usize, row_m
 /// `active_blocks`, populated by `physics::settle_tick`), leaving every other row's cached sum
 /// untouched. Rows that are refreshed are always recomputed from scratch (never adjusted
 /// incrementally), so no f32 drift can accumulate in cells that stay active for a long time.
+///
+/// Filtered by `mask` for the same reason as `refresh_row_mass_full`: a cell outside the shape
+/// (`mask[idx] == MASK_OUTSIDE`) is never touched by the solver, so it must never be counted as
+/// live mass. `mask` must be the same length as `heights` (`width * height`).
 pub fn refresh_row_mass_active(
     heights: &[f32],
     width: usize,
     height: usize,
+    mask: &[u8],
     block_size: usize,
     active_blocks: &[crate::BlockActivity],
     row_mass: &mut Vec<f32>,
@@ -114,7 +146,7 @@ pub fn refresh_row_mass_active(
         let y_end = ((by + 1) * block_size).min(height);
         for y in y_start..y_end {
             let start = y * width;
-            row_mass[y] = heights[start..start + width].iter().sum();
+            row_mass[y] = row_mass_sum(&heights[start..start + width], &mask[start..start + width]);
         }
     }
 }
@@ -298,8 +330,10 @@ mod tests {
         for (i, v) in heights.iter_mut().enumerate() {
             *v = i as f32 * 0.01;
         }
+        // All-inside mask: filtering should be a no-op against the unfiltered direct sum.
+        let mask = vec![crate::MASK_INSIDE; width * height];
         let mut row_mass = Vec::new();
-        refresh_row_mass_full(&heights, width, height, &mut row_mass);
+        refresh_row_mass_full(&heights, width, height, &mask, &mut row_mass);
 
         for y in 0..height {
             let expected: f32 = heights[y * width..(y + 1) * width].iter().sum();
@@ -308,11 +342,46 @@ mod tests {
     }
 
     #[test]
+    fn test_refresh_row_mass_full_excludes_masked_out_cells() {
+        // Regression test for the "one decile line stays pinned" bug: cells outside the shape
+        // mask are never touched by the solver (every flux/CA path in physics.rs is gated on
+        // `is_inside`), so they must never count towards a row's cached mass — otherwise a
+        // frozen phantom value sits there forever and the quantile scan mistakes it for live,
+        // moving sand.
+        let width = 4;
+        let height = 2;
+        // Row 0: two cells outside the mask holding a large phantom height, two cells inside
+        // holding real mass. Row 1: fully inside, ordinary values.
+        let heights = vec![100.0, 100.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let mask = vec![
+            crate::MASK_OUTSIDE,
+            crate::MASK_OUTSIDE,
+            crate::MASK_INSIDE,
+            crate::MASK_INSIDE,
+            crate::MASK_INSIDE,
+            crate::MASK_INSIDE,
+            crate::MASK_INSIDE,
+            crate::MASK_INSIDE,
+        ];
+        let mut row_mass = Vec::new();
+        refresh_row_mass_full(&heights, width, height, &mask, &mut row_mass);
+
+        assert!(
+            (row_mass[0] - 3.0).abs() < 1e-6,
+            "row 0 should count only the two in-mask cells (1.0 + 2.0 = 3.0), got {} \
+             (phantom mass from the masked-out 100.0 cells leaked in)",
+            row_mass[0]
+        );
+        assert!((row_mass[1] - 18.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn test_refresh_row_mass_active_only_touches_active_block_rows() {
         let width = 8;
         let height = 8;
         let block_size = 4; // 2x2 blocks
         let heights = vec![1.0f32; width * height];
+        let mask = vec![crate::MASK_INSIDE; width * height];
         let mut row_mass = vec![0.0f32; height];
 
         // Seed a stale/wrong cache value everywhere.
@@ -324,7 +393,7 @@ mod tests {
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
         active_blocks[0] = crate::BlockActivity::Fast; // block (bx=0, by=0)
 
-        refresh_row_mass_active(&heights, width, height, block_size, &active_blocks, &mut row_mass);
+        refresh_row_mass_active(&heights, width, height, &mask, block_size, &active_blocks, &mut row_mass);
 
         // Rows 0..4 (the active block-row) must be refreshed to the real sum.
         for y in 0..4 {

@@ -769,6 +769,7 @@ impl DrawingSimulation {
             &self.heightmap.data,
             self.heightmap.width,
             self.heightmap.height,
+            &self.shape_mask,
             &mut self.row_mass,
         );
         self.quantile_targets =
@@ -785,6 +786,7 @@ impl DrawingSimulation {
             &self.heightmap.data,
             self.heightmap.width,
             self.heightmap.height,
+            &self.shape_mask,
             self.block_size,
             &self.active_blocks,
             &mut self.row_mass,
@@ -1893,6 +1895,7 @@ mod tests {
             &sim.heightmap.data,
             sim.heightmap.width,
             sim.heightmap.height,
+            &sim.shape_mask,
             &mut fresh_row_mass,
         );
 
@@ -1928,6 +1931,161 @@ mod tests {
 
         sim.set_quantile_mode(QuantileMode::Off);
         assert!(sim.quantile_positions().is_empty());
+    }
+
+    #[test]
+    // Direct proof of the fix, independent of the long-run behavioural test below: after a
+    // Circle reset (the non-Hourglass branch of `reset()`, which fills the *entire* grid via
+    // `generate_smooth_noise` with no shape-mask zeroing), a large fraction of the raw
+    // `heightmap.data` sum sits in cells outside the circular mask that the solver can never
+    // reach. The row-mass cache the quantile scan reads must total to the masked sum, not the
+    // raw one -- otherwise that phantom mass is exactly what pins an early decile line.
+    fn test_quantile_row_mass_excludes_out_of_mask_phantom_mass_after_circle_reset() {
+        let mut sim = DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::Circle;
+        sim.reset();
+
+        let raw_total: f32 = sim.heightmap.data.iter().sum();
+        let masked_total: f32 = sim
+            .heightmap
+            .data
+            .iter()
+            .zip(sim.shape_mask.iter())
+            .filter(|&(_, &m)| m != MASK_OUTSIDE)
+            .map(|(&h, _)| h)
+            .sum();
+
+        assert!(raw_total > 0.0, "reset() should leave some mass in the grid");
+        let phantom_fraction = (raw_total - masked_total) / raw_total;
+        assert!(
+            phantom_fraction > 0.05,
+            "expected a significant out-of-mask phantom fraction after Circle reset(), got {} \
+             (raw_total={}, masked_total={}) -- if this ever goes to ~0, the separate zeroing fix \
+             described in the task brief may already be in place and this test's premise no \
+             longer holds",
+            phantom_fraction,
+            raw_total,
+            masked_total
+        );
+
+        sim.set_quantile_mode(QuantileMode::Deciles);
+        let row_mass_total: f32 = sim.row_mass.iter().sum();
+        // Loose relative tolerance rather than a tight absolute one: row_mass_total is a sum of
+        // 512 per-row partial sums (a different f32 reduction order than the flat sum used for
+        // masked_total above), so the two accumulate rounding noise differently over ~262k
+        // elements -- that's ordinary float32 summation-order noise, not a correctness gap. What
+        // this assertion actually needs to rule out is `row_mass_total` including the raw,
+        // unmasked total instead (a ~50% relative gap here), which this tolerance is nowhere near
+        // wide enough to accidentally let through.
+        let rel_err = (row_mass_total - masked_total).abs() / masked_total;
+        assert!(
+            rel_err < 1e-3,
+            "quantile row_mass cache total should equal the mask-filtered sum, not the raw \
+             unfiltered heightmap sum: row_mass_total={}, masked_total={}, raw_total={}, rel_err={}",
+            row_mass_total,
+            masked_total,
+            raw_total,
+            rel_err
+        );
+    }
+
+    #[test]
+    // Regression test for the user's exact reported bug: Deciles + Circle + Sand-fall gravity,
+    // one decile line (the first, 10%-of-mass line) stayed pinned near the top of the grid while
+    // every other decile line correctly descended as sand fell under gravity.
+    //
+    // Root cause: `refresh_row_mass_full`/`refresh_row_mass_active` summed raw `heightmap.data`
+    // with no shape-mask filtering. `reset()`'s non-Hourglass branch -- which Circle, Square and
+    // Oval all take -- fills the *entire* grid via `generate_smooth_noise`, including cells
+    // outside the circular mask that the solver can never reach (every flux/CA path in
+    // `physics.rs` is gated on `is_inside`), so those cells hold a frozen, never-updated height
+    // forever. Counting that phantom height as live mass is enough on its own to satisfy an
+    // early decile's cumulative-mass threshold before the scan ever reaches real, moving sand --
+    // measured at 512, Circle's phantom fraction of the raw height-sum is ~0.335, comfortably
+    // past the first decile's 0.1 threshold.
+    //
+    // This has to be caught by watching a line's position *change* over a long run, not by a
+    // single snapshot -- a line sitting high up is not itself a bug, only a line that never moves
+    // while its neighbours do. Sampling at t=50 and t=500 (well past `QUANTILE_FULL_RESYNC_TICKS`
+    // = 100, so any staleness from that separate mechanism is not what's under test here) mirrors
+    // the user's report of a decile line frozen across many hundreds of ticks.
+    fn test_decile_lines_all_descend_for_circle_sandfall() {
+        let mut sim = DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::Circle;
+        sim.gravity_dir = Vec2::new(0.0, SANDFALL_GRAVITY_STRENGTH);
+        // Circle takes reset()'s non-Hourglass, generate_smooth_noise branch -- the user's exact
+        // repro path (not initialize_hourglass, which already zeroes out-of-mask cells).
+        sim.reset();
+        sim.set_quantile_mode(QuantileMode::Deciles);
+
+        let targets = [None; 5];
+        for _ in 0..50 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Circle, 16.0, 16.0);
+        }
+        let at_50 = sim.quantile_positions().to_vec();
+        assert_eq!(at_50.len(), 9);
+
+        for _ in 0..450 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Circle, 16.0, 16.0);
+        }
+        let at_500 = sim.quantile_positions().to_vec();
+        assert_eq!(at_500.len(), 9);
+
+        // Guard against the scenario going quiescent too early: if nothing of substance ever
+        // moved, every line would trivially "stay put" and the assertions below would pass
+        // vacuously (see docs/ARCHITECTURE.md section 11).
+        let total_mass: f32 = sim.row_mass.iter().sum();
+        assert!(
+            total_mass > 1.0,
+            "scenario went quiescent with almost no mass ({}) -- test would be vacuous",
+            total_mass
+        );
+
+        eprintln!(
+            "decile positions at t=50:  {:?}\ndecile positions at t=500: {:?}",
+            at_50, at_500
+        );
+
+        // Every decile line -- including (especially) the first -- must have descended
+        // (increased normalised position, since 0.0 = top row edge) by a meaningful amount. A
+        // frozen phantom-mass cell pins a line's position exactly flat instead of letting it
+        // track the real, moving pile underneath the phantom.
+        let deltas: Vec<f32> = at_50.iter().zip(at_500.iter()).map(|(&b, &a)| a - b).collect();
+
+        // Every decile line must have descended (increased normalised position) by a meaningful
+        // amount in absolute terms. This alone is a weak check -- see below for why it is not
+        // sufficient on its own.
+        for (i, &delta) in deltas.iter().enumerate() {
+            assert!(
+                delta > 0.01,
+                "decile line {} (cumulative fraction {}) should have descended between t=50 and \
+                 t=500: before={}, after={}, delta={}",
+                i,
+                DECILE_FRACTIONS[i],
+                at_50[i],
+                at_500[i],
+                delta
+            );
+        }
+
+        // The discriminating check: decile line 0 must move by a substantial *fraction of* how
+        // much the other eight lines moved, not merely by some small positive amount. A first
+        // pass at this test used a bare `delta > 0.01` per line and it passed even with the bug
+        // reverted (line 0 crept by 0.019, just clearing that bar, while lines 1-8 moved by
+        // 0.06-0.41) -- exactly the vacuous-test trap the task brief warned about. The bug's
+        // actual signature is line 0 moving a small fraction of what its neighbours do, not zero
+        // movement, so the check has to be comparative rather than a small fixed floor.
+        let others_mean_delta: f32 = deltas[1..].iter().sum::<f32>() / (deltas.len() - 1) as f32;
+        assert!(
+            deltas[0] > 0.3 * others_mean_delta,
+            "decile line 0 barely moved (delta={}) relative to the mean movement of lines 1-8 \
+             (mean delta={}) -- this is the reported bug's exact shape: one line pinned near the \
+             top (by phantom, out-of-mask mass inflating its cumulative-mass threshold) while the \
+             others correctly track the descending pile. deltas={:?}",
+            deltas[0],
+            others_mean_delta,
+            deltas
+        );
     }
 }
 
