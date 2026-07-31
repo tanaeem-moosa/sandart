@@ -1059,28 +1059,143 @@ fn step_hash(n: u32) -> f32 {
     (h % 10000) as f32 / 10000.0
 }
 
-/// Derive `SandboxShape::MultiStageHourglass`'s per-tier chamber counts, widest tier first,
-/// from the widest (top) tier's chamber count `n` (user-selectable 5..=16, default 8 -- see
-/// `DrawingSimulation::multistage_chambers`). This is the ONLY place the merge rule is
-/// expressed; `eval_sandbox_shape` and `DrawingSimulation::initialize_hourglass` both just
-/// consume the returned chain's length and per-tier values, with no assumption about how it
-/// was derived, how long it is, or that it ends `... -> 2 -> 1` -- so changing the rule (a
-/// different range, or a coarser final merge) is a one-function change.
+/// Fixed-size, allocation-free per-tier chamber BOUNDARIES for
+/// `SandboxShape::MultiStageHourglass`'s merge-tree cascade, built by `multistage_tier_boundaries`.
 ///
-/// Current rule: repeated `ceil(n / 2)` until a single bottom chamber is reached. At the
-/// shipped default `n = 8` this reproduces today's `8 -> 4 -> 2 -> 1` exactly (4 tiers) --
-/// the regression anchor this whole feature is built on top of. Other examples in the
-/// supported range: `16 -> 8 -> 4 -> 2 -> 1` (5 tiers) at the slider's top; `5 -> 3 -> 2 -> 1`
-/// (4 tiers) at its bottom; every `n` from 9 to 16 produces 5 tiers, every `n` from 5 to 8
-/// produces 4.
-pub fn multistage_tier_chambers(n: u32) -> Vec<u32> {
-    let mut cur = n.max(1);
-    let mut tiers = vec![cur];
-    while cur > 1 {
-        cur = (cur + 1) / 2; // ceil(cur / 2) -- the merge rule
-        tiers.push(cur);
+/// Every tier's boundaries are expressed as integer counts of `w / n` units, where `n` is tier
+/// 0's (the widest tier's) chamber count -- i.e. `multistage_chambers` itself, clamped to the
+/// supported `1..=16` range. Tier 0's boundaries are therefore always `[0, 1, 2, ..., n]`, and
+/// every lower tier's boundary list is, by construction, a SUBSET of tier 0's: each entry is
+/// copied verbatim from a parent boundary, never recomputed or interpolated, so there is no
+/// float accumulation or drift and a parent chamber's neck is always exactly on one of its
+/// child chamber's boundaries.
+///
+/// Sized for the supported range (`n <= 16`, so at most 17 boundary values per tier, and at
+/// most 5 tiers -- see `multistage_tier_boundaries`'s doc comment -- with one spare row of
+/// headroom) so the whole thing lives on the stack: no `Vec`, no per-call heap allocation, safe
+/// to build fresh on every `eval_sandbox_shape` call despite that function running ~262k times
+/// per mask regeneration.
+pub struct MultistageBoundaries {
+    /// `boundaries[t][0..lens[t]]` are tier `t`'s chamber boundaries (`lens[t]` values, i.e.
+    /// `lens[t] - 1` chambers), in integer units of `w / n`. Entries at or beyond `lens[t]`,
+    /// and rows at or beyond `n_tiers`, are unused zero padding.
+    pub boundaries: [[u32; 17]; 6],
+    /// Number of valid entries in `boundaries[t]` (chamber count + 1) for each tier.
+    pub lens: [usize; 6],
+    /// Number of tiers actually populated -- `multistage_tier_chambers(n).len()`.
+    pub n_tiers: usize,
+}
+
+/// Build `SandboxShape::MultiStageHourglass`'s merge-tree tier boundaries from the widest (top)
+/// tier's chamber count `n` (user-selectable 5..=16, default 8 -- see
+/// `DrawingSimulation::multistage_chambers`; clamped to `1..=16` here so the fixed-size arrays
+/// above can never be written out of bounds). This is the ONLY place the merge rule is
+/// expressed; `eval_sandbox_shape`, `multistage_tier_chambers` and
+/// `DrawingSimulation::initialize_hourglass` all just consume the result, with no assumption
+/// about how it was derived or how many tiers it produces -- so changing the rule (a different
+/// range, or a coarser final merge) is a one-function change.
+///
+/// THE MERGE RULE: tier 0 has `n` equal-width chambers, boundaries `[0, 1, .., n]`. Each lower
+/// tier merges its parent tier's `n_k` chambers into `m = ceil(n_k / 2)` children by
+/// WIDTH-BALANCED boundary selection, not fixed index pairing: child `j`'s right boundary
+/// (`j` = 1..m-1) is whichever of the parent's OWN boundary values lands closest to the evenly
+/// spaced target `j * n / m` (`n` = tier 0's chamber count, so this is exact integer comparison
+/// via cross-multiplication, never a float target) -- so every child's boundaries are still
+/// exactly the union of the parent boundaries it merges (its own neck is inside that span by
+/// construction, fixing the "neck lands on a wall" bug the original per-tier independent
+/// uniform grid had), but the CHOICE of which parent boundaries go together is made to keep
+/// children as close to equal width as the parent's own available cut points allow, rather than
+/// always grouping strict left-to-right pairs.
+///
+/// This replaces an earlier, simpler version of this rule (fixed 2-parents-per-child index
+/// pairing, with one designated middle child getting only 1 parent when `n_k` was odd). That
+/// version kept every merge "locally" balanced but NOT globally: two odd merges in a row (e.g.
+/// n = 9's `9 -> 5 -> 3`) can leave a lone narrow singleton chamber adjacent to a much wider
+/// sibling, and the NEXT merge, pairing them together by fixed index regardless of their actual
+/// widths, produces a child whose centre is dragged far enough toward the wide parent that the
+/// narrow parent's neck -- though still inside the child's boundary, satisfying the "no wall
+/// collision" guarantee -- lands outside that child's own visual funnel width (`0.35 *
+/// chamber_w`) at every row, a structural miss found by this feature's own regression test. The
+/// width-balanced selection dissolves that case (verified for n = 9's `9 -> 5 -> 3 -> 2 -> 1`:
+/// tier 2 becomes widths `[4, 3, 2]` instead of `[4, 1, 4]`, and the final `3 -> 2` merge lands
+/// widths `[4, 5]` with both parent centres within their child's funnel reach) without
+/// abandoning the exact-integer-subset property: a child boundary is still always copied
+/// verbatim from a parent boundary (which is, inductively, always one of tier 0's `[0, 1, ..,
+/// n]`), never recomputed or interpolated. On a DENSE, evenly-spaced parent (tier 0 itself, or
+/// any later tier that happens to still be uniform) this reduces to ordinary 2-parents-per-
+/// child pairing, so `n = 8` and `n = 16` (both all-power-of-two, always-uniform chains) still
+/// produce exactly today's `8 -> 4 -> 2 -> 1` / `16 -> 8 -> 4 -> 2 -> 1` -- see
+/// `test_multistage_n8_is_bit_identical_to_shipped_geometry`, unaffected by this change.
+pub fn multistage_tier_boundaries(n: u32) -> MultistageBoundaries {
+    let n = n.clamp(1, 16);
+
+    let mut boundaries = [[0u32; 17]; 6];
+    let mut lens = [0usize; 6];
+
+    let mut cur_n = n;
+    for i in 0..=cur_n as usize {
+        boundaries[0][i] = i as u32;
     }
-    tiers
+    lens[0] = cur_n as usize + 1;
+    let mut n_tiers = 1usize;
+
+    while cur_n > 1 {
+        let next_n = (cur_n + 1) / 2; // ceil(cur_n / 2) -- m, the number of children
+        let t = n_tiers - 1; // parent tier index
+        let p_len = cur_n as usize + 1; // number of boundary values in the parent tier
+        let m = next_n as usize;
+
+        boundaries[t + 1][0] = boundaries[t][0]; // always 0
+        boundaries[t + 1][m] = boundaries[t][p_len - 1]; // always n
+
+        // Width-balanced greedy: for each interior cut j = 1..m-1, walk a forward-only
+        // pointer `i` through the parent's own boundary list looking for the value closest
+        // to the evenly spaced target `j * n / m`, comparing via cross-multiplication
+        // (`boundaries[t][i] * m` vs `j * n`) so the comparison is exact integer arithmetic,
+        // never a float target. The pointer only ever advances (never revisits an earlier
+        // parent boundary), which keeps selections strictly increasing across all m-1 cuts
+        // -- i.e. every child gets at least one parent -- while `max_i` reserves enough
+        // remaining parent boundaries for the cuts still to come after this one. On an
+        // exact tie between two candidate boundaries, this advances to the LARGER one
+        // (`next_diff <= cur_diff`, not `<`), matching the worked example this rule was
+        // specified against.
+        let mut i = 1usize;
+        for j in 1..m {
+            let target_num = (j as u32) * n; // compare against boundaries[t][i] * m
+            let remaining_after = (m - 1) - j; // interior cuts still needed after this one
+            let max_i = p_len - 2 - remaining_after; // last usable index, reserving room
+            while i < max_i {
+                let cur_diff = (boundaries[t][i] * m as u32).abs_diff(target_num);
+                let next_diff = (boundaries[t][i + 1] * m as u32).abs_diff(target_num);
+                if next_diff <= cur_diff {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            boundaries[t + 1][j] = boundaries[t][i];
+            i += 1;
+        }
+        lens[t + 1] = m + 1;
+
+        cur_n = next_n;
+        n_tiers += 1;
+    }
+
+    MultistageBoundaries { boundaries, lens, n_tiers }
+}
+
+/// Derive `SandboxShape::MultiStageHourglass`'s per-tier chamber COUNTS, widest tier first, from
+/// `multistage_tier_boundaries` (the single source of truth for the merge rule -- see that
+/// function's doc comment). Kept as a separate `Vec`-returning function, rather than inlining
+/// `.lens[t] - 1` everywhere, because the non-hot-path call sites (the UI's cell-count readout,
+/// `DrawingSimulation::initialize_hourglass`, and this module's own tests) only ever want the
+/// per-tier chamber count, not the boundary geometry, and a `Vec` is fine there -- it's only
+/// `eval_sandbox_shape`'s per-cell hot path that needs `multistage_tier_boundaries`' allocation-
+/// free form directly.
+pub fn multistage_tier_chambers(n: u32) -> Vec<u32> {
+    let tb = multistage_tier_boundaries(n);
+    (0..tb.n_tiers).map(|t| (tb.lens[t] - 1) as u32).collect()
 }
 
 /// `MultiStageHourglass`'s per-chamber neck half-width: capped at 0.30 of that tier's own
@@ -1218,25 +1333,46 @@ pub fn eval_sandbox_shape(
             if dy < -total_half || dy >= total_half {
                 return (false, false);
             }
-            let tier_chambers = multistage_tier_chambers(multistage_chambers);
-            let n_tiers = tier_chambers.len();
+            // Allocation-free per-tier boundary table (see `multistage_tier_boundaries`'s doc
+            // comment) -- built fresh on every call, which is fine: it's fixed-size stack
+            // arrays, not a `Vec`, so there's no heap churn despite this function running
+            // ~262k times per mask regeneration.
+            let tb = multistage_tier_boundaries(multistage_chambers);
+            let n_tiers = tb.n_tiers;
             let tier_h = (2.0 * total_half) / n_tiers as f32;
             let tier = (((dy + total_half) / tier_h).floor() as i32)
                 .clamp(0, n_tiers as i32 - 1) as usize;
             let y0 = -total_half + tier as f32 * tier_h;
             let y1 = y0 + tier_h;
-            let n_t = tier_chambers[tier] as f32;
-            let chamber_w = w_f / n_t;
 
-            // Chamber `i` of an `n`-chamber tier is centred at `(i + 0.5) * chamber_w`
-            // (measured from the left edge) -- each tier simply divides the full width
-            // into its own chamber count evenly, so a clean 2-to-1 visual alignment with
-            // the tier below falls out automatically whenever the merge from `n` produces
-            // an exact half, and is merely an even, regular division (not a broken one)
-            // when it doesn't (e.g. 5 -> 3, which isn't an exact halving). Nothing here
-            // has to compute a parent index at all.
-            let slot = (((dx + w_f / 2.0) / chamber_w).floor() as i32).clamp(0, n_t as i32 - 1);
-            let chamber_center = (slot as f32 + 0.5) * chamber_w - w_f / 2.0;
+            // Tier 0's chamber count (`n`, clamped to the supported 1..=16 range by
+            // `multistage_tier_boundaries`) is the `n` that every boundary value is expressed
+            // in `w / n` units of.
+            let n0 = (tb.lens[0] - 1) as f32;
+            let unit_w = w_f / n0;
+
+            // Chamber `slot` of this tier spans boundaries `[tb.boundaries[tier][slot],
+            // tb.boundaries[tier][slot + 1])`, in `w / n0` units -- found by scanning this
+            // tier's own (short, <= 17-entry) boundary list, rather than dividing the full
+            // width evenly by this tier's OWN chamber count the way every tier used to. That
+            // old per-tier independent uniform grid is exactly the bug this replaces: a
+            // merge-tree boundary list guarantees each child's span is the union of the
+            // parent chambers that feed it, so a parent's neck is inside its child's slot by
+            // construction, instead of landing there by arithmetic luck (or not, e.g. a
+            // middle chamber's neck landing exactly on the tier-below's centre wall).
+            let n_t = tb.lens[tier] - 1;
+            let u = ((dx + w_f / 2.0) / unit_w).clamp(0.0, n0);
+            let mut slot = n_t - 1;
+            for i in 0..n_t {
+                if u < tb.boundaries[tier][i + 1] as f32 {
+                    slot = i;
+                    break;
+                }
+            }
+            let b0 = tb.boundaries[tier][slot] as f32;
+            let b1 = tb.boundaries[tier][slot + 1] as f32;
+            let chamber_w = (b1 - b0) * unit_w;
+            let chamber_center = ((b0 + b1) * 0.5) * unit_w - w_f / 2.0;
             let dx_local = dx - chamber_center;
 
             // Each chamber is its own small funnel: widest at the top of its tier,
@@ -7380,9 +7516,20 @@ mod tests {
             let ui_min_neck_width = 0.5 / w as f32;
 
             for chambers in 5u32..=16 {
+                // Per-tier boundary table -- the single source of truth `eval_sandbox_shape`
+                // itself now uses (see `multistage_tier_boundaries`'s doc comment). Sampling
+                // positions below are derived from this, NOT from an assumed uniform
+                // `w / n` grid per tier: the merge-tree fix this test guards makes lower
+                // tiers' chambers unequal width whenever an odd parent count merges (e.g.
+                // n = 5's tier 1 is `2, 1, 2` units wide, not three equal thirds), so a
+                // uniform-grid sampling position would silently sample the wrong pixels once
+                // that happens.
+                let tb = multistage_tier_boundaries(chambers);
+                let n_tiers = tb.n_tiers;
                 let tier_chambers = multistage_tier_chambers(chambers);
-                let n_tiers = tier_chambers.len();
                 let tier_h = (2.0 * total_half) / n_tiers as f32;
+                let n0 = (tb.lens[0] - 1) as f32; // == chambers
+                let unit_w = w as f32 / n0;
 
                 // A coarser neck/curve sweep than the dedicated test above (this one already
                 // multiplies by 12 chamber counts and 2 resolutions) but still covers the full
@@ -7403,11 +7550,13 @@ mod tests {
                             // above the boundary so it lands solidly inside this tier's own neck.
                             let y1 = -total_half + (tier as f32 + 1.0) * tier_h;
                             let neck_row = (center + y1 - 2.0).round() as usize;
-                            let chamber_w = w as f32 / n as f32;
 
-                            for c in 0..n {
+                            for c in 0..n as usize {
+                                let b0 = tb.boundaries[tier][c] as f32;
+                                let b1 = tb.boundaries[tier][c + 1] as f32;
+
                                 // (1) no dam: the chamber's own neck centre must stay open.
-                                let cx = ((c as f32 + 0.5) * chamber_w).round() as usize;
+                                let cx = (((b0 + b1) * 0.5) * unit_w).round() as usize;
                                 assert_ne!(
                                     mask[neck_row * w + cx],
                                     crate::MASK_OUTSIDE,
@@ -7419,8 +7568,8 @@ mod tests {
 
                                 // (2) no merge: the wall between this chamber's neck and the
                                 // next chamber's neck (the slot boundary) must stay closed.
-                                if c + 1 < n {
-                                    let boundary_x = ((c as f32 + 1.0) * chamber_w).round() as usize;
+                                if c + 1 < n as usize {
+                                    let boundary_x = (b1 * unit_w).round() as usize;
                                     assert_eq!(
                                         mask[neck_row * w + boundary_x],
                                         crate::MASK_OUTSIDE,
@@ -7583,6 +7732,151 @@ mod tests {
                          multistage_chambers=8 -- NOT bit-identical. First mismatch at {:?}",
                         grid, neck_width, curve, mismatches, w * h, first_mismatch
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    // Permanent regression test for the "neck lands on a wall" bug in `MultiStageHourglass`
+    // that motivated the merge-tree boundary rewrite (`multistage_tier_boundaries` /
+    // `multistage_tier_chambers`'s doc comments). Before that rewrite, every tier laid its
+    // chambers on its OWN independent uniform grid of `w / n_t` slots, computed with no
+    // reference to the tier above, so a parent chamber's neck landed over a child chamber's
+    // OPEN interior only by arithmetic luck. Probed at grid 512 across all 12 supported chamber
+    // counts (5..=16), only n = 8 and n = 16 (both all-power-of-two merge chains) were clean;
+    // every other count had at least one neck with a fraction of its width blocked -- and in
+    // several cases (n = 5, 6, 9, 10, 11, 12) a neck with ZERO open cells beneath it, i.e. a hard
+    // dam, not just a narrowing. This test walks every tier boundary, for every supported chamber
+    // count, at every supported grid size, and asserts neither failure mode occurs.
+    //
+    // Method: for tier `t`'s neck row (one row above the boundary with tier `t + 1`), enumerate
+    // maximal open (mask-inside) runs -- one run per chamber, since adjacent chambers' necks are
+    // walled off from each other (see the dam/merge test above). For each run, count how many of
+    // its cells are open one row below the boundary (inside tier `t + 1`). Assert that count is
+    // never zero (a dam) and is at least a third of the run's width (a "mostly over open space"
+    // bar loose enough to allow the cascade's intentional shoulder-and-slide partial overhang --
+    // see below -- while still catching the near-total misses this bug produced).
+    //
+    // PARTIAL overhang is normal and deliberately NOT asserted away: it already happens today at
+    // the shipped n = 8 (the cascade's intended look, sand sliding off a shoulder rather than
+    // dropping straight through), so a test that demanded 100% coverage would be asserting away
+    // real, intended geometry, not just the bug. Only a near-total miss (this test's 1/3 floor)
+    // or an exact zero is treated as broken.
+    //
+    // NON-VACUITY: this test was confirmed to fail, and to name the exact broken (n, tier, x
+    // range) triples from the probe table above, before the merge-tree fix was applied -- see
+    // the task report this shipped alongside for the exact failure output captured that way.
+    //
+    // NO PER-COUNT EXEMPTIONS: this holds for every n in 5..=16 and every tier boundary, with no
+    // exclusion list. An earlier version of `multistage_tier_boundaries` merged parent chambers
+    // by fixed index pairing (2 parents per child, one designated middle child getting only 1
+    // when the parent count was odd); that kept each individual merge locally balanced but not
+    // globally so, and n = 9's `9 -> 5 -> 3 -> 2 -> 1` chain -- two odd merges in a row -- left a
+    // lone narrow singleton chamber (from the first odd merge) paired by index with a much wider
+    // neighbour (in the second), dragging the resulting child's centre far enough that the
+    // narrow parent's neck, though still inside the child's boundary, sat outside that child's
+    // own funnel width (`0.35 * chamber_w`) at every row -- a structural miss, not a probe-depth
+    // or curve artifact, and this test caught it (n = 9 was the only count in the whole
+    // supported range where the old index-pairing rule failed this way). `multistage_tier_
+    // boundaries` now selects each merge's boundaries by WIDTH, not index (see that function's
+    // doc comment for the full before/after and the worked n = 9 numbers), which dissolves this
+    // case without abandoning the exact-integer-subset property or disturbing n = 8 / n = 16's
+    // bit-identical uniform halving.
+    //
+    // SCOPE: `neck_width` is swept over `{0.06, 0.12}` only, and `hourglass_curve` over `{0.1,
+    // 0.6}` only -- narrower than the full slider ranges, and NOT because wider sweeps fail for
+    // an alignment reason. Re-running the excluded corners (neck_width = 0.005, the slider's
+    // resolution-dependent floor point which collapses to a literal 1-cell neck -- see
+    // `multistage_neck_half_width`'s doc comment -- and hourglass_curve up to 3.0, the slider's
+    // steepest setting) reproduces failures at n = 8 and n = 16 too, i.e. the two chains that are
+    // BIT-IDENTICAL to today's shipped geometry both before and after every change in this file
+    // (see `test_multistage_n8_is_bit_identical_to_shipped_geometry`). That proves those
+    // failures are an orthogonal, PRE-EXISTING property of the taper design, not something any
+    // version of the alignment fix introduced or could fix: at grid 64 (the smallest supported
+    // grid, hence the shortest tiers -- as little as ~10-16px tall at 4-5 tiers) a 1-cell neck
+    // combined with a steep curve, or simply a chamber whose neck sits close to its parent's
+    // envelope edge, can lose its entire margin within the single row this test samples 1px into
+    // the next tier -- a rasterisation/taper-rate reality of the smallest grid and the already-
+    // accepted 1-cell neck floor (see `test_drainage_at_narrowest_possible_neck`'s doc comment
+    // for the existing precedent of treating that specific corner as an accepted tradeoff, not a
+    // gate), independent of whether the tier boundaries above it are aligned correctly. Measured
+    // examples: n = 16, grid = 64, neck_width = 0.005, curve = 3.0 -- 8 separate tier1->2 necks
+    // each 1 cell wide with 0 cells open 1px below; n = 12, grid = 64, neck_width = 0.02, curve =
+    // 1.0 -- tier3->4 (the FINAL, always-trivial merge into the single bottom chamber) short by
+    // exactly one cell of the 1/3 threshold.
+    //
+    // IMPORTANT FOR FUTURE READERS: this scoped sweep is 0 failures across all four grids and
+    // every n in 5..=16 with NO exclusions -- but it does NOT prove the whole (neck_width,
+    // hourglass_curve) parameter space is clean at grid 64. `curve > 0.6` combined with a
+    // near-minimum neck at grid 64 is explicitly NOT covered here (see the measured examples
+    // above) and is known, separately, to still misbehave -- do not read a green run of this
+    // test as a certificate that grid 64 is clean at every slider setting.
+    fn test_multistage_neck_always_overhangs_open_space_below() {
+        for &grid in &[64usize, 128, 256, 512] {
+            let w = grid;
+            let h = grid;
+            let h_f = h as f32;
+            let half_h = h_f / 2.0;
+            let total_half = 0.42 * h_f;
+
+            for n in 5u32..=16 {
+                for &neck_width in &[0.06f32, 0.12] {
+                    for &curve in &[0.1f32, 0.6] {
+                        let tb = multistage_tier_boundaries(n);
+                        let n_tiers = tb.n_tiers;
+                        let tier_h = (2.0 * total_half) / n_tiers as f32;
+
+                        let open = |x: usize, y: usize| -> bool {
+                            eval_sandbox_shape(
+                                x, y, w, h, SandboxShape::MultiStageHourglass,
+                                neck_width, curve, n, false,
+                            ).0
+                        };
+                        let row_of = |dy: f32| -> usize {
+                            ((dy + half_h).round() as isize).clamp(0, h as isize - 1) as usize
+                        };
+
+                        for t in 0..n_tiers - 1 {
+                            // Neck row: one row above the boundary with tier t+1. Below row:
+                            // one row inside tier t+1. Mirrors the probe this test replaces
+                            // (the task's saved `tmp_neck_alignment_probe` module).
+                            let dy_neck = -total_half + (t as f32 + 1.0) * tier_h - 1.0;
+                            let dy_below = -total_half + (t as f32 + 1.0) * tier_h + 1.0;
+                            let (ry_neck, ry_below) = (row_of(dy_neck), row_of(dy_below));
+
+                            let mut x = 0usize;
+                            while x < w {
+                                if !open(x, ry_neck) {
+                                    x += 1;
+                                    continue;
+                                }
+                                let start = x;
+                                while x < w && open(x, ry_neck) {
+                                    x += 1;
+                                }
+                                let end = x; // exclusive
+                                let run_width = end - start;
+                                let below_open = (start..end).filter(|&c| open(c, ry_below)).count();
+
+                                assert!(
+                                    below_open > 0,
+                                    "grid={} n={} neck_width={:.4} curve={:.2} tier{}->{}: neck \
+                                     x[{},{}) width {} has ZERO open cells below it -- a dam, \
+                                     sand above it can never drain",
+                                    grid, n, neck_width, curve, t, t + 1, start, end, run_width
+                                );
+                                assert!(
+                                    below_open * 3 >= run_width,
+                                    "grid={} n={} neck_width={:.4} curve={:.2} tier{}->{}: neck \
+                                     x[{},{}) width {} has only {} of {} cells open below it \
+                                     (< 1/3) -- overhangs a wall, not just a shoulder",
+                                    grid, n, neck_width, curve, t, t + 1, start, end, run_width,
+                                    below_open, run_width
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
