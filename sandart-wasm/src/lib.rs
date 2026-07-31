@@ -312,8 +312,9 @@ impl WasmSimulationState {
     /// `HeightmapRenderer`) is a fixed-size allocation made at construction time, so there is no
     /// in-place "resize" — only "replace with a freshly constructed one of the right size". That
     /// necessarily discards the current sand/water contents (same as any other reset), but current
-    /// material, shape, gravity, neck width and chamber curvature survive via `sim.reset()`'s
-    /// normal contract (it never touches those fields) rather than reverting to defaults.
+    /// material, shape, gravity, neck width, chamber curvature and multistage chamber count
+    /// survive via `sim.reset()`'s normal contract (it never touches those fields) rather than
+    /// reverting to defaults.
     pub fn set_grid_size(&mut self, size: u32) -> Result<(), JsValue> {
         let size = size as usize;
         if !matches!(size, 64 | 128 | 256 | 512) {
@@ -329,6 +330,7 @@ impl WasmSimulationState {
         let gravity_dir = self.sim.gravity_dir;
         let neck_width = self.sim.neck_width;
         let hourglass_curve = self.sim.hourglass_curve;
+        let multistage_chambers = self.sim.multistage_chambers;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -336,6 +338,7 @@ impl WasmSimulationState {
         sim.gravity_dir = gravity_dir;
         sim.neck_width = neck_width;
         sim.hourglass_curve = hourglass_curve;
+        sim.multistage_chambers = multistage_chambers;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -418,6 +421,41 @@ impl WasmSimulationState {
     pub fn set_hourglass_curve(&mut self, curve: f32) {
         self.sim.hourglass_curve = curve;
         self.sim.generate_shape_mask();
+    }
+
+    /// The widest (top) tier's chamber count for `SandboxShape::MultiStageHourglass`'s
+    /// merging cascade -- user-selectable 5..=16, default 8. Clamped defensively even though
+    /// the UI slider (`chambers-slider` in `index.html`) already enforces the range, matching
+    /// `set_marble_count`'s pattern below. Follows the exact same contract as
+    /// `set_neck_width`/`set_hourglass_curve`: only regenerates the mask, does not reset the
+    /// sim (the caller in `demo.js` resets explicitly afterward, same as it does for those
+    /// two, since changing the chamber count changes the boundary as much as they do).
+    pub fn set_multistage_chambers(&mut self, chambers: u32) {
+        self.sim.multistage_chambers = chambers.clamp(5, 16);
+        self.sim.generate_shape_mask();
+    }
+
+    /// Current `multistage_chambers` value, so the web UI can initialise its slider/readout
+    /// from the actual backing value rather than assuming its own hard-coded default matches.
+    pub fn get_multistage_chambers(&self) -> u32 {
+        self.sim.multistage_chambers
+    }
+
+    /// The rasterised neck HALF-width, in cells, that `eval_sandbox_shape` actually uses for
+    /// the current shape/neck_width/multistage_chambers/grid-size combination -- i.e. after
+    /// the per-tier cap and floor (and, for MultiStageHourglass, the anti-merge ceiling) have
+    /// been applied, not just the raw slider fraction. Exists purely for the UI cell-count
+    /// readout next to the neck-width slider: the floor/cap logic means the slider's fraction
+    /// alone is a poor guide to what actually rasterises, especially at small grid sizes,
+    /// which is exactly what prompted adding this readout in the first place. Display-only;
+    /// does not affect geometry.
+    pub fn neck_half_width_cells(&self) -> f32 {
+        sandart_sim::physics::effective_neck_half_width_cells(
+            self.grid_size,
+            self.sandbox_shape,
+            self.sim.neck_width,
+            self.sim.multistage_chambers,
+        )
     }
 
     pub fn draw_ripples(&mut self) {

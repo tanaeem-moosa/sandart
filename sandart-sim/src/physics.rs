@@ -1059,6 +1059,89 @@ fn step_hash(n: u32) -> f32 {
     (h % 10000) as f32 / 10000.0
 }
 
+/// Derive `SandboxShape::MultiStageHourglass`'s per-tier chamber counts, widest tier first,
+/// from the widest (top) tier's chamber count `n` (user-selectable 5..=16, default 8 -- see
+/// `DrawingSimulation::multistage_chambers`). This is the ONLY place the merge rule is
+/// expressed; `eval_sandbox_shape` and `DrawingSimulation::initialize_hourglass` both just
+/// consume the returned chain's length and per-tier values, with no assumption about how it
+/// was derived, how long it is, or that it ends `... -> 2 -> 1` -- so changing the rule (a
+/// different range, or a coarser final merge) is a one-function change.
+///
+/// Current rule: repeated `ceil(n / 2)` until a single bottom chamber is reached. At the
+/// shipped default `n = 8` this reproduces today's `8 -> 4 -> 2 -> 1` exactly (4 tiers) --
+/// the regression anchor this whole feature is built on top of. Other examples in the
+/// supported range: `16 -> 8 -> 4 -> 2 -> 1` (5 tiers) at the slider's top; `5 -> 3 -> 2 -> 1`
+/// (4 tiers) at its bottom; every `n` from 9 to 16 produces 5 tiers, every `n` from 5 to 8
+/// produces 4.
+pub fn multistage_tier_chambers(n: u32) -> Vec<u32> {
+    let mut cur = n.max(1);
+    let mut tiers = vec![cur];
+    while cur > 1 {
+        cur = (cur + 1) / 2; // ceil(cur / 2) -- the merge rule
+        tiers.push(cur);
+    }
+    tiers
+}
+
+/// `MultiStageHourglass`'s per-chamber neck half-width: capped at 0.30 of that tier's own
+/// chamber width (so the neck can never be wider than the chamber's own taper allows, which
+/// is what stops the funnel inverting), floored at 0.5 cells -- half a cell either side of
+/// centre, i.e. a 1-cell-wide opening, the smallest a rasterised neck can be and still exist
+/// at all -- and then clamped to a hair under half the chamber width (`anti_merge_ceiling`)
+/// so the floor above can never push the neck past the point where it would overlap this
+/// chamber's neighbour -- the merge failure this whole clamp chain exists to prevent.
+///
+/// The floor used to be 3 cells; it was lowered to 0.5 by deliberate user request (a 1-cell
+/// neck reachable at every resolution, on the reasoning "if it blocks sand flow, I could just
+/// increase the neck width -- no point not allowing me to pick"), paired with `index.html`'s
+/// `neck-slider` gaining a resolution-dependent `min` (`0.5 / grid_width`, recomputed in
+/// `demo.js` on every resolution change) so the slider's own bottom end actually reaches this
+/// floor rather than clamping to it early. This floor is itself now mostly a safety net for
+/// direct API/future callers rather than load-bearing from the shipped slider -- see the task
+/// report this shipped alongside for drainage measurements at a 1-cell neck, and note this
+/// deliberately changes geometry at the bottom of the neck-width slider (unlike the anti-merge
+/// ceiling below, which was proven a no-op at the shipped default).
+///
+/// See the doc comment at this function's one call site inside `eval_sandbox_shape` for the
+/// full worked numbers.
+///
+/// Factored out into its own function -- rather than left inline in `eval_sandbox_shape` --
+/// so `effective_neck_half_width_cells` below (the UI cell-count readout) computes this
+/// exact same value instead of a second, hand-copied formula that could silently drift out of
+/// sync with it.
+fn multistage_neck_half_width(w_f: f32, chamber_w: f32, neck_width: f32) -> f32 {
+    let neck_cap = 0.30 * chamber_w;
+    let neck_hw = (neck_width * w_f).min(neck_cap).max(0.5);
+    let anti_merge_ceiling = (chamber_w / 2.0 - 0.5).max(0.5);
+    neck_hw.min(anti_merge_ceiling)
+}
+
+/// The rasterised neck HALF-width, in cells, that `eval_sandbox_shape` actually uses for
+/// `shape` at grid width `w` and the given `neck_width` (and, for `MultiStageHourglass`,
+/// `multistage_chambers`) -- i.e. after whatever per-shape cap/floor logic applies, not just
+/// the raw `neck_width * w` fraction. Exists so the web UI can show the user where the
+/// neck-width slider's fraction actually lands once that logic has run (see the `demo.js`
+/// readout this feeds), rather than only the fraction itself, which is a poor guide to the
+/// real opening once a cap or floor bites -- particularly at small grid sizes.
+///
+/// For every funnel shape except `MultiStageHourglass` there is no cap, so this is simply
+/// `neck_width * w`. For `MultiStageHourglass` it reproduces the widest tier's (tier 0's) own
+/// neck computation -- the narrowest chambers, and therefore the one most likely to be
+/// capped or floored -- via `multistage_neck_half_width`, the same function
+/// `eval_sandbox_shape` calls, so this cannot drift out of sync with the geometry it
+/// describes.
+pub fn effective_neck_half_width_cells(w: usize, shape: crate::SandboxShape, neck_width: f32, multistage_chambers: u32) -> f32 {
+    let w_f = w as f32;
+    match shape {
+        crate::SandboxShape::MultiStageHourglass => {
+            let tiers = multistage_tier_chambers(multistage_chambers);
+            let chamber_w = w_f / tiers[0] as f32; // widest tier, tier 0
+            multistage_neck_half_width(w_f, chamber_w, neck_width)
+        }
+        _ => neck_width * w_f,
+    }
+}
+
 pub fn eval_sandbox_shape(
     cx: usize,
     cy: usize,
@@ -1067,6 +1150,7 @@ pub fn eval_sandbox_shape(
     shape: crate::SandboxShape,
     neck_width: f32,
     hourglass_curve: f32,
+    multistage_chambers: u32,
     flipped: bool,
 ) -> (bool, bool) {
     let center_x = w as f32 / 2.0;
@@ -1122,30 +1206,35 @@ pub fn eval_sandbox_shape(
             }
         }
         crate::SandboxShape::MultiStageHourglass => {
-            // Binary merging cascade: 8 chambers at the top, each adjacent pair merging
-            // into one shared chamber below, halving every tier -- 8 -> 4 -> 2 -> 1 --
-            // until everything collects in a single chamber at the bottom. Four tiers of
-            // equal height stacked from `-total_half` (top) to `+total_half` (bottom).
+            // Binary-merging cascade: `multistage_chambers` chambers in the widest (top)
+            // tier, each adjacent pair merging into one shared chamber below, per
+            // `multistage_tier_chambers` -- e.g. 8 -> 4 -> 2 -> 1 at the shipped default,
+            // 16 -> 8 -> 4 -> 2 -> 1 at the slider's top, 5 -> 3 -> 2 -> 1 at its bottom.
+            // The TIER COUNT is therefore itself derived, not fixed at 4 -- see that
+            // function's doc comment, the single place this rule is expressed. Tiers of
+            // equal height are stacked from `-total_half` (top) to `+total_half` (bottom),
+            // however many tiers the chain produces.
             let total_half = 0.42 * h_f;
             if dy < -total_half || dy >= total_half {
                 return (false, false);
             }
-            const TIER_CHAMBERS: [u32; 4] = [8, 4, 2, 1];
-            let tier_h = (2.0 * total_half) / TIER_CHAMBERS.len() as f32;
+            let tier_chambers = multistage_tier_chambers(multistage_chambers);
+            let n_tiers = tier_chambers.len();
+            let tier_h = (2.0 * total_half) / n_tiers as f32;
             let tier = (((dy + total_half) / tier_h).floor() as i32)
-                .clamp(0, TIER_CHAMBERS.len() as i32 - 1) as usize;
+                .clamp(0, n_tiers as i32 - 1) as usize;
             let y0 = -total_half + tier as f32 * tier_h;
             let y1 = y0 + tier_h;
-            let n_t = TIER_CHAMBERS[tier] as f32;
+            let n_t = tier_chambers[tier] as f32;
             let chamber_w = w_f / n_t;
 
             // Chamber `i` of an `n`-chamber tier is centred at `(i + 0.5) * chamber_w`
-            // (measured from the left edge). Chamber `i` of the `n/2`-chamber tier
-            // beneath it is centred at `(i/2 + 0.5) * (2 * chamber_w)`, which is exactly
-            // the average of chambers `2k` and `2k+1` above it -- so centring each
-            // chamber in its own slot is all that is needed for the pairing the brief
-            // asks for (child `i` -> parent `i/2`) to fall out automatically; nothing
-            // below has to compute a parent index at all.
+            // (measured from the left edge) -- each tier simply divides the full width
+            // into its own chamber count evenly, so a clean 2-to-1 visual alignment with
+            // the tier below falls out automatically whenever the merge from `n` produces
+            // an exact half, and is merely an even, regular division (not a broken one)
+            // when it doesn't (e.g. 5 -> 3, which isn't an exact halving). Nothing here
+            // has to compute a parent index at all.
             let slot = (((dx + w_f / 2.0) / chamber_w).floor() as i32).clamp(0, n_t as i32 - 1);
             let chamber_center = (slot as f32 + 0.5) * chamber_w - w_f / 2.0;
             let dx_local = dx - chamber_center;
@@ -1153,35 +1242,53 @@ pub fn eval_sandbox_shape(
             // Each chamber is its own small funnel: widest at the top of its tier,
             // narrowing to a neck at the bottom. `max_hw` reuses the 0.35 fraction every
             // other funnel shape in this file uses for its chamber half-width -- and at
-            // tier 3 (one chamber spanning the full width) it reduces to exactly that:
-            // 0.35 * w, the same top width as the plain `Hourglass`.
+            // the bottom tier (one chamber spanning the full width) it reduces to exactly
+            // that: 0.35 * w, the same top width as the plain `Hourglass`.
             //
             // The neck cannot just be `neck_width * w_f` here the way it is everywhere
-            // else: that slider tops out at 0.12 * w, but tier 0's chambers are only
-            // w/8 = 0.125 * w wide, so an unscaled neck at the top of the slider would be
-            // nearly as wide as its own chamber and the 8 chambers would merge into open
-            // space -- the specific failure this design invites. The neck half-width is
-            // instead capped at 0.30 of *that tier's own* chamber width (comfortably
-            // under the 0.35 used for the chamber's own widest point, so the funnel can
-            // never invert with the neck wider than its own top) and floored at 3 cells
-            // so it never collapses to nothing at the bottom of the slider.
+            // else: that slider tops out at 0.12 * w, but the widest tier's chambers can
+            // be as narrow as w/16 = 0.0625 * w (at the top of the chamber-count slider),
+            // so an unscaled neck there would be nearly as wide as its own chamber and
+            // adjacent chambers would merge into open space -- the specific failure this
+            // design invites. The neck half-width is instead capped at 0.30 of *that
+            // tier's own* chamber width (comfortably under the 0.35 used for the
+            // chamber's own widest point, so the funnel can never invert with the neck
+            // wider than its own top) and floored at 0.5 cells (a 1-cell-wide opening,
+            // the smallest a rasterised neck can be at all) so it never collapses to
+            // nothing at the bottom of the slider.
             //
-            // Tabulated in fractions of `w` (grid-size independent) and in cells on the
-            // shipped 512 grid, at the slider's low/mid/high ends (neck_width = .005 / .06 / .12):
+            // The slider's own minimum is resolution-dependent (`0.5 / grid_width`, set in
+            // `demo.js` and recomputed on every resolution change) precisely so its bottom
+            // end lands on exactly this 0.5-cell floor at every grid size, rather than a
+            // fixed fraction that floors to very different cell counts depending on
+            // resolution (which was the original complaint this floor-lowering answers: at
+            // the old fixed minimum and floor, low resolutions spent much of the slider's
+            // travel pinned at a neck several times wider than the new floor allows).
             //
-            //   tier  n   chamber_w       max_hw           neck_cap         neck_hw @ .005 / .06 / .12
-            //     0   8   .125  ( 64px)   .0438 ( 22.4px)  .0375 ( 19.2px)   3.0px / 19.2px(cap) / 19.2px(cap)
-            //     1   4   .25   (128px)   .0875 ( 44.8px)  .075  ( 38.4px)   3.0px / 30.7px      / 38.4px(cap)
-            //     2   2   .5    (256px)   .175  ( 89.6px)  .15   ( 76.8px)   3.0px / 30.7px      / 61.4px
-            //     3   1   1.0   (512px)   .35   (179.2px)  .30   (153.6px)   3.0px / 30.7px      / 61.4px
+            // At the shipped default (n = 8, 4 tiers), tabulated in fractions of `w`
+            // (grid-size independent) and in cells on the shipped 512 grid, at the
+            // slider's low/mid/high ends (neck_width = 0.5/w / .06 / .12):
             //
-            // The cap only ever bites tiers 0 and 1 -- the two tiers small enough for the
-            // raw slider value to threaten them. By tier 2 the cap already exceeds the
-            // slider's maximum (0.15 * w > 0.12 * w), so the two wide bottom chambers see
+            //   tier  n   chamber_w       max_hw           neck_cap         neck_hw @ min / .06 / .12
+            //     0   8   .125  ( 64px)   .0438 ( 22.4px)  .0375 ( 19.2px)   0.5px / 19.2px(cap) / 19.2px(cap)
+            //     1   4   .25   (128px)   .0875 ( 44.8px)  .075  ( 38.4px)   0.5px / 30.7px      / 38.4px(cap)
+            //     2   2   .5    (256px)   .175  ( 89.6px)  .15   ( 76.8px)   0.5px / 30.7px      / 61.4px
+            //     3   1   1.0   (512px)   .35   (179.2px)  .30   (153.6px)   0.5px / 30.7px      / 61.4px
+            //
+            // The cap only ever bites the two tiers small enough for the raw slider value
+            // to threaten them (tiers 0-1 at n = 8; more of the chain at larger n). Once
+            // the cap exceeds the slider's maximum (0.15 * w > 0.12 * w) the chambers see
             // exactly the neck width the slider asked for, uncapped.
             let max_hw = 0.35 * chamber_w;
-            let neck_cap = 0.30 * chamber_w;
-            let neck_hw = (neck_width * w_f).min(neck_cap).max(3.0);
+            // See `multistage_neck_half_width`'s doc comment for the cap/floor/anti-merge-
+            // ceiling arithmetic this computes and why the last of those three only starts
+            // to matter once the chamber count becomes configurable (it is a no-op at
+            // n = 8, today's only historical value, at every shipped grid size -- see the
+            // report this shipped alongside for the measurements that back that claim).
+            // Factored into its own function so the UI's neck-width cell-count readout
+            // (`effective_neck_half_width_cells`) computes this exact value rather than a
+            // second, hand-copied formula that could drift out of sync with it.
+            let neck_hw = multistage_neck_half_width(w_f, chamber_w, neck_width);
 
             // t_local: 1 at the top of the tier (widest), 0 at its bottom (the neck) --
             // the same sense as `Hourglass`'s `t` (0 at the neck, 1 at the chamber's
@@ -2712,7 +2819,10 @@ mod tests {
     }
 
     /// Generate a shape mask for testing. Uses eval_sandbox_shape to build the mask
-    /// with proper INSIDE/BOUNDARY/OUTSIDE classification.
+    /// with proper INSIDE/BOUNDARY/OUTSIDE classification. Fixes `multistage_chambers` at
+    /// 8 (today's only historical value) so the ~40 call sites that exercise every shape
+    /// other than `MultiStageHourglass` don't need to know the new parameter exists; tests
+    /// that actually vary the chamber count use `make_test_mask_with_chambers` below.
     fn make_test_mask(
         w: usize,
         h: usize,
@@ -2720,11 +2830,26 @@ mod tests {
         neck_width: f32,
         hourglass_curve: f32,
     ) -> Vec<u8> {
+        make_test_mask_with_chambers(w, h, shape, neck_width, hourglass_curve, 8)
+    }
+
+    /// Same as `make_test_mask`, but with `multistage_chambers` exposed for
+    /// `MultiStageHourglass` tests that sweep the widest-tier chamber count.
+    fn make_test_mask_with_chambers(
+        w: usize,
+        h: usize,
+        shape: SandboxShape,
+        neck_width: f32,
+        hourglass_curve: f32,
+        multistage_chambers: u32,
+    ) -> Vec<u8> {
         let mut mask = vec![crate::MASK_OUTSIDE; w * h];
         // Pass 1: inside/outside
         for y in 0..h {
             for x in 0..w {
-                let (inside, _) = eval_sandbox_shape(x, y, w, h, shape, neck_width, hourglass_curve, false);
+                let (inside, _) = eval_sandbox_shape(
+                    x, y, w, h, shape, neck_width, hourglass_curve, multistage_chambers, false,
+                );
                 mask[y * w + x] = if inside { crate::MASK_INSIDE } else { crate::MASK_OUTSIDE };
             }
         }
@@ -6005,33 +6130,138 @@ mod tests {
     // structurally wrong) to actually pass sand within a reasonable number of ticks would trap
     // almost everything in tier 0 -- or stack it up in an intermediate tier -- while still
     // conserving mass perfectly, because nothing is leaking out of the shape mask, it just never
-    // reaches the bottom. Fills tier 0 (the top 8 chambers) and lets the cascade run long enough
-    // to settle, then checks that most of that sand made it all the way down to tier 3's single
+    // reaches the bottom. Fills tier 0 (the widest tier) and lets the cascade run long enough
+    // to settle, then checks that most of that sand made it all the way down to the single
     // bottom chamber.
     //
     // Uses a wider-than-default neck (0.06, versus the slider's default 0.005) the same way
     // `test_hourglass_full_drainage` does above -- the point here is whether the *geometry*
     // lets sand reach the bottom at all, not how slowly the default neck throttles it.
     //
-    // Measured today: bottom_frac climbs from 0.197 (80 ticks) to 0.967 (500 ticks) to 1.000
-    // (1500+ ticks) -- a genuinely gradual multi-tier drain, not an initialization artifact.
-    // 1500 ticks is used here for margin against the 0.5 threshold while keeping the test cheap
-    // (~0.2s on the 128x128 grid used below).
+    // Swept across the widest-tier chamber count's full user-selectable range (5..=16) rather
+    // than just the shipped default of 8, since the tier count itself changes at n = 9 (4 tiers
+    // below that, 5 at and above) and both shapes need to prove they still drain: n = 5 (bottom
+    // of slider, 4 tiers, an odd merge 5 -> 3), n = 8 (shipped default, the regression anchor),
+    // n = 11 (mid-range, 5 tiers, another odd merge 11 -> 6 -> 3), n = 16 (top of slider, 5
+    // tiers, the narrowest chambers).
+    //
+    // Measured today at n = 8: bottom_frac climbs from 0.197 (80 ticks) to 0.967 (500 ticks) to
+    // 1.000 (1500+ ticks) -- a genuinely gradual multi-tier drain, not an initialization
+    // artifact. 1500 ticks is used here for margin against the 0.5 threshold while keeping the
+    // test cheap (~0.2s per chamber count on the 128x128 grid used below).
     fn test_cascade_drains_to_bottom_chamber() {
         let w = 128;
         let h = 128;
         let neck_width = 0.06;
         let curve = 0.6;
-        let mask = make_test_mask(w, h, SandboxShape::MultiStageHourglass, neck_width, curve);
+
+        for chambers in [5u32, 8, 11, 16] {
+            let mask = make_test_mask_with_chambers(
+                w, h, SandboxShape::MultiStageHourglass, neck_width, curve, chambers,
+            );
+
+            let center_y = h as f32 / 2.0;
+            let total_half = 0.42 * h as f32;
+            let n_tiers = multistage_tier_chambers(chambers).len();
+            let tier_h = (2.0 * total_half) / n_tiers as f32;
+            // Fill tier 0 only: dy < -total_half + tier_h, matching the fill threshold
+            // `initialize_hourglass` uses for this shape.
+            let fill_row_end = (center_y - total_half + tier_h).round() as usize;
+            // Bottom tier (single chamber) starts here; must match `y1` for the second-to-last
+            // tier index in `eval_sandbox_shape`'s MultiStageHourglass branch.
+            let bottom_tier_row0 = (center_y + total_half - tier_h).round() as usize;
+
+            let mut hm = Heightmap::new(w, h, 0.0);
+            for y in 0..fill_row_end {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    if mask[idx] != crate::MASK_OUTSIDE {
+                        hm.data[idx] = 0.55;
+                    }
+                }
+            }
+            let initial_mass: f64 = hm.data.iter().map(|&v| v as f64).sum();
+            assert!(initial_mass > 0.0, "chambers={}: tier 0 was not filled with any sand", chambers);
+
+            let mut temp_heights = hm.data.clone();
+            let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
+            let mut cell_colors = vec![0u8; w * h * 4];
+            let mut sliding = vec![false; w * h];
+            let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
+
+            let mut edge_vel_h = vec![0.0; w * h];
+            let mut edge_vel_v = vec![0.0; w * h];
+            let mut column_depth = vec![0.0; w * h];
+            let block_size = 32;
+            let (cols, rows) = (w / block_size, h / block_size);
+            let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
+            let mut last_displacements = vec![1.0; cols * rows];
+            let mut last_simulated_ticks = vec![0; cols * rows];
+
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+            for i in 0..1500u32 {
+                settle_tick(
+                    &mut hm, &mut temp_heights, &mut cell_colors, &mut cell_props,
+                    &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
+                    &mut last_simulated_ticks, cols * rows, block_size, &[],
+                    12345u32.wrapping_add(i),
+                    &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir,
+                );
+            }
+
+            let final_mass: f64 = hm.data.iter().map(|&v| v as f64).sum();
+            let bottom_mass: f64 = hm.data[bottom_tier_row0 * w..].iter().map(|&v| v as f64).sum();
+            let mass_err = (final_mass - initial_mass).abs() / initial_mass;
+            let bottom_frac = bottom_mass / final_mass;
+
+            println!(
+                "test_cascade_drains_to_bottom_chamber[chambers={}]: init_mass={:.6} \
+                 final_mass={:.6} mass_err={:.8} bottom_mass={:.6} bottom_frac={:.4}",
+                chambers, initial_mass, final_mass, mass_err, bottom_mass, bottom_frac
+            );
+
+            assert!(
+                mass_err < 1e-4,
+                "chambers={}: mass not conserved during drainage: mass_err={:.8}",
+                chambers, mass_err
+            );
+            assert!(
+                bottom_frac > 0.5,
+                "chambers={}: cascade failed to drain to the bottom chamber: only {:.1}% of the \
+                 mass reached the bottom tier after 1500 ticks (bottom_mass={:.6}, \
+                 final_mass={:.6}). Sand is stuck in an upper tier.",
+                chambers, bottom_frac * 100.0, bottom_mass, final_mass
+            );
+        }
+    }
+
+    #[test]
+    // DIAGNOSTIC, not a gate: measures whether sand actually flows through the tightest neck the
+    // parameter space allows -- multistage_chambers = 16 (narrowest chambers), grid = 64
+    // (smallest grid, so the smallest absolute neck), neck_width at the new UI slider minimum
+    // (`0.5 / 64`, a literal 1-cell-wide opening). By explicit user decision, clogging at this
+    // extreme is ACCEPTABLE and this test does NOT narrow the supported range based on the
+    // answer ("if it blocks sand flow, I could just increase the neck width -- no point not
+    // allowing me to pick") -- it only asserts mass conservation (the geometry must not leak)
+    // and prints the drained fraction so the practical limit is known and documented rather than
+    // guessed at. Run with --nocapture to see the numbers cited in the task report.
+    fn test_drainage_at_narrowest_possible_neck() {
+        let w = 64;
+        let h = 64;
+        let chambers = 16u32;
+        let neck_width = 0.5 / w as f32; // exactly the new UI slider minimum at this grid
+        let curve = 0.6;
+
+        let mask = make_test_mask_with_chambers(
+            w, h, SandboxShape::MultiStageHourglass, neck_width, curve, chambers,
+        );
 
         let center_y = h as f32 / 2.0;
         let total_half = 0.42 * h as f32;
-        let tier_h = (2.0 * total_half) / 4.0;
-        // Fill tier 0 only: dy < -total_half + tier_h, matching the fill threshold
-        // `initialize_hourglass` uses for this shape.
+        let n_tiers = multistage_tier_chambers(chambers).len();
+        let tier_h = (2.0 * total_half) / n_tiers as f32;
         let fill_row_end = (center_y - total_half + tier_h).round() as usize;
-        // Tier 3 (bottom, single chamber) starts here; must match `y1` for tier index 2 in
-        // `eval_sandbox_shape`'s MultiStageHourglass branch.
         let bottom_tier_row0 = (center_y + total_half - tier_h).round() as usize;
 
         let mut hm = Heightmap::new(w, h, 0.0);
@@ -6063,7 +6293,10 @@ mod tests {
 
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
-        for i in 0..1500u32 {
+        // A generous tick budget (3x test_cascade_drains_to_bottom_chamber's) since this neck
+        // is deliberately as tight as the parameter space allows, so it is expected to be slow.
+        const TICKS: u32 = 4500;
+        for i in 0..TICKS {
             settle_tick(
                 &mut hm, &mut temp_heights, &mut cell_colors, &mut cell_props,
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
@@ -6077,22 +6310,23 @@ mod tests {
         let bottom_mass: f64 = hm.data[bottom_tier_row0 * w..].iter().map(|&v| v as f64).sum();
         let mass_err = (final_mass - initial_mass).abs() / initial_mass;
         let bottom_frac = bottom_mass / final_mass;
+        let tier0_mass: f64 = hm.data[..fill_row_end * w].iter().map(|&v| v as f64).sum();
 
         println!(
-            "test_cascade_drains_to_bottom_chamber: init_mass={:.6} final_mass={:.6} mass_err={:.8} \
-             bottom_mass={:.6} bottom_frac={:.4}",
-            initial_mass, final_mass, mass_err, bottom_mass, bottom_frac
+            "test_drainage_at_narrowest_possible_neck: chambers={} w={} neck_width={:.6} \
+             (1-cell floor) ticks={} init_mass={:.6} final_mass={:.6} mass_err={:.8} \
+             tier0_remaining={:.6} bottom_mass={:.6} bottom_frac={:.4}",
+            chambers, w, neck_width, TICKS, initial_mass, final_mass, mass_err,
+            tier0_mass, bottom_mass, bottom_frac
         );
 
-        assert!(mass_err < 1e-4, "Mass not conserved during drainage: mass_err={:.8}", mass_err);
+        // Gate ONLY on conservation -- geometry must never leak, regardless of how slowly it
+        // drains. Deliberately no assertion on `bottom_frac`/drain speed: a clog at this
+        // deliberately extreme setting is accepted, not a failure.
         assert!(
-            bottom_frac > 0.5,
-            "Cascade failed to drain to the bottom chamber: only {:.1}% of the mass reached \
-             tier 3 after 1500 ticks (bottom_mass={:.6}, final_mass={:.6}). Sand is stuck in an \
-             upper tier.",
-            bottom_frac * 100.0,
-            bottom_mass,
-            final_mass
+            mass_err < 1e-4,
+            "Mass not conserved at the narrowest possible neck: mass_err={:.8}",
+            mass_err
         );
     }
 
@@ -7108,6 +7342,247 @@ mod tests {
                             );
                         }
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    // Companion to the neck-width/curve sweep above, now sweeping the widest-tier CHAMBER COUNT
+    // (5..=16) instead of holding it fixed at 8. Same two failure modes (dam, neck merge), but
+    // this time the risk isn't only the neck-width slider -- it's the chamber count itself: at
+    // n = 16 the widest tier's chambers are half as wide as at n = 8, so the same
+    // `0.30 * chamber_w` neck cap yields a narrower absolute neck, and the (originally
+    // unconditional 3-cell, now 0.5-cell -- see `multistage_neck_half_width`) floor that
+    // guarantees a minimum opening can, at a small enough chamber, exceed HALF the chamber's
+    // own width -- which is exactly a merge. Checked at both the shipped resolution (512) and
+    // the smallest supported one (64), since chamber_w shrinks with resolution too and 64 is
+    // where the two shrinking factors compound.
+    //
+    // This is what actually found the gap: at the ORIGINAL 3-cell floor, w=64, chambers>=10ish,
+    // the unguarded floor pushed the neck half-width past half the chamber width (merged=true,
+    // measured directly, not theorised) across the *entire* neck-width slider, because the
+    // floor there was a constant that ignored the cap entirely once the cap had already dropped
+    // below it. The `anti_merge_ceiling` clamp added to `eval_sandbox_shape` alongside this test
+    // is what makes it pass; deleting that clamp reproduces the failure (verified by temporarily
+    // removing it before writing this comment). Lowering the floor further to 0.5 cells in a
+    // later, separate, deliberate change only shrinks the region `anti_merge_ceiling` has to
+    // cover, so this test's coverage stays valid (and is extended below to explicitly include
+    // the new resolution-dependent slider minimum, the tightest case in the whole space:
+    // n = 16 at w = 64 with a 1-cell neck).
+    fn test_cascade_no_dam_or_neck_merge_across_chamber_count_range() {
+        for &w in &[64usize, 512] {
+            let h = w;
+            let center = h as f32 / 2.0;
+            let total_half = 0.42 * h as f32;
+            // The new UI slider minimum (see `demo.js`'s neck-width `min` recompute), the exact
+            // point a 1-cell-wide neck (0.5 half-width) becomes reachable at this resolution.
+            let ui_min_neck_width = 0.5 / w as f32;
+
+            for chambers in 5u32..=16 {
+                let tier_chambers = multistage_tier_chambers(chambers);
+                let n_tiers = tier_chambers.len();
+                let tier_h = (2.0 * total_half) / n_tiers as f32;
+
+                // A coarser neck/curve sweep than the dedicated test above (this one already
+                // multiplies by 12 chamber counts and 2 resolutions) but still covers the full
+                // slider range at both ends and the middle, plus the new resolution-dependent
+                // minimum itself (the worst case: n = 16, w = 64, ui_min_neck_width) and a
+                // value below it (0.0005, an out-of-slider-range direct API call) to prove the
+                // `.max(0.5)` safety net alone -- not just the UI clamping the slider -- keeps
+                // the geometry sane for any caller.
+                for &neck_width in &[0.0005f32, ui_min_neck_width, 0.005, 0.06, 0.12] {
+                    for &curve in &[0.1f32, 0.6, 3.0] {
+                        let mask = make_test_mask_with_chambers(
+                            w, h, SandboxShape::MultiStageHourglass, neck_width, curve, chambers,
+                        );
+
+                        for (tier, &n) in tier_chambers.iter().enumerate() {
+                            // Bottom boundary of this tier in dy-space (must match `y1` in
+                            // `eval_sandbox_shape`'s MultiStageHourglass branch), sampled 2 rows
+                            // above the boundary so it lands solidly inside this tier's own neck.
+                            let y1 = -total_half + (tier as f32 + 1.0) * tier_h;
+                            let neck_row = (center + y1 - 2.0).round() as usize;
+                            let chamber_w = w as f32 / n as f32;
+
+                            for c in 0..n {
+                                // (1) no dam: the chamber's own neck centre must stay open.
+                                let cx = ((c as f32 + 0.5) * chamber_w).round() as usize;
+                                assert_ne!(
+                                    mask[neck_row * w + cx],
+                                    crate::MASK_OUTSIDE,
+                                    "w={} chambers={} neck_width={:.4} curve={:.2} tier={} \
+                                     chamber={}: neck closed at its own centre (row={}, col={}) \
+                                     -- sand above it can never drain",
+                                    w, chambers, neck_width, curve, tier, c, neck_row, cx
+                                );
+
+                                // (2) no merge: the wall between this chamber's neck and the
+                                // next chamber's neck (the slot boundary) must stay closed.
+                                if c + 1 < n {
+                                    let boundary_x = ((c as f32 + 1.0) * chamber_w).round() as usize;
+                                    assert_eq!(
+                                        mask[neck_row * w + boundary_x],
+                                        crate::MASK_OUTSIDE,
+                                        "w={} chambers={} neck_width={:.4} curve={:.2} tier={} \
+                                         chambers {}/{}: the wall between adjacent necks has \
+                                         opened (row={}, col={}) -- chambers have merged into \
+                                         open space",
+                                        w, chambers, neck_width, curve, tier, c, c + 1,
+                                        neck_row, boundary_x
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Literal reproduction of `eval_sandbox_shape`'s `MultiStageHourglass` branch exactly as
+    /// it shipped before the widest-tier chamber count became configurable (hard-coded
+    /// `TIER_CHAMBERS = [8, 4, 2, 1]`, neck floor of 3 cells, no `anti_merge_ceiling` clamp) --
+    /// copied verbatim from `git show HEAD:sandart-sim/src/physics.rs` at the commit this
+    /// feature branched from, not re-derived from memory. Exists solely so
+    /// `test_multistage_n8_is_bit_identical_to_shipped_geometry` below can rasterise both the
+    /// old and new code paths and diff them cell-by-cell, rather than the bit-identity claim
+    /// resting on reading the new code and asserting it looks equivalent.
+    ///
+    /// NOTE ON THE FLOOR: the neck floor was deliberately lowered from 3 cells to 0.5 cells in
+    /// a follow-on change immediately after the chamber-count generalisation this test anchors
+    /// (see `multistage_neck_half_width`'s doc comment), by explicit user request, independent
+    /// of this feature. This function is deliberately left at the ORIGINAL 3-cell floor, so it
+    /// no longer matches current `eval_sandbox_shape` output at low `neck_width` -- that
+    /// disagreement is expected and is exactly the floor-lowering's intended effect, not a
+    /// regression. The test below restricts its sweep to `neck_width` large enough that neither
+    /// floor value binds, so it continues to isolate and prove what it was built to prove: that
+    /// deriving the tier chain from a variable chamber count (`multistage_tier_chambers`,
+    /// chamber-slot centring, the neck cap) reproduces the original hard-coded n = 8 geometry
+    /// exactly, unaffected by the separate, later, deliberate floor change. The floor-inclusive
+    /// proof (0 mismatches across grid in {64,128,256,512}, the FULL neck_width range
+    /// 0.005..=0.12, and curve in {0.1,0.6,1.0,2.0,3.0}, using the ORIGINAL 3-cell floor on both
+    /// sides) was run once, before the floor-lowering change landed, and is recorded verbatim in
+    /// the task report this shipped alongside rather than kept green here forever, since keeping
+    /// it green here would require never actually lowering the floor.
+    fn old_multistage_eval(cx: usize, cy: usize, w: usize, h: usize, neck_width: f32, hourglass_curve: f32) -> (bool, bool) {
+        let center_x = w as f32 / 2.0;
+        let center_y = h as f32 / 2.0;
+        let dx = cx as f32 - center_x;
+        let dy = cy as f32 - center_y;
+        let w_f = w as f32;
+        let h_f = h as f32;
+
+        let total_half = 0.42 * h_f;
+        if dy < -total_half || dy >= total_half {
+            return (false, false);
+        }
+        const TIER_CHAMBERS: [u32; 4] = [8, 4, 2, 1];
+        let tier_h = (2.0 * total_half) / TIER_CHAMBERS.len() as f32;
+        let tier = (((dy + total_half) / tier_h).floor() as i32)
+            .clamp(0, TIER_CHAMBERS.len() as i32 - 1) as usize;
+        let y0 = -total_half + tier as f32 * tier_h;
+        let y1 = y0 + tier_h;
+        let n_t = TIER_CHAMBERS[tier] as f32;
+        let chamber_w = w_f / n_t;
+
+        let slot = (((dx + w_f / 2.0) / chamber_w).floor() as i32).clamp(0, n_t as i32 - 1);
+        let chamber_center = (slot as f32 + 0.5) * chamber_w - w_f / 2.0;
+        let dx_local = dx - chamber_center;
+
+        let max_hw = 0.35 * chamber_w;
+        let neck_cap = 0.30 * chamber_w;
+        let neck_hw = (neck_width * w_f).min(neck_cap).max(3.0);
+
+        let t_local = ((y1 - dy) / tier_h).clamp(0.0, 1.0);
+        let allowed_hw = neck_hw + t_local.powf(hourglass_curve) * (max_hw - neck_hw);
+
+        let inside = dx_local.abs() < allowed_hw;
+        let safe_allowed_hw = (allowed_hw - 1.5).max(1.0);
+        let is_safe = dx_local.abs() < safe_allowed_hw
+            && dy > (-total_half + 1.5)
+            && dy < (total_half - 1.5);
+        (inside, is_safe)
+    }
+
+    #[test]
+    // THE regression anchor for the "make the widest tier's chamber count user-selectable"
+    // feature: at multistage_chambers = 8 (the new field's default, and today's only
+    // historical value), the new generic code must produce the EXACT same mask as the old
+    // hard-coded 8 -> 4 -> 2 -> 1 formula (`old_multistage_eval` above, copied from the
+    // pre-feature commit), at every resolution the grid-size selector supports (not just the
+    // shipped 512). This is checked by literal rasterisation and a cell-by-cell diff, not by
+    // reading the new formula and asserting it looks equivalent.
+    //
+    // This also doubles as the proof that `anti_merge_ceiling` (added alongside the chamber
+    // count becoming configurable, to stop chambers merging at small grids/wide chamber
+    // counts -- see `test_cascade_no_dam_or_neck_merge_across_chamber_count_range`) never
+    // engages for n = 8 at any shipped resolution: if it did, this test would catch it as a
+    // mismatch immediately.
+    //
+    // SCOPE, both the sweep range and the excluded grid, is deliberate, not an oversight. A
+    // separate, later, deliberate change (see `multistage_neck_half_width`'s doc comment)
+    // lowered the neck floor from 3 cells to 0.5 cells by explicit user request. Old and new
+    // formulas only ever agree when `min(neck_width * w, cap) >= 3.0` -- i.e. BOTH the raw
+    // slider value and the per-tier cap clear the OLD floor, so neither formula's floor ever
+    // engages and both reduce to the same uncapped/capped value. That fails in two distinct
+    // ways this sweep has to route around:
+    //
+    //   - Raw too small: below `neck_width = 0.05`, `neck_width * w` can fall under 3.0 even
+    //     at the largest grid, so the sweep starts at 0.05 (>= 3.0 / 64 = 0.046875, comfortable
+    //     margin) rather than the slider's actual minimum.
+    //   - Cap too small, REGARDLESS of neck_width: at grid = 64, tier 0's chamber_w = 8 gives
+    //     `neck_cap = 0.30 * 8 = 2.4`, which never reaches 3.0 no matter what `neck_width` is.
+    //     The OLD formula's floor therefore forces tier 0's neck to a constant 3.0 at every
+    //     point on the slider at this grid size (the cap always loses to the floor), while the
+    //     NEW formula's lower floor lets the cap actually bind (giving up to 2.4, varying with
+    //     `neck_width`). No sweep range fixes this -- it is a real, permanent difference at
+    //     this specific (grid, tier) pair, not a near-the-minimum edge case. Measured directly:
+    //     at grid=64, multistage_chambers=8, tier 0, `old_multistage_eval` returns a neck
+    //     half-width pinned at 3.0 for every neck_width from 0.005 to 0.12; the current
+    //     formula ranges from 0.5 up to 2.4 (`0.30 * 8`) over that same range. This is the
+    //     floor-lowering *fixing* a previously-invisible quirk (the slider silently did nothing
+    //     to tier 0's neck at grid 64) as a side effect, not a bug -- but it does mean grid 64
+    //     cannot be part of a "changes nothing" comparison, so it is excluded from this test's
+    //     grid list. The full floor-inclusive proof (the exact original 3-cell floor on both
+    //     sides, across all four grid sizes and the complete 0.005..=0.12 range) was run once,
+    //     before the floor-lowering change landed, and is recorded in the task report this
+    //     shipped alongside rather than kept green here forever.
+    fn test_multistage_n8_is_bit_identical_to_shipped_geometry() {
+        let neck_steps = 12;
+        for &grid in &[128usize, 256, 512] {
+            let w = grid;
+            let h = grid;
+            for step in 0..=neck_steps {
+                let neck_width = 0.05 + (0.12 - 0.05) * (step as f32 / neck_steps as f32);
+                for &curve in &[0.1f32, 0.6, 1.0, 2.0, 3.0] {
+                    let mut mismatches = 0usize;
+                    let mut first_mismatch: Option<(usize, usize, (bool, bool), (bool, bool))> = None;
+                    for y in 0..h {
+                        for x in 0..w {
+                            let new_result = eval_sandbox_shape(
+                                x, y, w, h,
+                                crate::SandboxShape::MultiStageHourglass,
+                                neck_width, curve,
+                                8, // multistage_chambers: the shipped-default, only historical value
+                                false,
+                            );
+                            let old_result = old_multistage_eval(x, y, w, h, neck_width, curve);
+                            if new_result != old_result {
+                                mismatches += 1;
+                                if first_mismatch.is_none() {
+                                    first_mismatch = Some((x, y, old_result, new_result));
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        mismatches, 0,
+                        "grid={} neck_width={:.4} curve={:.2}: {} of {} cells differ between the \
+                         old hard-coded n=8 formula and the new generic one at \
+                         multistage_chambers=8 -- NOT bit-identical. First mismatch at {:?}",
+                        grid, neck_width, curve, mismatches, w * h, first_mismatch
+                    );
                 }
             }
         }

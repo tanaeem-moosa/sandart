@@ -313,6 +313,14 @@ pub struct DrawingSimulation {
     pub gravity_dir: Vec2,
     pub neck_width: f32,
     pub hourglass_curve: f32,
+    /// The widest (top) tier's chamber count for `SandboxShape::MultiStageHourglass`'s
+    /// merging cascade -- user-selectable 5..=16, default 8 (today's shipped, hard-coded
+    /// value before this field existed). Every tier below is derived from this one number
+    /// by `physics::multistage_tier_chambers`; see that function's doc comment for the
+    /// merge rule. Setting this follows the same contract as `neck_width`/
+    /// `hourglass_curve`: the setter (`sandart-wasm`'s `set_multistage_chambers`) just
+    /// assigns the field and calls `generate_shape_mask()`, it does not reset the sim.
+    pub multistage_chambers: u32,
 
     /// Precomputed shape mask grid (GRID_SIZE * GRID_SIZE).
     /// Values: MASK_OUTSIDE (0) = wall, MASK_INSIDE (1) = playable interior,
@@ -503,6 +511,7 @@ impl DrawingSimulation {
             gravity_dir: Vec2::ZERO,
             neck_width: 0.005,
             hourglass_curve: 0.6,
+            multistage_chambers: 8,
             shape_mask: vec![MASK_OUTSIDE; grid_size * grid_size],
             shape_mask_dirty: true,
             flipped: false,
@@ -521,8 +530,9 @@ impl DrawingSimulation {
         sim
     }
 
-    /// Regenerate the shape mask from the current sandbox_shape, neck_width, and hourglass_curve.
-    /// Call this whenever these parameters change. Sets shape_mask_dirty for GPU re-upload.
+    /// Regenerate the shape mask from the current sandbox_shape, neck_width, hourglass_curve,
+    /// and (for MultiStageHourglass) multistage_chambers. Call this whenever these parameters
+    /// change. Sets shape_mask_dirty for GPU re-upload.
     pub fn generate_shape_mask(&mut self) {
         let w = self.heightmap.width;
         let h = self.heightmap.height;
@@ -536,6 +546,7 @@ impl DrawingSimulation {
                     self.sandbox_shape,
                     self.neck_width,
                     self.hourglass_curve,
+                    self.multistage_chambers,
                     self.flipped,
                 );
                 self.shape_mask[offset + x] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
@@ -640,7 +651,22 @@ impl DrawingSimulation {
         let w = self.heightmap.width;
         let h = self.heightmap.height;
         let center_y = h as f32 / 2.0;
-        
+
+        // Fills exactly tier 0 (the widest tier) of the MultiStageHourglass merging cascade:
+        // `total_half = 0.42h` split evenly across however many tiers
+        // `physics::multistage_tier_chambers(self.multistage_chambers)` produces, and this is
+        // the bottom boundary of tier 0 (`-total_half + tier_h`). Must match the tier math in
+        // `eval_sandbox_shape`'s `MultiStageHourglass` branch -- computed once here (not per
+        // cell) since it only depends on `h` and the chamber count, not on `(x, y)`. At the
+        // shipped default (multistage_chambers = 8, 4 tiers of `0.21h` each) this is exactly
+        // `-0.21 * h`, today's original hard-coded value.
+        let multistage_fill_threshold = {
+            let total_half = 0.42 * h as f32;
+            let n_tiers = physics::multistage_tier_chambers(self.multistage_chambers).len();
+            let tier_h = (2.0 * total_half) / n_tiers as f32;
+            -total_half + tier_h
+        };
+
         for y in 0..h {
             let row_offset = y * w;
             let dy = y as f32 - center_y;
@@ -649,11 +675,7 @@ impl DrawingSimulation {
                 let inside = self.shape_mask[idx] != MASK_OUTSIDE;
 
                 let fill_threshold = if self.sandbox_shape == SandboxShape::MultiStageHourglass {
-                    // Fills exactly tier 0 (the top 8 chambers) of the merging cascade:
-                    // `total_half = 0.42h`, 4 equal tiers of height `0.21h` each, so tier 0
-                    // spans `[-0.42h, -0.21h)` and this is its bottom boundary. Must match
-                    // the tier math in `eval_sandbox_shape`'s `MultiStageHourglass` branch.
-                    -0.21 * h as f32
+                    multistage_fill_threshold
                 } else if self.sandbox_shape == SandboxShape::StaircaseCascade {
                     -0.26 * h as f32
                 } else {

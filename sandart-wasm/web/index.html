@@ -633,12 +633,31 @@
                     <div class="field row">
                         <label for="neck-slider">Neck width</label>
                         <span id="neck-val" class="val-display">0.005</span>
-                        <input type="range" id="neck-slider" min="0.005" max="0.12" step="0.005" value="0.005">
+                        <!-- min/step are placeholders for the shipped 512 default grid and are
+                             overwritten at runtime by updateNeckSliderRange() in demo.js, which
+                             sets them from the ACTUAL grid resolution (min = 0.5 / grid_width,
+                             the fraction that rasterises to exactly a 1-cell neck at that
+                             resolution) and recomputes on every resolution change -- a fixed
+                             fraction would floor to a very different, resolution-dependent cell
+                             count instead of the same physical opening. -->
+                        <input type="range" id="neck-slider" min="0.000977" max="0.12" step="0.000977" value="0.005">
                     </div>
                     <div class="field row">
                         <label for="curvature-slider">Chamber curve</label>
                         <span id="curvature-val" class="val-display">0.6</span>
                         <input type="range" id="curvature-slider" min="0.1" max="3.0" step="0.1" value="0.6">
+                    </div>
+                    <!-- Cascade-only: the widest (top) tier's chamber count for the
+                         "Merging cascade" shape. Every tier below it is derived, not
+                         separately configured -- see multistage_tier_chambers in
+                         sandart-sim/src/physics.rs. Shown/hidden alongside shape selection
+                         the same way the shape-specific pattern param panels are (see
+                         updateParamPanels in demo.js), since it means nothing for any other
+                         shape. -->
+                    <div class="field row" id="chambers-row" style="display: none;">
+                        <label for="chambers-slider">Widest tier</label>
+                        <span id="chambers-val" class="val-display">8</span>
+                        <input type="range" id="chambers-slider" min="5" max="16" step="1" value="8">
                     </div>
                 </div>
 
@@ -724,7 +743,7 @@
                     </optgroup>
                     <optgroup label="Sand-fall funnels" id="shape-group-sandfall" hidden>
                         <option value="3">Classic hourglass</option>
-                        <option value="4">Cascade, 8 to 1</option>
+                        <option value="4">Merging cascade</option>
                         <option value="5">Galton board</option>
                         <option value="6">Staircase cascade</option>
                         <option value="7">Procedural cave</option>
