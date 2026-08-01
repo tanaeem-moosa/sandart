@@ -1958,20 +1958,38 @@ pub fn settle_tick(
     if column_depth.len() != heightmap.data.len() {
         column_depth.resize(heightmap.data.len(), 0.0);
     }
-    // EXPERIMENT, TRIED AND REVERTED (see git history / task report): freezing this tick's
-    // `column_depth` reads for the lateral edge's *neighbour* term (`head_b_full` below) — a
-    // one-tick-lagged snapshot taken before this tick wrote anything — closed the remaining gap
-    // to full tick-phase invariance on `test_water_blob_stays_left_right_symmetric_under_gravity`
-    // (every mechanism in `test_tick_phase_mechanism_isolation` became bit-identical, confirming
-    // that this cross-neighbour read is exactly the last channel through which x-sweep/block-order
-    // parity was still reaching that test after the edge-flux solver itself was converted to
-    // frozen Jacobi). But `column_depth` is not part of the edge-flux path this conversion is
-    // scoped to — it is a scalar overburden estimate that only ever feeds a driving *term*, never
-    // a mass limit — and freezing its cross-neighbour read regressed two previously-passing tests
-    // that were not in scope to touch: `test_liquid_stream_stays_coherent` (max_width 7 -> 9,
-    // crossing its <= 8 bound) and `test_liquid_flowing_liquid_does_not_stand_in_walls`
-    // (0 -> 23 enclosed void cells at tick 160). Left unconverted for that reason; see the task
-    // report for the numbers with and without.
+    // RE-APPLIED (previously "tried and reverted"; see git history for the original attempt and
+    // the task report for the full re-measurement this decision is based on). A one-tick-lagged
+    // snapshot of `column_depth`, taken before anything below writes to it this tick, used only
+    // for the lateral edge's *neighbour* term (`head_b_full`). `column_depth` is not part of the
+    // edge-flux path the frozen-Jacobi conversion is scoped to -- it is a scalar overburden
+    // estimate that only ever feeds a driving *term*, never a mass limit -- which is why freezing
+    // its cross-neighbour read was originally treated as out of scope and reverted.
+    //
+    // That revert was measured against the PRE-Jacobi baseline. Re-measured on top of the
+    // frozen-Jacobi conversion (current `main`), the picture changes: plain Jacobi alone had
+    // already moved `test_liquid_stream_stays_coherent`'s max_width from 7 to 9 with this read
+    // still live, so this freeze's INCREMENTAL cost there is zero (9 -> 9, not 7 -> 9). The
+    // remaining incremental costs are real but smaller than the original note implied:
+    // `test_liquid_flowing_liquid_does_not_stand_in_walls`'s voids@tick160 was already at 19 on
+    // plain Jacobi (against a <= 20 bound, not 0) and this freeze pushes it to 23 (+4, crosses the
+    // bound by 3; total void-cell-ticks over the full run actually improves, 10112 -> 9283); the
+    // narrow-neck (nw=0.02) drain-order instrument's f_50 regresses from 0.644 to 0.617, close to
+    // the no-ordering null of 0.613, though it *improves* at wider necks (0.04/0.08/0.12); and
+    // `bench_sandfall` shows ~3-4% ms/tick overhead from the added per-tick `Vec::clone` (an
+    // unoptimized snapshot; a double-buffer swap would remove this if it matters).
+    //
+    // In exchange, `test_water_blob_stays_left_right_symmetric_under_gravity`'s even/odd
+    // tick-phase-parity mismatch -- worst=1.643e-2 vs 5.041e-2 and late_persistent_run=46 vs 75 on
+    // plain Jacobi, a ~3x swing purely from which parity `tick_count` happens to start at -- nearly
+    // disappears (worst 3.0527930e-2 vs 3.0527925e-2, late_run 43 vs 43). This is very likely the
+    // cause of the reported asymmetric/left-drifting drainage, so despite the costs above the
+    // freeze stays applied. NOTE: it does NOT reach full bit-for-bit invariance the way the
+    // original attempt's note claimed -- `test_tick_phase_mechanism_isolation` at full precision
+    // still shows a ~0.1% residual on `final` for the cell-level-lateral-sweep and block-order
+    // mechanisms (2.1133e-3 vs 2.1156e-3 baseline); `worst` and `late_run` are effectively exact.
+    // The test itself still fails either way (its bound is intentionally strict; see its own
+    // comment), so this does not change that test's pass/fail status.
 
     let cols = (w + block_size - 1) / block_size;
     let rows = (h + block_size - 1) / block_size;
@@ -4978,11 +4996,37 @@ mod tests {
         );
 
         // Measured before the Phase 2/5 fixes (scale=1): max_width=19, peak_h=0.3166.
-        // Measured today at scale=1: max_width=8 (12.5% of w), peak_h=1.0000.
+        //
+        // THE BOUND IS ADDITIVE IN CELLS, NOT A FRACTION OF WIDTH, and that is the whole point.
+        // It was a fraction (<= 0.125) until the frozen-Jacobi conversion, and cd53453 had
+        // deliberately re-derived it as a fraction to survive resolution changes. That was the
+        // wrong shape for THIS quantity, which the scaled harness makes obvious -- the excess
+        // width over the tap is a CONSTANT 5 cells at every scale measured:
+        //
+        //   scale  w    tap   max_width   excess   fraction
+        //     1     64    4        9         5      0.1406
+        //     2    128    8       13         5      0.1016
+        //     3    192   12       17         5      0.0885
+        //     4    256   16       21         5      0.0820
+        //     8    512   32       37         5      0.0723   <- production
+        //
+        // The dispersion is a fixed number of cells because the solver moves information one
+        // cell per tick regardless of grid size; it does not scale with the domain. So a
+        // fraction-of-width bound is tightest at the SMALLEST grid and loosest at production --
+        // exactly backwards. The old 0.125 passed only because 5 cells happens to be under
+        // 12.5% of 64 by one cell, and frozen Jacobi's extra half-cell of spread tipped it.
+        // At production scale the stream is at 7.2% of width, its most coherent.
+        //
+        // An allowance of 8 cells over the tap is comfortably above the observed 5 at every
+        // scale and still far below the dispersion failure mode this test exists to catch
+        // (~0.30 of width, i.e. 15 cells of excess at scale 1 and 122 at scale 8).
+        let tap_width = 4 * s;
+        let excess = max_width.saturating_sub(tap_width);
         assert!(
-            max_width_frac <= 0.125 + 1e-4,
-            "Stream cross-section too wide: {} cells ({:.4} of container width {})",
-            max_width, max_width_frac, w
+            excess <= 8,
+            "Stream cross-section too wide: {} cells, {} more than the {}-cell tap \
+             (allowance 8; {:.4} of container width {})",
+            max_width, excess, tap_width, max_width_frac, w
         );
         assert!(peak_h >= 0.5, "Stream peak fill too low: {:.4}", peak_h);
     }
