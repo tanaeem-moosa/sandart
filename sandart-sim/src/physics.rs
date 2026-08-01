@@ -292,6 +292,63 @@ const GRAVITY_HEAD_SCALE: f32 = 25.0;
 /// ever reintroduces a phantom, git history has the deadband.
 const LATERAL_PRESSURE_SCALE: f32 = 5.0;
 
+/// STAGE C. The single knob that turns a granular material's declared repose threshold
+/// (`PROP_THRESHOLD`, e.g. 0.08 for DrySand — see `MaterialMode::preset_props`) into the yield
+/// stress `tau` the lateral flux edge in `settle_tick`'s granular CA branch gates flow behind (see
+/// the "Combined liquid + granular share" block there). `tau = GRANULAR_TAU_SCALE *
+/// threshold_prop * granular_share`.
+///
+/// **This is where to change the repose angle.** Raising it raises `tau` for every granular
+/// material proportionally to its own `threshold_prop`, so CoarseSand stays steeper than DrySand
+/// stays steeper than FinePowder exactly as their `preset_props` already declare, without having
+/// to hand-tune each material's threshold separately. Lowering it moves sand back toward liquid
+/// behaviour; `0.0` reproduces a zero-yield-stress (pre-Stage-C-fix) granular material exactly,
+/// which is a useful sanity check if this mechanism is ever suspected of a regression.
+///
+/// **Starting value and its derivation.** `1.0` — i.e. `tau` starts as `threshold_prop` taken
+/// literally, at face value, in the same raw-height units the granular CA's own `geom_slope`
+/// comparisons already used it in (`effective_slope <= threshold` in the old lateral loop this
+/// replaces). This is deliberately NOT the CA's actual in-gravity value, which was
+/// `threshold_prop * 0.35` (`get_ca_params`: "Lower friction/repose angle in Sand-fall mode for
+/// realistic fluid flow", further halved by the `sliding_active` hysteresis branch to as low as
+/// `threshold_prop * 0.175`) — that discount is *why* sand had no working yield stress under
+/// gravity in the first place (see the Stage C task brief and `test_dry_sand_has_angle_of_repose`,
+/// which documents DrySand settling to a ~2.4 degree slope with the discount in place). Using the
+/// material's own undiscounted threshold is the natural undoing of that: not a new number invented
+/// for this change, but the number the material already declared for itself, applied without the
+/// fluid-flavoured discount that used to sit on top of it. It is a starting point, not a final
+/// answer — see the doc comment above for what measuring it produced (a still-fairly-weak ~2.4
+/// degree repose angle at this value, because the old CA's flow-RATE constants and its dispersion
+/// term dominated the pile's short-timescale shape at least as much as either threshold did — see
+/// `test_dry_sand_has_angle_of_repose`'s own doc comment, NON-VACUITY FINDING). Raising this
+/// constant is the intended next step once a specific target repose angle is picked.
+const GRANULAR_TAU_SCALE: f32 = 1.0;
+
+/// STAGE C. Amplitude of the granular lateral edge's dispersion term, as a fraction of that edge's
+/// own `tau` (see `GRANULAR_TAU_SCALE`) rather than a fixed magnitude — see the "Combined liquid +
+/// granular share" block in `settle_tick` for where this is used. `dispersion` is drawn uniformly
+/// from `[-DISPERSION_TAU_FRAC * tau, +DISPERSION_TAU_FRAC * tau]` and added to the driving head
+/// before the yield-stress gate, so it can nudge an edge sitting near `tau` over or under the
+/// threshold from tick to tick (a ragged, grainy heap surface) without being able to either
+/// override a genuinely-below-threshold edge by more than half of `tau` or swamp `tau` altogether
+/// the way the old CA's fixed `perp_dot * 3.5 * dispersion_noise` did (up to ~44x the ~0.08
+/// threshold it was nominally gated behind — see the Stage C task brief, and
+/// `GRANULAR_TAU_SCALE`'s doc comment for why that made the old mechanism's threshold inoperative
+/// in practice). `0.5` is a starting value, not a measured optimum: half of `tau` is large enough
+/// to visibly texture a settled heap's edge (see `test_dry_sand_has_angle_of_repose` CASE 3's
+/// slight overshoot of the measured angle, 0.0464 vs 0.0426) while remaining smaller than `tau`
+/// itself, so it perturbs which near-threshold edges move rather than deciding the outcome for
+/// edges that are clearly above or clearly below.
+const DISPERSION_TAU_FRAC: f32 = 0.5;
+
+/// STAGE C. Flat per-edge, per-tick probability that the granular lateral edge sits out this tick
+/// (see the "Combined liquid + granular share" block in `settle_tick`) — reproduces the old CA's
+/// flat `lock_chance = 0.05` under gravity (`get_ca_params`: "Low locking under gravity so sand
+/// avalanches smoothly into a natural hill"), scaled by `granular_share` at the call site so a
+/// fully liquid cell is never locked. Low by design: this is meant to add occasional stickiness
+/// texture, not to be a second yield-stress mechanism competing with `tau`.
+const GRAVITY_LOCK_CHANCE: f32 = 0.05;
+
 /// The grid height `LATERAL_PRESSURE_SCALE` was actually tuned at, and the height `column_depth`
 /// normalises its per-row contribution against so the accumulated sum represents *physical*
 /// depth rather than a row count.
@@ -2625,6 +2682,25 @@ pub fn settle_tick(
                     // bit-identical to before for sand.
                     let granular_share = if gravity_active { 1.0 - cell_liquidity } else { 1.0 };
 
+                    // Stage C carve-out: Oobleck's shear-thickening (`get_ca_params`'s
+                    // `wetness >= 0.50 && wetness < 0.65` branch, driven by `closest_marble_vel`)
+                    // is a marble/mouse-interaction feature, not a repose/yield-stress question,
+                    // and no test in this suite exercises it under gravity. Rather than guess at
+                    // how a viscosity that depends on a dragged marble's speed should interact with
+                    // a yield-stress lateral edge, Stage C leaves Oobleck's gravity-mode lateral
+                    // transport entirely on the CA (bit-identical to pre-Stage-C), and the new
+                    // combined lateral flux edge below is gated to skip it. `liquidity(0.55) == 0`,
+                    // so Oobleck was already 100% CA-carried before this change; this keeps it that
+                    // way rather than silently folding it into a mechanism that was never measured
+                    // against it.
+                    let is_oobleck_band = wetness >= 0.50 && wetness < 0.65;
+
+                    // Per-edge RNG seed, hoisted from the main flow loop below (it used to be
+                    // computed just before that loop) so the new combined lateral flux edge can
+                    // also draw from it for dispersion/locking. Same formula, same inputs — moving
+                    // it earlier changes nothing about what it produces.
+                    let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
+
                     // Depth-integrated lateral pressure (see `LATERAL_PRESSURE_SCALE`): the amount
                     // of resting liquid stacked strictly *above* this cell in its connected static
                     // column, used below to make the lateral edge's driving head grow with depth
@@ -2702,8 +2778,10 @@ pub fn settle_tick(
                         column_depth[center_idx] = depth_above;
                     }
 
-                    // --- Liquid share: the same conservative edge-flux solver as the g = 0
-                    //     branch above, but with a non-zero gravitational head Phi ---
+                    // --- Combined liquid + granular share: the same conservative edge-flux
+                    //     solver as the g = 0 branch above, but with a non-zero gravitational
+                    //     head Phi, AND (Stage C) a non-zero yield stress `tau` for the granular
+                    //     share ---
                     //
                     // `H = h + Phi(g, r)` is the unified head. In Sandbox the grid plane is
                     // horizontal, gravity is perpendicular to it and Phi is identically zero, so
@@ -2715,51 +2793,92 @@ pub fn settle_tick(
                     // capacity that makes ripples conservative at g = 0 is what produces
                     // hydrostatic stacking and level pools at g > 0.
                     //
-                    // Weighted by `cell_liquidity`, with the granular CA below carrying the
-                    // complementary `1 - cell_liquidity`, so the handover across the old
-                    // `wetness >= 0.75` cut is continuous (C5) and a pure granular cell
-                    // (liquidity == 0) is bit-identical to before.
-                    if gravity_active && cell_liquidity > 0.0 && x + 1 < w && is_inside(x + 1, y) {
+                    // Before Stage C this call only carried the `cell_liquidity` share, with the
+                    // granular CA below carrying the complementary `1 - cell_liquidity` share of
+                    // this same edge via its own lateral `try_move`s. Stage C moves that granular
+                    // share onto this same flux call instead of a second one: a cell's height is
+                    // one blended quantity, not two separately-tracked liquid/granular stacks, so
+                    // "cell_liquidity share of the flux" always meant "how liquid-like this edge's
+                    // *parameters* are", not "only move the liquid fraction of the mass". `weight`
+                    // is therefore 1.0 (the whole edge), and every parameter that differs between
+                    // the two regimes — `tau` here, `wave_params` already did this for `(c_sq,
+                    // damping)` — is blended by `cell_liquidity` instead. The granular CA's lateral
+                    // loop is skipped for this case now (see the bail-out just below this block),
+                    // so there is no double-counting.
+                    if gravity_active && !is_oobleck_band && x + 1 < w && is_inside(x + 1, y) {
                         let nb_idx = center_idx + 1;
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
-                        // *Jacobi driving.* This lateral edge is the conservative, energy-carrying
-                        // case the g = 0 branch's note above (`wetness >= 0.75 && !gravity_active`,
-                        // see the "Jacobi driving" comment there for the full derivation) says needs
-                        // a frozen snapshot: driving this tick's head off `temp_heights` mid-sweep
-                        // makes the update Gauss-Seidel on a sweep whose direction alternates by row
-                        // (`(tick_count + y) % 2`), and a cell's driving term can then already
-                        // reflect this tick's flux from the very neighbour it is being compared
-                        // against — measured at a per-tick spectral radius of 1.20 against 0.994 for
-                        // the frozen form, i.e. a gain, not just directional noise. So `head_a` and
-                        // `head_b_full` below are built from `heightmap.data`, the tick's frozen
-                        // starting heights, exactly like the g = 0 branch. This is the vertical/
-                        // gravity-aligned edge's Gauss-Seidel ordering (phase 0, load-bearing for
-                        // CFL there) but that justification is about advection down the gravity
-                        // axis; it does not extend to this sideways, non-advective edge.
-                        //
-                        // `avail_a`/`avail_b` and the `cap_*`/`cell_capacity` room clamps below stay
-                        // on the live `temp_heights`-derived buffer on purpose, unchanged: only the
-                        // *driving* term needs the snapshot, the donor-mass/acceptor-room limits
-                        // inside `flux_edge` must still see what the other edges incident on these
-                        // cells have already taken this pass, or a cell could be drained twice over.
-                        // `column_depth` itself is also left untouched (still read live below) — it
-                        // is already this tick's freshly computed value by construction (see its
-                        // doc comment above), not a mid-sweep artifact of this edge's own flux.
+
+                        // `tau` — the yield stress — is `PROP_THRESHOLD` (the material's own
+                        // declared repose threshold, e.g. 0.08 for DrySand; see
+                        // `MaterialMode::preset_props`), scaled by `GRANULAR_TAU_SCALE` (see that
+                        // constant's doc comment for where to move this single value to retune
+                        // repose angle later) and by `granular_share` (`1 - cell_liquidity`, and
+                        // always available here since this whole branch requires `gravity_active`)
+                        // so a fully liquid cell keeps zero yield stress (unchanged liquid
+                        // behaviour) and a fully granular cell gets the whole of it. Deliberately
+                        // NOT also multiplied by the CA's old in-gravity `* 0.35` discount
+                        // (`get_ca_params`: "Lower friction/repose angle in Sand-fall mode for
+                        // realistic fluid flow") — undoing that discount, which is precisely what
+                        // made sand behave like a liquid under gravity, is the fix Stage C exists
+                        // to make.
+                        let threshold_prop = cell_props[center_idx * 4 + PROP_THRESHOLD];
+                        let tau = GRANULAR_TAU_SCALE * threshold_prop * granular_share;
+
                         let h_a_frozen = heightmap.data[center_idx];
                         let h_b_frozen = heightmap.data[nb_idx];
+
+                        // Lateral dispersion (see `DISPERSION_TAU_FRAC`'s doc comment): a small,
+                        // signed, per-edge-per-tick random perturbation of the driving head,
+                        // scaled to a FRACTION OF THIS EDGE'S OWN `tau` rather than a fixed
+                        // magnitude. The old CA's dispersion term (`perp_dot * 3.5 *
+                        // dispersion_noise`, up to 3.5 against a ~0.06-0.08 effective threshold)
+                        // is exactly what made `tau` inoperative if ported unchanged — see the
+                        // Stage C task brief. Scaling it to `tau` instead of a constant keeps it
+                        // proportionate for every material's own threshold, and keeps a real yield
+                        // stress that actually gates flow rather than being swamped by noise.
+                        // Computed once and reused by both `edge_sleeps` and
+                        // `flux_edge_candidate` below — both must see the identical driving term,
+                        // per `edge_sleeps`'s own doc comment on why a mismatch there is unsound.
+                        // Free-fall dispersion is not separately scaled down here (the old CA used
+                        // a gentler `* 0.8` in free fall against `* 3.5` on the bed): the in-transit
+                        // donor limit (`avail_a`/`avail_b` below) already suppresses a genuinely
+                        // free-falling stream's lateral spread structurally (a saturated stream has
+                        // `avail ~= 0` on this edge regardless of what drives it), so a second,
+                        // separate free-fall tier here would be redundant with a mechanism that is
+                        // already doing that job.
+                        let disp_roll = ((seed ^ (nb_idx as u32).wrapping_mul(823)) & 0xFF) as f32 / 255.0;
+                        let dispersion = (disp_roll - 0.5) * 2.0 * DISPERSION_TAU_FRAC * tau;
+
                         // `head_b_full` folds the neighbour's own depth-integrated overburden in
                         // (see `LATERAL_PRESSURE_SCALE`), symmetrically with `head_a` below, so the
                         // driving term compares total column pressure rather than local fill alone.
                         // `column_depth[nb_idx]` may be a tick stale if the neighbour's block ran
                         // after this one, or hasn't run yet this tick — harmless, since (like
                         // `GRAVITY_HEAD_SCALE`) it only ever feeds `driving`, never the mass limits.
-                        // (A frozen-snapshot read here was tried and reverted — see the comment on
-                        // `column_depth`'s resize check above for why.)
+                        // `column_depth` itself stays gated on `cell_liquidity > 0.0` (unchanged
+                        // from before Stage C — see that computation above), so a pure granular
+                        // cell has `column_depth == 0` here and this reduces to local fill plus
+                        // dispersion, matching the old CA's `geom_slope`, which also never grew
+                        // with depth for sand.
                         let head_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
-                            + LATERAL_PRESSURE_SCALE * column_depth[center_idx];
+                            + LATERAL_PRESSURE_SCALE * column_depth[center_idx] + dispersion;
                         let head_b_full = h_b_frozen + LATERAL_PRESSURE_SCALE * column_depth[nb_idx];
+
+                        // Stochastic locking (see `GRAVITY_LOCK_CHANCE`'s doc comment):
+                        // reproduces the CA's flat 0.05 `lock_chance` under gravity ("Low locking
+                        // under gravity so sand avalanches smoothly"), scaled by `granular_share`
+                        // so a fully liquid cell is never locked (matching its old behaviour of
+                        // never passing through this mechanism at all) and a fully granular cell
+                        // keeps the original flat rate. A locked edge is treated exactly like a
+                        // sleeping one below (zero flux, velocity cleared) rather than as stored,
+                        // undischarged momentum — matching the old CA, where a locked tick's
+                        // would-be transfer was simply skipped, not deferred.
+                        let lock_roll = ((seed ^ (nb_idx as u32).wrapping_mul(577)) & 0xFFFF) as f32 / 65535.0;
+                        let locked = lock_roll < GRAVITY_LOCK_CHANCE * granular_share;
+
                         // Sleeping edge (see `edge_sleeps`), tested *before* the in-transit
                         // computation below rather than after, because that computation is the
                         // expensive part of this edge: two neighbour loads, a capacity lookup and
@@ -2777,9 +2896,9 @@ pub fn settle_tick(
                         //
                         // The driving term passed here must be `head_a - head_b_full` — the exact
                         // quantity `flux_edge` will compute internally below — or branch 2 could
-                        // sleep an edge the depth-pressure term would in fact have moved.
-                        if edge_sleeps(
-                            head_a - head_b_full, 0.0, edge_vel_h[center_idx],
+                        // sleep an edge the depth-pressure/dispersion terms would in fact have moved.
+                        if locked || edge_sleeps(
+                            head_a - head_b_full, tau, edge_vel_h[center_idx],
                             h_a, h_b, cell_capacity - h_a, cap_b - h_b,
                         ) {
                             if edge_vel_h[center_idx] != 0.0 {
@@ -2830,9 +2949,11 @@ pub fn settle_tick(
                             //
                             // Every case in free fall reproduces the old value exactly (in the stream
                             // interior `outflow = inflow` and `room_below = 0`; at the front
-                            // `room_below` is a whole cell), so this is a strict relaxation confined
-                            // to genuinely supported liquid. Reachable only when `cell_liquidity >
-                            // 0.0`, so granular cells are untouched by construction.
+                            // `room_below` is a whole cell), so this is a strict relaxation. Stage C
+                            // extends it from "liquid share only" to this whole edge (see this
+                            // block's opening comment) — the function itself was already
+                            // material-agnostic (`cell_capacity_for` handles the granular 1.5 cap
+                            // fine), it just was not reached for a pure granular cell before.
                             //
                             // (`in_transit` itself is defined above, alongside `column_depth`,
                             // since that bookkeeping needs it for every liquid cell regardless of
@@ -2853,11 +2974,11 @@ pub fn settle_tick(
                             let candidate = flux_edge_candidate(
                                 head_a,
                                 head_b_full,
-                                c_sq, damping, 0.0,
+                                c_sq, damping, tau,
                                 cell_capacity, cap_b,
                                 avail_a, avail_b,
                                 h_a, h_b,
-                                cell_liquidity,
+                                1.0,
                                 edge_vel_h[center_idx],
                             );
                             cand_h[center_idx] = candidate;
@@ -2877,6 +2998,24 @@ pub fn settle_tick(
                                 cell_in_total[center_idx] += -candidate;
                             }
                         }
+                    }
+
+                    // Stage C bail-out: for any non-Oobleck material under gravity, the lateral
+                    // (x) edge is now entirely owned by the combined flux call just above — both
+                    // the liquid share (as before Stage C) and the granular share (new). The
+                    // granular CA below (avalanche valve + main flow loop) only ever touched the
+                    // `ndy == 0` lateral edge under gravity (the `ndy != 0` vertical edge has been
+                    // phase-0's since Stage B) so, with the lateral edge now also handled above,
+                    // that whole remaining CA body would be pure redundant work at best and a
+                    // double-counted transfer at worst if left reachable here. `sliding` is reset
+                    // to `false` rather than left stale, matching the `granular_share <= 0.0`
+                    // bail-out this one now supersedes for the gravity case (see its comment just
+                    // below, now dead code for every material except Oobleck under gravity, which
+                    // this bail-out deliberately does not touch — see `is_oobleck_band`'s comment
+                    // above).
+                    if gravity_active && !is_oobleck_band {
+                        sliding[center_idx] = false;
+                        continue;
                     }
 
                     // Sleeping cell: a fully liquid cell under gravity has `granular_share == 0`,
@@ -2935,8 +3074,9 @@ pub fn settle_tick(
                         continue;
                     }
 
-                    let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
-                    
+                    // `seed` is now computed once, earlier in this branch (see the comment there),
+                    // so the new combined lateral flux edge can share it with this loop.
+
                     let neighbors_info = if gravity_active && gravity_dir.y > 0.0 {
                         if (tick_count + phase_offset(K_CA_CHECKERBOARD) + x as u32 + y as u32) % 2 == 0 {
                             [

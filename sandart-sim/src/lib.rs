@@ -1824,6 +1824,66 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "DIAGNOSTIC (Stage C task report): does DrySand still scatter across the Galton \
+                board's pegs -- the shape whose whole visual point is a spread bottom \
+                distribution -- once its lateral transport runs on the yield-stress flux edge \
+                instead of the old CA's stochastic dispersion? Not a behavioural spec (no fixed \
+                pass/fail bar on the spread number itself, since there was never a prior \
+                assertion establishing what it should be), just a printed measurement to compare \
+                against a pre-Stage-C checkout. Run with --ignored --nocapture."]
+    fn diag_galton_board_bottom_spread() {
+        let mut sim = DrawingSimulation::new();
+        sim.sandbox_shape = SandboxShape::GaltonBoard;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.apply_preset(MaterialMode::DrySand);
+        sim.initialize_hourglass();
+
+        let targets = [None; 5];
+        for _ in 0..1500 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::GaltonBoard, 0.0, 16.0);
+        }
+
+        let w = sim.heightmap.width;
+        let h = sim.heightmap.height;
+        // Bottom collection zone: below the peg field (see the shafts test above for where the
+        // peg field itself lives, `dy` in (6, 0.38 * h) below the neck).
+        let y_lo = h / 2 + (0.40 * h as f32) as usize;
+        let mut col_mass = vec![0.0f64; w];
+        let mut total = 0.0f64;
+        let mut occupied_cols = 0usize;
+        for x in 0..w {
+            let mut m = 0.0f64;
+            for y in y_lo..h {
+                m += sim.heightmap.data[y * w + x] as f64;
+            }
+            col_mass[x] = m;
+            total += m;
+            if m > 0.01 {
+                occupied_cols += 1;
+            }
+        }
+        let mean_x: f64 = if total > 0.0 {
+            col_mass.iter().enumerate().map(|(x, &m)| x as f64 * m).sum::<f64>() / total
+        } else {
+            f64::NAN
+        };
+        let var_x: f64 = if total > 0.0 {
+            col_mass.iter().enumerate().map(|(x, &m)| (x as f64 - mean_x).powi(2) * m).sum::<f64>() / total
+        } else {
+            f64::NAN
+        };
+        // Peak concentration: the single fullest column's share of the bottom-zone mass. A
+        // Galton board that scatters should have this well under 1.0 (mass spread over many
+        // columns); a board that funnels straight down a single channel would have it near 1.0.
+        let peak_frac = col_mass.iter().cloned().fold(0.0f64, f64::max) / total.max(1e-12);
+        println!(
+            "diag_galton_board_bottom_spread: total_mass={:.2} occupied_cols={} mean_x={:.2} \
+             std_x={:.2} (grid w={}) peak_col_frac={:.4}",
+            total, occupied_cols, mean_x, var_x.sqrt(), w, peak_frac
+        );
+    }
+
+    #[test]
     fn test_quantile_lines_descend_as_hourglass_drains() {
         let mut sim = DrawingSimulation::new();
         sim.sandbox_shape = SandboxShape::Hourglass;
