@@ -324,6 +324,26 @@ const LATERAL_PRESSURE_SCALE: f32 = 5.0;
 /// constant is the intended next step once a specific target repose angle is picked.
 const GRANULAR_TAU_SCALE: f32 = 1.0;
 
+/// STAGE C FOLLOW-ON. The coefficient of lateral earth pressure: what fraction of a granular
+/// cell's vertical overburden pushes SIDEWAYS.
+///
+/// A liquid is isotropic -- vertical stress transmits laterally in full, so K = 1, which is what
+/// `LATERAL_PRESSURE_SCALE` alone encodes and what liquid keeps exactly. A granular medium does
+/// not: grain-to-grain contacts and wall friction carry part of the load, so lateral stress is a
+/// fraction of vertical. Jaky's classic estimate for a loose, normally-consolidated granular bed
+/// is `K0 = 1 - sin(phi)`, which for a friction angle of 30-35 degrees gives 0.43-0.50. 0.45 sits
+/// in the middle of that range and is a derived value, not a fitted one.
+///
+/// Before this existed the coefficient was effectively ZERO for sand -- `column_depth` was gated
+/// on `cell_liquidity > 0.0`, so a granular cell had no overburden term at all and its lateral
+/// driving was the local fill difference alone. Sand could not converge toward an outlet from
+/// depth because depth exerted no sideways push on it.
+///
+/// Applied at the lateral edge's read site, blended by each cell's own liquidity, so mixed cells
+/// interpolate and a fully liquid cell is bit-identical to before. Set to 0.0 to reproduce
+/// pre-follow-on behaviour exactly; 1.0 makes sand hydrostatic like water.
+const LATERAL_EARTH_PRESSURE_K: f32 = 0.45;
+
 /// STAGE C. Amplitude of the granular lateral edge's dispersion term, as a fraction of that edge's
 /// own `tau` (see `GRANULAR_TAU_SCALE`) rather than a fixed magnitude — see the "Combined liquid +
 /// granular share" block in `settle_tick` for where this is used. `dispersion` is drawn uniformly
@@ -2723,7 +2743,17 @@ pub fn settle_tick(
                     // this term is inert for the case that must stay narrow. A genuinely resting
                     // stack accumulates one cell of head per row, same units `h` itself uses, so a
                     // shallow puddle (nothing above) reduces exactly to today's `head_a = h_a`.
-                    if gravity_active && cell_liquidity > 0.0 {
+                    // STAGE C FOLLOW-ON: this used to be gated on `cell_liquidity > 0.0`, so a
+                    // pure granular cell had `column_depth == 0` and sand's lateral driving was
+                    // the LOCAL FILL DIFFERENCE alone -- a grain ten cells down felt exactly what
+                    // a grain at the surface felt. That is the user's original report stated
+                    // mechanically ("pressure from the side means most sand should drain from the
+                    // side at some depth"): there was no such pressure for sand, and never had
+                    // been. `column_depth` is now the raw overburden for EVERY material; how much
+                    // of it actually pushes sideways is the `k_lateral` coefficient applied at the
+                    // read site below, NOT here -- scaling the stored value would compound down
+                    // the column, since this is a running sum.
+                    if gravity_active {
                         let above_idx = center_idx - w; // safe: the CA guard above requires y > 0
                         let depth_above = if is_inside(x, y - 1) {
                             // `external_mass_this_tick` is signed (see its doc comment in
@@ -2863,9 +2893,21 @@ pub fn settle_tick(
                         // cell has `column_depth == 0` here and this reduces to local fill plus
                         // dispersion, matching the old CA's `geom_slope`, which also never grew
                         // with depth for sand.
+                        // How much of a cell's overburden pushes SIDEWAYS. A liquid is isotropic:
+                        // vertical stress transmits laterally in full, K = 1. A granular medium
+                        // does not -- grain contacts and wall friction carry part of the load, and
+                        // the ratio of lateral to vertical stress is the coefficient of lateral
+                        // earth pressure. See `LATERAL_EARTH_PRESSURE_K`. Blended by each cell's
+                        // OWN liquidity so mixed cells interpolate continuously and a fully liquid
+                        // cell is bit-identical to before this change (k == 1.0 exactly).
+                        let k_of = |liq: f32| liq + (1.0 - liq) * LATERAL_EARTH_PRESSURE_K;
+                        let k_a = k_of(cell_liquidity);
+                        let k_b = k_of(liquidity(cell_props[nb_idx * 4 + PROP_WETNESS]));
+
                         let head_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
-                            + LATERAL_PRESSURE_SCALE * column_depth[center_idx] + dispersion;
-                        let head_b_full = h_b_frozen + LATERAL_PRESSURE_SCALE * column_depth[nb_idx];
+                            + k_a * LATERAL_PRESSURE_SCALE * column_depth[center_idx] + dispersion;
+                        let head_b_full =
+                            h_b_frozen + k_b * LATERAL_PRESSURE_SCALE * column_depth[nb_idx];
 
                         // Stochastic locking (see `GRAVITY_LOCK_CHANCE`'s doc comment):
                         // reproduces the CA's flat 0.05 `lock_chance` under gravity ("Low locking
@@ -6933,24 +6975,56 @@ mod tests {
             s_measured, s_measured.atan().to_degrees()
         );
 
-        // The two-sided pin: case 1 (from above) and case 2 (from below) must land close to the
-        // SAME value, not merely "each didn't do something extreme on its own". Tolerance chosen
-        // from the exploration's tick-to-tick noise band at this budget (~0.01-0.02); 0.03 is a
-        // comfortable margin above that noise while still being far tighter than the gap between
-        // the two starting points (0.35 vs ~0.6 * s_measured).
+        // CASE 2 MUST STAY PUT. It must NOT rise to meet case 1.
+        //
+        // This assertion previously required case 1 (settling from above) and case 2 (built from
+        // below) to converge on the SAME value. That was written against the pre-Stage-C
+        // mechanism, which had no real yield stress: piles crept, and a shallow pile drifted
+        // upward toward the same creep-determined slope, so two-sided convergence looked like it
+        // pinned an angle. It did not -- it pinned a creep rate, and it would have been satisfied
+        // just as well by two piles converging on a value near zero.
+        //
+        // With a real `tau` a sub-threshold pile is STABLE: the driving head never exceeds the
+        // yield stress, so nothing moves and it stays exactly where it was built. A material that
+        // spontaneously STEEPENED to reach its repose angle would be unphysical -- gravity has no
+        // mechanism to do that. So the correct two-sided statement is: from above, collapse to the
+        // angle; from below, hold position. Measured here: 0.0532 -> 0.0536, i.e. it holds to
+        // within 0.0004.
+        //
+        // The three parts below are each load-bearing. Held position rules out creep; strictly
+        // below case 1 rules out having been built above the angle by accident, which would make
+        // "it held" trivially true; and not collapsing toward flat rules out the failure this
+        // whole test exists to catch, a material with no yield stress at all. The NON-VACUITY
+        // ANCHOR further up (sand versus water in the identical rig) is what guards the case
+        // where `tau` is present but too weak to matter.
+        // Still used by cases 3 and 4 below, which legitimately compare a settled result against
+        // the measured repose angle. Tolerance from the exploration's tick-to-tick noise band at
+        // this budget (~0.01-0.02).
         const CONVERGENCE_TOL: f32 = 0.03;
+        const HOLD_TOL: f32 = 0.02;
         assert!(
-            (slope1_final - slope2_final).abs() < CONVERGENCE_TOL,
-            "CASE 1 and CASE 2 should converge to close to the same angle from opposite sides: \
-             case1_final={:.4}, case2_final={:.4}, |diff|={:.4} (tolerance {:.4})",
-            slope1_final, slope2_final, (slope1_final - slope2_final).abs(), CONVERGENCE_TOL
+            (slope2_final - shallow_initial).abs() < HOLD_TOL,
+            "CASE 2: a pile built SHALLOWER than the repose angle must hold its slope, not creep: \
+             initial={:.4}, final={:.4}, |drift|={:.4} (tolerance {:.4})",
+            shallow_initial, slope2_final, (slope2_final - shallow_initial).abs(), HOLD_TOL
         );
         assert!(
-            slope2_final > shallow_initial * 1.10,
-            "CASE 2: a pile built shallower than repose ({:.4}) should rise toward the angle \
-             (found to be ~{:.4}), not stay flat or erode further -- got {:.4}",
-            shallow_initial, s_measured, slope2_final
+            slope2_final < slope1_final,
+            "CASE 2 must sit BELOW case 1's repose angle, or 'it held' proves nothing: \
+             case2_final={:.4}, case1_final={:.4}",
+            slope2_final, slope1_final
         );
+        assert!(
+            slope2_final > 0.5 * shallow_initial,
+            "CASE 2 collapsed toward flat rather than holding -- no effective yield stress: \
+             initial={:.4}, final={:.4}",
+            shallow_initial, slope2_final
+        );
+        // (An assertion requiring CASE 2 to RISE by at least 10% toward the repose angle used to
+        // sit here, alongside the convergence check replaced above. Same mistake, same reason:
+        // gravity has no mechanism to steepen a stable pile, so demanding that it rise only ever
+        // described the old creep-dominated behaviour. Both are now replaced by the hold /
+        // below-case-1 / not-collapsed triple above. `s_measured` remains used by cases 3 and 4.)
         assert!(
             (slope3_final - s_measured).abs() < CONVERGENCE_TOL,
             "CASE 3: a pile built at the measured repose angle ({:.4}) should stay close to it, \
