@@ -650,24 +650,164 @@ fn flux_edge_apply(
 /// conversion measured `min_h >= 0` and `max_h <= capacity` with no exceptions (see the physics
 /// conversion's measurement notes), which is what would fail first if a second pass were in fact
 /// needed.
+///
+/// **The split need not be proportional.** The argument above only requires each side's per-edge
+/// factors to sum, weighted by the raw claims, to no more than that side's budget — it never
+/// required every edge sharing a cell to be scaled by the *same* factor. `budget_term` exploits
+/// exactly that slack to divide a contested budget with randomised weights instead of equal ones
+/// (see its doc comment for the per-side bound, and `grain_jitter_strength` for why granular
+/// material wants this and liquid does not).
 #[inline]
 fn edge_arbitration_scale(
     donor_out_total: f32,
+    donor_out_total_jit: f32,
     donor_avail: f32,
     acceptor_in_total: f32,
+    acceptor_in_total_jit: f32,
     acceptor_freecap: f32,
+    jitter: f32,
 ) -> f32 {
-    let out_scale = if donor_out_total > donor_avail && donor_out_total > 0.0 {
-        (donor_avail / donor_out_total).max(0.0)
+    budget_term(donor_out_total, donor_out_total_jit, donor_avail, jitter)
+        .min(budget_term(acceptor_in_total, acceptor_in_total_jit, acceptor_freecap, jitter))
+        .min(1.0)
+}
+
+/// One side (donor or acceptor) of `edge_arbitration_scale`: the fraction of this edge's raw claim
+/// that survives *that* cell's budget.
+///
+/// **Oversubscription is tested against the RAW total, the split is taken against the JITTERED
+/// one, and mixing those two is deliberate.** Testing with the jittered total instead would be
+/// unsound in one direction: `jit_total` can fall *below* `raw_total` (jitters below 1 shrink it),
+/// so `jit_total <= budget` does not imply the raw claims fit, and returning `1.0` there would let
+/// a cell over-drain or overfill. Testing with the raw total keeps the two branches exactly as
+/// safe as they were before jitter existed:
+///
+/// * **Not oversubscribed** (`raw_total <= budget`): every edge passes at `1.0`, so the applied sum
+///   is `raw_total <= budget`. Jitter is deliberately inert here — there is no allocation decision
+///   to make when everyone fits, and perturbing fluxes that nothing is competing for would be a
+///   change to the physics rather than to how a contested budget is *divided*.
+/// * **Oversubscribed**: the applied sum is bounded by
+///   `Σ |raw_e| · budget · r_e / jit_total = budget · (Σ |raw_e| r_e) / jit_total = budget`,
+///   exactly — since `jit_total` is by definition `Σ |raw_e| r_e` over the same edge group. The
+///   share edge `e` ends up with is `|raw_e| r_e / Σ |raw_e'| r_e'`: the proportional weights,
+///   multiplicatively perturbed and renormalised, still summing to one.
+///
+/// So the Zalesak single-pass argument in `edge_arbitration_scale`'s doc comment carries over
+/// verbatim — it only ever needed each side's per-edge factors to respect that side's own budget
+/// sum, which both branches above still do. The outer `.min(1.0)` is what lets an above-1 jitter
+/// raise an edge's *share* without ever letting it exceed its own raw candidate.
+///
+/// With `jitter == 1.0` on every edge, `jit_total == raw_total` and this reduces to
+/// `min(1, budget / raw_total)` — bit-identical to the pre-jitter limiter, which is what makes
+/// liquid (and any zero-strength granular material) provably unchanged.
+#[inline]
+fn budget_term(raw_total: f32, jit_total: f32, budget: f32, jitter: f32) -> f32 {
+    if raw_total > budget && jit_total > 0.0 {
+        (budget * jitter / jit_total).max(0.0)
     } else {
         1.0
-    };
-    let in_scale = if acceptor_in_total > acceptor_freecap && acceptor_in_total > 0.0 {
-        (acceptor_freecap / acceptor_in_total).max(0.0)
+    }
+}
+
+/// How strongly a contested edge's share of a shared budget is randomised away from the strictly
+/// proportional split, as the half-width of the multiplicative jitter: `r ∈ [1 - s, 1 + s]`.
+///
+/// `PROP_GRAIN_SIZE` spans `0.05` (FinePowder) .. `0.80` (CoarseSand) across the granular presets
+/// (`MaterialMode::preset_props`). At `1.25` a coarse grain reaches the `0.95` ceiling — its share
+/// of a contested budget ranges over `[0.05, 1.95]×` the proportional one — while FinePowder sits
+/// at `0.0625`, i.e. essentially the smooth proportional behaviour a powder should have. The
+/// ceiling is `0.95` rather than `1.0` so `r` stays strictly positive and `jit_total` cannot
+/// collapse to zero while raw claims are still nonzero, which `budget_term` relies on.
+const GRAIN_JITTER_SCALE: f32 = 1.25;
+const GRAIN_JITTER_MAX: f32 = 0.95;
+
+/// `granular_share`-gated jitter strength for the cell whose material is being rationed.
+///
+/// Gated on `granular_share = 1 - cell_liquidity`, not on `grain_size`, so every liquid preset is
+/// excluded structurally: liquids have `wetness >= 0.75`, hence `cell_liquidity == 1` under
+/// gravity, hence strength `0.0` and `jitter == 1.0` regardless of what `grain_size` they carry —
+/// the bit-identical path noted on `budget_term`. Liquid's grain sizes happen to be small too, but
+/// it is the liquidity gate that is load-bearing.
+#[inline]
+fn grain_jitter_strength(cell_props: &[f32], cell: usize) -> f32 {
+    let granular_share = (1.0 - liquidity(cell_props[cell * 4 + PROP_WETNESS])).clamp(0.0, 1.0);
+    if granular_share <= 0.0 {
+        return 0.0;
+    }
+    let grain_size = cell_props[cell * 4 + PROP_GRAIN_SIZE];
+    (GRAIN_JITTER_SCALE * grain_size).clamp(0.0, GRAIN_JITTER_MAX) * granular_share
+}
+
+/// The per-edge multiplicative weight `r` this edge carries into arbitration, in `[0.05, 1.95]`.
+///
+/// A stateless hash of `(time_seed, edge key, salt)` rather than a stored RNG stream — the same
+/// pattern as the `disp_roll`/`lock_roll` draws in `settle_tick` — precisely so the COLLECT pass
+/// (which accumulates `|candidate| * r` into the jittered totals) and the APPLY pass (which needs
+/// the same `r` back to compute this edge's share) can each derive it independently and agree,
+/// with no extra per-edge buffer to allocate, clear, and keep in sync. `salt` separates the two
+/// edge orientations and the tick phases, which index into the same cell-keyed arrays.
+///
+/// Strength comes from the DONOR: it is the donor's material that is being divided up, so a coarse
+/// grain draining into a fine bed should behave coarsely, not the other way round.
+#[inline]
+fn edge_share_jitter(
+    cell_props: &[f32],
+    donor: usize,
+    edge_key: usize,
+    salt: u32,
+    time_seed: u32,
+) -> f32 {
+    let s = grain_jitter_strength(cell_props, donor);
+    if s <= 0.0 {
+        return 1.0;
+    }
+    let mut hsh = time_seed
+        ^ (edge_key as u32).wrapping_mul(0x9E37_79B1)
+        ^ salt.wrapping_mul(0x2545_F491);
+    hsh ^= hsh >> 16;
+    hsh = hsh.wrapping_mul(0x7feb_352d);
+    hsh ^= hsh >> 15;
+    hsh = hsh.wrapping_mul(0x846c_a68b);
+    hsh ^= hsh >> 16;
+    let u = (hsh >> 8) as f32 / 16_777_216.0;
+    1.0 + s * (2.0 * u - 1.0)
+}
+
+/// Distinguishes the two edge orientations in `edge_share_jitter`'s hash. `cand_h[i]` and
+/// `cand_v[i]` are two *different* edges that share the cell key `i`, so without this they would
+/// draw the identical jitter and a cell's horizontal and vertical claims would be perturbed in
+/// lockstep — a directional bias, not grain.
+const EDGE_SALT_H: u32 = 0x27d4_eb2f;
+const EDGE_SALT_V: u32 = 0x5bf0_3635;
+
+/// Folds one collected candidate into both the raw and the jittered donor/acceptor totals, drawing
+/// the edge's jitter once. The COLLECT-side counterpart of the `edge_arbitration_scale` call in
+/// APPLY, which re-derives the same jitter from the same `(edge_key, salt, time_seed)`.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn accumulate_edge_totals(
+    candidate: f32,
+    a_idx: usize,
+    b_idx: usize,
+    edge_key: usize,
+    salt: u32,
+    time_seed: u32,
+    cell_props: &[f32],
+    out_total: &mut [f32],
+    in_total: &mut [f32],
+    out_total_jit: &mut [f32],
+    in_total_jit: &mut [f32],
+) {
+    let (donor, acceptor, mag) = if candidate >= 0.0 {
+        (a_idx, b_idx, candidate)
     } else {
-        1.0
+        (b_idx, a_idx, -candidate)
     };
-    out_scale.min(in_scale)
+    let jit = edge_share_jitter(cell_props, donor, edge_key, salt, time_seed);
+    out_total[donor] += mag;
+    in_total[acceptor] += mag;
+    out_total_jit[donor] += mag * jit;
+    in_total_jit[acceptor] += mag * jit;
 }
 
 /// Sleeping predicate for a flux edge: `true` when `flux_edge` would provably realise a flux of
@@ -2231,6 +2371,12 @@ pub fn settle_tick(
     // saw the earlier edge's already-reduced `temp_heights`) and what arbitration now prevents
     // explicitly.
     //
+    // `cell_out_total_jit[i]` / `cell_in_total_jit[i]` are the same two sums with each term weighted
+    // by that edge's `edge_share_jitter`. BOTH the raw and the jittered sums are needed and neither
+    // can be derived from the other: the raw pair decides *whether* a cell is oversubscribed, the
+    // jittered pair decides *how* an oversubscribed budget is divided. `budget_term`'s doc comment
+    // has the soundness argument for using them for those two different jobs.
+    //
     // All buffers are sized to the full grid (indexed by cell, not by block) and allocated once,
     // outside the phase loop; only the cells actually touched this phase are ever written to, and
     // the `touched_*` lists are what let the next phase clear exactly those entries back to their
@@ -2242,6 +2388,8 @@ pub fn settle_tick(
     let mut edge_v_active = vec![false; cell_count];
     let mut cell_out_total = vec![0.0f32; cell_count];
     let mut cell_in_total = vec![0.0f32; cell_count];
+    let mut cell_out_total_jit = vec![0.0f32; cell_count];
+    let mut cell_in_total_jit = vec![0.0f32; cell_count];
     let mut cell_avail = vec![0.0f32; cell_count];
     let mut cell_freecap = vec![0.0f32; cell_count];
     // Phase 1's g=0 (Sandbox) liquid branch also needs, per center cell, the largest raw head
@@ -2301,6 +2449,8 @@ pub fn settle_tick(
         for &idx in &touched_cells {
             cell_out_total[idx] = 0.0;
             cell_in_total[idx] = 0.0;
+            cell_out_total_jit[idx] = 0.0;
+            cell_in_total_jit[idx] = 0.0;
             cell_avail[idx] = 0.0;
             cell_freecap[idx] = 0.0;
         }
@@ -2492,13 +2642,12 @@ pub fn settle_tick(
                         cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
                         touched_cells.push(center_idx);
                         touched_cells.push(nb_idx);
-                        if candidate >= 0.0 {
-                            cell_out_total[center_idx] += candidate;
-                            cell_in_total[nb_idx] += candidate;
-                        } else {
-                            cell_out_total[nb_idx] += -candidate;
-                            cell_in_total[center_idx] += -candidate;
-                        }
+                        accumulate_edge_totals(
+                            candidate, center_idx, nb_idx, center_idx,
+                            EDGE_SALT_V.wrapping_add(phase as u32), time_seed, cell_props,
+                            &mut cell_out_total, &mut cell_in_total,
+                            &mut cell_out_total_jit, &mut cell_in_total_jit,
+                        );
                     }
                     continue;
                 }
@@ -2616,13 +2765,12 @@ pub fn settle_tick(
                             cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
-                            if candidate >= 0.0 {
-                                cell_out_total[center_idx] += candidate;
-                                cell_in_total[nb_idx] += candidate;
-                            } else {
-                                cell_out_total[nb_idx] += -candidate;
-                                cell_in_total[center_idx] += -candidate;
-                            }
+                            accumulate_edge_totals(
+                                candidate, center_idx, nb_idx, center_idx,
+                                EDGE_SALT_H.wrapping_add(phase as u32), time_seed, cell_props,
+                                &mut cell_out_total, &mut cell_in_total,
+                                &mut cell_out_total_jit, &mut cell_in_total_jit,
+                            );
                         }
                     }
 
@@ -2657,13 +2805,12 @@ pub fn settle_tick(
                             cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
-                            if candidate >= 0.0 {
-                                cell_out_total[center_idx] += candidate;
-                                cell_in_total[nb_idx] += candidate;
-                            } else {
-                                cell_out_total[nb_idx] += -candidate;
-                                cell_in_total[center_idx] += -candidate;
-                            }
+                            accumulate_edge_totals(
+                                candidate, center_idx, nb_idx, center_idx,
+                                EDGE_SALT_V.wrapping_add(phase as u32), time_seed, cell_props,
+                                &mut cell_out_total, &mut cell_in_total,
+                                &mut cell_out_total_jit, &mut cell_in_total_jit,
+                            );
                         }
                     }
 
@@ -3032,13 +3179,12 @@ pub fn settle_tick(
                             cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
-                            if candidate >= 0.0 {
-                                cell_out_total[center_idx] += candidate;
-                                cell_in_total[nb_idx] += candidate;
-                            } else {
-                                cell_out_total[nb_idx] += -candidate;
-                                cell_in_total[center_idx] += -candidate;
-                            }
+                            accumulate_edge_totals(
+                                candidate, center_idx, nb_idx, center_idx,
+                                EDGE_SALT_H.wrapping_add(phase as u32), time_seed, cell_props,
+                                &mut cell_out_total, &mut cell_in_total,
+                                &mut cell_out_total_jit, &mut cell_in_total_jit,
+                            );
                         }
                     }
 
@@ -3451,9 +3597,13 @@ pub fn settle_tick(
         let a_idx = idx;
         let b_idx = idx + w;
         let (donor, acceptor) = if raw >= 0.0 { (a_idx, b_idx) } else { (b_idx, a_idx) };
+        let jit = edge_share_jitter(
+            cell_props, donor, idx, EDGE_SALT_V.wrapping_add(phase as u32), time_seed,
+        );
         let scale = edge_arbitration_scale(
-            cell_out_total[donor], cell_avail[donor],
-            cell_in_total[acceptor], cell_freecap[acceptor],
+            cell_out_total[donor], cell_out_total_jit[donor], cell_avail[donor],
+            cell_in_total[acceptor], cell_in_total_jit[acceptor], cell_freecap[acceptor],
+            jit,
         );
         let final_flux = raw * scale;
         cand_v[idx] = final_flux;
@@ -3479,9 +3629,13 @@ pub fn settle_tick(
         let a_idx = idx;
         let b_idx = idx + 1;
         let (donor, acceptor) = if raw >= 0.0 { (a_idx, b_idx) } else { (b_idx, a_idx) };
+        let jit = edge_share_jitter(
+            cell_props, donor, idx, EDGE_SALT_H.wrapping_add(phase as u32), time_seed,
+        );
         let scale = edge_arbitration_scale(
-            cell_out_total[donor], cell_avail[donor],
-            cell_in_total[acceptor], cell_freecap[acceptor],
+            cell_out_total[donor], cell_out_total_jit[donor], cell_avail[donor],
+            cell_in_total[acceptor], cell_in_total_jit[acceptor], cell_freecap[acceptor],
+            jit,
         );
         let final_flux = raw * scale;
         cand_h[idx] = final_flux;
@@ -11070,5 +11224,207 @@ mod tests {
             let label = format!("liquid_nw{neck_width:.2}");
             diag_mass_vs_core_flow_funnel(MaterialMode::Water, 0.95, &label, neck_width);
         }
+    }
+
+    // =====================================================================================
+    // DIAGNOSTIC: does GRAIN_JITTER_SCALE actually raise spatial colour/property variance among
+    // neighbouring sand cells, the way its doc comment on `edge_arbitration_scale` /
+    // `grain_jitter_strength` claims it should? No existing test measures spatial colour/property
+    // variance at all -- every other conservation/symmetry test either sums mass (conservation)
+    // or tracks a single scalar signed difference (symmetry), neither of which would notice
+    // colour and properties homogenising into mush as they blend.
+    //
+    // SCENARIO: narrow vertical stripes of material poured into an Hourglass funnel's upper
+    // chamber and left to drain through the neck. The neck (and the avalanching within the
+    // chamber above it) is where `budget_term` is actually contested -- an open flat bed rarely
+    // oversubscribes a cell's free capacity or available mass; a narrowing funnel constantly
+    // does. Stripe width is deliberately narrow relative to the fill width (stripe_width=4 out of
+    // a ~50-wide chamber) so a large share of cells start adjacent to a stripe boundary rather
+    // than a handful at the edges.
+    //
+    // GRAIN_JITTER_SCALE is a compile-time const (see its doc comment on l.721-ish), so the
+    // 0.0-vs-1.25 A/B this diagnostic exists for is NOT performed inside one process -- it can't
+    // be done at runtime. Run this test twice, editing the const between runs (0.0, then 1.25)
+    // and diff the printed numbers by hand; that is what the accompanying task report does.
+    // NEVER assert on these numbers: they are a measurement, not a spec, and are expected to
+    // change if the arbitration mechanism changes.
+    //
+    // WHY BOTH VARIANCE AND LOCAL CONTRAST: global spatial variance can stay high while
+    // everything smooths out locally -- two large flat regions of different colour, each
+    // internally uniform, still have high global variance across the whole grid. That is not what
+    // "grainy" means. Local contrast (mean |a - b| between adjacent OCCUPIED cells, reported
+    // separately for the horizontal and vertical directions since the jitter's edge-orientation
+    // salts (EDGE_SALT_H/EDGE_SALT_V) could in principle introduce a directional bias) is closer
+    // to what a grainy *look* actually is.
+    //
+    // WHY TWO VARIANTS BELOW: a single uniform material's props never vary spatially, and
+    // blending two identical values together (jittered split or not) is a no-op -- so a
+    // same-material-both-stripes scenario can only ever show a colour effect, with prop variance
+    // pinned at exactly 0 by construction. `diag_grain_variance_mixed_materials` stripes two
+    // different DrySand-family presets (both wetness=0, i.e. granular_share=1 for both --
+    // apples-to-apples granular, not granular-vs-liquid) so PROP_GRAIN_SIZE/THRESHOLD/FLOW_RATE
+    // also start with real spatial contrast, exercising the property side of `advect_properties`.
+    fn diag_grain_variance_scenario(
+        mode_a: MaterialMode,
+        mode_b: MaterialMode,
+        label: &str,
+        tick_checkpoints: &[usize],
+    ) {
+        let w = 64usize;
+        let h = 96usize;
+        let block_size = 16usize;
+        let neck_width = 0.05f32;
+        let stripe_width = 4usize;
+
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, neck_width, 0.6);
+
+        let row_width = |y: usize| -> usize {
+            (0..w).filter(|&x| mask[y * w + x] != crate::MASK_OUTSIDE).count()
+        };
+        let neck_y = (0..h)
+            .filter(|&y| row_width(y) > 0)
+            .min_by_key(|&y| (row_width(y), (y as i64 - (h as i64 / 2)).abs()))
+            .expect("hourglass mask has no inside rows");
+        const FILL_Y0: usize = 12;
+        let fill_y1 = neck_y.saturating_sub(4);
+        assert!(
+            fill_y1 > FILL_Y0 + 4,
+            "fill region too small: FILL_Y0={FILL_Y0} fill_y1={fill_y1} neck_y={neck_y}"
+        );
+
+        let is_stripe_a = |x: usize| -> bool { (x / stripe_width) % 2 == 0 };
+
+        let mut props = vec![0.0f32; w * h * 4];
+        for y in FILL_Y0..fill_y1 {
+            for x in 0..w {
+                let idx = y * w + x;
+                if mask[idx] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let mode = if is_stripe_a(x) { mode_a } else { mode_b };
+                let (wetness, threshold, flow_rate, grain_size) = mode.preset_props();
+                props[idx * 4 + PROP_WETNESS] = wetness;
+                props[idx * 4 + PROP_THRESHOLD] = threshold;
+                props[idx * 4 + PROP_FLOW_RATE] = flow_rate;
+                props[idx * 4 + PROP_GRAIN_SIZE] = grain_size;
+            }
+        }
+
+        let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
+        let fill_height = 1.0f32;
+        for y in FILL_Y0..fill_y1 {
+            for x in 0..w {
+                let idx = y * w + x;
+                if mask[idx] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                sim.hm.data[idx] = fill_height;
+                let (r, g, b) = if is_stripe_a(x) { (255u8, 255u8, 255u8) } else { (20u8, 20u8, 20u8) };
+                sim.cell_colors[idx * 4] = r;
+                sim.cell_colors[idx * 4 + 1] = g;
+                sim.cell_colors[idx * 4 + 2] = b;
+                sim.cell_colors[idx * 4 + 3] = 255;
+            }
+        }
+
+        const CHANNEL_NAMES: [&str; 7] = [
+            "color_R", "color_G", "color_B",
+            "prop_WETNESS", "prop_THRESHOLD", "prop_FLOW_RATE", "prop_GRAIN_SIZE",
+        ];
+        // Channel index convention: 0..3 = colour RGB, 3..7 = props (WETNESS/THRESHOLD/
+        // FLOW_RATE/GRAIN_SIZE), matching CHANNEL_NAMES above.
+        let read_channel = |sim: &TestSim, idx: usize, c: usize| -> f32 {
+            if c < 3 { sim.cell_colors[idx * 4 + c] as f32 } else { sim.cell_props[idx * 4 + (c - 3)] }
+        };
+
+        let report = |sim: &TestSim, tick: usize| {
+            let occupied: Vec<usize> = (0..w * h)
+                .filter(|&idx| mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] > 0.05)
+                .collect();
+            let n = occupied.len();
+            if n == 0 {
+                println!("diag_grain_variance[{label}] t={tick}: no occupied cells left");
+                return;
+            }
+            for (c, name) in CHANNEL_NAMES.iter().enumerate() {
+                let mean: f64 = occupied.iter().map(|&i| read_channel(sim, i, c) as f64).sum::<f64>() / n as f64;
+                let var: f64 = occupied
+                    .iter()
+                    .map(|&i| { let d = read_channel(sim, i, c) as f64 - mean; d * d })
+                    .sum::<f64>()
+                    / n as f64;
+                let sd = var.sqrt();
+
+                let (mut h_sum, mut h_n) = (0.0f64, 0usize);
+                let (mut v_sum, mut v_n) = (0.0f64, 0usize);
+                for &idx in &occupied {
+                    let x = idx % w;
+                    let y = idx / w;
+                    if x + 1 < w {
+                        let ridx = idx + 1;
+                        if mask[ridx] != crate::MASK_OUTSIDE && sim.hm.data[ridx] > 0.05 {
+                            h_sum += (read_channel(sim, idx, c) as f64 - read_channel(sim, ridx, c) as f64).abs();
+                            h_n += 1;
+                        }
+                    }
+                    if y + 1 < h {
+                        let didx = idx + w;
+                        if mask[didx] != crate::MASK_OUTSIDE && sim.hm.data[didx] > 0.05 {
+                            v_sum += (read_channel(sim, idx, c) as f64 - read_channel(sim, didx, c) as f64).abs();
+                            v_n += 1;
+                        }
+                    }
+                }
+                let local_h = if h_n > 0 { h_sum / h_n as f64 } else { 0.0 };
+                let local_v = if v_n > 0 { v_sum / v_n as f64 } else { 0.0 };
+                println!(
+                    "diag_grain_variance[{label}] t={tick:>4} n_occ={n:>5} {name:<16} \
+                     mean={mean:>9.4} sd={sd:>9.4} local_h={local_h:>8.4} local_v={local_v:>8.4}",
+                );
+            }
+        };
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        report(&sim, 0);
+        let mut next = 0usize;
+        let mut t = 0usize;
+        let max_tick = *tick_checkpoints.last().expect("tick_checkpoints must be non-empty");
+        while t < max_tick {
+            sim.tick(gravity_dir, 4096);
+            t += 1;
+            if next < tick_checkpoints.len() && t == tick_checkpoints[next] {
+                report(&sim, t);
+                next += 1;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    // DIAGNOSTIC measurement, not pass/fail -- see `diag_grain_variance_scenario`'s doc comment.
+    // Same material on both stripes (only colour differs): isolates the colour-only effect and
+    // lets grain size be swept cleanly across presets (FinePowder 0.05 .. CoarseSand 0.80)
+    // without also perturbing property contrast between the stripes.
+    // Run with (editing GRAIN_JITTER_SCALE between runs):
+    //   cargo test -p sandart-sim --release --lib \
+    //     physics::tests::diag_grain_variance_color_only -- --ignored --nocapture
+    fn diag_grain_variance_color_only() {
+        for mode in [MaterialMode::FinePowder, MaterialMode::DrySand, MaterialMode::CoarseSand] {
+            let label = format!("{mode:?}_color_only");
+            diag_grain_variance_scenario(mode, mode, &label, &[50, 150, 300]);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    // DIAGNOSTIC measurement, not pass/fail -- see `diag_grain_variance_scenario`'s doc comment.
+    // Two DIFFERENT DrySand-family materials striped together (both wetness=0, so
+    // granular_share=1 for both -- an apples-to-apples granular comparison, not granular-vs-
+    // liquid), so PROP_GRAIN_SIZE/THRESHOLD/FLOW_RATE start with real spatial contrast, not just
+    // colour -- this is what actually exercises property mixing.
+    fn diag_grain_variance_mixed_materials() {
+        diag_grain_variance_scenario(
+            MaterialMode::FinePowder, MaterialMode::CoarseSand, "finepowder_vs_coarsesand", &[50, 150, 300],
+        );
     }
 }
