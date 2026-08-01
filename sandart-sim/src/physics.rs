@@ -6455,6 +6455,433 @@ mod tests {
         assert!(spreads[1] >= 8, "DrySand should retain a real heap: spread={}", spreads[1]);
     }
 
+    /// Linear-regression slope of `h(x)` along one row, `-d(height)/d(offset)` so a downhill
+    /// flank (height falling away from the peak as `|offset|` grows) reads as a positive slope
+    /// — the same sign convention as the CA's own `geom_slope = h_center - h_neighbor`.
+    /// `offsets` is the set of *signed* offsets from `x0` to fit against (deliberately not just
+    /// a contiguous range, so callers can average the left and right flank in one call and get
+    /// a slope that is robust to small left/right asymmetry from the CA's stochastic dispersion
+    /// term).
+    fn regress_slope(sim: &TestSim, w: usize, x0: usize, row: usize, offsets: &[isize]) -> f32 {
+        let mut sum_x = 0f64;
+        let mut sum_y = 0f64;
+        let mut sum_xy = 0f64;
+        let mut sum_xx = 0f64;
+        let mut n = 0f64;
+        for &dx in offsets {
+            let x = (x0 as isize + dx) as usize;
+            let y = sim.hm.data[row * w + x] as f64;
+            // Fold the left flank (negative dx) onto the same "distance from peak" axis as the
+            // right flank (positive dx) by regressing height against |dx| with a sign flip on
+            // the left, so a symmetric ramp contributes consistently from both sides.
+            let signed_x = dx.unsigned_abs() as f64;
+            sum_x += signed_x;
+            sum_y += y;
+            sum_xy += signed_x * y;
+            sum_xx += signed_x * signed_x;
+            n += 1.0;
+        }
+        let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x);
+        (-slope) as f32
+    }
+
+    /// Offsets covering the mid-flank of a ramp of the given `half_width`: excludes the
+    /// peak/plateau (inner ~20%) and the near-zero tail (outer ~15%), on both left and right,
+    /// where the CA's per-tick noise and rounding dominate the signal. `half_width` is in cells,
+    /// already scaled by `test_scale()` by the caller.
+    fn flank_offsets(half_width: isize) -> Vec<isize> {
+        let lo = (half_width as f32 * 0.20).round() as isize;
+        let hi = (half_width as f32 * 0.85).round() as isize;
+        let lo = lo.max(1);
+        let hi = hi.max(lo + 1);
+        (lo..=hi).chain((-hi..=-lo).rev()).collect()
+    }
+
+    /// Angle-of-repose test scaffolding shared by the four cases below: a wide, deep,
+    /// fully-packed "bedrock" base resting on the container's true floor (found by scanning
+    /// `eval_sandbox_shape`, not assumed), with a single ramp row directly on top of it. The
+    /// bedrock exists so the ramp's own vertical position is pinned before any tick runs --
+    /// building the ramp as a free-floating block instead (tried first; see task report) lets it
+    /// fall and pool into a couple of rows near the wall, where boundary-adjacent cells show
+    /// runaway lateral erosion unrelated to the repose threshold and swamp the signal this test
+    /// wants. Resting on bedrock mid-grid removes that confound: the only way height can change
+    /// after this point is genuine lateral (x) CA flow, which is exactly the mechanism under
+    /// test.
+    struct ReposeRig {
+        w: usize,
+        h: usize,
+        x0: usize,
+        ramp_row: usize,
+        mask: Vec<u8>,
+        gravity_dir: glam::Vec2,
+    }
+
+    impl ReposeRig {
+        fn new(s: usize) -> Self {
+            let w = 64 * s;
+            let h = 64 * s;
+            let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+            let x0 = w / 2;
+            let floor_row = (0..h)
+                .rev()
+                .find(|&y| eval_sandbox_shape(x0, y, w, h, SandboxShape::Square, 0.04, 1.0, 8, false).0)
+                .expect("container must have at least one inside row at x0");
+            ReposeRig { w, h, x0, ramp_row: floor_row - 12 * s, mask, gravity_dir: glam::Vec2::new(0.0, 0.04) }
+        }
+
+        /// Builds a fresh sim with the packed bedrock base (floor_row - 12*s + 1 .. floor_row)
+        /// and a triangular ramp of the given `slope`, holding `area` (peak_h * half_width,
+        /// scaled as `s^2` by the caller) of sand on `ramp_row`, directly atop the bedrock.
+        fn build(&self, s: usize, slope: f32, area: f32) -> TestSim {
+            self.build_material(s, slope, area, MaterialMode::DrySand, 1.5)
+        }
+
+        /// Same as `build`, generalised over material and its incompressibility cap (1.5 for
+        /// granular materials, 1.0 for liquids -- see `cell_capacity_for`), so the identical
+        /// rig/construction can be used as a zero-repose reference point: build the same ramp out
+        /// of `Water` instead of `DrySand` and see how it behaves under the SAME construction,
+        /// budget and measurement. Used by the non-vacuity comparison in
+        /// `test_dry_sand_has_angle_of_repose`.
+        fn build_material(&self, s: usize, slope: f32, area: f32, material: MaterialMode, capacity: f32) -> TestSim {
+            let props = get_test_props(material, self.w * self.h);
+            let mut sim = TestSim::new(self.w, self.h, props, self.mask.clone(), 32);
+            let base_row_hi = self.ramp_row + 12 * s + 1; // exclusive, = floor_row + 1
+            // Pinned close to the container's own walls (found by scanning, not assumed) rather
+            // than an arbitrary fraction of width: a base whose own edges have room to slump
+            // sideways is itself unstable over long tick counts (its own hard 1.5-to-0 step is
+            // far steeper than anything under test) and was observed, during exploration, to
+            // slowly erode and eventually let the ramp above drain into it. Pinning the base
+            // edges directly against the wall leaves them nowhere to go.
+            let base_x_lo = (0..self.x0)
+                .find(|&x| eval_sandbox_shape(x, self.ramp_row + 1, self.w, self.h, SandboxShape::Square, 0.04, 1.0, 8, false).0)
+                .unwrap_or(0)
+                + 1;
+            let base_x_hi = (self.x0..self.w)
+                .rev()
+                .find(|&x| eval_sandbox_shape(x, self.ramp_row + 1, self.w, self.h, SandboxShape::Square, 0.04, 1.0, 8, false).0)
+                .unwrap_or(self.w - 1);
+            for y in (self.ramp_row + 1)..base_row_hi {
+                for x in base_x_lo..base_x_hi {
+                    sim.hm.data[y * self.w + x] = capacity; // fully packed bedrock
+                }
+            }
+            let peak_h = (area * slope).sqrt();
+            let half_width = (peak_h / slope).round() as isize;
+            assert!(
+                (half_width as usize) < (base_x_hi - self.x0).min(self.x0 - base_x_lo),
+                "ramp half_width {} does not fit inside the packed base margins at scale {}",
+                half_width, s
+            );
+            for dx in -half_width..=half_width {
+                let hgt = (peak_h - slope * dx.unsigned_abs() as f32).max(0.0);
+                sim.hm.data[self.ramp_row * self.w + (self.x0 as isize + dx) as usize] = hgt;
+            }
+            sim
+        }
+
+        fn slope_at(&self, sim: &TestSim, half_width: isize) -> f32 {
+            regress_slope(sim, self.w, self.x0, self.ramp_row, &flank_offsets(half_width))
+        }
+
+        /// Ticks `sim` for `ticks` total, then averages the measured flank slope over a further
+        /// sampling window instead of reading a single instant. Necessary because this rig's
+        /// lateral flow (see the CASE-1-doc-comment finding on the stochastic dispersion term)
+        /// does not settle to a fixed point -- it continues to fluctuate tick-to-tick within a
+        /// narrow band even once the fast collapse/rise phase is over. A single-tick snapshot
+        /// lands at an arbitrary point in that fluctuation; averaging several evenly-spaced
+        /// samples over the tail of the run reports the band itself, which is what "the measured
+        /// repose angle" actually means here. The run is fully deterministic (seed derived from
+        /// `tick_count`), so this is reproducible, not a flakiness workaround.
+        fn settle_and_measure(&self, sim: &mut TestSim, ticks: usize, half_width: isize) -> f32 {
+            let (avg, _flow) = self.settle_and_measure_with_flow(sim, ticks, half_width);
+            avg
+        }
+
+        /// Same as `settle_and_measure`, also returning the total flow moved over the whole
+        /// call (fast phase + sampling window), for the quiescence guard.
+        fn settle_and_measure_with_flow(&self, sim: &mut TestSim, ticks: usize, half_width: isize) -> (f32, f64) {
+            let window = (ticks / 4).max(20);
+            let fast_phase = ticks.saturating_sub(window);
+            let mut total_flow = 0.0f64;
+            for _ in 0..fast_phase {
+                total_flow += sim.tick(self.gravity_dir, usize::MAX) as f64;
+            }
+            let samples = 5;
+            let step = (window / samples).max(1);
+            let mut sum = 0.0f32;
+            for _ in 0..samples {
+                for _ in 0..step {
+                    total_flow += sim.tick(self.gravity_dir, usize::MAX) as f64;
+                }
+                sum += self.slope_at(sim, half_width);
+            }
+            (sum / samples as f32, total_flow)
+        }
+    }
+
+    #[test]
+    fn test_dry_sand_has_angle_of_repose() {
+        // THE GAP: sand's angle of repose lives entirely in the granular CA's lateral-flow
+        // threshold today (`if geom_slope > 0.20` in the avalanche valve, `settle_tick`,
+        // physics.rs -- measured at line 2995 in the current tree, not line ~2977 as the task
+        // brief guessed; the `flow = 0.10 * (geom_slope - 0.20)` line the brief quotes is the
+        // very next line, 2996). Nothing in the suite asserts sand actually has one. The planned
+        // Stage C migration moves sand's lateral transport onto the edge-flux solver, whose
+        // equivalent mechanism (`tau`, in `flux_edge`/`edge_sleeps`) is fully implemented but
+        // hardcoded to `tau = 0.0` at every call site -- moving sand across as-is would silently
+        // flatten it like a liquid. This test exists to catch exactly that regression before it
+        // ships.
+        //
+        // MEASURE, DON'T ASSUME -- what this test found, empirically (see the task report for
+        // the full exploration), is more complicated than the brief's framing:
+        //
+        // 1. There is no literal fixed point. A hand-built ramp's lateral per-cell height
+        //    difference (`geom_slope`) does not converge to a permanent stable value at ANY tick
+        //    count, even with the 0.20 valve fully intact. A **second**, independent mechanism
+        //    in the same CA -- the main flow loop a few dozen lines below the avalanche valve --
+        //    carries its own, much smaller threshold under gravity (`threshold_prop * 0.35`,
+        //    ~0.028 for DrySand, further halved by the `sliding_active` hysteresis branch to
+        //    ~0.014) plus an unconditional stochastic "dispersion" term
+        //    (`gravity_push += perp_dot * 3.5 * dispersion_noise`, physics.rs ~3128) that fires
+        //    most ticks regardless of local slope. That second mechanism causes slow, continuous
+        //    lateral creep at *any* nonzero slope. Even on this test's "bedrock base" rig (see
+        //    `ReposeRig`, chosen specifically because a pile touching the true floor -- a
+        //    boundary-mask row -- erodes far faster, fully flattening within ~250 ticks), a pile
+        //    with the REAL, unmodified 0.20 threshold still decays from ~0.04 towards 0 by
+        //    ~900 ticks. "The measured repose angle" here is therefore a *snapshot at a fixed,
+        //    moderate tick budget* (chosen to match realistic interactive timescales -- a user
+        //    watches the sandbox for a few hundred ticks, not hundreds of thousands), not a
+        //    literal fixed point of the ODE.
+        //
+        // 2. NON-VACUITY FINDING, and a correction to the brief: flipping ONLY the named 0.20
+        //    valve (physics.rs:2995) does NOT make the four cases below fail. Measured: CASE 1's
+        //    final slope moves from 0.0426 (real) to 0.0332 (valve zeroed) -- a real but modest
+        //    change, and every case's assertion still passes, because cases 2/3's targets are
+        //    DERIVED from case 1's own measured result, so the four cases are self-consistent
+        //    (and self-normalizing) regardless of how strong the underlying repose actually is.
+        //    At this test's ~100-tick budget, what makes DrySand look different from a
+        //    zero-repose material is dominated by the granular CA's flow-RATE constants (alpha
+        //    ~0.375, `lock_chance` = 0.05 flat under gravity, `max_transfer_coeff` 0.20-0.40 on
+        //    the bed) -- properties independent of either slope threshold -- not by the 0.20
+        //    valve specifically. Confirmed directly: build the identical ramp out of Water
+        //    (wetness=1.0, routed through the flux solver only -- `granular_share <= 0.0` skips
+        //    the granular CA entirely, so it never sees either threshold) and it flattens to
+        //    ~0.0000 within ~100 ticks regardless. The NON-VACUITY ANCHOR check below exists
+        //    because of this: it is a SEPARATE, longer-budget (~4.5x `measure_ticks`) comparison
+        //    of DrySand against that same Water baseline, at a point where a rate-limited-but-
+        //    thresholdless pile has had time to mostly catch up to Water's floor while a
+        //    genuinely-thresholded one has not. THAT check is what actually distinguishes the
+        //    0.20 valve being present from absent -- see its own comment for the measured
+        //    numbers (dry=0.0401 real vs dry=0.0171 with the valve zeroed, against a 0.025
+        //    margin over Water's ~0.0000).
+        //
+        // SCALE INVARIANCE -- the DECAY PROCESS is approximately self-similar across scale, not
+        // (per finding 1 above) a stable angle both scales converge to and hold. A slope is
+        // dimensionless and `geom_slope` never divides by grid size, so time-rescaled snapshots
+        // are comparable: at `SANDART_TEST_SCALE=8` a slope-0.35 pile reads ~0.048 after 51200
+        // ticks (a one-off exploration run, not this test's own budget -- see below), the same
+        // order of magnitude as this test's own scale-1 reading of ~0.04-0.05 after 100 ticks.
+        // But those two tick counts are NOT "the same point in the process" by any linear
+        // scaling -- reaching them is not proportional to `s`. The same slope-0.35 pile that
+        // collapses to under half its starting slope within 100 ticks at scale 1 is still at
+        // 0.353 (no measurable collapse at all) after 800 ticks (100 * 8) at scale 8, and needs
+        // roughly 20000-25000 ticks -- 200-250x the naive linear scaling, not 8x -- before CASE
+        // 1's "collapsed to under half" bar is cleared. That is because
+        // `test_liquid_stream_stays_coherent`'s mechanism (the precedent for this file's
+        // linear-in-`s` tick-budget convention) is advective -- a falling stream covers a fixed
+        // number of cells per tick, so linear is the right shape there; this rig's mechanism is
+        // a lateral relaxation/avalanche process, empirically worse than the O(distance^2) a
+        // pure diffusion process would suggest (closer to cubic in the half_width ratio).
+        // Running this test's actual assertions at scale 8 with a large-enough budget measured
+        // ~312s for ONE of the four cases alone (`measure_ticks` temporarily raised to 51200) --
+        // impractical even as an opt-in manual check. `measure_ticks` therefore stays
+        // linear-in-`s`, fast at every scale, but this means the test does NOT literally pass
+        // under `SANDART_TEST_SCALE=8` -- CASE 1 fails there because the pile hasn't had time to
+        // collapse yet, not because the angle differs. Reported here rather than worked around
+        // (e.g. scaling the budget as `s^3`, which would make the scale-1 cost model misleading
+        // and still be a guess at the true exponent) because the honest shape is "assert the
+        // angle at scale 1; know, and say plainly, that this test cannot afford to re-verify
+        // convergence at production scale on every run."
+        let s = test_scale();
+        let rig = ReposeRig::new(s);
+        let area = 10.0 * (s as f32) * (s as f32); // half_width scales as s at fixed slope
+        let measure_ticks = 100 * s;
+
+        // ---- Case 1: built STEEPER than repose must COLLAPSE toward the angle. ----
+        // Also serves as the primary measurement: DrySand's documented weak gravity-mode repose
+        // (get_ca_params halves-then-scales its threshold under gravity; see the doc comment
+        // above) means there's no way to know the converged value without measuring, so start
+        // absurdly steep (0.35 -- for context, that's already far above anything the exploration
+        // found DrySand settling toward) and read off wherever it lands.
+        let steep_initial = 0.35f32;
+        let mut sim1 = rig.build(s, steep_initial, area);
+        let half_width_1 = ((area * steep_initial).sqrt() / steep_initial).round() as isize;
+        let slope1_initial = rig.slope_at(&sim1, half_width_1);
+        let (slope1_final, flow1_total) = rig.settle_and_measure_with_flow(&mut sim1, measure_ticks, half_width_1);
+        println!(
+            "test_dry_sand_has_angle_of_repose CASE 1 (steep): initial={:.4} ({:.2} deg) final={:.4} ({:.2} deg) total_flow={:.2}",
+            slope1_initial, slope1_initial.atan().to_degrees(),
+            slope1_final, slope1_final.atan().to_degrees(), flow1_total
+        );
+        assert!(
+            flow1_total > 1.0,
+            "scenario went quiescent (total_flow={:.4}) -- the other assertions would pass vacuously",
+            flow1_total
+        );
+        assert!(
+            slope1_final < slope1_initial * 0.5,
+            "CASE 1: a pile built at slope {:.4} should collapse substantially over {} ticks, but only reached {:.4}",
+            slope1_initial, measure_ticks, slope1_final
+        );
+
+        let s_measured = slope1_final;
+
+        // ---- NON-VACUITY ANCHOR: DrySand vs Water in the identical rig, at a longer budget. ----
+        // See the NON-VACUITY FINDING in the doc comment above for why this exists and why 100
+        // ticks alone cannot carry it: at the short budget the four cases above use, DrySand's
+        // elevated slope (vs. a hypothetical zero-repose material) is dominated by the granular
+        // CA's own flow-RATE constants (alpha, lock_chance, per-tick transfer caps), not by
+        // either slope threshold -- so it does not distinguish "threshold present" from
+        // "threshold zeroed". Water (wetness=1.0) is a genuine, already-implemented zero-repose
+        // reference: `granular_share <= 0.0` routes it through the flux solver only, never the
+        // granular CA, so it never sees either threshold at all. Built with the IDENTICAL rig,
+        // construction and starting slope, Water flattens to ~0 within ~100 ticks and stays
+        // there. At a longer budget (~4.5x `measure_ticks`, chosen from measurement: this is
+        // where a rate-limited-but-thresholdless pile has had time to mostly catch up to
+        // Water's floor while a genuinely-thresholded one has not), DrySand retaining
+        // meaningfully more slope than Water is the actual load-bearing signal for "the
+        // threshold mechanism is doing something", separate from the four cases' own internal
+        // (and, per the finding, threshold-insensitive) cross-consistency.
+        let anchor_ticks = measure_ticks * 9 / 2;
+        let mut sim_water = rig.build_material(s, steep_initial, area, MaterialMode::Water, 1.0);
+        let water_anchor_final = rig.settle_and_measure(&mut sim_water, anchor_ticks, half_width_1);
+        let mut sim_dry_anchor = rig.build(s, steep_initial, area);
+        let dry_anchor_final = rig.settle_and_measure(&mut sim_dry_anchor, anchor_ticks, half_width_1);
+        println!(
+            "test_dry_sand_has_angle_of_repose NON-VACUITY ANCHOR @{} ticks: DrySand={:.4} ({:.2} deg) Water={:.4} ({:.2} deg)",
+            anchor_ticks, dry_anchor_final, dry_anchor_final.atan().to_degrees(),
+            water_anchor_final, water_anchor_final.atan().to_degrees()
+        );
+        assert!(
+            dry_anchor_final > water_anchor_final + 0.025,
+            "NON-VACUITY ANCHOR: DrySand should retain meaningfully more slope than Water in the \
+             identical rig at {} ticks -- dry={:.4}, water={:.4} (need dry > water + 0.025)",
+            anchor_ticks, dry_anchor_final, water_anchor_final
+        );
+
+        // ---- Case 3: built AT the repose angle must be STABLE. ----
+        // (Measured before case 2 so case 2's "shallower than repose" can be defined relative to
+        // it, matching the brief's framing.)
+        let at_slope = s_measured;
+        let mut sim3 = rig.build(s, at_slope, area);
+        let half_width_3 = ((area * at_slope).sqrt() / at_slope).round() as isize;
+        let slope3_final = rig.settle_and_measure(&mut sim3, measure_ticks, half_width_3);
+        println!(
+            "test_dry_sand_has_angle_of_repose CASE 3 (at angle): initial={:.4} final={:.4} ({:.2} deg)",
+            at_slope, slope3_final, slope3_final.atan().to_degrees()
+        );
+
+        // ---- Case 2: built SHALLOWER than repose must STAY PUT / converge toward the SAME
+        // angle from below (not slump toward flat). ----
+        let shallow_initial = s_measured * 0.6;
+        let mut sim2 = rig.build(s, shallow_initial, area);
+        let half_width_2 = ((area * shallow_initial).sqrt() / shallow_initial).round() as isize;
+        let slope2_final = rig.settle_and_measure(&mut sim2, measure_ticks, half_width_2);
+        println!(
+            "test_dry_sand_has_angle_of_repose CASE 2 (shallow): initial={:.4} final={:.4} ({:.2} deg) s_measured={:.4} ({:.2} deg)",
+            shallow_initial, slope2_final, slope2_final.atan().to_degrees(),
+            s_measured, s_measured.atan().to_degrees()
+        );
+
+        // The two-sided pin: case 1 (from above) and case 2 (from below) must land close to the
+        // SAME value, not merely "each didn't do something extreme on its own". Tolerance chosen
+        // from the exploration's tick-to-tick noise band at this budget (~0.01-0.02); 0.03 is a
+        // comfortable margin above that noise while still being far tighter than the gap between
+        // the two starting points (0.35 vs ~0.6 * s_measured).
+        const CONVERGENCE_TOL: f32 = 0.03;
+        assert!(
+            (slope1_final - slope2_final).abs() < CONVERGENCE_TOL,
+            "CASE 1 and CASE 2 should converge to close to the same angle from opposite sides: \
+             case1_final={:.4}, case2_final={:.4}, |diff|={:.4} (tolerance {:.4})",
+            slope1_final, slope2_final, (slope1_final - slope2_final).abs(), CONVERGENCE_TOL
+        );
+        assert!(
+            slope2_final > shallow_initial * 1.10,
+            "CASE 2: a pile built shallower than repose ({:.4}) should rise toward the angle \
+             (found to be ~{:.4}), not stay flat or erode further -- got {:.4}",
+            shallow_initial, s_measured, slope2_final
+        );
+        assert!(
+            (slope3_final - s_measured).abs() < CONVERGENCE_TOL,
+            "CASE 3: a pile built at the measured repose angle ({:.4}) should stay close to it, \
+             not drift -- got {:.4}",
+            s_measured, slope3_final
+        );
+
+        // ---- Case 4: material DEPOSITED ON THE PEAK of a settled pile must avalanche down the
+        // flanks and RE-ESTABLISH the angle -- not remain a spike, and not punch a hole. ----
+        // Continues from case 1's already-settled pile (slope1_final ~= s_measured).
+        let mass_before_deposit: f64 = sim1.hm.data.iter().map(|&v| v as f64).sum();
+        let deposit_h = 2.0f32; // a large spike relative to the settled peak (~sqrt(area*s_measured))
+        let deposit_half = (1 * s).max(1) as isize;
+        for dx in -deposit_half..=deposit_half {
+            let idx = rig.ramp_row * rig.w + (rig.x0 as isize + dx) as usize;
+            sim1.hm.data[idx] += deposit_h;
+        }
+        let mass_after_deposit: f64 = sim1.hm.data.iter().map(|&v| v as f64).sum();
+        let peak_h_after_deposit = sim1.hm.data[rig.ramp_row * rig.w + rig.x0];
+
+        let (slope4_final, flow4_total) = rig.settle_and_measure_with_flow(&mut sim1, measure_ticks, half_width_1);
+        let mass_after_resettle: f64 = sim1.hm.data.iter().map(|&v| v as f64).sum();
+        let peak_h_after_resettle = sim1.hm.data[rig.ramp_row * rig.w + rig.x0];
+        // "No hole": the peak column and its near neighbours a few cells out should not have
+        // been carved into a crater -- i.e. the peak should not now be *lower* than a point
+        // partway down the flank it's supposed to be feeding.
+        let mid_flank_offset = (half_width_1 as f32 * 0.5).round() as isize;
+        let h_mid_flank = sim1.hm.data[rig.ramp_row * rig.w + (rig.x0 as isize + mid_flank_offset) as usize];
+        let h_peak = sim1.hm.data[rig.ramp_row * rig.w + rig.x0];
+
+        println!(
+            "test_dry_sand_has_angle_of_repose CASE 4 (deposit on peak): mass_before_deposit={:.3} \
+             mass_after_deposit={:.3} mass_after_resettle={:.3} peak_after_deposit={:.4} \
+             peak_after_resettle={:.4} h_peak={:.4} h_mid_flank(dx={})={:.4} flank_slope={:.4} \
+             ({:.2} deg) total_flow={:.2}",
+            mass_before_deposit, mass_after_deposit, mass_after_resettle,
+            peak_h_after_deposit, peak_h_after_resettle, h_peak, mid_flank_offset, h_mid_flank,
+            slope4_final, slope4_final.atan().to_degrees(), flow4_total
+        );
+        assert!(
+            (mass_after_resettle - mass_after_deposit).abs() < 0.5,
+            "CASE 4: mass should be conserved while the spike avalanches down (before resettle: \
+             {:.3}, after: {:.3})",
+            mass_after_deposit, mass_after_resettle
+        );
+        assert!(
+            flow4_total > 1.0,
+            "CASE 4 scenario went quiescent (total_flow={:.4}) -- the spike never avalanched",
+            flow4_total
+        );
+        assert!(
+            peak_h_after_resettle < peak_h_after_deposit * 0.85,
+            "CASE 4: the deposited spike should avalanche down (peak height should drop \
+             substantially from right after deposit), not remain a spike: after_deposit={:.4}, \
+             after_resettle={:.4}",
+            peak_h_after_deposit, peak_h_after_resettle
+        );
+        assert!(
+            h_peak >= h_mid_flank * 0.5,
+            "CASE 4: the peak should not have been carved into a crater -- h_peak={:.4} is far \
+             below h_mid_flank={:.4} at dx={}",
+            h_peak, h_mid_flank, mid_flank_offset
+        );
+        assert!(
+            (slope4_final - s_measured).abs() < CONVERGENCE_TOL,
+            "CASE 4: the flank slope after the peak re-settles should re-establish the measured \
+             repose angle ({:.4}), not stay disturbed -- got {:.4}",
+            s_measured, slope4_final
+        );
+    }
+
     #[test]
     #[ignore = "Phase 3 target: a liquid blob impacting a floor should splash — spreading \
                 laterally beyond its original width AND moving at least 1 row upward against \
