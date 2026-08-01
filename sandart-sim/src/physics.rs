@@ -439,13 +439,27 @@ fn in_transit_at(
     edge_vel_v[c - w].max(0.0).min(downstream_route)
 }
 
-/// Returns the signed flux (positive = `a` -> `b`).
+/// Computes the *candidate* signed flux (positive = `a` -> `b`) for one edge, from a single
+/// frozen read of the caller-supplied heads/avail/cap — no shared state (`temp_heights`,
+/// `cell_props`, `cell_colors`) is touched here. This is the COLLECT half of the frozen-Jacobi
+/// flux solver; see the big comment on the candidate-flux buffers in `settle_tick` for the
+/// three-pass structure and `flux_edge_apply` for the APPLY half.
+///
+/// The donor/acceptor clamps below (`avail_a`, `cap_b - h_b`, etc.) are still applied — they are
+/// what makes this a *single-edge* candidate rather than the raw, unbounded integrated velocity —
+/// but they are only a per-edge upper bound. Multiple edges reading the same frozen donor (a cell
+/// with two owned outgoing edges, or a cell that is the acceptor of two different owners' edges)
+/// can still, together, claim more than that donor has or more than that acceptor can hold; that
+/// is exactly what the caller's arbitration step (summing candidates per cell and rescaling, see
+/// `settle_tick`) exists to catch before any candidate here is actually applied.
+///
+/// Reduction to the pre-Jacobi solver: this is bit-for-bit the same formula the combined
+/// compute-and-apply `flux_edge` used before this conversion (see git history), just without the
+/// final application — so a cell touched by only one edge this phase (arbitration a provable
+/// no-op there — see the phase-0 case) behaves identically to before.
+#[inline]
 #[allow(clippy::too_many_arguments)]
-fn flux_edge(
-    a_b: usize,
-    b_b: usize,
-    a_idx: usize,
-    b_idx: usize,
+fn flux_edge_candidate(
     head_a: f32,
     head_b: f32,
     c_sq: f32,
@@ -455,15 +469,10 @@ fn flux_edge(
     cap_b: f32,
     avail_a: f32,
     avail_b: f32,
+    h_a: f32,
+    h_b: f32,
     weight: f32,
-    v_e: &mut f32,
-    temp_heights: &mut [f32],
-    cell_colors: &mut [u8],
-    cell_props: &mut [f32],
-    modified: &mut Vec<bool>,
-    next_displacements: &mut Vec<f32>,
-    total_flow: &mut f32,
-    flow_occurred: &mut bool,
+    v_e_prev: f32,
 ) -> f32 {
     let driving = head_a - head_b;
     let yielded = if driving > tau {
@@ -474,20 +483,46 @@ fn flux_edge(
         0.0
     };
 
-    let v = (*v_e + c_sq * yielded) * damping;
+    let v = (v_e_prev + c_sq * yielded) * damping;
 
-    let h_a = temp_heights[a_idx];
-    let h_b = temp_heights[b_idx];
-
-    // Donor mass and acceptor capacity, in the direction the velocity actually points.
-    let flux = weight * if v > 0.0 {
+    // Donor mass and acceptor capacity, in the direction the velocity actually points. This is
+    // the single-edge bound described above, not the final word — see the doc comment.
+    weight * if v > 0.0 {
         v.min(avail_a).min((cap_b - h_b).max(0.0))
     } else if v < 0.0 {
         -((-v).min(avail_b).min((cap_a - h_a).max(0.0)))
     } else {
         0.0
-    };
+    }
+}
 
+/// Applies a *final* (post-arbitration) signed flux to one edge: the APPLY half of the
+/// frozen-Jacobi flux solver (see `flux_edge_candidate` and the candidate-flux buffer comment in
+/// `settle_tick`). Bit-for-bit the same mutation the old combined `flux_edge` performed once its
+/// `flux` value was computed — moved here unchanged so that arbitration can sit between computing
+/// a candidate and mutating anything.
+///
+/// `*v_e` is set to the *realised* (final) flux rather than the raw candidate or the raw
+/// integrated velocity — same anti-windup rationale as before: an edge whose donor is empty or
+/// whose acceptor is full (locally, or now also via arbitration) must not accumulate unbounded
+/// head every tick and then discharge it in one burst the instant the constraint lifts.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn flux_edge_apply(
+    a_b: usize,
+    b_b: usize,
+    a_idx: usize,
+    b_idx: usize,
+    flux: f32,
+    v_e: &mut f32,
+    temp_heights: &mut [f32],
+    cell_colors: &mut [u8],
+    cell_props: &mut [f32],
+    modified: &mut Vec<bool>,
+    next_displacements: &mut Vec<f32>,
+    total_flow: &mut f32,
+    flow_occurred: &mut bool,
+) {
     *v_e = flux;
 
     // Below this the transfer is pure f32 noise; skipping it is still exactly conservative
@@ -511,8 +546,51 @@ fn flux_edge(
         *total_flow += mag;
         *flow_occurred = true;
     }
+}
 
-    flux
+/// The pointwise-minimum flux-corrected-transport (Zalesak-style) scale factor for one candidate
+/// edge, given the donor's and acceptor's frozen per-cell budgets and the RAW (pre-scaling)
+/// totals every edge touching them this phase already claimed (see the candidate-flux buffer
+/// comment above `settle_tick`'s phase loop for how `*_out_total`/`*_in_total` are accumulated).
+///
+/// Returns a value in `[0, 1]`; multiplying a candidate flux by it can only shrink the candidate's
+/// magnitude, never grow or flip it.
+///
+/// **Why a single application of this (no fixed-point iteration to convergence) is sufficient.**
+/// For a donor cell `d`, define `out_scale(d) = min(1, avail(d) / out_total(d))` where
+/// `out_total(d)` is the sum of every RAW candidate magnitude `d` donates this phase. Scaling
+/// *every* edge donating out of `d` by at most `out_scale(d)` (this function never returns more,
+/// since it takes the minimum with the acceptor's own ratio too) bounds their sum by
+/// `out_total(d) * out_scale(d)`, which is exactly `avail(d)` when `out_total(d) > avail(d)` and
+/// is `<= avail(d)` otherwise (where `out_scale(d) == 1` and the raw sum was already within
+/// budget). The identical argument bounds the acceptor side by `freecap(a)`. Both guarantees
+/// therefore follow from the RAW totals alone, computed once before any scaling is applied — a
+/// second pass recomputing totals from already-scaled fluxes would not find anything to correct,
+/// because the bound was exact, not approximate. This is the standard synchronous FCT limiter
+/// (Zalesak 1979): the min-of-two-ratios construction is precisely what makes it single-pass.
+///
+/// Cross-checked empirically, not just algebraically: every diagnostic and test run against this
+/// conversion measured `min_h >= 0` and `max_h <= capacity` with no exceptions (see the physics
+/// conversion's measurement notes), which is what would fail first if a second pass were in fact
+/// needed.
+#[inline]
+fn edge_arbitration_scale(
+    donor_out_total: f32,
+    donor_avail: f32,
+    acceptor_in_total: f32,
+    acceptor_freecap: f32,
+) -> f32 {
+    let out_scale = if donor_out_total > donor_avail && donor_out_total > 0.0 {
+        (donor_avail / donor_out_total).max(0.0)
+    } else {
+        1.0
+    };
+    let in_scale = if acceptor_in_total > acceptor_freecap && acceptor_in_total > 0.0 {
+        (acceptor_freecap / acceptor_in_total).max(0.0)
+    } else {
+        1.0
+    };
+    out_scale.min(in_scale)
 }
 
 /// Sleeping predicate for a flux edge: `true` when `flux_edge` would provably realise a flux of
@@ -1880,6 +1958,20 @@ pub fn settle_tick(
     if column_depth.len() != heightmap.data.len() {
         column_depth.resize(heightmap.data.len(), 0.0);
     }
+    // EXPERIMENT, TRIED AND REVERTED (see git history / task report): freezing this tick's
+    // `column_depth` reads for the lateral edge's *neighbour* term (`head_b_full` below) — a
+    // one-tick-lagged snapshot taken before this tick wrote anything — closed the remaining gap
+    // to full tick-phase invariance on `test_water_blob_stays_left_right_symmetric_under_gravity`
+    // (every mechanism in `test_tick_phase_mechanism_isolation` became bit-identical, confirming
+    // that this cross-neighbour read is exactly the last channel through which x-sweep/block-order
+    // parity was still reaching that test after the edge-flux solver itself was converted to
+    // frozen Jacobi). But `column_depth` is not part of the edge-flux path this conversion is
+    // scoped to — it is a scalar overburden estimate that only ever feeds a driving *term*, never
+    // a mass limit — and freezing its cross-neighbour read regressed two previously-passing tests
+    // that were not in scope to touch: `test_liquid_stream_stays_coherent` (max_width 7 -> 9,
+    // crossing its <= 8 bound) and `test_liquid_flowing_liquid_does_not_stand_in_walls`
+    // (0 -> 23 enclosed void cells at tick 160). Left unconverted for that reason; see the task
+    // report for the numbers with and without.
 
     let cols = (w + block_size - 1) / block_size;
     let rows = (h + block_size - 1) / block_size;
@@ -2013,6 +2105,62 @@ pub fn settle_tick(
     let mut next_displacements = vec![0.0f32; expected_len];
     let mut flow_occurred = false;
 
+    // --- Frozen-Jacobi candidate-flux state (edge-flux solver only; the granular CA's own
+    //     `try_move` transfers are untouched and still apply immediately, sequentially) ---
+    //
+    // Each phase (0 = gravity-aligned, 1 = everything else the flux solver owns) now runs in
+    // three sub-passes instead of one:
+    //
+    //   1. COLLECT: walk every cell exactly as before, but instead of computing-and-applying a
+    //      flux in one step, compute the *candidate* flux for each edge this cell owns (see
+    //      `flux_edge_candidate`) from state nothing in this phase has mutated yet, and record it
+    //      here. Because nothing is mutated until step 3, every candidate in a phase is reading
+    //      the identical frozen snapshot regardless of which cell the scheduler happened to visit
+    //      first — the whole point of this rewrite.
+    //   2/3. ARBITRATE + APPLY: see the big comment just above the post-collection loop at the end
+    //      of each phase body for the capacity-limiter algorithm and why one pass suffices.
+    //
+    // `cand_h[i]` / `cand_v[i]` hold the horizontal edge (i, i+1) / vertical edge (i, i+w) owned by
+    // cell `i`, valid only where `edge_h_active[i]` / `edge_v_active[i]` is set. They hold the
+    // *candidate* (single-edge-clamped, pre-arbitration) flux during COLLECT and are overwritten
+    // in place with the *final* (post-arbitration) flux during APPLY, since nothing downstream
+    // needs the raw candidate once arbitration has run.
+    //
+    // `cell_avail[i]` / `cell_freecap[i]` are cell `i`'s frozen donor-mass / acceptor-free-capacity
+    // limits for whichever edges touch it this phase (a pure function of the cell and the phase's
+    // context — gravity-aligned vs. lateral, in-transit-adjusted or not — never of which specific
+    // edge is asking, so it is safe for more than one edge to write the same value here).
+    // `cell_out_total[i]` / `cell_in_total[i]` are the *sums* of raw candidate magnitudes where `i`
+    // is the donor / acceptor across every edge that touched it this phase; that sum is exactly
+    // what the single Gauss-Seidel sweep used to prevent by construction (an edge processed later
+    // saw the earlier edge's already-reduced `temp_heights`) and what arbitration now prevents
+    // explicitly.
+    //
+    // All buffers are sized to the full grid (indexed by cell, not by block) and allocated once,
+    // outside the phase loop; only the cells actually touched this phase are ever written to, and
+    // the `touched_*` lists are what let the next phase clear exactly those entries back to their
+    // default instead of paying an O(grid) reset every phase.
+    let cell_count = heightmap.data.len();
+    let mut cand_h = vec![0.0f32; cell_count];
+    let mut cand_v = vec![0.0f32; cell_count];
+    let mut edge_h_active = vec![false; cell_count];
+    let mut edge_v_active = vec![false; cell_count];
+    let mut cell_out_total = vec![0.0f32; cell_count];
+    let mut cell_in_total = vec![0.0f32; cell_count];
+    let mut cell_avail = vec![0.0f32; cell_count];
+    let mut cell_freecap = vec![0.0f32; cell_count];
+    // Phase 1's g=0 (Sandbox) liquid branch also needs, per center cell, the largest raw head
+    // difference across its owned edges (`max_head_diff`, computed unconditionally during COLLECT
+    // — it does not depend on arbitration) so the post-APPLY block-wake check can be run once
+    // arbitration has settled `cand_h`/`cand_v` into their final values. `g0_liquid_cells` is the
+    // set of cells that took that branch this phase at all, whether or not they ended up owning a
+    // live edge.
+    let mut max_head_diff_cell = vec![0.0f32; cell_count];
+    let mut touched_h: Vec<usize> = Vec::new();
+    let mut touched_v: Vec<usize> = Vec::new();
+    let mut touched_cells: Vec<usize> = Vec::new();
+    let mut g0_liquid_cells: Vec<usize> = Vec::new();
+
     // 2. Continuous per-cell solver (loop over active blocks)
     let gravity_active = gravity_dir.length_squared() > 1e-6;
     let b_len = expected_len;
@@ -2048,6 +2196,25 @@ pub fn settle_tick(
         if phase == 0 && !gravity_active {
             continue;
         }
+
+        // Clear exactly the candidate-flux state the *previous* phase touched (a no-op on
+        // phase 0, the first phase run, since every `touched_*` list starts empty). Sparse by
+        // construction — only cells with a live edge or a g=0-liquid visit last phase pay this
+        // cost — rather than an O(grid) fill every phase.
+        for &idx in &touched_h { edge_h_active[idx] = false; cand_h[idx] = 0.0; }
+        for &idx in &touched_v { edge_v_active[idx] = false; cand_v[idx] = 0.0; }
+        for &idx in &touched_cells {
+            cell_out_total[idx] = 0.0;
+            cell_in_total[idx] = 0.0;
+            cell_avail[idx] = 0.0;
+            cell_freecap[idx] = 0.0;
+        }
+        for &idx in &g0_liquid_cells { max_head_diff_cell[idx] = 0.0; }
+        touched_h.clear();
+        touched_v.clear();
+        touched_cells.clear();
+        g0_liquid_cells.clear();
+
         // True when phase 0 should walk rows bottom-to-top (the usual case: gravity points at
         // +y, i.e. down the grid).
         let against_gravity_is_up = gravity_dir.y >= 0.0;
@@ -2138,8 +2305,17 @@ pub fn settle_tick(
                     if x > 0 && x + 1 < w && y > 0 && y + 1 < h && is_inside(x, y + 1) {
                         let cell_liquidity = liquidity(wetness);
                         let nb_idx = center_idx + w;
-                        let h_a = temp_heights[center_idx];
-                        let h_b = temp_heights[nb_idx];
+                        // Frozen read: phase 0 is always the first phase to touch any cell (see
+                        // the candidate-flux buffer comment above `settle_tick`'s phase loop), so
+                        // `heightmap.data` — the tick's untouched starting heights — and
+                        // `temp_heights` coincide here. Reading `heightmap.data` explicitly (not
+                        // `temp_heights`) is what makes that invariant self-evident rather than an
+                        // accident of phase order: every cell in this phase reads the SAME
+                        // snapshot regardless of which cell the scheduler visits first, which is
+                        // the frozen-Jacobi property this conversion exists to establish. Nothing
+                        // is mutated until this phase's post-collection APPLY step, further down.
+                        let h_a = heightmap.data[center_idx];
+                        let h_b = heightmap.data[nb_idx];
                         let cap_a = cell_capacity_for(wetness);
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
                         // Driving head on this edge, fill term normalised to fraction-of-capacity
@@ -2195,23 +2371,39 @@ pub fn settle_tick(
                         let (liquid_c_sq, liquid_damping) = wave_params(wetness);
                         let c_sq = GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity;
                         let damping = GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity;
-                        let nb_b = ((y + 1) / block_size) * cols + bx;
-                        let phase0_f = flux_edge(
-                            b, nb_b, center_idx, nb_idx,
-                            head_a,
-                            head_b,
+                        // COLLECT only: compute this edge's candidate flux and record it, plus
+                        // this cell's and its neighbour's donor/acceptor limits for arbitration.
+                        // Nothing is mutated yet — see this phase's post-collection ARBITRATE +
+                        // APPLY pass below the nested loops, and the buffer comment above the
+                        // phase loop for why phase 0's arbitration is provably a no-op (each cell
+                        // owns exactly one vertical edge as donor and one as acceptor here) but is
+                        // still routed through the same general machinery rather than
+                        // special-cased.
+                        let candidate = flux_edge_candidate(
+                            head_a, head_b,
                             c_sq, damping, 0.0,
-                            cap_a,
-                            cap_b,
+                            cap_a, cap_b,
+                            h_a, h_b,
                             h_a, h_b,
                             1.0,
-                            &mut edge_vel_v[center_idx],
-                            temp_heights, cell_colors, cell_props,
-                            &mut modified, &mut next_displacements,
-                            &mut total_flow, &mut flow_occurred,
+                            edge_vel_v[center_idx],
                         );
-                        #[cfg(test)]
-                        note_phase_flow(phase, phase0_f);
+                        cand_v[center_idx] = candidate;
+                        edge_v_active[center_idx] = true;
+                        touched_v.push(center_idx);
+                        cell_avail[center_idx] = h_a;
+                        cell_freecap[center_idx] = (cap_a - h_a).max(0.0);
+                        cell_avail[nb_idx] = h_b;
+                        cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
+                        touched_cells.push(center_idx);
+                        touched_cells.push(nb_idx);
+                        if candidate >= 0.0 {
+                            cell_out_total[center_idx] += candidate;
+                            cell_in_total[nb_idx] += candidate;
+                        } else {
+                            cell_out_total[nb_idx] += -candidate;
+                            cell_in_total[center_idx] += -candidate;
+                        }
                     }
                     continue;
                 }
@@ -2250,11 +2442,13 @@ pub fn settle_tick(
                     // help; it only moved the ceiling and made the directional bias visible as
                     // 33x worse left/right asymmetry.
                     //
-                    // The clamps below stay live on purpose. Only the *dynamics* need the
-                    // snapshot; the donor-mass and acceptor-capacity limits inside `flux_edge`
-                    // are a safety limiter and must see what the other three edges have already
-                    // taken this pass, or a cell could be drained twice over. Because every edge
-                    // still debits exactly what it credits, Jacobi ordering costs nothing in
+                    // The clamps below (`avail`/`cap - h`) are now candidate-level, not final —
+                    // arbitration (this phase's post-collection ARBITRATE + APPLY pass, below the
+                    // nested loops) is what actually enforces "must not see what the other edges
+                    // incident on this cell have already taken", now that nothing is applied
+                    // mid-phase to see. Because every edge still debits exactly what it credits,
+                    // and arbitration only ever scales a candidate down (never up, never
+                    // negative — see that pass's comment), Jacobi ordering costs nothing in
                     // conservation — that property is structural in the flux form, not a
                     // consequence of the sweep order.
                     //
@@ -2265,13 +2459,16 @@ pub fn settle_tick(
                     // energy-carrying case, which is exactly this g = 0 branch.
                     let (c_sq, damping) = wave_params(wetness);
                     let cap_c = cell_capacity_for(wetness);
-                    let mut max_flux = 0.0f32;
                     // Largest head difference across the edges this cell owns — the *driving*
                     // term, the same quantity `edge_sleeps`' branch 2 tests against `tau`. It is
                     // the wake magnitude; see the block-activation note at the end of this branch
-                    // for why it is a difference and not a level.
+                    // for why it is a difference and not a level. Computed unconditionally during
+                    // COLLECT (it does not depend on arbitration); the block-wake check itself is
+                    // deferred to this phase's post-APPLY pass, once `max_flux` — the *other* half
+                    // of that check — has its final, post-arbitration value.
                     let mut max_head_diff = 0.0f32;
                     let head_c = heightmap.data[center_idx];
+                    g0_liquid_cells.push(center_idx);
 
                     // *Which buffer the sleeping test reads is the whole subtlety here.* The two
                     // branches of `edge_sleeps` mirror two different clauses of `flux_edge`, and
@@ -2303,21 +2500,34 @@ pub fn settle_tick(
                                 edge_vel_h[center_idx] = 0.0;
                             }
                         } else {
-                            let nb_b = by * cols + (x + 1) / block_size;
-                            let f = flux_edge(
-                                b, nb_b, center_idx, nb_idx,
+                            // COLLECT only — see the phase-loop buffer comment and
+                            // `flux_edge_candidate`'s doc comment. This cell also owns the y-edge
+                            // below (next block), so — unlike phase 0 — this cell can be a donor
+                            // (or acceptor) on *two* owned edges at once this phase, which is
+                            // exactly the multi-edge case arbitration exists for.
+                            let candidate = flux_edge_candidate(
                                 head_c, heightmap.data[nb_idx],
                                 c_sq, damping, 0.0,
                                 cap_c, cap_b,
-                                h_a, h_b, 1.0,
-                                &mut edge_vel_h[center_idx],
-                                temp_heights, cell_colors, cell_props,
-                                &mut modified, &mut next_displacements,
-                                &mut total_flow, &mut flow_occurred,
+                                h_a, h_b, h_a, h_b, 1.0,
+                                edge_vel_h[center_idx],
                             );
-                            max_flux = max_flux.max(f.abs());
-                            #[cfg(test)]
-                            note_phase_flow(phase, f);
+                            cand_h[center_idx] = candidate;
+                            edge_h_active[center_idx] = true;
+                            touched_h.push(center_idx);
+                            cell_avail[center_idx] = h_a;
+                            cell_freecap[center_idx] = (cap_c - h_a).max(0.0);
+                            cell_avail[nb_idx] = h_b;
+                            cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
+                            touched_cells.push(center_idx);
+                            touched_cells.push(nb_idx);
+                            if candidate >= 0.0 {
+                                cell_out_total[center_idx] += candidate;
+                                cell_in_total[nb_idx] += candidate;
+                            } else {
+                                cell_out_total[nb_idx] += -candidate;
+                                cell_in_total[center_idx] += -candidate;
+                            }
                         }
                     }
 
@@ -2335,64 +2545,48 @@ pub fn settle_tick(
                                 edge_vel_v[center_idx] = 0.0;
                             }
                         } else {
-                            let nb_b = ((y + 1) / block_size) * cols + bx;
-                            let f = flux_edge(
-                                b, nb_b, center_idx, nb_idx,
+                            // COLLECT only — see the comment on the x-edge above.
+                            let candidate = flux_edge_candidate(
                                 head_c, heightmap.data[nb_idx],
                                 c_sq, damping, 0.0,
                                 cap_c, cap_b,
-                                h_a, h_b, 1.0,
-                                &mut edge_vel_v[center_idx],
-                                temp_heights, cell_colors, cell_props,
-                                &mut modified, &mut next_displacements,
-                                &mut total_flow, &mut flow_occurred,
+                                h_a, h_b, h_a, h_b, 1.0,
+                                edge_vel_v[center_idx],
                             );
-                            max_flux = max_flux.max(f.abs());
-                            #[cfg(test)]
-                            note_phase_flow(phase, f);
+                            cand_v[center_idx] = candidate;
+                            edge_v_active[center_idx] = true;
+                            touched_v.push(center_idx);
+                            cell_avail[center_idx] = h_a;
+                            cell_freecap[center_idx] = (cap_c - h_a).max(0.0);
+                            cell_avail[nb_idx] = h_b;
+                            cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
+                            touched_cells.push(center_idx);
+                            touched_cells.push(nb_idx);
+                            if candidate >= 0.0 {
+                                cell_out_total[center_idx] += candidate;
+                                cell_in_total[nb_idx] += candidate;
+                            } else {
+                                cell_out_total[nb_idx] += -candidate;
+                                cell_in_total[center_idx] += -candidate;
+                            }
                         }
                     }
 
-                    // Block-activation bookkeeping. `max_flux` plays the role the per-cell
-                    // velocity used to, and the head difference keeps a cell's neighbourhood awake
-                    // so a travelling wave is not cut off at a block boundary: an edge that is
-                    // about to move mass next tick has a head to move it with, and this is that
-                    // head — literally `edge_sleeps`' branch-2 driving term, so the wake magnitude
-                    // and the sleep predicate now agree on what "something is happening here"
-                    // means.
+                    // Block-activation bookkeeping (`max_head_diff` only; `max_flux` is folded in
+                    // once arbitration has finalised this cell's owned edges — see this phase's
+                    // post-APPLY pass below the nested loops, which runs this exact check with the
+                    // final `max_flux`). Recorded here unconditionally, matching the pre-Jacobi
+                    // behaviour where this check ran once per cell regardless of which edges were
+                    // live.
                     //
-                    // It used to be `|temp_heights[center] - DEFAULT_SAND_HEIGHT|`, an *absolute
-                    // level*, and that is a category error that the coarse 0.1 must-simulate bar
-                    // in `settle_tick`'s scheduler was covering for. A pool is only at
-                    // DEFAULT_SAND_HEIGHT by coincidence — the user's bed is wherever they poured
-                    // it — so a perfectly flat, perfectly still pool at any other level reported a
-                    // constant nonzero "disturbance" forever, and the only reason that was not
-                    // ruinous is that the bar sat above a typical offset. Measured on a settled
-                    // 256x256 pool, MUST block-ticks over a staleness period (7680 = the whole
-                    // domain): level magnitude gave 7680 at a 0.50 bed under either bar, and 0 at a
-                    // 0.35 bed purely because that is the constant written into the expression;
-                    // the head difference gives 0 at both.
-                    //
-                    // Level-based also gets the ripple itself backwards. The quantity that must
-                    // clear the bar is the wavefront's, and a low-amplitude ripple's height
-                    // deviation is ~1e-3 — a thousand times under the old 0.1 bar — so wavefront
-                    // blocks were never MUST, fell into `rest_candidates` and were scheduled by
-                    // `staleness * displacement`, which for a small deviation sorts to the bottom
-                    // of the queue. The front then advanced only when a block aged out at
-                    // MAX_STALENESS, which is the reported bug: waves that "freeze half way
-                    // through" and jerk forward sporadically. Reach scaled with the simulation
-                    // budget instead of with the wave speed — on a 235-column pool the disturbance
-                    // died at column 148 at budget 32 and 200 at budget 64, against 245 (the wall)
-                    // at 256. See `test_sandbox_wave_reach_is_budget_independent`.
-                    if max_flux > 3e-4 || max_head_diff > 1e-4 {
-                        flow_occurred = true;
-                        let flow_val = max_flux.max(max_head_diff);
-                        activate_neighbor(b, flow_val, &mut modified, &mut next_displacements);
-                        if bx > 0 { activate_neighbor(b - 1, flow_val, &mut modified, &mut next_displacements); }
-                        if bx + 1 < cols { activate_neighbor(b + 1, flow_val, &mut modified, &mut next_displacements); }
-                        if by > 0 { activate_neighbor(b - cols, flow_val, &mut modified, &mut next_displacements); }
-                        if by + 1 < rows { activate_neighbor(b + cols, flow_val, &mut modified, &mut next_displacements); }
-                    }
+                    // The head-difference wake magnitude is `edge_sleeps`' branch-2 driving term,
+                    // not an absolute level — see git history for why a level-based wake magnitude
+                    // was a category error (a settled pool away from `DEFAULT_SAND_HEIGHT` looked
+                    // perpetually "disturbed", while a real low-amplitude ripple's ~1e-3 deviation
+                    // never cleared the old 0.1 must-simulate bar and only advanced when a block
+                    // aged out — `test_sandbox_wave_reach_is_budget_independent` is the regression
+                    // guard for that).
+                    max_head_diff_cell[center_idx] = max_head_diff;
                 } else {
                     // --- Cellular Automata (Sand settling behavior) ---
                     // CA requires accessing neighbors at offset 1, so we must be inside the grid boundaries
@@ -2543,6 +2737,8 @@ pub fn settle_tick(
                         // `column_depth[nb_idx]` may be a tick stale if the neighbour's block ran
                         // after this one, or hasn't run yet this tick — harmless, since (like
                         // `GRAVITY_HEAD_SCALE`) it only ever feeds `driving`, never the mass limits.
+                        // (A frozen-snapshot read here was tried and reverted — see the comment on
+                        // `column_depth`'s resize check above for why.)
                         let head_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
                             + LATERAL_PRESSURE_SCALE * column_depth[center_idx];
                         let head_b_full = h_b_frozen + LATERAL_PRESSURE_SCALE * column_depth[nb_idx];
@@ -2573,7 +2769,6 @@ pub fn settle_tick(
                             }
                         } else {
                             let (c_sq, damping) = wave_params(wetness);
-                            let nb_b = by * cols + (x + 1) / block_size;
                             // Mass that arrived from upstream during phase 0 is still falling; it is
                             // unsupported and cannot push sideways (see `flux_edge`'s `avail_*`).
                             // `edge_vel_v[i - w]` is exactly the flux phase 0 realised on the
@@ -2630,21 +2825,39 @@ pub fn settle_tick(
                             let avail_b = (h_b
                                 - in_transit_at(nb_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask))
                                 .max(0.0);
-                            let lateral_f = flux_edge(
-                                b, nb_b, center_idx, nb_idx,
+                            // COLLECT only — see the phase-loop buffer comment and
+                            // `flux_edge_candidate`'s doc comment. Under gravity this is the only
+                            // owned edge this cell has in phase 1 (its vertical edge belongs to
+                            // phase 0, already fully resolved), but it can still be the ACCEPTOR
+                            // of up to two live edges this phase — its own, run in reverse (if the
+                            // neighbour is higher), and its left neighbour's owned edge — which is
+                            // exactly the multi-edge case arbitration exists for.
+                            let candidate = flux_edge_candidate(
                                 head_a,
                                 head_b_full,
                                 c_sq, damping, 0.0,
                                 cell_capacity, cap_b,
                                 avail_a, avail_b,
+                                h_a, h_b,
                                 cell_liquidity,
-                                &mut edge_vel_h[center_idx],
-                                temp_heights, cell_colors, cell_props,
-                                &mut modified, &mut next_displacements,
-                                &mut total_flow, &mut flow_occurred,
+                                edge_vel_h[center_idx],
                             );
-                            #[cfg(test)]
-                            note_phase_flow(phase, lateral_f);
+                            cand_h[center_idx] = candidate;
+                            edge_h_active[center_idx] = true;
+                            touched_h.push(center_idx);
+                            cell_avail[center_idx] = avail_a;
+                            cell_freecap[center_idx] = (cell_capacity - h_a).max(0.0);
+                            cell_avail[nb_idx] = avail_b;
+                            cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
+                            touched_cells.push(center_idx);
+                            touched_cells.push(nb_idx);
+                            if candidate >= 0.0 {
+                                cell_out_total[center_idx] += candidate;
+                                cell_in_total[nb_idx] += candidate;
+                            } else {
+                                cell_out_total[nb_idx] += -candidate;
+                                cell_in_total[center_idx] += -candidate;
+                            }
                         }
                     }
 
@@ -3013,6 +3226,107 @@ pub fn settle_tick(
                     sliding[center_idx] = cell_flowed;
                 }
             }
+        }
+    }
+
+    // --- ARBITRATE + APPLY ---
+    //
+    // Every entry in `touched_v`/`touched_h` is a candidate this phase's COLLECT pass computed
+    // from the single frozen snapshot described in the buffer comment above the phase loop: no
+    // edge above saw any other edge's update. `cell_out_total`/`cell_in_total` are the RAW sums of
+    // those candidates' magnitudes, per cell, in the donor and acceptor directions; comparing them
+    // against the frozen `cell_avail`/`cell_freecap` and scaling by `edge_arbitration_scale` (see
+    // its doc comment for the single-pass proof) is what restores the guarantee the old sequential
+    // sweep used to provide for free — that a cell's total same-tick draw/receipt cannot exceed
+    // what it actually has or actually has room for — now that no edge's application is visible to
+    // the next one within this phase.
+    //
+    // Apply order between `touched_v` and `touched_h` (and within each list) does not matter: each
+    // edge's final flux was already fixed by arbitration above, so applying them is pure
+    // accumulation (`temp_heights[i] +=/-= final_flux`), which is commutative. This is a direct
+    // consequence of the flux form's structural conservation (see `flux_edge_apply`'s doc
+    // comment) and is what makes this whole rewrite order-independent where the old sweep was not.
+    for &idx in &touched_v {
+        let raw = cand_v[idx];
+        let a_idx = idx;
+        let b_idx = idx + w;
+        let (donor, acceptor) = if raw >= 0.0 { (a_idx, b_idx) } else { (b_idx, a_idx) };
+        let scale = edge_arbitration_scale(
+            cell_out_total[donor], cell_avail[donor],
+            cell_in_total[acceptor], cell_freecap[acceptor],
+        );
+        let final_flux = raw * scale;
+        cand_v[idx] = final_flux;
+        let x = idx % w;
+        let y = idx / w;
+        let bx = x / block_size;
+        let by = y / block_size;
+        let a_b = by * cols + bx;
+        let nb_b = ((y + 1) / block_size) * cols + bx;
+        flux_edge_apply(
+            a_b, nb_b, a_idx, b_idx, final_flux,
+            &mut edge_vel_v[idx],
+            temp_heights, cell_colors, cell_props,
+            &mut modified, &mut next_displacements,
+            &mut total_flow, &mut flow_occurred,
+        );
+        #[cfg(test)]
+        note_phase_flow(phase, final_flux);
+    }
+
+    for &idx in &touched_h {
+        let raw = cand_h[idx];
+        let a_idx = idx;
+        let b_idx = idx + 1;
+        let (donor, acceptor) = if raw >= 0.0 { (a_idx, b_idx) } else { (b_idx, a_idx) };
+        let scale = edge_arbitration_scale(
+            cell_out_total[donor], cell_avail[donor],
+            cell_in_total[acceptor], cell_freecap[acceptor],
+        );
+        let final_flux = raw * scale;
+        cand_h[idx] = final_flux;
+        let x = idx % w;
+        let y = idx / w;
+        let bx = x / block_size;
+        let by = y / block_size;
+        let a_b = by * cols + bx;
+        let nb_b = by * cols + (x + 1) / block_size;
+        flux_edge_apply(
+            a_b, nb_b, a_idx, b_idx, final_flux,
+            &mut edge_vel_h[idx],
+            temp_heights, cell_colors, cell_props,
+            &mut modified, &mut next_displacements,
+            &mut total_flow, &mut flow_occurred,
+        );
+        #[cfg(test)]
+        note_phase_flow(phase, final_flux);
+    }
+
+    // Block-wake bookkeeping for phase 1's g=0 (Sandbox) liquid branch, deferred from COLLECT
+    // time until arbitration has settled `cand_h`/`cand_v` (overwritten in place, just above) into
+    // their final post-arbitration values — see the comment where `max_head_diff_cell` is written,
+    // in that branch itself, for why `max_head_diff` alone was safe to compute immediately but
+    // `max_flux` was not.
+    for &idx in &g0_liquid_cells {
+        let max_flux = {
+            let h_mag = if edge_h_active[idx] { cand_h[idx].abs() } else { 0.0 };
+            let v_mag = if edge_v_active[idx] { cand_v[idx].abs() } else { 0.0 };
+            h_mag.max(v_mag)
+        };
+        let max_head_diff = max_head_diff_cell[idx];
+        if max_flux > 3e-4 || max_head_diff > 1e-4 {
+            flow_occurred = true;
+            let flow_val = max_flux.max(max_head_diff);
+            let x = idx % w;
+            let y = idx / w;
+            let bx = x / block_size;
+            let by = y / block_size;
+            let wake_b = by * cols + bx;
+            activate_neighbor(wake_b, flow_val, &mut modified, &mut next_displacements);
+            if bx > 0 { activate_neighbor(wake_b - 1, flow_val, &mut modified, &mut next_displacements); }
+            if bx + 1 < cols { activate_neighbor(wake_b + 1, flow_val, &mut modified, &mut next_displacements); }
+            if by > 0 { activate_neighbor(wake_b - cols, flow_val, &mut modified, &mut next_displacements); }
+            if by + 1 < rows { activate_neighbor(wake_b + cols, flow_val, &mut modified, &mut next_displacements); }
         }
     }
     } // end `for phase` — body left at the original indentation so the operator split reads as a
@@ -5113,6 +5427,100 @@ mod tests {
         );
         // Measured today: rel_err ~= 1.2e-6.
         assert!(rel_err < 1e-4, "Mass not conserved under gravity: rel_err={:.8}", rel_err);
+    }
+
+    #[test]
+    // Positivity/capacity guard for the frozen-Jacobi edge-flux solver specifically (phase 0's
+    // gravity-aligned edges and phase 1's lateral/g=0 edges — see `edge_arbitration_scale`'s doc
+    // comment for why a single arbitration pass is supposed to make a negative or over-capacity
+    // cell structurally impossible). Deliberately scoped away from the marble/`displace_line`
+    // path (`add_sand_with_limit_properties` etc.), which is untouched by this conversion and was
+    // independently confirmed, while writing this guard, to already have its own tiny pre-existing
+    // capacity overshoot (~1.4e-3 over a 1.5 cap, reproduces bit-for-bit on an unmodified checkout
+    // of this crate) unrelated to the flux path — a blanket whole-grid assertion would trip on
+    // that every time this test module runs and misattribute it to this change.
+    //
+    // Exercises three of this conversion's paths directly: granular free-fall under gravity
+    // (phase 0's `weight = 1.0` edge, `DrySand`), liquid free-fall + lateral spreading under
+    // gravity (phase 0 and phase 1's `cell_liquidity`-gated lateral edge, `Water`), and the g=0
+    // Sandbox liquid wave (phase 1's `wetness >= 0.75 && !gravity_active` branch).
+    fn test_frozen_jacobi_never_exceeds_capacity_or_goes_negative() {
+        const EPS: f32 = 1e-4;
+        let check = |sim: &TestSim, label: &str| {
+            let mut min_h = f32::MAX;
+            let mut max_over = f32::MIN;
+            for idx in 0..sim.hm.data.len() {
+                if sim.mask[idx] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let hgt = sim.hm.data[idx];
+                min_h = min_h.min(hgt);
+                let cap = cell_capacity_for(sim.cell_props[idx * 4 + PROP_WETNESS]);
+                max_over = max_over.max(hgt - cap);
+            }
+            println!("test_frozen_jacobi_never_exceeds_capacity_or_goes_negative[{label}]: min_h={min_h:.6} max_over_capacity={max_over:.6}");
+            assert!(min_h >= -EPS, "[{label}] a cell went negative: min_h={min_h:.6}");
+            assert!(max_over <= EPS, "[{label}] a cell exceeded its capacity by {max_over:.6}");
+        };
+
+        // Granular free-fall (phase 0 only; g=0 branch never entered).
+        {
+            let w = 48;
+            let h = 64;
+            let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+            let props = get_test_props(MaterialMode::DrySand, w * h);
+            let mut sim = TestSim::new(w, h, props, mask, 16);
+            for y in 4..10 {
+                for x in 4..w - 4 {
+                    sim.hm.data[y * w + x] = 1.4;
+                }
+            }
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+            for _ in 0..400 {
+                sim.tick(gravity_dir, 256);
+                check(&sim, "DrySand under gravity");
+            }
+        }
+
+        // Liquid free-fall + lateral spreading under gravity (phase 0 and phase 1 both active).
+        {
+            let w = 48;
+            let h = 64;
+            let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+            let props = get_test_props(MaterialMode::Water, w * h);
+            let mut sim = TestSim::new(w, h, props, mask, 16);
+            for y in 4..10 {
+                for x in 4..w - 4 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+            for _ in 0..400 {
+                sim.tick(gravity_dir, 256);
+                check(&sim, "Water under gravity");
+            }
+        }
+
+        // g=0 Sandbox liquid wave (phase 1's `wetness >= 0.75 && !gravity_active` branch only).
+        {
+            let w = 48;
+            let h = 48;
+            let mask = make_test_mask(w, h, SandboxShape::Circle, 0.0, 1.0);
+            let props = get_test_props(MaterialMode::Water, w * h);
+            let mut sim = TestSim::new(w, h, props, mask, 16);
+            for y in 0..h {
+                for x in 0..w {
+                    if sim.mask[y * w + x] != crate::MASK_OUTSIDE {
+                        sim.hm.data[y * w + x] = 0.5;
+                    }
+                }
+            }
+            add_bump(&mut sim, w, h, w as f32 / 2.0, h as f32 / 2.0, 0.4, 4.0);
+            for _ in 0..400 {
+                sim.tick(glam::Vec2::ZERO, 256);
+                check(&sim, "Water Sandbox g=0");
+            }
+        }
     }
 
     #[test]
@@ -9773,11 +10181,25 @@ mod tests {
              mass_top(white)={:.4} mass_bottom(black)={:.4} m_black={:.4} white_fraction_global={:.4}",
             initial_mass, mass_top, mass_bottom, m_black, white_fraction_global,
         );
-        // Predictions, stated BEFORE the run below is analysed (self-validation item 3):
+        // Predictions, stated BEFORE the run below is analysed (self-validation item 3).
+        //
+        // THE IDEAL f_50 IS 2 * m_black, NOT m_black. This was wrong in the first version of
+        // this diagnostic and the error propagated into several conclusions, so the derivation
+        // is spelled out. `white_fraction_of_exited` is CUMULATIVE -- it is the composition of
+        // everything that has left so far, which is why it necessarily ends at
+        // `white_fraction_global`. Under ideal plug flow material leaves in strict depth order,
+        // so at drained fraction f the exited mass is all black until f reaches m_black and the
+        // white excess above that is (f - m_black). The cumulative white fraction is therefore
+        //     W(f) = max(0, (f - m_black) / f)
+        // and W(f) = 0.5 gives f - m_black = 0.5 f, i.e. f = 2 * m_black.
+        // Reading `m_black` as the ideal understates it by exactly a factor of two and makes
+        // badly-mixed drainage look close to ideal.
+        let ideal_f50 = 2.0 * m_black;
         println!(
-            "diag_mass_vs_core[{label}]: PREDICTIONS mass_flow=[white_frac@10%~=0.0, f_50~={:.4}] \
+            "diag_mass_vs_core[{label}]: PREDICTIONS mass_flow=[white_frac@10%~=0.0, f_50~={:.4} \
+             (= 2*m_black, cumulative metric -- see comment)] \
              core_flow=[white_frac@10%>>0.0 (near 1.0 in the extreme), f_50<<{:.4} (near 0.0 in the extreme)]",
-            m_black, m_black,
+            ideal_f50, ideal_f50,
         );
 
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
@@ -9940,9 +10362,10 @@ mod tests {
         //     i.e. no depth ordering at all => white_fraction_global
         const IDEAL_MASS_FLOW_WHITE_AT_10: f64 = 0.0;
         println!(
-            "diag_mass_vs_core[{label}]: SUMMARY neck_width={neck_width:.2} m_black={:.4} f_50={:?} \
-             white_fraction_of_exited@10%: ideal_mass_flow={:.4} observed={:?} no_ordering_null={:.4}",
-            m_black, f_50, IDEAL_MASS_FLOW_WHITE_AT_10, white_at_10, white_fraction_global,
+            "diag_mass_vs_core[{label}]: SUMMARY neck_width={neck_width:.2} m_black={:.4} \
+             f_50: ideal={:.4} observed={:?} \
+             | white_fraction_of_exited@10%: ideal_mass_flow={:.4} observed={:?} no_ordering_null={:.4}",
+            m_black, 2.0 * m_black, f_50, IDEAL_MASS_FLOW_WHITE_AT_10, white_at_10, white_fraction_global,
         );
     }
 
