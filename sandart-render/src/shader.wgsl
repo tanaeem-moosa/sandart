@@ -436,8 +436,22 @@ fn fs_main(
     let buttercream = mix(dry_color * 0.9, vec3<f32>(0.95, 0.93, 0.88), 0.7);
     let yogurt = mix(dry_color * 0.9, vec3<f32>(0.96, 0.94, 0.88), 0.75);
     let oil = mix(dry_color * 0.4, vec3<f32>(0.60, 0.45, 0.15), 0.5);
-    // Rich, deep blue water — more saturated and vivid
-    let water = mix(dry_color * 0.15, vec3<f32>(0.03, 0.22, 0.58), 0.85);
+    // Water gets TWO mixes, chosen by whether the user has picked a colour scheme at all.
+    //
+    // `color_mode == 0` is the no-scheme-chosen state: `dry_color` is then derived from the
+    // uniform sand colour above, not from anything the user painted, so there is no painted
+    // colour to honour and water should simply be the deep blue it has always been. That blue
+    // is a deliberate response to an earlier report that water did not look properly blue, so
+    // the default must not be weakened.
+    //
+    // `color_mode > 0` means a scheme IS active and `dry_color` is the per-cell painted colour.
+    // The old 0.15/0.85 split gave it only ~2.25% weight in the final mix (0.15 * 0.15) — an
+    // outlier far below every neighbouring material in this same wetness progression (oobleck
+    // ~32%, oil ~20%, milk ~18%) — which is why liquid rendered as flat blue no matter what was
+    // painted on it. 0.6/0.5 restores a comparable ~30% weight, but ONLY in this branch.
+    let water_default = mix(dry_color * 0.15, vec3<f32>(0.03, 0.22, 0.58), 0.85);
+    let water_painted = mix(dry_color * 0.6, vec3<f32>(0.03, 0.22, 0.58), 0.5);
+    let water = select(water_default, water_painted, uniforms.color_mode > 0u);
     let milk = mix(dry_color * 0.9, vec3<f32>(0.95, 0.95, 0.93), 0.8);
 
     var mat_base_color = dry_color;

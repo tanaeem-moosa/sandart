@@ -10,3 +10,9 @@ bytemuck = { version = "1.19.0", features = ["derive"] }
 
 [dev-dependencies]
 pollster = "0.4.0"
+# Test-only. `shader.wgsl` is compiled at RUNTIME by `create_shader_module`, so until this was
+# added a WGSL syntax or type error could not fail any build or test — it surfaced as a blank
+# canvas in the browser, which is the one place this project cannot verify anything. naga is
+# already in the lock file as a transitive dependency of wgpu; the version is pinned to match
+# wgpu 23's so the validator agrees with the compiler that actually runs the shader.
+naga = { version = "23.1.0", features = ["wgsl-in"] }
