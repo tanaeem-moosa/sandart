@@ -389,6 +389,19 @@
             height: 100%;
             background: linear-gradient(135deg, var(--c1) 0 50%, var(--c2) 50% 100%);
         }
+        /* The rainbow preset shares the .swatch grid (sizing/border/hover/.active all stay
+           default) but a two-colour diagonal split reads as generic pink/blue at 34px and
+           doesn't identify it as "rainbow". Give just this one swatch a real multi-hue fill. */
+        .swatch[data-preset="rainbow"] .swatch-split {
+            /* The end stops get FLAT RUNS rather than sitting at 0%/100%. A 135deg gradient
+               puts its endpoints in opposite corners, where there is almost no area, so a
+               stop pinned to 100% is effectively invisible — rendering the candidates at the
+               true 34px showed the violet end all but absent. Holding red to 12% and starting
+               violet at 90% gives both ends real area at swatch size. */
+            background: linear-gradient(135deg,
+                #ff2d55 0% 12%, #ff9500 28%, #ffd60a 44%, #34c759 60%, #2d9bff 76%,
+                #af52de 90% 100%);
+        }
 
         .color-picker-wrapper { display: flex; gap: 14px; padding: 4px 0 2px; }
         .color-field { display: grid; gap: 5px; justify-items: start; }
