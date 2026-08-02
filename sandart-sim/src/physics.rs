@@ -25,9 +25,9 @@ use crate::{PROP_WETNESS, PROP_THRESHOLD, PROP_FLOW_RATE, PROP_GRAIN_SIZE};
 /// in expectation: a value of 180.3 lands on 181 three times in ten and 180 the rest, so a
 /// sequence of blends accumulates towards 180.3 instead of collapsing onto 180.
 ///
-/// This is what makes `u8` colour storage viable. A plain `.round()` discards every increment
+/// This is what makes `u8` color storage viable. A plain `.round()` discards every increment
 /// smaller than half an LSB, and because the flux solver nudges a cell by the same small amount
-/// over and over, that discard is *systematic*: slow deformation (a colour line bending as sand
+/// over and over, that discard is *systematic*: slow deformation (a color line bending as sand
 /// creeps under it) was erased every tick rather than accumulating.
 ///
 /// **The seeding must vary per event, not per cell.** A stable per-cell hash — the right choice
@@ -7579,7 +7579,7 @@ mod tests {
     // remove the order dependence itself to make it green again — the failure is intentionally
     // documenting real outstanding work. See the assertion messages below for the mechanism (a
     // residual order dependence in the gravity lateral-edge driving path) and the principled fix
-    // if live state must be kept: red-black *edge* colouring on the lateral pass — process all
+    // if live state must be kept: red-black *edge* coloring on the lateral pass — process all
     // even-x lateral edges, then all odd-x lateral edges, so no single pass ever shares a cell
     // between two edges it updates.
     fn test_water_blob_stays_left_right_symmetric_under_gravity() {
@@ -7760,7 +7760,7 @@ mod tests {
              alone is BELOW baseline on both (7.04e-2 / 1.03e-2 against 1.11e-1 / 1.18e-2), block \
              order alone overshoots `final`, and only the two together reproduce the reference \
              magnitude. So the sweep governs how long the lean persists while the peak and final \
-             magnitude come from the two interacting. Expect edge colouring to fix persistence \
+             magnitude come from the two interacting. Expect edge coloring to fix persistence \
              and NOT to close the magnitude gap on its own. \
              \
              AN EARLIER VERSION OF THIS NOTE QUOTED 61 ticks for a cell-parity-only flip and 42 \
@@ -7771,7 +7771,7 @@ mod tests {
              those figures. \
              \
              If live state must be kept (i.e. this cannot simply be made a frozen Jacobi read), \
-             the principled fix for the lateral pass is red-black EDGE colouring: process all \
+             the principled fix for the lateral pass is red-black EDGE coloring: process all \
              even-x lateral edges, then all odd-x lateral edges, so no single pass ever shares a \
              cell between two edges it updates. Do not respond to this failure by re-tuning \
              tolerances, ignoring the test, or picking a different scan order (Hilbert or diagonal \
@@ -8896,14 +8896,14 @@ mod tests {
 
         println!("Errors: R_err={:.9}, G_err={:.9}, B_err={:.9}, Wet_err={:.9}, Grain_err={:.9}", r_err, g_err, b_err, wet_err, grain_err);
 
-        // Colour is stored as `u8` and every blend is rounded back to an integer by
-        // `stochastic_round`, so the colour channels carry a quantisation residual that the
+        // Color is stored as `u8` and every blend is rounded back to an integer by
+        // `stochastic_round`, so the color channels carry a quantisation residual that the
         // (pure f32) property channels do not. It is unbiased, so it is a zero-mean random
         // walk in the totals rather than the one-directional loss plain `.round()` produced.
         //
         // Measured over 36 independent realizations of the rounding (identical physics, only
         // the rounding entropy varied): per-channel absolute error is zero-mean with
-        // sigma ~= 90-140 colour-mass units on totals of 1.3e5 (G) to 4.0e5 (R), i.e.
+        // sigma ~= 90-140 color-mass units on totals of 1.3e5 (G) to 4.0e5 (R), i.e.
         // sigma_rel = 3.5e-4 (R), 6.9e-4 (G), 4.7e-4 (B). Worst single realization was
         // 2.0e-3 (G, ~2.9 sigma); this realization gives 6.1e-4 / 2.7e-4 / 4.8e-4.
         //
@@ -8920,7 +8920,7 @@ mod tests {
     }
 
     /// Stochastic rounding is unbiased, so every conservation test above stays green no matter
-    /// how badly colour smears — the totals are conserved by construction. The risk it actually
+    /// how badly color smears — the totals are conserved by construction. The risk it actually
     /// carries is *diffusion*: each blend injects roughly +/-0.5 LSB of noise, and the flux
     /// solver performs a very large number of advection events, so the random walk can
     /// accumulate into spatial blur. Nothing else in the suite measures that.
@@ -8928,17 +8928,17 @@ mod tests {
     /// A square box is filled to a *uniform* height above the per-cell cap and left to compact
     /// under gravity for 3000 ticks. Uniform means the free surface stays flat, so the bulk
     /// motion is vertical rather than a pile collapsing sideways, while still transporting
-    /// ~5.9e5 units of volume — this is not a quiescent bed. Colour is split left/right by a
+    /// ~5.9e5 units of volume — this is not a quiescent bed. Color is split left/right by a
     /// vertical line, i.e. the interface is *parallel* to the flow.
     ///
     /// Two things are measured, for two different reasons:
     ///
     /// 1. **Interface width.** This is mostly *physical*: the solver's own lateral mixing
-    ///    smears the split over ~11 columns here, and the f32 colour buffer this change replaced
+    ///    smears the split over ~11 columns here, and the f32 color buffer this change replaced
     ///    measures 11.364 against the u8 buffer's 11.571 — quantisation contributes essentially
     ///    none of it. The bound is therefore set against that physical baseline. It is the
     ///    coarse "did the picture turn to mush" check.
-    /// 2. **Deep-interior drift.** Away from the split every neighbour started the same colour,
+    /// 2. **Deep-interior drift.** Away from the split every neighbour started the same color,
     ///    and a weighted blend of equal integers is that same integer (to within one ulp of
     ///    `w_keep + w_arrive != 1.0`), so an exact solver leaves those cells on their starting
     ///    value however many transfers pass through. This part has essentially no physical
@@ -8957,9 +8957,9 @@ mod tests {
         let mut cell_colors = vec![0u8; w * h * 4];
         let mut cell_props = get_test_props(MaterialMode::DrySand, w * h);
 
-        // Colour *every* cell by which side of `split` its column is on, including the empty
+        // Color *every* cell by which side of `split` its column is on, including the empty
         // ones the sand will fall into. If the destination cells started black they would blend
-        // towards black on arrival, which is a real (physical) colour change and would swamp the
+        // towards black on arrival, which is a real (physical) color change and would swamp the
         // quantisation signal this test is trying to isolate.
         for y in 0..h {
             for x in 0..w {
@@ -9029,7 +9029,7 @@ mod tests {
         let span = LEFT[0] as f64 - RIGHT[0] as f64;
 
         let mut widths: Vec<f64> = Vec::new();
-        // Deep-interior fidelity: every neighbour of these cells started the run the same colour,
+        // Deep-interior fidelity: every neighbour of these cells started the run the same color,
         // so no weighted blend of them can produce anything else. An exact solver leaves them on
         // their starting value however many transfers pass through — the f32 reference run
         // measures 0.0024 LSB here. Whatever is measured is the rounding, not the solver.
@@ -9042,7 +9042,7 @@ mod tests {
                 continue;
             }
             // Transition width: columns whose red channel sits strictly between the two starting
-            // levels, measured against the exact starting colours rather than a local average, so
+            // levels, measured against the exact starting colors rather than a local average, so
             // a smear cannot drag the reference along with it.
             widths.push(
                 (split - HALF_WIN..split + HALF_WIN)
@@ -9098,7 +9098,7 @@ mod tests {
         //   interface width mean 11.571 / worst 24 columns
         //   deep interior drift mean 0.0167 LSB, max 4 LSB, 98.39% still exact
         //   total volume transported 588402
-        // Same scenario against the f32 colour buffer this change replaced, for reference:
+        // Same scenario against the f32 color buffer this change replaced, for reference:
         //   interface width mean 11.364 / worst 23 columns; deep drift mean 0.0024 LSB, max 1.
         //
         // The interface bound sits ~20% above the physical baseline: wide enough not to police
@@ -9107,13 +9107,13 @@ mod tests {
         // 28.27 columns, so this catches 6x and up on width alone.
         assert!(
             mean_width < 14.0,
-            "colour interface diffused: mean transition width {:.3} columns over {} rows \
-             (physical baseline 11.36 with an exact colour buffer)",
+            "color interface diffused: mean transition width {:.3} columns over {} rows \
+             (physical baseline 11.36 with an exact color buffer)",
             mean_width, widths.len()
         );
         assert!(
             worst_width < 30.0,
-            "colour interface diffused on some row: worst transition width {:.0} columns",
+            "color interface diffused on some row: worst transition width {:.0} columns",
             worst_width
         );
 
@@ -9122,7 +9122,7 @@ mod tests {
         // below what a mere 3x noise amplification produces (7.07 mean / 42 max).
         assert!(
             mean_dev < 0.5 && deep_max <= 12.0,
-            "deep interior colour drifted off its exact starting value: mean |d| = {:.4} LSB, \
+            "deep interior color drifted off its exact starting value: mean |d| = {:.4} LSB, \
              max |d| = {:.0} LSB over {} samples",
             mean_dev, deep_max, deep_dev.len()
         );
@@ -10835,7 +10835,7 @@ mod tests {
     //       channel around the neck, each tick, before the tick runs;
     //   (b) of the flux that actually moves each tick, what fraction phase 0 (gravity-aligned)
     //       realises versus phase 1 (everything else, including the lateral edge/CA);
-    //   (c) a source-depth profile: material is seeded in horizontal colour bands (by initial
+    //   (c) a source-depth profile: material is seeded in horizontal color bands (by initial
     //       row), and the mass-weighted mean band index of whatever has crossed below the neck
     //       is tracked over time, so "did this drain from the top only, or from all depths"
     //       becomes a number instead of an impression.
@@ -10849,7 +10849,7 @@ mod tests {
     // construction.
     //
     // NOTE on `band_mass_below`: an earlier version of these diagnostics binned the
-    // mass-weighted-blended colour tracer into discrete band indices. Binning a blended value
+    // mass-weighted-blended color tracer into discrete band indices. Binning a blended value
     // piles everything into the middle band under exact mass conservation and produces a
     // plausible-looking false signal (it once showed a band gaining 2.5x its initial mass with
     // total mass exactly conserved). That histogram has been removed. The continuous
@@ -10902,7 +10902,7 @@ mod tests {
             neck_y, neck_width, row_width(neck_y), FILL_Y0, FILL_Y1
         );
 
-        // Seed the upper chamber in horizontal colour bands and near-capacity fill.
+        // Seed the upper chamber in horizontal color bands and near-capacity fill.
         let band_color = |band: usize| -> u8 { (band * (255 / (NUM_BANDS - 1))) as u8 };
         let mut initial_band_mass = [0.0f64; NUM_BANDS];
         for y in FILL_Y0..FILL_Y1 {
@@ -11098,14 +11098,14 @@ mod tests {
     // MEASUREMENT (mass-flow vs core/funnel-flow hypothesis) -- see the assigning brief.
     // Seeds a triangular funnel (the upper, converging chamber of an Hourglass mask: wide
     // mouth narrowing down to a small neck) with the BOTTOM half of the fill region (by row,
-    // i.e. the half closer to the neck) coloured black and the TOP half (the wide mouth, far
-    // from the neck) coloured white. Because the chamber narrows going down, the bottom
+    // i.e. the half closer to the neck) colored black and the TOP half (the wide mouth, far
+    // from the neck) colored white. Because the chamber narrows going down, the bottom
     // half's rows are narrower and hold less area/mass than the top half's -- `m_black` is
     // computed exactly from the actual seeded per-row mass below, never assumed to be 0.25.
     //
-    // Colour is used as a mass-weighted-mean CONSERVED tracer (`advect_properties` blends
-    // colour mass-weighted with stochastic rounding; `test_color_conservation` asserts
-    // colour*mass conserved to 0.5%) -- the mean is read continuously, never bucketed into
+    // Color is used as a mass-weighted-mean CONSERVED tracer (`advect_properties` blends
+    // color mass-weighted with stochastic rounding; `test_color_conservation` asserts
+    // color*mass conserved to 0.5%) -- the mean is read continuously, never bucketed into
     // discrete bands (an earlier attempt binned blended greys into bands and produced a false
     // signal: everything piled into the middle band and looked like a real effect). R = tone
     // (0 black / 255 white), G = normalised source row, B = normalised source column, each an
@@ -11452,12 +11452,12 @@ mod tests {
     }
 
     // =====================================================================================
-    // DIAGNOSTIC: does GRAIN_JITTER_SCALE actually raise spatial colour/property variance among
+    // DIAGNOSTIC: does GRAIN_JITTER_SCALE actually raise spatial color/property variance among
     // neighbouring sand cells, the way its doc comment on `edge_arbitration_scale` /
-    // `grain_jitter_strength` claims it should? No existing test measures spatial colour/property
+    // `grain_jitter_strength` claims it should? No existing test measures spatial color/property
     // variance at all -- every other conservation/symmetry test either sums mass (conservation)
     // or tracks a single scalar signed difference (symmetry), neither of which would notice
-    // colour and properties homogenising into mush as they blend.
+    // color and properties homogenising into mush as they blend.
     //
     // SCENARIO: narrow vertical stripes of material poured into an Hourglass funnel's upper
     // chamber and left to drain through the neck. The neck (and the avalanching within the
@@ -11475,7 +11475,7 @@ mod tests {
     // change if the arbitration mechanism changes.
     //
     // WHY BOTH VARIANCE AND LOCAL CONTRAST: global spatial variance can stay high while
-    // everything smooths out locally -- two large flat regions of different colour, each
+    // everything smooths out locally -- two large flat regions of different color, each
     // internally uniform, still have high global variance across the whole grid. That is not what
     // "grainy" means. Local contrast (mean |a - b| between adjacent OCCUPIED cells, reported
     // separately for the horizontal and vertical directions since the jitter's edge-orientation
@@ -11484,7 +11484,7 @@ mod tests {
     //
     // WHY TWO VARIANTS BELOW: a single uniform material's props never vary spatially, and
     // blending two identical values together (jittered split or not) is a no-op -- so a
-    // same-material-both-stripes scenario can only ever show a colour effect, with prop variance
+    // same-material-both-stripes scenario can only ever show a color effect, with prop variance
     // pinned at exactly 0 by construction. `diag_grain_variance_mixed_materials` stripes two
     // different DrySand-family presets (both wetness=0, i.e. granular_share=1 for both --
     // apples-to-apples granular, not granular-vs-liquid) so PROP_GRAIN_SIZE/THRESHOLD/FLOW_RATE
@@ -11556,7 +11556,7 @@ mod tests {
             "color_R", "color_G", "color_B",
             "prop_WETNESS", "prop_THRESHOLD", "prop_FLOW_RATE", "prop_GRAIN_SIZE",
         ];
-        // Channel index convention: 0..3 = colour RGB, 3..7 = props (WETNESS/THRESHOLD/
+        // Channel index convention: 0..3 = color RGB, 3..7 = props (WETNESS/THRESHOLD/
         // FLOW_RATE/GRAIN_SIZE), matching CHANNEL_NAMES above.
         let read_channel = |sim: &TestSim, idx: usize, c: usize| -> f32 {
             if c < 3 { sim.cell_colors[idx * 4 + c] as f32 } else { sim.cell_props[idx * 4 + (c - 3)] }
@@ -11627,7 +11627,7 @@ mod tests {
     #[test]
     #[ignore]
     // DIAGNOSTIC measurement, not pass/fail -- see `diag_grain_variance_scenario`'s doc comment.
-    // Same material on both stripes (only colour differs): isolates the colour-only effect and
+    // Same material on both stripes (only color differs): isolates the color-only effect and
     // lets grain size be swept cleanly across presets (FinePowder 0.05 .. CoarseSand 0.80)
     // without also perturbing property contrast between the stripes.
     // Run with (editing GRAIN_JITTER_SCALE between runs):
@@ -11646,7 +11646,7 @@ mod tests {
     // Two DIFFERENT DrySand-family materials striped together (both wetness=0, so
     // granular_share=1 for both -- an apples-to-apples granular comparison, not granular-vs-
     // liquid), so PROP_GRAIN_SIZE/THRESHOLD/FLOW_RATE start with real spatial contrast, not just
-    // colour -- this is what actually exercises property mixing.
+    // color -- this is what actually exercises property mixing.
     fn diag_grain_variance_mixed_materials() {
         diag_grain_variance_scenario(
             MaterialMode::FinePowder, MaterialMode::CoarseSand, "finepowder_vs_coarsesand", &[50, 150, 300],

@@ -267,7 +267,7 @@ pub struct DrawingSimulation {
     /// Pre-allocated temp buffer for double-buffering settling flows.
     pub temp_heights: Vec<f32>,
     /// Per-cell RGBA color buffer, RGBA interleaved. This is the simulation's single source of
-    /// truth for colour and is also exactly what external consumers (sandart-wasm's GPU upload,
+    /// truth for color and is also exactly what external consumers (sandart-wasm's GPU upload,
     /// the native renderer, `set_cell_colors`'s `&[u8]` contract) read — there is no separate
     /// render view and no conversion step.
     ///
@@ -611,10 +611,10 @@ impl DrawingSimulation {
         self.edge_vel_v.fill(0.0);
         self.column_depth.fill(0.0);
         // Deliberately does NOT touch `cell_colors`. A reset is a physics-state reset (heights,
-        // velocities, bounds) — the colour theme the caller pushed via `set_cell_colors` is a
+        // velocities, bounds) — the color theme the caller pushed via `set_cell_colors` is a
         // separate concern and has no reason to revert to the placeholder tan `new_with_size`
         // seeds a brand-new sim with. This used to unconditionally overwrite every cell back to
-        // that placeholder here, which silently discarded whatever colour theme was active any
+        // that placeholder here, which silently discarded whatever color theme was active any
         // time `reset()` ran — including from `set_sandbox_shape` on every Hourglass-family shape
         // change, not just the explicit Reset button. Preserving the buffer by simply not writing
         // to it means every current and future caller of `reset()` gets this for free, rather than
