@@ -21,8 +21,8 @@
 
              2. One accent, and it is borrowed rather than invented: the same
                 recycled-glass green the mass-distribution lines are drawn in over the
-                sand. Panel and overlay agree, and nothing here competes with coloured
-                sand under coloured light.
+                sand. Panel and overlay agree, and nothing here competes with colored
+                sand under colored light.
 
            Everything is set in mono except the wordmark. An instrument face has no
            display type; it has etched labels and numeric readouts.
@@ -365,7 +365,7 @@
             box-shadow: 0 0 0 3px var(--accent-shade);
         }
 
-        /* ---- Colour ------------------------------------------------------------- */
+        /* ---- Color ------------------------------------------------------------- */
 
         .swatch-grid {
             display: grid;
@@ -390,7 +390,7 @@
             background: linear-gradient(135deg, var(--c1) 0 50%, var(--c2) 50% 100%);
         }
         /* The rainbow preset shares the .swatch grid (sizing/border/hover/.active all stay
-           default) but a two-colour diagonal split reads as generic pink/blue at 34px and
+           default) but a two-color diagonal split reads as generic pink/blue at 34px and
            doesn't identify it as "rainbow". Give just this one swatch a real multi-hue fill. */
         .swatch[data-preset="rainbow"] .swatch-split {
             /* The end stops get FLAT RUNS rather than sitting at 0%/100%. A 135deg gradient
@@ -509,7 +509,7 @@
             text-transform: uppercase;
         }
         /* Diagnostic build identifier — deliberately quieter than the three stat readouts
-           above it (dimmer colour, no bold numerals): it exists to answer "am I looking at a
+           above it (dimmer color, no bold numerals): it exists to answer "am I looking at a
            stale cached bundle?", not to compete with the live performance stats. Derived at
            compile time; see sandart-wasm/build.rs and demo.js's displayBuildStamp(). */
         .build-stamp {
@@ -875,12 +875,12 @@
                 </div>
             </div>
 
-            <!-- ---- Shared: colour ---- -->
+            <!-- ---- Shared: color ---- -->
             <div class="group">
-                <div class="group-title">Colour</div>
+                <div class="group-title">Color</div>
                 <div class="row"><label for="color-pattern">Scheme</label></div>
                 <select id="color-pattern">
-                    <option value="solid">Solid colour</option>
+                    <option value="solid">Solid color</option>
                     <option value="gradient">Linear gradient</option>
                     <option value="stripes">Stripes</option>
                     <option value="concentric">Concentric rings</option>
@@ -913,13 +913,13 @@
                 <div id="custom-color-inputs">
                     <div class="color-picker-wrapper">
                         <div class="color-field">
-                            <span>Colour 1</span>
+                            <span>Color 1</span>
                             <div class="color-picker-container">
                                 <input type="color" id="color-sand-1" value="#ebd9bb">
                             </div>
                         </div>
                         <div id="color-sand-2-wrapper" class="color-field" style="display: none;">
-                            <span>Colour 2</span>
+                            <span>Color 2</span>
                             <div class="color-picker-container">
                                 <input type="color" id="color-sand-2" value="#5c4033">
                             </div>
@@ -941,7 +941,7 @@
                 </select>
 
                 <div class="row color-row gap-above">
-                    <label for="color-led">LED colour</label>
+                    <label for="color-led">LED color</label>
                     <input type="color" id="color-led" value="#ffffff">
                 </div>
 

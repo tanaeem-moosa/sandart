@@ -1001,14 +1001,14 @@ function setupPanelInput() {
     colorThemeControls.forEach(id => {
         const el = document.getElementById(id);
         if (!el) return;
-        // Editing a colour field directly means the user has left the preset behind. Without
+        // Editing a color field directly means the user has left the preset behind. Without
         // this, `syncColorTheme`'s preset branch reassigns `colorInput1/2.value` from the still
-        // selected preset on the very same event, overwriting the colour just chosen — so the
-        // picker opened, worked, and appeared to do nothing. The preset and the two colour
+        // selected preset on the very same event, overwriting the color just chosen — so the
+        // picker opened, worked, and appeared to do nothing. The preset and the two color
         // fields are two sources of truth for the same state; this is what hands authority to
         // whichever the user touched last.
-        const isColourField = id === 'color-sand-1' || id === 'color-sand-2';
-        const handler = isColourField
+        const isColorField = id === 'color-sand-1' || id === 'color-sand-2';
+        const handler = isColorField
             ? () => {
                 const presetSelect = document.getElementById('color-preset');
                 if (presetSelect && presetSelect.value !== 'custom') {
