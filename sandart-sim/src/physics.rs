@@ -930,6 +930,36 @@ mod edge_sleep_stats {
     }
 }
 
+/// DIAGNOSTIC-ONLY A/B TOGGLE for the upstream/side block-wake fix (`activate_neighbor_upstream`
+/// / `activate_neighbor_side`), same pattern and same rationale as `edge_sleep_stats`: a
+/// thread-local so parallel tests don't interfere, `#[cfg(test)]`-gated so it does not exist in
+/// production at all (a non-test build always takes the fix -- see the `#[cfg(not(test))]`
+/// twin below, which the optimizer folds to a no-op branch). Exists solely so a diagnostic test
+/// can measure the SAME build with the fix on vs. off (e.g. to confirm a gap metric actually
+/// moves because of this fix, not because of something else) without needing two separate
+/// compiles or touching version control.
+#[cfg(test)]
+pub(crate) mod upstream_wake_gate {
+    use std::cell::Cell;
+    thread_local! {
+        static DISABLED: Cell<bool> = const { Cell::new(false) };
+    }
+    pub fn set_disabled(v: bool) {
+        DISABLED.with(|c| c.set(v));
+    }
+    #[inline(always)]
+    pub fn is_disabled() -> bool {
+        DISABLED.with(|c| c.get())
+    }
+}
+#[cfg(not(test))]
+mod upstream_wake_gate {
+    #[inline(always)]
+    pub fn is_disabled() -> bool {
+        false
+    }
+}
+
 /// EXPERIMENTAL DIAGNOSTIC (see the tick-phase-order hypothesis test plan): per-tick, per-phase
 /// flux attribution. Not used by any assertion; `#[cfg(test)]`-gated and thread-local like
 /// `edge_sleep_stats`, so it costs nothing in production and cannot interact with parallel tests.
@@ -1981,6 +2011,14 @@ pub fn eval_sandbox_shape(
     }
 }
 
+/// The LOD scheduler's MUST-simulate bar (see the block-classification comment in `settle_tick`,
+/// `BlockActivity::Fast`): a block whose recorded displacement clears this next tick is
+/// simulated unconditionally, bypassing `budget_n` entirely. Module-level (rather than local to
+/// `settle_tick`, which is where this used to live) so `activate_neighbor_upstream` below —
+/// needed by both `settle_tick`'s flux-edge loops and `try_move`'s granular-CA path — can force
+/// a block straight into that tier by name instead of duplicating the magic number.
+const MUST_SIMULATE_THRESHOLD: f32 = 1e-4;
+
 /// Mark a neighbor block as modified (needing redraw/copy-back this frame) and bump its
 /// next-frame displacement estimate, without touching the buffer belonging to the block
 /// currently being simulated (which would corrupt a block that hasn't run yet this frame).
@@ -1988,6 +2026,70 @@ fn activate_neighbor(neighbor_b: usize, flow: f32, modified: &mut Vec<bool>, nex
     modified[neighbor_b] = true;
     if next_displacements[neighbor_b] < flow {
         next_displacements[neighbor_b] = flow;
+    }
+}
+
+/// Injected displacement for `activate_neighbor_upstream`: comfortably above the near-zero
+/// residual displacement a block settling toward rest reports (so it reliably outranks those as
+/// a `budget_simulate` priority — see `priority = staleness * displacement` in `settle_tick`'s
+/// block classification), but strictly under `MUST_SIMULATE_THRESHOLD` so it can never itself
+/// push a block into the unconditional, budget-exempt MUST-simulate (`Fast`) tier. Half the
+/// threshold rather than some other fraction is not load-bearing — the only requirement is
+/// `0 < UPSTREAM_DISPLACEMENT_HINT < MUST_SIMULATE_THRESHOLD`.
+const UPSTREAM_DISPLACEMENT_HINT: f32 = 0.5 * MUST_SIMULATE_THRESHOLD;
+
+/// Like `activate_neighbor`, but injects `UPSTREAM_DISPLACEMENT_HINT` in place of an actual flow
+/// magnitude (there isn't one to report: nothing has moved into or out of this block yet — that
+/// is exactly the point).
+///
+/// Reserved for the block one step upstream of an edge whose donor just lost mass: its support
+/// moved, so unlike an ordinary touched neighbour this dependency is causal rather than merely
+/// speculative, and it competes for `budget_n` as a `Medium`-priority (`budget_simulate`)
+/// candidate rather than being left to whatever priority a same-tick, zero-actual-flow block
+/// would otherwise get (none — it would not enter `rest_candidates` at all without this nudge,
+/// since nothing flowed through IT this tick to record a displacement).
+///
+/// Deliberately NOT a `MUST_SIMULATE_THRESHOLD`-or-above bump: an earlier version of this fix
+/// forced the upstream block straight into the unconditional `Fast` tier, which the task's own
+/// author overturned — blocks that are merely likely to have work, as this one is, are meant to
+/// compete for budget like everything else in `Medium`/`Slow`, not bypass it; only genuinely
+/// already-active blocks (real, measured displacement) earn the budget-exempt tier. This keeps
+/// that invariant: the total simulated block count stays capped by `budget_n` either way, so
+/// this fix can only ever redistribute which blocks receive it, never add unbounded extra work.
+#[inline]
+fn activate_neighbor_upstream(neighbor_b: usize, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>) {
+    modified[neighbor_b] = true;
+    if next_displacements[neighbor_b] < UPSTREAM_DISPLACEMENT_HINT {
+        next_displacements[neighbor_b] = UPSTREAM_DISPLACEMENT_HINT;
+    }
+}
+
+/// Injected displacement for `activate_neighbor_side` -- deliberately smaller than
+/// `UPSTREAM_DISPLACEMENT_HINT` (a tenth of `MUST_SIMULATE_THRESHOLD`, so it ranks below an
+/// upstream nudge at equal staleness) and, like it, strictly under `MUST_SIMULATE_THRESHOLD` so
+/// it can never bypass `budget_n` into `Fast`.
+const SIDE_DISPLACEMENT_HINT: f32 = 0.1 * MUST_SIMULATE_THRESHOLD;
+
+/// The SPECULATIVE half of the upstream-wake fix: a plain lateral/vertical neighbour of a block
+/// that just had real flow through it, on the axis perpendicular to that flow, is not causally
+/// implicated the way `activate_neighbor_upstream`'s target is -- nothing below or beside it
+/// actually changed -- but a body that is actively moving in one column/row often has its
+/// neighbours about to follow, so it earns a low-priority nudge into `rest_candidates` rather
+/// than nothing at all.
+///
+/// This must NOT pass the edge's real flux magnitude (an earlier version of this fix did, via
+/// plain `activate_neighbor`, and it regressed `test_settled_liquid_sleeps_and_wakes`: a
+/// settled pool's ordinary free-surface flow is often well above `MUST_SIMULATE_THRESHOLD` on
+/// its own, and multiplying that magnitude out to every perpendicular neighbour of every
+/// touched edge pushed most of the pool's blocks into the unconditional `Fast` tier, exactly
+/// the runaway `MUST_SIMULATE_THRESHOLD`'s own doc comment warns a too-low bar causes). Using
+/// the fixed, sub-threshold `SIDE_DISPLACEMENT_HINT` instead keeps this strictly a low-priority
+/// `budget_simulate` candidate no matter how large the triggering flow was.
+#[inline]
+fn activate_neighbor_side(neighbor_b: usize, modified: &mut Vec<bool>, next_displacements: &mut Vec<f32>) {
+    modified[neighbor_b] = true;
+    if next_displacements[neighbor_b] < SIDE_DISPLACEMENT_HINT {
+        next_displacements[neighbor_b] = SIDE_DISPLACEMENT_HINT;
     }
 }
 
@@ -2005,6 +2107,7 @@ fn try_move(
     neighbor_idx: usize,
     flow: f32,
     w: usize,
+    h: usize,
     block_size: usize,
     cols: usize,
     temp_heights: &mut [f32],
@@ -2022,6 +2125,62 @@ fn try_move(
 
     activate_neighbor(b, flow, modified, next_displacements);
     activate_neighbor(neighbor_b, flow, modified, next_displacements);
+
+    // Upstream wake. The two calls above activate only the two blocks THIS edge touches
+    // (`center_idx`'s and `neighbor_idx`'s), which is the same limit `flux_edge_apply` has on
+    // the flux-solver path (see the matching "Upstream wake" comment on the `touched_v`/
+    // `touched_h` loops in `settle_tick`) -- and it produces the identical failure mode here:
+    // a cell one more step *upstream* of `center_idx`, on the opposite side from
+    // `neighbor_idx`, just had its support move away and is never told. Under the block-LOD
+    // scheduler that cell's block can then stay `Inactive` (not merely low-priority) for up to
+    // `MAX_STALENESS` ticks after the material below it has already moved several cells,
+    // opening a gap on the block boundary between them. `flow` here is already known positive
+    // (checked at both call sites before this is reached) and always drains
+    // `center_idx -> neighbor_idx`, so upstream is unconditionally one more grid step past
+    // `center_idx`, away from `neighbor_idx` -- unlike the flux solver's signed `final_flux`,
+    // there is no direction ambiguity to resolve here.
+    //
+    // `activate_neighbor_upstream`, not plain `activate_neighbor`: this dependency is causal
+    // (its support genuinely moved), not speculative, so it earns priority as a `Medium`
+    // (`budget_simulate`) candidate instead of the no-signal-at-all it would otherwise get --
+    // but it still competes for `budget_n` like any other candidate rather than bypassing it
+    // (see that function's doc comment).
+    let cx = (center_idx % w) as isize;
+    let cy = (center_idx / w) as isize;
+    let dx = (nx as isize) - cx;
+    let dy = (ny as isize) - cy;
+    let up_x = cx - dx;
+    let up_y = cy - dy;
+    if !upstream_wake_gate::is_disabled() {
+        if up_x >= 0 && up_y >= 0 && (up_x as usize) < w && (up_y as usize) < h {
+            let up_b = (up_y as usize / block_size) * cols + (up_x as usize / block_size);
+            activate_neighbor_upstream(up_b, modified, next_displacements);
+        }
+
+        // Speculative half: see the matching comment on the flux-solver's touched_v loop. The
+        // donor block's two neighbours PERPENDICULAR to this move's direction are not causally
+        // implicated, but a block that is actively flowing often has its lateral neighbours
+        // about to follow, so give them a plain (budget-competing) nudge too. Bounded via
+        // `modified.len()` (== `cols * rows`) rather than a separate `rows` parameter, since
+        // `try_move` is not otherwise told the block grid's row count.
+        let (donor_bx, donor_by) = ((center_idx % w) / block_size, (center_idx / w) / block_size);
+        if dy != 0 {
+            if donor_bx > 0 {
+                activate_neighbor_side(donor_by * cols + (donor_bx - 1), modified, next_displacements);
+            }
+            if donor_bx + 1 < cols {
+                activate_neighbor_side(donor_by * cols + (donor_bx + 1), modified, next_displacements);
+            }
+        } else if dx != 0 {
+            if let Some(up_by) = donor_by.checked_sub(1) {
+                activate_neighbor_side(up_by * cols + donor_bx, modified, next_displacements);
+            }
+            let down_b = (donor_by + 1) * cols + donor_bx;
+            if down_b < modified.len() {
+                activate_neighbor_side(down_b, modified, next_displacements);
+            }
+        }
+    }
 
     advect_properties(cell_colors, cell_props, center_idx, neighbor_idx, flow, temp_heights[neighbor_idx]);
     temp_heights[center_idx] -= flow;
@@ -2222,8 +2381,9 @@ pub fn settle_tick(
         active_blocks.resize(expected_len, crate::BlockActivity::Inactive);
     }
 
-    // Constants from the design doc
-    const MUST_SIMULATE_THRESHOLD: f32 = 1e-4;
+    // Constants from the design doc. `MUST_SIMULATE_THRESHOLD` now lives at module scope (see
+    // its doc comment) so `activate_neighbor_upstream` can reuse it by name; kept here too via
+    // that same binding rather than a second declaration.
     const MAX_STALENESS: u32 = 30;
     const FLOW_INACTIVE_THRESHOLD: f32 = 3e-4;
 
@@ -3347,7 +3507,7 @@ pub fn settle_tick(
                                     * granular_share;
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD {
                                     try_move(
-                                        b, center_idx, neighbor_idx, clamped_flow, w, block_size, cols,
+                                        b, center_idx, neighbor_idx, clamped_flow, w, h, block_size, cols,
                                         temp_heights, cell_colors, cell_props,
                                         &mut modified, &mut next_displacements,
                                         &mut total_flow, &mut cell_flowed, &mut flow_occurred,
@@ -3557,7 +3717,7 @@ pub fn settle_tick(
 
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD || (src_h <= 0.001 && clamped_flow > 0.0) {
                                     try_move(
-                                        b, center_idx, neighbor_idx, clamped_flow, w, block_size, cols,
+                                        b, center_idx, neighbor_idx, clamped_flow, w, h, block_size, cols,
                                         temp_heights, cell_colors, cell_props,
                                         &mut modified, &mut next_displacements,
                                         &mut total_flow, &mut cell_flowed, &mut flow_occurred,
@@ -3622,6 +3782,47 @@ pub fn settle_tick(
         );
         #[cfg(test)]
         note_phase_flow(phase, final_flux);
+
+        // Upstream wake. `flux_edge_apply` above activates only `a_b`/`nb_b`, the two blocks
+        // THIS edge touches. A cell one row further upstream of the donor -- e.g. directly
+        // above a cell that just drained downward -- is neither of those and is never told its
+        // support moved. Under the block-LOD scheduler (`will_simulate[b]`, gated on
+        // `last_displacements` from a PRIOR tick) that leaves the block above able to stay
+        // `Inactive` for up to `MAX_STALENESS` ticks while the material below it keeps falling,
+        // which is exactly how a gap opens on a block boundary underneath actively-falling
+        // material: this is the flux-solver counterpart of `try_move`'s identical fix on the
+        // granular-CA path (see its "Upstream wake" comment for the general argument). Gated on
+        // the same `MIN_FLUX` `flux_edge_apply` itself uses, so a below-threshold non-event
+        // wakes nothing extra either. `activate_neighbor_upstream`, not plain `activate_neighbor`:
+        // this is a causal dependency (its support genuinely moved), so it earns `Medium`
+        // (`budget_simulate`) priority rather than the none it would otherwise get -- but it
+        // still competes for `budget_n` like any other candidate (see that function's doc
+        // comment for why this stays capped rather than bypassing the scheduler).
+        //
+        // Speculative half: the donor block's two LATERAL neighbours (same block-row, one
+        // column either side) are not causally implicated the way the upstream block is --
+        // nothing below them changed -- but a body that is actively falling in this column
+        // often has its neighbours about to follow, so give them a low-priority
+        // (`SIDE_DISPLACEMENT_HINT`, budget-competing) nudge too rather than leaving them to
+        // find out only via their own edges or the `MAX_STALENESS` catch-up.
+        if !upstream_wake_gate::is_disabled() && final_flux.abs() > 1e-7 {
+            let up_y = if final_flux > 0.0 {
+                y.checked_sub(1)
+            } else {
+                (y + 2 < h).then_some(y + 2)
+            };
+            if let Some(up_y) = up_y {
+                let up_b = (up_y / block_size) * cols + bx;
+                activate_neighbor_upstream(up_b, &mut modified, &mut next_displacements);
+            }
+            let donor_by = (donor / w) / block_size;
+            if bx > 0 {
+                activate_neighbor_side(donor_by * cols + (bx - 1), &mut modified, &mut next_displacements);
+            }
+            if bx + 1 < cols {
+                activate_neighbor_side(donor_by * cols + (bx + 1), &mut modified, &mut next_displacements);
+            }
+        }
     }
 
     for &idx in &touched_h {
@@ -3654,6 +3855,30 @@ pub fn settle_tick(
         );
         #[cfg(test)]
         note_phase_flow(phase, final_flux);
+
+        // Upstream wake -- lateral counterpart of the vertical edge's identical fix just above
+        // (see its comment for the general argument, and the touched_v loop's "Speculative
+        // half" comment for the sibling-neighbour nudge below). One column further upstream of
+        // the donor, on the far side from the acceptor, is never activated by `flux_edge_apply`
+        // itself.
+        if !upstream_wake_gate::is_disabled() && final_flux.abs() > 1e-7 {
+            let up_x = if final_flux > 0.0 {
+                x.checked_sub(1)
+            } else {
+                (x + 2 < w).then_some(x + 2)
+            };
+            if let Some(up_x) = up_x {
+                let up_b = by * cols + (up_x / block_size);
+                activate_neighbor_upstream(up_b, &mut modified, &mut next_displacements);
+            }
+            let donor_bx = (donor % w) / block_size;
+            if by > 0 {
+                activate_neighbor_side((by - 1) * cols + donor_bx, &mut modified, &mut next_displacements);
+            }
+            if by + 1 < rows {
+                activate_neighbor_side((by + 1) * cols + donor_bx, &mut modified, &mut next_displacements);
+            }
+        }
     }
 
     // Block-wake bookkeeping for phase 1's g=0 (Sandbox) liquid branch, deferred from COLLECT
@@ -11426,5 +11651,731 @@ mod tests {
         diag_grain_variance_scenario(
             MaterialMode::FinePowder, MaterialMode::CoarseSand, "finepowder_vs_coarsesand", &[50, 150, 300],
         );
+    }
+
+    #[test]
+    #[ignore]
+    // DIAGNOSTIC (reproduce-only, no assertions): user report is that falling sand "falls in
+    // chunks with almost clear separation of blocks" -- "large slabs that separate and merge in
+    // the end" -- seen on Circle and on Hourglass after a flip, and NOT present a few days before
+    // the flux-solver / frozen-state Jacobi conversion for sand's gravity-aligned edge (see the
+    // Stage B comment on `test_granular_flowing_fall_conserves_mass_and_respects_cfl`, which moved
+    // sand's vertical edge onto the same conservative `flux_edge` solver liquid already used).
+    //
+    // Scenario: drop a solid 24x24 DrySand block into an open Circle container with clear air
+    // below it, and watch the block while it free-falls. A solid block has no reason to develop
+    // internal gaps: nothing is metering it against anything except gravity and its own capacity.
+    // If it does, that gap structure over time is the artifact.
+    //
+    // Three metrics, all computed every tick against the material's own current footprint (so a
+    // shrinking/settling block doesn't inflate them just by having a smaller bounding box):
+    //   - num_components: 8-connected components of h > 0.05 cells over the WHOLE grid, reusing
+    //     `find_liquid_components` from the tendril detector (it is a generic connectivity pass,
+    //     nothing liquid-specific about it -- it is called here on `sim.hm.data` for DrySand). A
+    //     solid falling block is exactly one component; slabs separating means > 1.
+    //   - void_cells / void_fraction: cells with h <= 0.05 strictly INSIDE the tight bounding box
+    //     of all currently-occupied cells (mask != OUTSIDE only), i.e. gaps enclosed by the
+    //     material's own convex extent -- the same style of measurement as `count_voids` in
+    //     `test_liquid_flowing_liquid_does_not_stand_in_walls`, adapted from "liquid on either
+    //     side in a row" to "inside the occupied bbox" because a solid block (unlike a draining
+    //     channel) has no natural left/right liquid landmark to test against.
+    //   - a vertical fill-fraction profile (rows x fill fraction across the bbox's column span),
+    //     printed at the tick where void_cells peaks, to read off whether any banding has a short
+    //     (~1-2 cell) wavelength (hypothesis 1: damped-Jacobi's least-damped mode is the highest
+    //     frequency one) or is organised into a few large irregular bands (hypothesis 2: the
+    //     uniform `edge_arbitration_scale` factor per cell plus `budget_term`'s hard
+    //     `raw_total > budget` branch creating a fracture plane where neighbouring cells land on
+    //     opposite sides of it).
+    fn diag_falling_block_slab_separation() {
+        let s = test_scale();
+        let w = 128 * s;
+        let h = 128 * s;
+        let eps = 0.05f32;
+
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // 24x24 block (scaled), centered horizontally, starting well inside the Circle's top
+        // (r_x = 0.46*w =~ 58.9 at s=1; the block's farthest corner from center is at dist_sq
+        // 2080 against r_x_sq 3467, comfortably inside) with the whole lower ~85% of the circle
+        // open air below it to fall through.
+        let block_w = 24 * s;
+        let block_h = 24 * s;
+        let x0 = w / 2 - block_w / 2;
+        let x1 = x0 + block_w;
+        let y0 = 20 * s;
+        let y1 = y0 + block_h;
+
+        let mut filled = 0usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = y * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE {
+                    sim.hm.data[idx] = 1.0;
+                    filled += 1;
+                }
+            }
+        }
+        assert_eq!(
+            filled, block_w * block_h,
+            "block placement clipped by the Circle mask -- adjust y0/block size, this scenario \
+             needs a genuinely solid rectangular block to start"
+        );
+
+        let bbox = |sim: &TestSim| -> Option<(usize, usize, usize, usize)> {
+            let (mut min_x, mut max_x, mut min_y, mut max_y) = (usize::MAX, 0usize, usize::MAX, 0usize);
+            let mut any = false;
+            for y in 0..h {
+                for x in 0..w {
+                    if sim.hm.data[y * w + x] > eps {
+                        any = true;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
+                }
+            }
+            any.then_some((min_x, max_x, min_y, max_y))
+        };
+
+        // "Eroded interior" void count: same as void_cells but excluding any cell within
+        // `erosion` of the bbox boundary. A rectangular bbox around a naturally sloped/triangular
+        // settled heap always has some void along its edges (the heap's corners) even with zero
+        // internal defect; this strips that geometric slack out so a nonzero count here can only
+        // come from a genuine enclosed pocket, not the heap's outline.
+        let erosion = 3usize;
+        let interior_void = |sim: &TestSim, min_x: usize, max_x: usize, min_y: usize, max_y: usize| -> usize {
+            if max_x - min_x <= 2 * erosion || max_y - min_y <= 2 * erosion {
+                return 0;
+            }
+            let mut count = 0usize;
+            for y in (min_y + erosion)..=(max_y - erosion) {
+                for x in (min_x + erosion)..=(max_x - erosion) {
+                    let idx = y * w + x;
+                    if mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] <= eps {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        };
+
+        let mut peak_void_cells = 0usize;
+        let mut peak_void_frac = 0.0f32;
+        let mut peak_void_tick = 0usize;
+        let mut peak_void_bbox = (0usize, 0usize, 0usize, 0usize);
+        let mut peak_components = 0usize;
+        let mut peak_components_tick = 0usize;
+        let mut final_components = 0usize;
+        let mut final_void_cells = 0usize;
+        let mut peak_interior_void = 0usize;
+        let mut peak_interior_void_tick = 0usize;
+        let mut final_interior_void = 0usize;
+        let checkpoints: Vec<usize> = [2, 4, 6, 8, 10, 15, 20, 30, 38, 50, 80, 120, 180, 260]
+            .iter()
+            .map(|&t| t * s)
+            .collect();
+
+        let max_ticks = 260 * s;
+        for t in 0..max_ticks {
+            sim.tick(gravity_dir, usize::MAX);
+
+            let components = find_liquid_components(&sim.hm.data, &mask, w, h, 0, h - 1, eps);
+            let num_components = components.len();
+            if num_components > peak_components {
+                peak_components = num_components;
+                peak_components_tick = t + 1;
+            }
+
+            let (void_cells, void_frac, this_bbox, this_interior_void) = match bbox(&sim) {
+                Some((min_x, max_x, min_y, max_y)) => {
+                    let mut inside_cells = 0usize;
+                    let mut void_cells = 0usize;
+                    for y in min_y..=max_y {
+                        for x in min_x..=max_x {
+                            let idx = y * w + x;
+                            if mask[idx] == crate::MASK_OUTSIDE {
+                                continue;
+                            }
+                            inside_cells += 1;
+                            if sim.hm.data[idx] <= eps {
+                                void_cells += 1;
+                            }
+                        }
+                    }
+                    let frac = void_cells as f32 / inside_cells.max(1) as f32;
+                    let iv = interior_void(&sim, min_x, max_x, min_y, max_y);
+                    (void_cells, frac, (min_x, max_x, min_y, max_y), iv)
+                }
+                None => (0, 0.0, (0, 0, 0, 0), 0),
+            };
+            if void_cells > peak_void_cells {
+                peak_void_cells = void_cells;
+                peak_void_tick = t + 1;
+                peak_void_bbox = this_bbox;
+            }
+            peak_void_frac = peak_void_frac.max(void_frac);
+            if this_interior_void > peak_interior_void {
+                peak_interior_void = this_interior_void;
+                peak_interior_void_tick = t + 1;
+            }
+
+            if checkpoints.contains(&(t + 1)) {
+                println!(
+                    "diag_falling_block_slab_separation: t={:>4} components={} void_cells={:>4} \
+                     void_frac={:.4} interior_void={:>4} bbox=({},{})-({},{})",
+                    t + 1, num_components, void_cells, void_frac, this_interior_void,
+                    this_bbox.0, this_bbox.2, this_bbox.1, this_bbox.3
+                );
+            }
+
+            if t + 1 == max_ticks {
+                final_components = num_components;
+                final_void_cells = void_cells;
+                final_interior_void = this_interior_void;
+            }
+        }
+
+        println!(
+            "diag_falling_block_slab_separation: scale={s} w={w} h={h} block={block_w}x{block_h} \
+             peak_void_cells={peak_void_cells} (@tick {peak_void_tick}) peak_void_frac={peak_void_frac:.4} \
+             peak_components={peak_components} (@tick {peak_components_tick}) \
+             peak_interior_void={peak_interior_void} (@tick {peak_interior_void_tick}) \
+             final_components={final_components} final_void_cells={final_void_cells} \
+             final_interior_void={final_interior_void}"
+        );
+
+        // Re-run just the peak-void tick's row profile for a banding-wavelength read. Rerunning
+        // rather than caching per-tick history keeps the main loop's memory flat; the sim is
+        // deterministic (fixed RNG seed schedule in `TestSim::tick`), so replaying to the same
+        // tick count reproduces the identical state.
+        if peak_void_cells > 0 {
+            let mask2 = mask.clone();
+            let props2 = get_test_props(MaterialMode::DrySand, w * h);
+            let mut sim2 = TestSim::new(w, h, props2, mask2.clone(), 32);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let idx = y * w + x;
+                    if mask2[idx] != crate::MASK_OUTSIDE {
+                        sim2.hm.data[idx] = 1.0;
+                    }
+                }
+            }
+            for _ in 0..peak_void_tick {
+                sim2.tick(gravity_dir, usize::MAX);
+            }
+            let (min_x, max_x, min_y, max_y) = peak_void_bbox;
+            println!(
+                "diag_falling_block_slab_separation: row fill-fraction profile at peak tick {peak_void_tick}, \
+                 bbox x=[{min_x},{max_x}] y=[{min_y},{max_y}]"
+            );
+            for y in min_y..=max_y {
+                let mut inside = 0usize;
+                let mut filled = 0usize;
+                for x in min_x..=max_x {
+                    let idx = y * w + x;
+                    if mask2[idx] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    inside += 1;
+                    if sim2.hm.data[idx] > eps {
+                        filled += 1;
+                    }
+                }
+                let frac = filled as f32 / inside.max(1) as f32;
+                let bar_len = (frac * 40.0).round() as usize;
+                let bar: String = "#".repeat(bar_len);
+                println!("  y={y:>4} fill={frac:.3} {bar}");
+            }
+
+            // Raw 2D snapshot of a central column strip, to tell horizontal row-banding (the
+            // whole row's fill fraction moves together, columns roughly agree within a row) apart
+            // from a true 2D checkerboard (fill alternates cell-by-cell independent of neighbours
+            // in the SAME row too). '#'=h>0.5, '+'=0.05<h<=0.5, '.'=h<=0.05(void).
+            let strip_x0 = min_x + (max_x - min_x) / 2 - 6.min((max_x - min_x) / 2);
+            let strip_x1 = (strip_x0 + 12).min(max_x);
+            println!(
+                "diag_falling_block_slab_separation: 2D snapshot cols [{strip_x0},{strip_x1}], \
+                 rows [{min_y},{max_y}]"
+            );
+            for y in min_y..=max_y {
+                let mut line = String::new();
+                for x in strip_x0..=strip_x1 {
+                    let idx = y * w + x;
+                    if mask2[idx] == crate::MASK_OUTSIDE {
+                        line.push(' ');
+                        continue;
+                    }
+                    let v = sim2.hm.data[idx];
+                    line.push(if v > 0.5 { '#' } else if v > eps { '+' } else { '.' });
+                }
+                println!("  y={y:>4} {line}");
+            }
+
+            // Quantitative parity correlation, over the SAME eroded interior region
+            // `interior_void` uses (excludes the bbox's outer `erosion` rim, so this isn't just
+            // picking up the block's outline). Splits mean(h) by row parity, column parity, and
+            // (x+y) parity (the checkerboard combination). If hypothesis 1 (damped-Jacobi's
+            // least-damped mode = highest spatial frequency) is what's firing, the (x+y) parity
+            // split should show the largest mean(h) gap of the three, since a 2D checkerboard
+            // mode is `(-1)^(x+y)`, not purely `(-1)^x` or `(-1)^y`. If instead this is
+            // hypothesis 2 (a few large irregular slabs from the `budget_term` branch), none of
+            // the three parity splits should show a meaningfully large gap -- the low-h region
+            // would be spatially contiguous, not alternating cell-by-cell.
+            let (min_x, max_x, min_y, max_y) = peak_void_bbox;
+            if max_x - min_x > 2 * erosion && max_y - min_y > 2 * erosion {
+                let mut sums = [[0.0f64; 2]; 3]; // [row, col, checker][parity]
+                let mut counts = [[0usize; 2]; 3];
+                for y in (min_y + erosion)..=(max_y - erosion) {
+                    for x in (min_x + erosion)..=(max_x - erosion) {
+                        let idx = y * w + x;
+                        if mask2[idx] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        let v = sim2.hm.data[idx] as f64;
+                        let py = y % 2;
+                        let px = x % 2;
+                        let pc = (x + y) % 2;
+                        sums[0][py] += v;
+                        counts[0][py] += 1;
+                        sums[1][px] += v;
+                        counts[1][px] += 1;
+                        sums[2][pc] += v;
+                        counts[2][pc] += 1;
+                    }
+                }
+                let mean = |k: usize, p: usize| sums[k][p] / counts[k][p].max(1) as f64;
+                let gap = |k: usize| (mean(k, 0) - mean(k, 1)).abs();
+                println!(
+                    "diag_falling_block_slab_separation: parity split @ tick {peak_void_tick} \
+                     (interior region, n={}): row_parity mean(even,odd)=({:.4},{:.4}) gap={:.4} | \
+                     col_parity mean(even,odd)=({:.4},{:.4}) gap={:.4} | \
+                     checker(x+y) mean(even,odd)=({:.4},{:.4}) gap={:.4}",
+                    counts[0][0] + counts[0][1],
+                    mean(0, 0), mean(0, 1), gap(0),
+                    mean(1, 0), mean(1, 1), gap(1),
+                    mean(2, 0), mean(2, 1), gap(2),
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    // DIAGNOSTIC (reproduce-only, no assertions), follow-up to `diag_falling_block_slab_separation`
+    // after the user supplied a photo of the actual defect: DrySand in a Circle container breaks
+    // into large horizontal slabs with clean straight-edged empty gaps *while still falling* --
+    // the material is never asleep, the slabs keep moving, and the gaps close again once the pile
+    // settles. That rules out edge-sleeping (asleep material cannot be what the user sees falling)
+    // and reframes the question: gaps opening between falling layers means different layers are
+    // falling at different SPEEDS, since uniform free fall cannot open a gap between two layers
+    // that started in contact and share one gravitational acceleration.
+    //
+    // This tracks, at each checkpoint during free fall, the mass-weighted vertical centroid of the
+    // object's EVEN-row mass separately from its ODD-row mass (over the same eroded-interior
+    // region `diag_falling_block_slab_separation` uses for its parity split), so a per-checkpoint
+    // finite difference gives a directly-measured fall SPEED for each parity class. If the two
+    // diverge and the divergence grows, rows are provably falling at different speeds and the
+    // effect is compounding rather than static. Alongside that it prints the mean `column_depth`
+    // (the one hand-rolled, non-flux-solver overburden term -- see its own doc comment -- that
+    // feeds the LATERAL edge's driving head, never the vertical one) split the same way, to check
+    // whether the seed of the divergence (if any) is visible there too, or is a distinct signal.
+    fn diag_falling_block_layer_velocity() {
+        let s = test_scale();
+        let w = 128 * s;
+        let h = 128 * s;
+
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::DrySand, w * h);
+        let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let block_w = 24 * s;
+        let block_h = 24 * s;
+        let x0 = w / 2 - block_w / 2;
+        let x1 = x0 + block_w;
+        let y0 = 20 * s;
+        let y1 = y0 + block_h;
+
+        let mut filled = 0usize;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let idx = y * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE {
+                    sim.hm.data[idx] = 1.0;
+                    filled += 1;
+                }
+            }
+        }
+        assert_eq!(
+            filled, block_w * block_h,
+            "block placement clipped by the Circle mask -- adjust y0/block size"
+        );
+
+        let bbox = |sim: &TestSim| -> Option<(usize, usize, usize, usize)> {
+            let (mut min_x, mut max_x, mut min_y, mut max_y) = (usize::MAX, 0usize, usize::MAX, 0usize);
+            let mut any = false;
+            for y in 0..h {
+                for x in 0..w {
+                    if sim.hm.data[y * w + x] > 0.05 {
+                        any = true;
+                        min_x = min_x.min(x);
+                        max_x = max_x.max(x);
+                        min_y = min_y.min(y);
+                        max_y = max_y.max(y);
+                    }
+                }
+            }
+            any.then_some((min_x, max_x, min_y, max_y))
+        };
+
+        let erosion = 3usize;
+        let checkpoint_every = 5 * s;
+        let max_ticks = 150 * s;
+
+        println!(
+            "diag_falling_block_layer_velocity: scale={s} w={w} h={h} block={block_w}x{block_h}"
+        );
+
+        let mut last: Option<(usize, f64, f64)> = None;
+        for t in 0..max_ticks {
+            sim.tick(gravity_dir, usize::MAX);
+            let tick_no = t + 1;
+            if tick_no % checkpoint_every != 0 {
+                continue;
+            }
+            let Some((min_x, max_x, min_y, max_y)) = bbox(&sim) else { continue };
+            if max_x - min_x <= 2 * erosion || max_y - min_y <= 2 * erosion {
+                continue;
+            }
+
+            let mut m_even = 0f64;
+            let mut ysum_even = 0f64;
+            let mut m_odd = 0f64;
+            let mut ysum_odd = 0f64;
+            let mut cd_even_sum = 0f64;
+            let mut cd_even_cnt = 0usize;
+            let mut cd_odd_sum = 0f64;
+            let mut cd_odd_cnt = 0usize;
+            for y in (min_y + erosion)..=(max_y - erosion) {
+                for x in (min_x + erosion)..=(max_x - erosion) {
+                    let idx = y * w + x;
+                    if mask[idx] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    let hh = sim.hm.data[idx] as f64;
+                    let cd = sim.column_depth[idx] as f64;
+                    if y % 2 == 0 {
+                        m_even += hh;
+                        ysum_even += hh * y as f64;
+                        cd_even_sum += cd;
+                        cd_even_cnt += 1;
+                    } else {
+                        m_odd += hh;
+                        ysum_odd += hh * y as f64;
+                        cd_odd_sum += cd;
+                        cd_odd_cnt += 1;
+                    }
+                }
+            }
+            let cy_even = if m_even > 0.0 { ysum_even / m_even } else { f64::NAN };
+            let cy_odd = if m_odd > 0.0 { ysum_odd / m_odd } else { f64::NAN };
+            let cd_even = cd_even_sum / cd_even_cnt.max(1) as f64;
+            let cd_odd = cd_odd_sum / cd_odd_cnt.max(1) as f64;
+            let bbox_h = max_y - min_y;
+
+            let vel_str = if let Some((pt, pcy_e, pcy_o)) = last {
+                let dt = (tick_no - pt) as f64;
+                let v_even = (cy_even - pcy_e) / dt;
+                let v_odd = (cy_odd - pcy_o) / dt;
+                format!(" v_even={:.4} v_odd={:.4} dv={:.4}", v_even, v_odd, v_even - v_odd)
+            } else {
+                String::new()
+            };
+
+            println!(
+                "diag_falling_block_layer_velocity: t={:>4} bbox_h={:>4} cy_even={:.2} \
+                 cy_odd={:.2} gap_cy={:.3} m_even={:.1} m_odd={:.1} cd_even={:.5} cd_odd={:.5} \
+                 cd_gap={:.5}{vel_str}",
+                tick_no, bbox_h, cy_even, cy_odd, cy_even - cy_odd, m_even, m_odd, cd_even,
+                cd_odd, cd_even - cd_odd
+            );
+
+            last = Some((tick_no, cy_even, cy_odd));
+        }
+    }
+
+    /// Writes one binary PPM (P6) frame of the occupancy field, nearest-neighbour upscaled by
+    /// `scale`, to `path`. Black = empty, light tan = occupied (h > 0.05), and -- when
+    /// `overlay_grid` is set -- a dim red line marks every `block_size`'th cell boundary so a
+    /// human viewer can read off whether gaps land on activation-block boundaries directly from
+    /// the image, without cross-referencing coordinates by hand.
+    fn write_ppm_frame(
+        path: &std::path::Path,
+        data: &[f32],
+        mask: &[u8],
+        w: usize,
+        h: usize,
+        scale: usize,
+        block_size: usize,
+        overlay_grid: bool,
+    ) {
+        use std::io::Write;
+        let out_w = w * scale;
+        let out_h = h * scale;
+        let mut buf = Vec::with_capacity(out_w * out_h * 3);
+        for oy in 0..out_h {
+            let y = oy / scale;
+            let grid_line_y = overlay_grid && y % block_size == 0;
+            for ox in 0..out_w {
+                let x = ox / scale;
+                let idx = y * w + x;
+                let grid_line_x = overlay_grid && x % block_size == 0;
+                let (r, g, b) = if mask[idx] == crate::MASK_OUTSIDE {
+                    (30u8, 30u8, 30u8)
+                } else if grid_line_x || grid_line_y {
+                    (140u8, 20u8, 20u8)
+                } else if data[idx] > 0.05 {
+                    (222u8, 197u8, 145u8)
+                } else {
+                    (0u8, 0u8, 0u8)
+                };
+                buf.push(r);
+                buf.push(g);
+                buf.push(b);
+            }
+        }
+        let mut f = std::fs::File::create(path).expect("create ppm frame");
+        write!(f, "P6\n{out_w} {out_h}\n255\n").unwrap();
+        f.write_all(&buf).unwrap();
+    }
+
+    /// Mirrors a DrawingSimulation-style "flip the apparatus" for a symmetric (Circle) container
+    /// on the lower-level `TestSim` harness: reflects the heightmap about `center_y = h / 2`
+    /// (same axis `DrawingSimulation::flip_hourglass` in lib.rs uses), clears the per-edge
+    /// momentum and `column_depth` buffers (a flipped apparatus's contents are in free fall from
+    /// rest, not carrying over pre-flip momentum -- see `flip_hourglass`'s own comment), and
+    /// forces every block to be reconsidered next tick. Doesn't touch `shape_mask` because
+    /// Circle is symmetric about the same axis, so `generate_shape_mask` after a real flip would
+    /// be a no-op here — the one piece of `flip_hourglass` this intentionally skips.
+    fn flip_sim(sim: &mut TestSim) {
+        let w = sim.hm.width;
+        let h = sim.hm.height;
+        for y in 1..=h / 2 {
+            let y2 = h.saturating_sub(y);
+            if y == y2 || y2 >= h {
+                continue;
+            }
+            for x in 0..w {
+                let i1 = y * w + x;
+                let i2 = y2 * w + x;
+                sim.hm.data.swap(i1, i2);
+            }
+        }
+        sim.edge_vel_h.fill(0.0);
+        sim.edge_vel_v.fill(0.0);
+        sim.column_depth.fill(0.0);
+        sim.last_displacements.fill(0.5);
+        sim.tick_count = 0;
+    }
+
+    #[test]
+    #[ignore]
+    // DIAGNOSTIC (reproduce-only, no assertions). The user's exact repro: fill a Circle
+    // container with DrySand, run until it is FULLY AT REST, then FLIP it (which -- per
+    // `flip_hourglass` in lib.rs -- mirrors the settled pile from the bottom of the container to
+    // the top, clears stored edge momentum, and forces every block to be reconsidered) and watch
+    // what happens as it falls again. This is a stronger, more direct instrument than the
+    // dropped-block scenario: nothing about a resting-then-flipped pile artificially assumes a
+    // rectangular shape, and "run to rest first" is exactly what the user reported doing.
+    //
+    // Runs the WHOLE scenario twice from the same seed: once with the upstream/side block-wake
+    // fix (`activate_neighbor_upstream` / `activate_neighbor_side`) disabled via
+    // `upstream_wake_gate`, once with it enabled (the shipped default), so the printed metrics
+    // are a true same-build A/B rather than a before/after across two separate compiles.
+    //
+    // Metrics per tick: interior void count (same eroded-bbox definition as
+    // `diag_falling_block_slab_separation`), and a BLOCK-BOUNDARY ALIGNMENT score -- of the rows
+    // that are mostly empty (mean fill < 0.15) while sandwiched between two rows that are not
+    // (a "gap row"), what fraction sit at `y % block_size == 0`, i.e. exactly on an
+    // activation-block boundary. Chance alignment is `1 / block_size` (50% at grid=64's
+    // block_size=2, 6.25% at grid=512's block_size=16) -- a rate well above that is the
+    // block-boundary signature; a rate near chance is not.
+    //
+    // Writes PPM frames (nearest-neighbour upscaled 8x) for a subsample of post-flip ticks into
+    // `/tmp/.../scratchpad/slabframes/{before,after}/` for the "before" (fix disabled) and
+    // "after" (fix enabled) runs, plus a `grid/` set with activation-block gridlines overlaid
+    // (before-fix only, since that's the run the alignment claim is about) for the caller to
+    // build contact sheets from outside this test (no image/video crate is a dependency of this
+    // crate, and none is added here — see the task brief).
+    fn diag_flip_release_front_and_block_alignment() {
+        let frame_root = std::path::PathBuf::from(
+            "/tmp/claude-1000/-home-deck-projects-sandart/6dbad8f7-de15-4c1a-aae8-0d4d41f500d8/scratchpad/slabframes",
+        );
+
+        for grid in [64usize, 512usize] {
+            let w = grid;
+            let h = grid;
+            let block_size = (grid / 32).max(1);
+            let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+            let props = get_test_props(MaterialMode::DrySand, w * h);
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+            for (disabled, tag) in [(true, "before"), (false, "after")] {
+                upstream_wake_gate::set_disabled(disabled);
+
+                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+                // Fill roughly the bottom 60% of the circle to h=1.0 -- a solid packed mass with
+                // clear air above it, the shape "pour DrySand into Circle and let it settle"
+                // naturally produces.
+                let fill_y0 = (0.40 * h as f32) as usize;
+                for y in fill_y0..h {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] != crate::MASK_OUTSIDE {
+                            sim.hm.data[idx] = 1.0;
+                        }
+                    }
+                }
+
+                // Run to rest: total per-tick flow below a tiny bar for 15 consecutive ticks.
+                let mut quiet_run = 0usize;
+                let mut rest_tick = 0usize;
+                let max_rest_ticks = 4000usize;
+                for t in 0..max_rest_ticks {
+                    let flow = sim.tick(gravity_dir, usize::MAX);
+                    if flow < 1e-3 {
+                        quiet_run += 1;
+                        if quiet_run >= 15 {
+                            rest_tick = t + 1;
+                            break;
+                        }
+                    } else {
+                        quiet_run = 0;
+                    }
+                }
+                let settled_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
+                println!(
+                    "diag_flip: grid={grid} [{tag}] rest reached at tick={rest_tick} (0 = did \
+                     not settle within {max_rest_ticks}) settled_mass={settled_mass:.1}"
+                );
+
+                flip_sim(&mut sim);
+
+                let post_flip_ticks = if grid == 64 { 260 } else { 400 };
+                let frame_every = if grid == 64 { 2 } else { 6 };
+                let frame_scale = if grid == 64 { 8 } else { 1 };
+                let frame_dir = frame_root.join(tag);
+                let grid_dir = frame_root.join("grid");
+                if grid == 64 {
+                    let _ = std::fs::create_dir_all(&frame_dir);
+                    if !disabled {
+                        // grid-overlay sheet is requested for the shipped (fixed) behaviour too,
+                        // in addition to "before" — write both, distinguished by filename.
+                    }
+                    let _ = std::fs::create_dir_all(&grid_dir);
+                }
+
+                let mut peak_interior_void = 0usize;
+                let mut peak_interior_void_tick = 0usize;
+                let mut align_hits = 0usize;
+                let mut align_total = 0usize;
+                let mut frames_written = 0usize;
+
+                for t in 0..post_flip_ticks {
+                    sim.tick(gravity_dir, usize::MAX);
+                    let tick_no = t + 1;
+
+                    // bbox + interior void (same definition as diag_falling_block_slab_separation)
+                    let (mut min_x, mut max_x, mut min_y, mut max_y) =
+                        (usize::MAX, 0usize, usize::MAX, 0usize);
+                    let mut any = false;
+                    for y in 0..h {
+                        for x in 0..w {
+                            if sim.hm.data[y * w + x] > 0.05 {
+                                any = true;
+                                min_x = min_x.min(x);
+                                max_x = max_x.max(x);
+                                min_y = min_y.min(y);
+                                max_y = max_y.max(y);
+                            }
+                        }
+                    }
+                    let mut interior_void = 0usize;
+                    if any && max_x > min_x + 6 && max_y > min_y + 6 {
+                        for y in (min_y + 3)..=(max_y - 3) {
+                            for x in (min_x + 3)..=(max_x - 3) {
+                                let idx = y * w + x;
+                                if mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] <= 0.05 {
+                                    interior_void += 1;
+                                }
+                            }
+                        }
+                    }
+                    if interior_void > peak_interior_void {
+                        peak_interior_void = interior_void;
+                        peak_interior_void_tick = tick_no;
+                    }
+
+                    // Gap-row block-boundary alignment, over the object's column span.
+                    if any && max_x > min_x + 6 && max_y > min_y + 4 {
+                        let row_fill = |y: usize| -> f32 {
+                            let mut inside = 0usize;
+                            let mut filled = 0usize;
+                            for x in min_x..=max_x {
+                                let idx = y * w + x;
+                                if mask[idx] == crate::MASK_OUTSIDE {
+                                    continue;
+                                }
+                                inside += 1;
+                                if sim.hm.data[idx] > 0.05 {
+                                    filled += 1;
+                                }
+                            }
+                            if inside == 0 { 1.0 } else { filled as f32 / inside as f32 }
+                        };
+                        for y in (min_y + 1)..max_y {
+                            let f_above = row_fill(y - 1);
+                            let f_here = row_fill(y);
+                            let f_below = row_fill(y + 1);
+                            if f_here < 0.15 && f_above > 0.4 && f_below > 0.4 {
+                                align_total += 1;
+                                if y % block_size == 0 {
+                                    align_hits += 1;
+                                }
+                            }
+                        }
+                    }
+
+                    if grid == 64 && tick_no % frame_every == 0 {
+                        let path = frame_dir.join(format!("frame_{tick_no:04}.ppm"));
+                        write_ppm_frame(&path, &sim.hm.data, &mask, w, h, frame_scale, block_size, false);
+                        frames_written += 1;
+                        if !disabled {
+                            let gpath = grid_dir.join(format!("frame_{tick_no:04}.ppm"));
+                            write_ppm_frame(&gpath, &sim.hm.data, &mask, w, h, frame_scale, block_size, true);
+                        }
+                    }
+                }
+
+                let align_frac = if align_total > 0 {
+                    align_hits as f64 / align_total as f64
+                } else {
+                    -1.0
+                };
+                let chance = 1.0 / block_size as f64;
+                println!(
+                    "diag_flip: grid={grid} [{tag}] block_size={block_size} \
+                     peak_interior_void={peak_interior_void} (@tick {peak_interior_void_tick}) \
+                     gap_rows_sampled={align_total} block_boundary_aligned={align_hits} \
+                     align_frac={align_frac:.3} chance_frac={chance:.3} frames_written={frames_written}"
+                );
+            }
+        }
+
+        upstream_wake_gate::set_disabled(false);
     }
 }
