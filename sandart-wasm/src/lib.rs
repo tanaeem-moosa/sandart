@@ -66,6 +66,12 @@ pub struct WasmSimulationState {
     // Quantile mass-distribution overlay (UI-facing setting; only actually applied to `sim`
     // while `simulator_mode == SandFall` — see `set_quantile_mode`/`set_simulator_mode`).
     quantile_mode: QuantileMode,
+    // Block-simulation heat-map debug overlay (see `set_heatmap_overlay`). Off by default, like
+    // `shadows_enabled` and `quantile_mode` — a pure render-side toggle, doesn't affect `sim` at
+    // all (the underlying per-block counter it displays, `sim.block_heat_buckets`, is always
+    // maintained regardless of whether this is on; this field only gates whether `render()`
+    // bothers uploading/tinting with it).
+    heatmap_enabled: bool,
     // Last dt seen by `step()`, used to make the per-frame easing below frame-rate independent.
     last_dt: f32,
     // Displayed (eased) quantile line positions, plus whether they hold a meaningful previous
@@ -213,6 +219,7 @@ impl WasmSimulationState {
             clock_minute: 99,
             color_mode: 0,
             quantile_mode: QuantileMode::Off,
+            heatmap_enabled: false,
             last_dt: 1.0 / 60.0,
             quantile_eased: [0.0; MAX_QUANTILE_LINES],
             quantile_eased_valid: false,
@@ -331,6 +338,7 @@ impl WasmSimulationState {
         let neck_width = self.sim.neck_width;
         let hourglass_curve = self.sim.hourglass_curve;
         let multistage_chambers = self.sim.multistage_chambers;
+        let perfect_simulation = self.sim.perfect_simulation;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -339,6 +347,12 @@ impl WasmSimulationState {
         sim.neck_width = neck_width;
         sim.hourglass_curve = hourglass_curve;
         sim.multistage_chambers = multistage_chambers;
+        // Carried over like the geometry params above, not left to reset to the fresh sim's
+        // default -- a resolution change is a full sim teardown/rebuild (see this function's
+        // doc comment), but the "perfect simulation" debug toggle is a UI setting, same
+        // category as `quantile_mode` below, and shouldn't silently flip off just because the
+        // grid resized underneath it.
+        sim.perfect_simulation = perfect_simulation;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -626,6 +640,23 @@ impl WasmSimulationState {
 
     pub fn set_shadows_enabled(&mut self, enabled: bool) {
         self.shadows_enabled = enabled;
+    }
+
+    /// "Perfect simulation" debug toggle: forwarded straight to the sim, which force-admits
+    /// every non-trivial (in-mask, holding material) block into its unconditional simulate tier
+    /// every tick instead of letting the adaptive budget skip any of them. See
+    /// `DrawingSimulation::perfect_simulation`'s doc comment in sandart-sim/src/lib.rs. Slow by
+    /// design — it exists to A/B the scheduler's approximation against the ground truth, not to
+    /// be left on.
+    pub fn set_perfect_simulation(&mut self, enabled: bool) {
+        self.sim.perfect_simulation = enabled;
+    }
+
+    /// Block-simulation heat-map debug overlay: purely a render-side toggle (see
+    /// `heatmap_enabled`'s field doc comment) — the underlying per-block counter runs
+    /// unconditionally in `sim`, this only gates whether `render()` uploads/draws it.
+    pub fn set_heatmap_overlay(&mut self, enabled: bool) {
+        self.heatmap_enabled = enabled;
     }
 
     pub fn load_pattern_gcode(&mut self, content: &str) -> bool {
@@ -976,8 +1007,20 @@ impl WasmSimulationState {
             grid_size: self.grid_size as f32,
             quantile_positions: quantile_positions_uniform,
             marbles: current_marbles,
+            heatmap_enabled: if self.heatmap_enabled { 1 } else { 0 },
+            _pad_heatmap: [0; 3],
         };
         self.renderer.update_uniforms(&self.queue, &current_uniforms);
+
+        // Block-simulation heat-map debug overlay: `sim.block_heat_buckets` is always
+        // maintained (see its doc comment), but building the byte array and uploading it to the
+        // GPU only happens while the overlay is actually switched on — this is the "costs
+        // nothing when disabled" half of the contract, the shader-side `heatmap_enabled == 0u`
+        // early-out (see shader.wgsl) is the other half.
+        if self.heatmap_enabled {
+            let heat_texels = self.sim.block_heat_texels();
+            self.renderer.update_block_heat(&self.queue, &heat_texels);
+        }
 
         // Calculate view projection matrix
         let aspect = self.surface_config.width as f32 / self.surface_config.height as f32;

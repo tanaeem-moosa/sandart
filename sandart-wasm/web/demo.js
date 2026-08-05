@@ -787,6 +787,11 @@ function syncSettings() {
     if (angleVal) angleVal.innerText = `${Math.round(angleRad * 180 / Math.PI)}\u00b0`;
     state.set_shadows_enabled(document.getElementById('check-shadows').checked);
 
+    // LOD scheduler debug instruments (both off by default) -- see the "Debug" group's comment
+    // in index.html for what each one does.
+    state.set_perfect_simulation(document.getElementById('check-perfect-sim').checked);
+    state.set_heatmap_overlay(document.getElementById('check-heatmap').checked);
+
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
     updateParamPanels(patternType);
@@ -1022,6 +1027,8 @@ function setupPanelInput() {
     });
 
     document.getElementById('check-shadows').addEventListener('change', syncSettings);
+    document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
+    document.getElementById('check-heatmap').addEventListener('change', syncSettings);
 
     // Operations buttons
     document.getElementById('btn-reset').addEventListener('click', () => {

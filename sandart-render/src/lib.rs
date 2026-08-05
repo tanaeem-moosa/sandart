@@ -6,6 +6,12 @@ use wgpu;
 /// different size (tests, the desktop app).
 pub const GRID_SIZE: usize = 512;
 
+/// The LOD scheduler's block grid edge length -- always 32x32 blocks regardless of simulation
+/// resolution (see `sandart-sim`'s `DrawingSimulation::new_with_size` doc comment on
+/// `block_size`). The block-simulation heat-map overlay's texture is sized to this, not to
+/// `GRID_SIZE`/the current resolution.
+pub const HEAT_GRID_SIZE: usize = 32;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -65,6 +71,20 @@ pub struct LightingUniforms {
     // block (144 bytes wasted for 9 floats), whereas array<vec4<f32>, 3> has zero padding.
     pub quantile_positions: [[f32; 4]; 3],
     pub marbles: [MarbleUniform; 5], // array of up to 5 marbles
+    /// Block-simulation heat-map debug overlay: 1 = draw it, 0 = off (default). Appended as the
+    /// LAST field rather than interleaved among the scalars above (`shadow_enabled` et al.), so
+    /// only the tail of the struct needs to change.
+    ///
+    /// The struct's overall alignment is 16 (forced by `quantile_positions`/`marbles`), so its
+    /// size must land on a 16-byte multiple; before this field the struct was exactly 224 bytes
+    /// (`224 / 16 == 14`, no trailing pad). A single `u32` here would land at 228, and Rust
+    /// would silently insert 12 bytes of TRAILING padding to round back up to 240 -- which
+    /// `derive(Pod)` correctly refuses to allow, since padding bytes are uninitialized and Pod
+    /// promises every byte is defined. `_pad_heatmap` makes that padding explicit data instead,
+    /// the same fix `grid_size` above already used once for a mid-struct gap (see its doc
+    /// comment) -- here there's nothing useful to repurpose the slack for, so it stays padding.
+    pub heatmap_enabled: u32,
+    pub _pad_heatmap: [u32; 3],
 }
 
 #[repr(C, align(16))]
@@ -88,6 +108,12 @@ pub struct HeightmapRenderer {
     pub heightmap_texture: wgpu::Texture,
     pub colormap_texture: wgpu::Texture,
     pub shape_mask_texture: wgpu::Texture,
+    /// Block-simulation heat-map debug overlay texture. Fixed 32x32 (`HEAT_GRID_SIZE`) rather
+    /// than `grid_size` x `grid_size` like the textures above -- the LOD scheduler's block grid
+    /// is always exactly 32x32 regardless of simulation resolution (see the `block_size`
+    /// derivation note in sandart-sim's `DrawingSimulation::new_with_size`), so this is the one
+    /// GPU resource in this struct that does NOT need rebuilding when resolution changes.
+    pub block_heat_texture: wgpu::Texture,
     pub bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
     pub camera_buffer: wgpu::Buffer,
@@ -204,6 +230,30 @@ impl HeightmapRenderer {
         let shape_mask_texture_view =
             shape_mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Create block-simulation heat-map texture (HEAT_GRID_SIZE x HEAT_GRID_SIZE R8Unorm).
+        // R8Unorm (not R8Uint like shape_mask_texture) because the shader reads it as a
+        // normalised [0,1] intensity to feed straight into a colour ramp, not as a small set of
+        // discrete tags to branch on. Sized to the fixed 32x32 block grid, not `texture_size`
+        // (which scales with `grid_size`) -- see `HEAT_GRID_SIZE`'s doc comment.
+        let heat_texture_size = wgpu::Extent3d {
+            width: HEAT_GRID_SIZE as u32,
+            height: HEAT_GRID_SIZE as u32,
+            depth_or_array_layers: 1,
+        };
+        let block_heat_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("block_heat_texture"),
+            size: heat_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let block_heat_texture_view =
+            block_heat_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         // 2. Create heightmap sampler (using Nearest filtering for portable R32Float manual bilinear interpolation in shader)
         let heightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("heightmap_sampler"),
@@ -296,6 +346,19 @@ impl HeightmapRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        // Read via `textureLoad` in the shader (integer block coords, no
+                        // sampler), same as `shape_mask_tex` above -- `filterable: false` costs
+                        // nothing since nothing ever samples this with a filtering sampler.
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -327,6 +390,10 @@ impl HeightmapRenderer {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(&shape_mask_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&block_heat_texture_view),
                 },
             ],
         });
@@ -384,6 +451,7 @@ impl HeightmapRenderer {
             heightmap_texture,
             colormap_texture,
             shape_mask_texture,
+            block_heat_texture,
             bind_group,
             uniform_buffer,
             camera_buffer,
@@ -437,6 +505,35 @@ impl HeightmapRenderer {
             wgpu::Extent3d {
                 width: grid_size,
                 height: grid_size,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Upload the block-simulation heat-map (R8Unorm) to GPU. `data` must be
+    /// `HEAT_GRID_SIZE * HEAT_GRID_SIZE` bytes, row-major -- see
+    /// `DrawingSimulation::block_heat_texels` in sandart-sim, which produces exactly that.
+    /// Callers are expected to only call this while the overlay is switched on (see
+    /// `sandart-wasm`'s `render()`), since the whole point of gating the upload behind the
+    /// toggle -- not just the shader read -- is to cost nothing when it's off.
+    pub fn update_block_heat(&mut self, queue: &wgpu::Queue, data: &[u8]) {
+        let size = HEAT_GRID_SIZE as u32;
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.block_heat_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(size), // 1 byte per pixel for R8Unorm
+                rows_per_image: Some(size),
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
                 depth_or_array_layers: 1,
             },
         );
@@ -666,6 +763,8 @@ mod tests {
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                 ],
+                heatmap_enabled: 0,
+                _pad_heatmap: [0; 3],
             };
             resources.update_uniforms(&queue, &uniforms);
 
@@ -945,6 +1044,8 @@ mod tests {
                         MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
                         MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
                     ],
+                    heatmap_enabled: 0,
+                    _pad_heatmap: [0; 3],
                 };
                 resources.update_uniforms(&queue, &uniforms);
 
@@ -1031,5 +1132,5 @@ mod tests {
 }
 
 // Compile-time layout/size verification assertions for WebGPU uniform alignments
-const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 224);
+const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 240);
 const _: () = assert!(std::mem::size_of::<CameraUniforms>() == 80);

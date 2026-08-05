@@ -2,6 +2,11 @@
 @group(0) @binding(1) var heightmap_sampler: sampler;
 @group(0) @binding(4) var colormap_tex: texture_2d<f32>;
 @group(0) @binding(5) var shape_mask_tex: texture_2d<u32>;
+// Block-simulation heat-map debug overlay. Always a fixed 32x32 texels (see `HEAT_GRID_SIZE` in
+// sandart-render/src/lib.rs) regardless of `uniforms.grid_size` -- the LOD scheduler's block
+// grid doesn't scale with resolution. Read via `textureLoad` (integer block coords), same as
+// `shape_mask_tex`, so no sampler binding is needed for it.
+@group(0) @binding(6) var block_heat_tex: texture_2d<f32>;
 
 const PI: f32 = 3.14159265359;
 const Z_SCALE: f32 = 0.009; // Unified heightmap displacement scale
@@ -34,6 +39,21 @@ struct LightingUniforms {
     // 16 bytes in a uniform buffer block and silently desync every field that follows it.
     quantile_positions: array<vec4<f32>, 3>,
     marbles: array<MarbleUniform, 5>,
+    // Block-simulation heat-map debug overlay: 1u = draw it, 0u = off (default). MUST stay the
+    // second-to-last field, mirroring the Rust-side `LightingUniforms` in
+    // sandart-render/src/lib.rs exactly -- see that field's doc comment for why the trailing
+    // `_pad_heatmap*` scalars below exist (an explicit stand-in for what would otherwise be
+    // silent struct-end padding, which `derive(Pod)` on the Rust side refuses to allow).
+    //
+    // Three separate `u32` scalars, NOT `array<u32, 3>` or `vec3<u32>`: WGSL's uniform-address-
+    // space layout rules force BOTH of those to 16-byte alignment/stride (an array's per-element
+    // stride and a vec3's own alignment each round up to 16 in this address space), which would
+    // shove this padding off to a different offset than the Rust side's plain, tightly-packed
+    // `[u32; 3]` and desync every byte after it. Bare scalars stay 4-byte aligned, matching Rust.
+    heatmap_enabled: u32,
+    _pad_heatmap0: u32,
+    _pad_heatmap1: u32,
+    _pad_heatmap2: u32,
 };
 
 struct CameraUniforms {
@@ -776,6 +796,41 @@ fn fs_main(
                 final_color = mix(final_color, line_color, line_alpha);
             }
         }
+    }
+
+    // Block-simulation heat-map debug overlay. Same placement contract as the quantile lines
+    // just above: past the `in_casing` early-return and the marble-hit return, so it only ever
+    // tints actual sand/table, never the casing or a marble, and `heatmap_enabled == 0u` (the
+    // default) skips this whole block, costing nothing.
+    if (uniforms.heatmap_enabled != 0u) {
+        // The block grid is a fixed 32x32 regardless of `uniforms.grid_size` (see
+        // `block_heat_tex`'s binding comment), so the block a fragment falls in is just its UV
+        // scaled directly by 32, not by the cell-resolution `grid_size`.
+        let heat_block_coord = vec2<i32>(vec2<f32>(uv.x, uv.y) * 32.0);
+        let heat = textureLoad(block_heat_tex, clamp(heat_block_coord, vec2<i32>(0), vec2<i32>(31)), 0).r;
+
+        // Cold -> hot ramp: dark blue, through teal-green, to a bright orange-red at 1.0. Picked
+        // over a single-hue (e.g. all-red) ramp because this overlay sits on top of BOTH the
+        // pale tan/cream sand AND the dark casing background in the same frame: a ramp that
+        // stayed dark at its cold end would disappear into the casing, and one that stayed
+        // bright at its hot end would wash out over pale sand. Blue-to-red moves in both
+        // lightness and hue at once, so the cold end reads against light sand (dark blue on
+        // cream) and the hot end reads against the dark casing (bright red-orange on near-black)
+        // instead of either extreme depending on luck to have contrast.
+        let cold = vec3<f32>(0.06, 0.10, 0.45);
+        let mid = vec3<f32>(0.10, 0.65, 0.55);
+        let hot = vec3<f32>(1.0, 0.30, 0.05);
+        var heat_color: vec3<f32>;
+        if (heat < 0.5) {
+            heat_color = mix(cold, mid, heat * 2.0);
+        } else {
+            heat_color = mix(mid, hot, (heat - 0.5) * 2.0);
+        }
+        // A flat, fairly strong blend rather than an intensity-scaled one: this is a debug
+        // instrument meant to be read at a glance, including over a completely cold (heat = 0.0)
+        // block, which needs to visibly differ from "no overlay at all" or the coldest blocks
+        // would be indistinguishable from the overlay being off.
+        final_color = mix(final_color, heat_color, 0.55);
     }
 
     return vec4<f32>(final_color, 1.0);

@@ -1092,6 +1092,11 @@ impl eframe::App for SandArtApp {
                         },
                     },
                 ],
+                // The block-simulation heat-map overlay is a sandart-wasm/web debug feature
+                // only, same as the quantile lines above; the native desktop app has no control
+                // for it, so it stays off here.
+                heatmap_enabled: 0,
+                _pad_heatmap: [0; 3],
             };
 
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering

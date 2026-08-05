@@ -35,6 +35,22 @@ pub const MASK_OUTSIDE: u8 = 0;
 pub const MASK_INSIDE: u8 = 1;
 pub const MASK_BOUNDARY: u8 = 2;
 
+/// Height above which a cell counts as "holding material" for the "perfect simulation" debug
+/// toggle's non-trivial-block scan (`DrawingSimulation::perfect_simulation`, `DrawingSimulation
+/// ::update`). Not `0.0` exactly — draining can leave a cell at a sub-float residue that will
+/// never itself flow anywhere, and forcing its block to simulate forever over dust like that
+/// would turn the toggle's "every tick" promise into pointless busywork. Comfortably below
+/// `physics::MUST_SIMULATE_THRESHOLD` (1e-4): this only decides whether a block is worth waking
+/// up at all, not whether it's expected to move once it has.
+const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
+
+/// Number of coarse time-buckets the block-simulation heat-map overlay's trailing window is
+/// divided into (see `DrawingSimulation::block_heat_buckets`). `HEAT_NUM_BUCKETS *
+/// HEAT_BUCKET_TICKS` is the ~300-tick window the task asked for.
+const HEAT_NUM_BUCKETS: usize = 10;
+/// Ticks per heat-map bucket — see `HEAT_NUM_BUCKETS`.
+const HEAT_BUCKET_TICKS: u32 = 30;
+
 pub const PROP_WETNESS: usize = 0;
 pub const PROP_THRESHOLD: usize = 1;
 pub const PROP_FLOW_RATE: usize = 2;
@@ -364,6 +380,43 @@ pub struct DrawingSimulation {
     /// (Deciles). These are raw targets, not eased for display — frame-to-frame smoothing is a
     /// rendering concern and belongs to the consumer (sandart-wasm), not the simulation.
     quantile_targets: Vec<f32>,
+
+    /// "Perfect simulation" debug toggle. Off by default (today's shipped, budget-limited
+    /// scheduler behaviour). When on, `update` force-admits every non-trivial block (inside the
+    /// shape mask AND holding material — see `PERFECT_SIM_MATERIAL_EPSILON`) into
+    /// `settle_tick`'s unconditional MUST tier every tick, ignoring `budget_n` entirely. This
+    /// exists so the adaptive scheduler's own approximation can be A/B'd against the ground
+    /// truth: several visual artifacts (gaps, slabs, stalled material) trace back to blocks that
+    /// lost the budget competition, and this toggle shows what the simulation looks like without
+    /// that competition. It is deliberately expensive — that is the point, not a bug.
+    pub perfect_simulation: bool,
+
+    /// Per-block "how often was this block actually simulated" heat-map counter for the debug
+    /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
+    /// (see that constant's doc comment). Length is always `active_blocks.len() *
+    /// HEAT_NUM_BUCKETS` (kept in sync defensively in `update`, the same way `settle_tick`
+    /// resizes its own per-block buffers).
+    ///
+    /// WHAT THIS MEASURES, EXACTLY: rather than a full 300-deep per-block ring buffer of
+    /// simulated/not-simulated bits (1024 blocks * 300 bits = ~38KB, workable but wasteful for
+    /// what is ultimately displayed as one blurry tint per block), the 300-tick window is
+    /// divided into `HEAT_NUM_BUCKETS` chunks of `HEAT_BUCKET_TICKS` ticks each. Every tick, the
+    /// current chunk's counter is incremented for each block `settle_tick` actually simulated;
+    /// every `HEAT_BUCKET_TICKS` ticks, the chunk that is about to start representing the newest
+    /// data is the same slot that held the OLDEST chunk (10 slots for a 10-chunk ring), so it is
+    /// cleared right before reuse — that clear IS the "periodic decay". Summing all buckets and
+    /// dividing by 300 (`block_heat_texels`/`block_heat_normalized`) gives the fraction of the
+    /// trailing window the block was simulated in.
+    ///
+    /// HOW THIS DIFFERS FROM AN EXACT 300-TICK TRAILING COUNT: the count is exact at whole-chunk
+    /// granularity but not at the tick level — a block simulated on tick 299-ago is
+    /// indistinguishable from one simulated on tick 271-ago, since both just increment the same
+    /// bucket. The aggregate also isn't pinned to exactly 300 ticks of history at every instant:
+    /// it's 9 complete 30-tick chunks (270 ticks, exact) plus however many ticks have elapsed in
+    /// the currently-filling 10th chunk (0..30 more), so the true window length breathes between
+    /// 270 and 300 ticks rather than sitting fixed at 300. For a coarse heat tint this is well
+    /// within what's visually distinguishable.
+    pub block_heat_buckets: Vec<u8>,
 }
 
 fn generate_smooth_noise(seed_val: u32, grid_size: usize) -> Heightmap {
@@ -525,6 +578,8 @@ impl DrawingSimulation {
             quantile_mode: QuantileMode::default(),
             row_mass: vec![0.0f32; grid_size],
             quantile_targets: Vec::new(),
+            perfect_simulation: false,
+            block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
         sim
@@ -640,6 +695,7 @@ impl DrawingSimulation {
         self.budget_n = 256;
         self.ema_frame_ms = 33.3;
         self.tick_count = 0;
+        self.block_heat_buckets.fill(0);
         self.refresh_quantiles_full();
     }
 
@@ -775,6 +831,23 @@ impl DrawingSimulation {
     /// ticks — easing them for smooth frame-to-frame motion is left to the renderer/consumer.
     pub fn quantile_positions(&self) -> &[f32] {
         &self.quantile_targets
+    }
+
+    /// Row-major block-heat texel bytes for the heat-map debug overlay, one byte per block
+    /// (always a 32x32 grid — see `new_with_size`'s doc comment), ready for direct upload as an
+    /// R8Unorm GPU texture: `byte = round((times_simulated_in_window / 300) * 255)`, clamped.
+    /// See `block_heat_buckets` for exactly what "times simulated in window" means and the
+    /// approximation it makes versus a true 300-tick trailing count.
+    pub fn block_heat_texels(&self) -> Vec<u8> {
+        let num_blocks = self.block_heat_buckets.len() / HEAT_NUM_BUCKETS;
+        (0..num_blocks)
+            .map(|b| {
+                let sum: u32 = (0..HEAT_NUM_BUCKETS)
+                    .map(|k| self.block_heat_buckets[b * HEAT_NUM_BUCKETS + k] as u32)
+                    .sum();
+                ((sum.min(300) as f32 / 300.0) * 255.0).round() as u8
+            })
+            .collect()
     }
 
     /// Full (all `GRID_SIZE` rows) row-mass recompute plus a fresh quantile target computation.
@@ -1073,8 +1146,61 @@ impl DrawingSimulation {
 
 
 
+        // "Perfect simulation" debug toggle: bypass the LOD scheduler's adaptive budget by
+        // pre-loading every non-trivial block's recorded displacement above
+        // `physics::MUST_SIMULATE_THRESHOLD` — exactly the bar `settle_tick`'s own
+        // classification loop uses to admit a block into its unconditional MUST tier (see that
+        // loop's doc comment in physics.rs). Routing through the SAME admission path every other
+        // MUST block goes through — rather than adding a second bypass mechanism to
+        // `settle_tick` itself — means `settle_tick`'s signature and its ~20 test call sites in
+        // physics.rs stay untouched, and the ordinary scheduler path is provably unaffected:
+        // this whole block only ever runs when `perfect_simulation` is set, and when it isn't,
+        // `last_displacements` is left exactly as `settle_tick` last wrote it.
+        //
+        // "Non-trivial" is inside the shape mask AND holding material that could move (see
+        // `PERFECT_SIM_MATERIAL_EPSILON`) — an empty block, or one entirely outside the mask, is
+        // left alone; it already reads displacement 0.0 here, nowhere near the MUST bar.
+        let mut perfect_sim_found_material = false;
+        if self.perfect_simulation {
+            // `w`/`h`/`block_size`/`cols`/`rows` are the same grid-geometry locals `update`
+            // already computed above for the marble-displacement block activation, reused here
+            // rather than recomputed.
+            for by in 0..rows {
+                for bx in 0..cols {
+                    let start_x = bx * block_size;
+                    let end_x = ((bx + 1) * block_size).min(w);
+                    let start_y = by * block_size;
+                    let end_y = ((by + 1) * block_size).min(h);
+                    let mut has_material = false;
+                    'scan: for y in start_y..end_y {
+                        let row_offset = y * w;
+                        for x in start_x..end_x {
+                            let idx = row_offset + x;
+                            if self.shape_mask[idx] != MASK_OUTSIDE
+                                && self.heightmap.data[idx] > PERFECT_SIM_MATERIAL_EPSILON
+                            {
+                                has_material = true;
+                                break 'scan;
+                            }
+                        }
+                    }
+                    if has_material {
+                        self.last_displacements[by * cols + bx] = physics::MUST_SIMULATE_THRESHOLD;
+                        perfect_sim_found_material = true;
+                    }
+                }
+            }
+        }
+
         // Run the gravity-driven settling cellular automata tick
-        let has_active = self.last_displacements.iter().any(|&x| x > 3e-4)
+        //
+        // `perfect_sim_found_material` is OR'd in explicitly rather than relying on the injected
+        // displacement value alone to trip the `> 3e-4` check just below: `settle_tick`'s own
+        // MUST bar (`physics::MUST_SIMULATE_THRESHOLD` = 1e-4) sits below this gate's 3e-4 by
+        // design (see that constant's doc comment), so a freshly-injected 1e-4 would silently
+        // fail to mark the tick active without this.
+        let has_active = perfect_sim_found_material
+            || self.last_displacements.iter().any(|&x| x > 3e-4)
             || self.marbles.iter().any(|m| m.was_active)
             || self.gravity_dir.length_squared() > 1e-6;
         if has_active {
@@ -1124,6 +1250,34 @@ impl DrawingSimulation {
             self.active_bounds.active = false;
         }
         self.tick_count = self.tick_count.wrapping_add(1);
+
+        // Block-simulation heat-map bookkeeping (debug overlay) — see `block_heat_buckets`'s
+        // doc comment for exactly what this counts and the bucket-decay approximation it makes.
+        // Runs every tick regardless of `has_active` so the trailing window keeps aging stale
+        // activity out even while the sim is fully at rest; only the increment step below is
+        // gated on `has_active`, since `active_blocks` was NOT refreshed by `settle_tick` this
+        // tick if it didn't run, and crediting its stale contents into the new bucket would
+        // double-count activity that actually happened one or more ticks ago.
+        if self.block_heat_buckets.len() != self.active_blocks.len() * HEAT_NUM_BUCKETS {
+            self.block_heat_buckets
+                .resize(self.active_blocks.len() * HEAT_NUM_BUCKETS, 0);
+        }
+        let heat_bucket = ((self.tick_count / HEAT_BUCKET_TICKS) % HEAT_NUM_BUCKETS as u32) as usize;
+        if self.tick_count % HEAT_BUCKET_TICKS == 0 {
+            // Entering a new bucket: this slot last held the chunk that is now 300 ticks old,
+            // so clear it before this tick's activity starts filling it back in.
+            for b in 0..self.active_blocks.len() {
+                self.block_heat_buckets[b * HEAT_NUM_BUCKETS + heat_bucket] = 0;
+            }
+        }
+        if has_active {
+            for (b, &activity) in self.active_blocks.iter().enumerate() {
+                if activity != BlockActivity::Inactive {
+                    let slot = &mut self.block_heat_buckets[b * HEAT_NUM_BUCKETS + heat_bucket];
+                    *slot = slot.saturating_add(1);
+                }
+            }
+        }
 
         // Quantile mass-distribution lines (Sand-fall overlay): the steady-state path recomputes
         // at most every 5 ticks, and only while the feature is switched on. `has_active` being

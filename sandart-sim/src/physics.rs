@@ -2411,7 +2411,12 @@ pub fn eval_sandbox_shape(
 /// `settle_tick`, which is where this used to live) so `activate_neighbor_upstream` below —
 /// needed by both `settle_tick`'s flux-edge loops and `try_move`'s granular-CA path — can force
 /// a block straight into that tier by name instead of duplicating the magic number.
-const MUST_SIMULATE_THRESHOLD: f32 = 1e-4;
+///
+/// `pub(crate)` (rather than private) so `DrawingSimulation::update`'s "perfect simulation"
+/// debug toggle (`sandart-sim/src/lib.rs`) can push a block into this exact tier by writing this
+/// exact threshold into `last_displacements`, instead of `settle_tick` growing a second bypass
+/// parameter that every one of its ~20 test call sites would also have to learn.
+pub(crate) const MUST_SIMULATE_THRESHOLD: f32 = 1e-4;
 
 /// Mark a neighbor block as modified (needing redraw/copy-back this frame) and bump its
 /// next-frame displacement estimate, without touching the buffer belonging to the block
