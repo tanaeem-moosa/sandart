@@ -791,7 +791,12 @@
                  blocks the budget is skipping, with or without the toggle above switched on.
                  "Fresh pressure field" swaps how the lateral-pressure overburden term is computed
                  each tick (standalone whole-grid pass vs. today's in-loop default) -- experimental,
-                 here to A/B live, not a settled improvement. -->
+                 here to A/B live, not a settled improvement. "Pressure field heat-map" tints each
+                 individual grid CELL (not each 32x32 block, like the heat-map above) by its
+                 column_depth value -- the hydrostatic overburden the lateral-pressure term reads --
+                 on a fixed log scale (violet = low/void, magenta = mid, pale yellow = high) so the
+                 same value always reads as the same colour whether "Fresh pressure field" above is
+                 on or off, making the two directly comparable. -->
             <div class="group">
                 <div class="group-title">Debug</div>
                 <label class="checkbox-container">
@@ -807,6 +812,11 @@
                 <label class="checkbox-container">
                     Fresh pressure field (experimental)
                     <input type="checkbox" id="check-fresh-pressure">
+                    <span class="checkmark"></span>
+                </label>
+                <label class="checkbox-container">
+                    Pressure field heat-map
+                    <input type="checkbox" id="check-pressure-heatmap">
                     <span class="checkmark"></span>
                 </label>
             </div>

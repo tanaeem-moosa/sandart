@@ -792,6 +792,7 @@ function syncSettings() {
     state.set_perfect_simulation(document.getElementById('check-perfect-sim').checked);
     state.set_heatmap_overlay(document.getElementById('check-heatmap').checked);
     state.set_fresh_pressure_field(document.getElementById('check-fresh-pressure').checked);
+    state.set_pressure_heatmap_overlay(document.getElementById('check-pressure-heatmap').checked);
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
@@ -1031,6 +1032,7 @@ function setupPanelInput() {
     document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
     document.getElementById('check-heatmap').addEventListener('change', syncSettings);
     document.getElementById('check-fresh-pressure').addEventListener('change', syncSettings);
+    document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
 
     // Operations buttons
     document.getElementById('btn-reset').addEventListener('click', () => {

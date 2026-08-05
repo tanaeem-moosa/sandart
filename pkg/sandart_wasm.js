@@ -387,6 +387,18 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_perfect_simulation(this.__wbg_ptr, enabled);
     }
     /**
+     * Per-cell pressure-field debug overlay: plumbed exactly like `set_heatmap_overlay` just
+     * above -- a plain field write, no reset/reinitialisation path. Purely a render-side toggle
+     * (see `pressure_heatmap_enabled`'s field doc comment); the underlying `sim.column_depth`
+     * runs unconditionally in `sim`, this only gates whether `render()` uploads/draws it. Shows
+     * whichever pass currently populates `column_depth`, so it tracks the "Fresh pressure field"
+     * toggle (`set_fresh_pressure_field`) automatically and can be used to compare the two.
+     * @param {boolean} enabled
+     */
+    set_pressure_heatmap_overlay(enabled) {
+        wasm.wasmsimulationstate_set_pressure_heatmap_overlay(this.__wbg_ptr, enabled);
+    }
+    /**
      * UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
      * selection even while in Sandbox (so it's remembered if the user switches back to
      * Sand-fall) but only actually enables the sim-side computation while in Sand-fall.
