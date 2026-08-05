@@ -624,13 +624,18 @@ fn in_transit_at(
 /// over the whole grid interior, reading a caller-supplied `source_heights` array instead of
 /// chaining off values computed earlier in the same per-cell loop.
 ///
-/// CURRENTLY UNUSED / kept for reference, NOT a dead-code accident. Task #54 tried promoting this
-/// to a free function so `settle_tick` could call it once at the TOP OF EACH PHASE (once reading
-/// `heightmap.data` at the top of phase 0, where it is bit-identical to `temp_heights`; once again
-/// reading `temp_heights` at the top of phase 1, after phase 0's own APPLY step has mutated it) --
-/// on the hypothesis that the once-per-tick placement (run once before the phase loop, always
-/// reading the frozen pre-tick `heightmap.data` snapshot) fed phase 1's lateral edges a
-/// pre-phase-0 overburden field instead of the state phase 1 actually reads its heads from.
+/// NOW WIRED UP behind the `fresh_pressure_field` debug toggle (`settle_tick`'s own parameter of
+/// that name, `DrawingSimulation::fresh_pressure_field`) at the ONCE-PER-TICK placement described
+/// below — run once, before the `for phase in 0..2` loop, reading the frozen pre-tick
+/// `heightmap.data` snapshot. Off by default; the fallback (this function unused, `column_depth`
+/// computed inline instead) is what every existing test still exercises. Task #54 originally
+/// tried promoting this to a free function so `settle_tick` could call it once at the TOP OF EACH
+/// PHASE instead (once reading `heightmap.data` at the top of phase 0, where it is bit-identical
+/// to `temp_heights`; once again reading `temp_heights` at the top of phase 1, after phase 0's
+/// own APPLY step has mutated it) — on the hypothesis that the once-per-tick placement (run once
+/// before the phase loop, always reading the frozen pre-tick `heightmap.data` snapshot) fed phase
+/// 1's lateral edges a pre-phase-0 overburden field instead of the state phase 1 actually reads
+/// its heads from.
 ///
 /// MEASURED, and it did NOT fix the target regression: `test_liquid_flowing_liquid_does_not_stand_in_walls`
 /// went from voids@160=66 (once-per-tick, before-phase-0 placement) to 85 (once-per-phase) -- WORSE,
@@ -644,23 +649,25 @@ fn in_transit_at(
 /// `column_depth` values diverge substantially (e.g. row 25: 92.6 old vs. 35.6 new) -- but this
 /// tracks a genuine difference in simulated height trajectory between the two builds by that point
 /// (their own `h` values at those same cells differ just as much), not degeneracy in this function.
-/// So the once-per-phase idea is sound in isolation but the tree containing it performs WORSE on the
-/// blocking test than what shipped before Task #54 touched this pass at all; it is kept here,
-/// unused, as a documented, measured dead end rather than deleted, so the next attempt does not
-/// re-derive it from scratch. The active code path (see the `if gravity_active` block ahead of the
-/// `for phase in 0..2` loop in `settle_tick`, and the inline computation inside phase 1's CA branch)
-/// is the FALLBACK this task's brief asked for: steps 2-4 (vertical overburden bonus, CFL cap,
-/// Janssen transform) WITHOUT step 1 (this standalone pass) -- i.e. `column_depth` is computed
-/// in-loop, order-dependent, exactly as it was before this task started. That configuration is the
-/// only one of the three measured (this once-per-phase version, the once-per-tick version, and this
-/// fallback) that passes the full test suite; see the task report for the full numbers.
+/// So the once-per-phase idea is sound in isolation but performs WORSE on the blocking test than
+/// the once-per-tick placement, which itself performs WORSE (voids@160=66, still over the <= 20
+/// bound) than the in-loop fallback that shipped after Task #54 (which passes the full suite).
+/// Neither of this function's two possible call placements fixes the target regression, which is
+/// why the DEFAULT stays the in-loop fallback (see the `if gravity_active && !fresh_pressure_field`
+/// block ahead of the `for phase in 0..2` loop in `settle_tick`, and the inline computation inside
+/// phase 1's CA branch) -- steps 2-4 (vertical overburden bonus, CFL cap, Janssen transform)
+/// WITHOUT step 1 (this standalone pass), `column_depth` computed in-loop, order-dependent. The
+/// once-per-tick placement is exposed anyway, opt-in only, as `fresh_pressure_field` -- not because
+/// it is known to be an improvement (the walls-test regression above says it visibly is not, by
+/// this one metric) but so its actual on-screen behaviour can be judged directly rather than only
+/// through this one scalar; see the task report for the full numbers.
 ///
 /// `source_heights` is the current heights to accumulate depth from (`temp_heights` at a
 /// once-per-phase call site, or the frozen `heightmap.data` snapshot at a once-per-tick site).
 /// `heightmap_data` is passed through unchanged to `in_transit_at`'s own frozen-clamp read (see
 /// its doc comment) and should always be the tick's frozen pre-tick snapshot, never
 /// `source_heights` itself, matching the original in-loop computation's own two-array split.
-#[allow(clippy::too_many_arguments, dead_code)]
+#[allow(clippy::too_many_arguments)]
 fn recompute_column_depth(
     w: usize,
     h: usize,
@@ -2885,6 +2892,18 @@ pub fn settle_tick(
     shape_mask: &[u8],
     tick_count: u32,
     gravity_dir: glam::Vec2,
+    // "Fresh pressure field" debug toggle (`DrawingSimulation::fresh_pressure_field`; see that
+    // field's doc comment). `false` (default): `column_depth` is computed exactly as before --
+    // inline, order-dependent, inside phase 1's own CA branch (see the "FALLBACK MEASUREMENT"
+    // comments at that site and just above the `for phase in 0..2` loop) -- bit-for-bit
+    // unchanged from the tree before this toggle existed. `true`: `column_depth` is instead
+    // computed once per tick, unconditionally, over the whole grid, by `recompute_column_depth`
+    // reading the frozen pre-tick `heightmap.data` snapshot -- see that function's own doc
+    // comment for what this is and the numbers it was measured against
+    // (`test_liquid_flowing_liquid_does_not_stand_in_walls`'s voids@160 metric: 66, at this
+    // once-per-tick/before-phase-0 placement, vs. 85 for a once-per-phase placement that was
+    // also tried and rejected).
+    fresh_pressure_field: bool,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -3078,14 +3097,38 @@ pub fn settle_tick(
 
     let gravity_active = gravity_dir.length_squared() > 1e-6;
 
-    // FALLBACK CONFIGURATION (Task #54): `column_depth` (depth-integrated lateral pressure; see
-    // `LATERAL_PRESSURE_SCALE`'s doc comment for what this quantity means) is NOT computed here or
-    // by any standalone pass. It is computed inline, order-dependent, inside phase 1's own CA
-    // branch below (see the "FALLBACK MEASUREMENT" comment at that site and at the top of the
-    // `for phase in 0..2` loop) — exactly as it was before this task touched this pass. A
-    // standalone-pass version (`recompute_column_depth`, called once per phase) was written and
-    // measured; it did not fix the target regression and is kept unused for reference — see that
-    // function's own doc comment for the numbers and the root-cause instrumentation.
+    // FALLBACK CONFIGURATION (Task #54): by default (`fresh_pressure_field == false`),
+    // `column_depth` (depth-integrated lateral pressure; see `LATERAL_PRESSURE_SCALE`'s doc
+    // comment for what this quantity means) is NOT computed here or by any standalone pass. It is
+    // computed inline, order-dependent, inside phase 1's own CA branch below (see the "FALLBACK
+    // MEASUREMENT" comment at that site and at the top of the `for phase in 0..2` loop) —
+    // exactly as it was before this task touched this pass. A standalone-pass version
+    // (`recompute_column_depth`, called once per phase) was written and measured; it did not fix
+    // the target regression and is kept unused for reference — see that function's own doc
+    // comment for the numbers and the root-cause instrumentation.
+    //
+    // FRESH PRESSURE FIELD (`fresh_pressure_field == true`; see this function's own doc comment
+    // on that parameter): run `recompute_column_depth` here instead, once per tick,
+    // unconditionally, over the WHOLE grid, reading this tick's frozen `heightmap.data` snapshot
+    // for both `source_heights` and `heightmap_data` (they are the same array at this
+    // once-per-tick/before-phase-0 call site — see `recompute_column_depth`'s doc comment on why
+    // those two parameters can differ at other call sites but do not here). The inline write
+    // inside phase 1's CA branch is skipped whenever this is on (see the matching
+    // "FRESH PRESSURE FIELD" guard at that site), so the two configurations never both write
+    // `column_depth` the same tick.
+    if fresh_pressure_field {
+        recompute_column_depth(
+            w,
+            h,
+            shape_mask,
+            &heightmap.data,
+            &heightmap.data,
+            &heightmap.external_mass_this_tick,
+            cell_props,
+            edge_vel_v,
+            &mut column_depth[..],
+        );
+    }
 
     let mut total_flow = 0.0f32;
     let mut next_displacements = vec![0.0f32; expected_len];
@@ -3654,7 +3697,13 @@ pub fn settle_tick(
                     // measure steps 2-4 WITHOUT step 1, per the task brief. Restore the
                     // standalone pass (see git history / the per-phase version) once this
                     // measurement is taken; do not leave the tree in this state.
-                    if gravity_active {
+                    //
+                    // FRESH PRESSURE FIELD: `&& !fresh_pressure_field` added so this inline write
+                    // never runs when the once-per-tick standalone pass above (in this function's
+                    // preamble, before the `for phase in 0..2` loop) already populated
+                    // `column_depth` for this tick — the two must never both write the same cell
+                    // the same tick, or whichever ran second would silently win.
+                    if gravity_active && !fresh_pressure_field {
                         let above_idx = center_idx - w; // safe: the CA guard above requires y > 0
                         let depth_above = if is_inside(x, y - 1) {
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
@@ -4705,6 +4754,11 @@ mod tests {
         mask: Vec<u8>,
         block_size: usize,
         tick_count: u32,
+        /// Mirrors `DrawingSimulation::fresh_pressure_field` / `settle_tick`'s parameter of the
+        /// same name. Defaults to `false` in `new()` so every existing `TestSim`-based test is
+        /// unaffected; set directly (`sim.fresh_pressure_field = true`) to A/B the standalone
+        /// `column_depth` pass against a specific scenario without touching `tick()`'s signature.
+        fresh_pressure_field: bool,
     }
 
     impl TestSim {
@@ -4728,6 +4782,7 @@ mod tests {
                 mask,
                 block_size,
                 tick_count: 0,
+                fresh_pressure_field: false,
             }
         }
 
@@ -4752,6 +4807,7 @@ mod tests {
                 &self.mask,
                 self.tick_count,
                 gravity_dir,
+                self.fresh_pressure_field,
             );
             self.tick_count += 1;
             flow
@@ -5075,6 +5131,7 @@ mod tests {
                 &mask,
                 i as u32,
                 glam::Vec2::ZERO,
+                false,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -5141,6 +5198,7 @@ mod tests {
             &mask,
             0,
             glam::Vec2::ZERO,
+            false,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -5214,6 +5272,7 @@ mod tests {
                 &mask,
                 0,
                 glam::Vec2::ZERO,
+                false,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -5314,6 +5373,7 @@ mod tests {
             &mask,
             0,
             glam::Vec2::ZERO,
+            false,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -5618,6 +5678,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
             );
         }
 
@@ -5711,6 +5772,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
             );
         }
 
@@ -5759,6 +5821,7 @@ mod tests {
                 &mask,
                 (500 + i) as u32,
                 gravity_dir,
+                false,
             );
         }
 
@@ -5827,6 +5890,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
             );
         }
 
@@ -5926,6 +5990,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
             );
         }
 
@@ -8766,6 +8831,7 @@ mod tests {
                 &mask,
                 i,
                 gravity_dir,
+                false,
             );
         }
 
@@ -8877,7 +8943,7 @@ mod tests {
                     &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                     &mut last_simulated_ticks, cols * rows, block_size, &[],
                     12345u32.wrapping_add(i),
-                    &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir,
+                    &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir, false,
                 );
             }
 
@@ -8973,7 +9039,7 @@ mod tests {
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[],
                 12345u32.wrapping_add(i),
-                &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir,
+                &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir, false,
             );
         }
 
@@ -9056,6 +9122,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
             );
         }
 
@@ -9137,6 +9204,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -9381,6 +9449,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
             );
         }
 
@@ -9556,6 +9625,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
             );
         }
 
@@ -9693,6 +9763,7 @@ mod tests {
                 &mask,
                 i,
                 gravity_dir,
+                false,
             ) as f64;
         }
 
@@ -9931,6 +10002,7 @@ mod tests {
                 &mask,
                 i,
                 gravity_dir,
+                false,
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -10464,7 +10536,7 @@ mod tests {
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[], t as u32,
                 &mut edge_vel_h,
-                &mut edge_vel_v, &mut column_depth, &mask, t as u32, gravity_dir,
+                &mut edge_vel_v, &mut column_depth, &mask, t as u32, gravity_dir, false,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();

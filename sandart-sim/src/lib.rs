@@ -391,6 +391,20 @@ pub struct DrawingSimulation {
     /// that competition. It is deliberately expensive — that is the point, not a bug.
     pub perfect_simulation: bool,
 
+    /// "Fresh pressure field" debug toggle. Off by default (today's shipped in-loop, order-
+    /// dependent `column_depth` computation, unchanged). When on, `column_depth`
+    /// (depth-integrated lateral pressure — see `physics::LATERAL_PRESSURE_SCALE`'s doc comment)
+    /// is instead computed by a standalone, unconditional pass (`physics::recompute_column_depth`)
+    /// run once per tick, before `settle_tick`'s phase loop, over the frozen pre-tick heightmap
+    /// snapshot, with the old in-loop write disabled for that tick. This is `settle_tick`'s
+    /// `fresh_pressure_field` parameter, threaded straight through — see its doc comment there for
+    /// the full mechanics and the one metric (`test_liquid_flowing_liquid_does_not_stand_in_walls`'s
+    /// voids@160) it has actually been measured against, which is not an improvement on that
+    /// metric. This toggle exists to let the standalone pass's actual on-screen behaviour be
+    /// judged directly (A/B'd against the current default) rather than only through that one
+    /// scalar — it is experimental, not a settled replacement for the default.
+    pub fresh_pressure_field: bool,
+
     /// Per-block "how often was this block actually simulated" heat-map counter for the debug
     /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
     /// (see that constant's doc comment). Length is always `active_blocks.len() *
@@ -579,6 +593,7 @@ impl DrawingSimulation {
             row_mass: vec![0.0f32; grid_size],
             quantile_targets: Vec::new(),
             perfect_simulation: false,
+            fresh_pressure_field: false,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -1244,6 +1259,7 @@ impl DrawingSimulation {
                     &self.shape_mask,
                     self.tick_count + iter as u32,
                     self.gravity_dir,
+                    self.fresh_pressure_field,
                 );
             }
         } else {

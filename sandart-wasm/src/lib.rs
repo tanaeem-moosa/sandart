@@ -339,6 +339,7 @@ impl WasmSimulationState {
         let hourglass_curve = self.sim.hourglass_curve;
         let multistage_chambers = self.sim.multistage_chambers;
         let perfect_simulation = self.sim.perfect_simulation;
+        let fresh_pressure_field = self.sim.fresh_pressure_field;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -353,6 +354,9 @@ impl WasmSimulationState {
         // category as `quantile_mode` below, and shouldn't silently flip off just because the
         // grid resized underneath it.
         sim.perfect_simulation = perfect_simulation;
+        // Same reasoning as `perfect_simulation` just above: a UI debug toggle, not simulation
+        // state, so it should survive a resolution rebuild rather than silently reset to default.
+        sim.fresh_pressure_field = fresh_pressure_field;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -679,6 +683,15 @@ impl WasmSimulationState {
     /// be left on.
     pub fn set_perfect_simulation(&mut self, enabled: bool) {
         self.sim.perfect_simulation = enabled;
+    }
+
+    /// "Fresh pressure field" debug toggle: forwarded straight to the sim, a plain field write
+    /// (same shape as `set_perfect_simulation` just above — no reset, no reinitialisation). See
+    /// `DrawingSimulation::fresh_pressure_field`'s doc comment in sandart-sim/src/lib.rs for what
+    /// it switches between. Experimental — it exists to A/B the standalone `column_depth` pass
+    /// against the shipped default live, not because it is known to be an improvement.
+    pub fn set_fresh_pressure_field(&mut self, enabled: bool) {
+        self.sim.fresh_pressure_field = enabled;
     }
 
     /// Block-simulation heat-map debug overlay: purely a render-side toggle (see
