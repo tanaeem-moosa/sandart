@@ -344,6 +344,109 @@ const GRANULAR_TAU_SCALE: f32 = 1.0;
 /// pre-follow-on behaviour exactly; 1.0 makes sand hydrostatic like water.
 const LATERAL_EARTH_PRESSURE_K: f32 = 0.45;
 
+/// `k_lateral` from the task brief: what fraction of a cell's vertical overburden reads through
+/// as additional driving head at a read site, blended by that cell's own liquidity so a fully
+/// liquid cell is exactly `1.0` (bit-identical to pre-existing behaviour at every call site) and
+/// a fully granular cell is `LATERAL_EARTH_PRESSURE_K`. Originally inline only at the lateral
+/// edge's read site (Stage C follow-on); promoted to a shared function so the vertical
+/// overburden bonus (Task #54 step 3, see the `VERTICAL_PRESSURE_SCALE` call site in phase 0)
+/// can reuse the exact same coefficient rather than inventing a second one -- both are "how much
+/// does this cell's own granular-ness discount an overburden-driven effect", just applied to two
+/// different edges.
+#[inline]
+fn k_of_liquidity(liq: f32) -> f32 {
+    liq + (1.0 - liq) * LATERAL_EARTH_PRESSURE_K
+}
+
+/// The Janssen depth scale: the characteristic depth (in `column_depth`'s own units --
+/// reference-resolution rows, see `REFERENCE_GRID_HEIGHT` -- of RAW, un-transformed overburden)
+/// over which a granular column's vertical stress rises toward its plateau. `1.0 - sin(phi)`-type
+/// wall friction (`LATERAL_EARTH_PRESSURE_K`) is what carries load into the container walls
+/// instead of straight down, and Janssen's classic result is that this makes vertical stress
+/// saturate exponentially with depth rather than grow linearly the way a liquid's hydrostatic
+/// pressure does -- `sigma_v(z) ~ 1 - exp(-z / z_c)`, with `z_c` set by the container's own
+/// transverse dimension and the wall friction coefficient. See `janssen_effective_depth`, which
+/// this feeds, for where the transform is applied.
+///
+/// NOT MEASURED — a first cut, exactly as the task brief allows ("a fixed z_c tied to container
+/// scale is an acceptable first cut if you say so"). Production hourglass neck widths run
+/// `neck_width * REFERENCE_GRID_HEIGHT` for `neck_width` in roughly 0.04..0.15 (see
+/// `make_test_mask`'s callers and `SandboxShape::Hourglass`'s docs), i.e. 20-77 reference rows;
+/// `24` sits at the narrow end of that range, deliberately -- a container-scale number, not a
+/// grid-scale one, chosen so the plateau engages within roughly one neck-width of depth rather
+/// than needing hundreds of rows (a linear-looking regime over hundreds of rows would be
+/// indistinguishable from the old unbounded hydrostatic behaviour in every scenario short one,
+/// defeating the point of this change). Retuning this against an actual Beverloo flow-rate
+/// measurement (drain rate should become independent of fill height once the column is a few
+/// `z_c` deep) is future work, flagged here rather than silently presented as validated.
+const JANSSEN_DEPTH_SCALE: f32 = 24.0;
+
+/// Transforms raw `column_depth` (hydrostatic, unbounded, linear in depth -- see
+/// `LATERAL_PRESSURE_SCALE`'s doc comment) into the depth-response SHAPE each material actually
+/// feels, blended by liquidity: a fully liquid cell gets the identity transform (`column_depth`
+/// unchanged -- hydrostatic pressure genuinely does grow without bound with depth, that is the
+/// physically correct model for a liquid and nothing here should touch it), and a fully granular
+/// cell gets the Janssen saturating curve, `JANSSEN_DEPTH_SCALE * (1 - exp(-column_depth /
+/// JANSSEN_DEPTH_SCALE))`, which approaches `column_depth` itself for shallow depth (matching
+/// today's tuning near the free surface, where `column_depth << JANSSEN_DEPTH_SCALE`) and
+/// plateaus at `JANSSEN_DEPTH_SCALE` for deep material instead of growing forever. This is the
+/// "depth RESPONSE SHAPE" the task brief asks for, applied at the read site rather than to the
+/// stored `column_depth` running sum itself (which must stay the raw, un-shaped overburden --
+/// see `column_depth`'s own doc comment on why scaling the stored value would compound down the
+/// column).
+#[inline]
+fn janssen_effective_depth(column_depth: f32, liquidity: f32) -> f32 {
+    let saturating = JANSSEN_DEPTH_SCALE * (1.0 - (-column_depth / JANSSEN_DEPTH_SCALE).exp());
+    liquidity * column_depth + (1.0 - liquidity) * saturating
+}
+
+/// STEP 3 (Task #54). How much of a cell's OWN (Janssen-shaped, see `janssen_effective_depth`)
+/// vertical overburden feeds back into the GRAVITY-ALIGNED edge's driving head, on top of the
+/// existing flat `gravity_dir.y * GRAVITY_HEAD_SCALE` term every cell already gets regardless of
+/// depth. Without this, `H = h + Phi(g)` has no depth term on the vertical edge at all -- a cell
+/// ten deep accelerates exactly like a surface cell, which is the literal bug this task's step 3
+/// exists to fix ("deep water falls faster").
+///
+/// Reuses `LATERAL_PRESSURE_SCALE`'s own value rather than an independently swept constant: it
+/// is the existing, already-tuned answer to "how many head units does one row of resting
+/// overburden add", and the CFL-style cap at the call site (see `VERTICAL_PRESSURE_CAP_MULT`) is
+/// what actually bounds the result, not this scale -- so there is little to gain from a separate
+/// sweep here versus just inheriting the value that already passed `test_liquid_stream_stays_coherent`
+/// and the enclosed-void tests at the lateral edge.
+const VERTICAL_PRESSURE_SCALE: f32 = LATERAL_PRESSURE_SCALE;
+
+/// STEP 3 (Task #54) CFL-STYLE BOUND. Caps the vertical overburden bonus (`VERTICAL_PRESSURE_SCALE
+/// * janssen_effective_depth(...) * k_of_liquidity(...)`) at this multiple of the existing flat
+/// `|gravity_dir.y| * GRAVITY_HEAD_SCALE` term, so a column of ANY depth can push its own vertical
+/// edge at most `1.0 + VERTICAL_PRESSURE_CAP_MULT` times as hard as the system was already tuned
+/// for, never unboundedly harder.
+///
+/// WHY A CAP IS NEEDED AT ALL, given `flux_edge_candidate` already clamps every edge's flux to
+/// `min(donor's available mass, acceptor's free capacity)` regardless of how large the driving
+/// head is (so no single edge can ever move more than about one cell's worth of mass in one
+/// tick, with or without this bonus): the risk this task brief calls out is not any one edge
+/// exceeding its own clamp, it is CASCADING -- phase 0 is a frozen-Jacobi pass, so every vertical
+/// edge in a column reads the SAME pre-tick snapshot independently and can *simultaneously*
+/// reach its own clamp in the same tick (that is by design, see the phase-loop comment on why
+/// phase 0 is order-independent). An unbounded depth bonus would push EVERY edge in a deep
+/// column to its saturated, fully-clamped transfer on every tick at once -- the exact "material
+/// moving multiple cells per tick while `block_size` is 2 cells" slab artifact this task
+/// explicitly warns against, just produced by a different mechanism (head magnitude, not an
+/// unclamped apply step) than the one a prior investigation already fixed. Capping the bonus
+/// at a small, fixed multiple of the SAME per-row unit `GRAVITY_HEAD_SCALE` was tuned around
+/// keeps the system in the regime it was already validated at (edges reach their clamp readily,
+/// same as today, just a little more readily for deep material) rather than a qualitatively new
+/// one where `column_depth` in the hundreds (measured: 464 at 60 rows deep, water, in
+/// `diag_lateral_pressure_term_magnitudes`) drives every single edge in a column to instantly
+/// saturate every tick forever.
+///
+/// `1.0`: the bonus can at most DOUBLE the existing driving head. Chosen, not measured -- a
+/// deliberately conservative first value that keeps the system within the same order of
+/// magnitude `test_liquid_stream_stays_coherent` and the CFL-respecting phase-0 sweep order were
+/// validated at, leaving headroom to raise it later against a specific "deep falls how much
+/// faster than shallow" target once one is picked.
+const VERTICAL_PRESSURE_CAP_MULT: f32 = 1.0;
+
 /// STAGE C. Amplitude of the granular lateral edge's dispersion term, as a fraction of that edge's
 /// own `tau` (see `GRANULAR_TAU_SCALE`) rather than a fixed magnitude — see the "Combined liquid +
 /// granular share" block in `settle_tick` for where this is used. `dispersion` is drawn uniformly
@@ -514,6 +617,84 @@ fn in_transit_at(
     let cap_below = cell_capacity_for(cell_props[below * 4 + PROP_WETNESS]);
     let downstream_route = edge_vel_v[c].max(0.0) + (cap_below - h_below).max(0.0);
     edge_vel_v[c - w].max(0.0).min(downstream_route)
+}
+
+/// Recomputes `column_depth` (depth-integrated lateral pressure; see `LATERAL_PRESSURE_SCALE`'s
+/// doc comment for what this quantity means) as a standalone, unconditional, top-to-bottom pass
+/// over the whole grid interior, reading a caller-supplied `source_heights` array instead of
+/// chaining off values computed earlier in the same per-cell loop.
+///
+/// CURRENTLY UNUSED / kept for reference, NOT a dead-code accident. Task #54 tried promoting this
+/// to a free function so `settle_tick` could call it once at the TOP OF EACH PHASE (once reading
+/// `heightmap.data` at the top of phase 0, where it is bit-identical to `temp_heights`; once again
+/// reading `temp_heights` at the top of phase 1, after phase 0's own APPLY step has mutated it) --
+/// on the hypothesis that the once-per-tick placement (run once before the phase loop, always
+/// reading the frozen pre-tick `heightmap.data` snapshot) fed phase 1's lateral edges a
+/// pre-phase-0 overburden field instead of the state phase 1 actually reads its heads from.
+///
+/// MEASURED, and it did NOT fix the target regression: `test_liquid_flowing_liquid_does_not_stand_in_walls`
+/// went from voids@160=66 (once-per-tick, before-phase-0 placement) to 85 (once-per-phase) -- WORSE,
+/// not better, and worse than the once-per-tick "after phase 0" placement (83) too. Root-caused by
+/// direct instrumentation, not left as a guess: dumping `column_depth` down a resting column of the
+/// walls-test's own scenario showed the once-per-phase pass produces BIT-IDENTICAL values to the
+/// old order-dependent in-loop computation at tick 0 (e.g. 24.0/64.0/104.0/144.0 at rows 10/15/20/25
+/// under both), which rules out a buffer-swap/plumbing bug (a real prior hypothesis: that
+/// `source_heights` and the frozen `heightmap_data` argument to `in_transit_at` had been swapped or
+/// duplicated, driving `column_depth` to a near-zero, ineffective field). By tick 29 the two builds'
+/// `column_depth` values diverge substantially (e.g. row 25: 92.6 old vs. 35.6 new) -- but this
+/// tracks a genuine difference in simulated height trajectory between the two builds by that point
+/// (their own `h` values at those same cells differ just as much), not degeneracy in this function.
+/// So the once-per-phase idea is sound in isolation but the tree containing it performs WORSE on the
+/// blocking test than what shipped before Task #54 touched this pass at all; it is kept here,
+/// unused, as a documented, measured dead end rather than deleted, so the next attempt does not
+/// re-derive it from scratch. The active code path (see the `if gravity_active` block ahead of the
+/// `for phase in 0..2` loop in `settle_tick`, and the inline computation inside phase 1's CA branch)
+/// is the FALLBACK this task's brief asked for: steps 2-4 (vertical overburden bonus, CFL cap,
+/// Janssen transform) WITHOUT step 1 (this standalone pass) -- i.e. `column_depth` is computed
+/// in-loop, order-dependent, exactly as it was before this task started. That configuration is the
+/// only one of the three measured (this once-per-phase version, the once-per-tick version, and this
+/// fallback) that passes the full test suite; see the task report for the full numbers.
+///
+/// `source_heights` is the current heights to accumulate depth from (`temp_heights` at a
+/// once-per-phase call site, or the frozen `heightmap.data` snapshot at a once-per-tick site).
+/// `heightmap_data` is passed through unchanged to `in_transit_at`'s own frozen-clamp read (see
+/// its doc comment) and should always be the tick's frozen pre-tick snapshot, never
+/// `source_heights` itself, matching the original in-loop computation's own two-array split.
+#[allow(clippy::too_many_arguments, dead_code)]
+fn recompute_column_depth(
+    w: usize,
+    h: usize,
+    shape_mask: &[u8],
+    source_heights: &[f32],
+    heightmap_data: &[f32],
+    external_mass_this_tick: &[f32],
+    cell_props: &[f32],
+    edge_vel_v: &[f32],
+    column_depth: &mut [f32],
+) {
+    let is_inside = |cx: usize, cy: usize| -> bool { shape_mask[cy * w + cx] != crate::MASK_OUTSIDE };
+    let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+    for y in 1..h.saturating_sub(1) {
+        let row_offset = y * w;
+        for x in 1..w.saturating_sub(1) {
+            let center_idx = row_offset + x;
+            if !is_inside(x, y) {
+                continue;
+            }
+            let above_idx = center_idx - w;
+            let depth_above = if is_inside(x, y - 1) {
+                let resting_above = (source_heights[above_idx]
+                    - in_transit_at(above_idx, w, h, source_heights, heightmap_data, cell_props, edge_vel_v, shape_mask)
+                    - external_mass_this_tick[above_idx].max(0.0))
+                    .max(0.0)
+                    * depth_scale;
+                resting_above + column_depth[above_idx]
+            } else {
+                0.0
+            };
+            column_depth[center_idx] = depth_above;
+        }
+    }
 }
 
 /// Computes the *candidate* signed flux (positive = `a` -> `b`) for one edge, from a single
@@ -2895,6 +3076,17 @@ pub fn settle_tick(
     // 1. Copy heightmap to working buffer at start of frame
     temp_heights.copy_from_slice(&heightmap.data);
 
+    let gravity_active = gravity_dir.length_squared() > 1e-6;
+
+    // FALLBACK CONFIGURATION (Task #54): `column_depth` (depth-integrated lateral pressure; see
+    // `LATERAL_PRESSURE_SCALE`'s doc comment for what this quantity means) is NOT computed here or
+    // by any standalone pass. It is computed inline, order-dependent, inside phase 1's own CA
+    // branch below (see the "FALLBACK MEASUREMENT" comment at that site and at the top of the
+    // `for phase in 0..2` loop) — exactly as it was before this task touched this pass. A
+    // standalone-pass version (`recompute_column_depth`, called once per phase) was written and
+    // measured; it did not fix the target regression and is kept unused for reference — see that
+    // function's own doc comment for the numbers and the root-cause instrumentation.
+
     let mut total_flow = 0.0f32;
     let mut next_displacements = vec![0.0f32; expected_len];
     let mut flow_occurred = false;
@@ -2982,7 +3174,6 @@ pub fn settle_tick(
     let mut pressure_nodes: Vec<usize> = Vec::new();
 
     // 2. Continuous per-cell solver (loop over active blocks)
-    let gravity_active = gravity_dir.length_squared() > 1e-6;
     let b_len = expected_len;
     // Directional operator split for liquid under gravity.
     //
@@ -3016,6 +3207,11 @@ pub fn settle_tick(
         if phase == 0 && !gravity_active {
             continue;
         }
+
+        // FALLBACK MEASUREMENT (Task #54): standalone per-phase `column_depth` recompute
+        // disabled here — `column_depth` is computed inline inside the phase-1 CA loop instead
+        // (see the "FALLBACK MEASUREMENT" comment at that site). Restore this call when
+        // reinstating step 1.
 
         // Clear exactly the candidate-flux state the *previous* phase touched (a no-op on
         // phase 0, the first phase run, since every `touched_*` list starts empty). Sparse by
@@ -3158,7 +3354,28 @@ pub fn settle_tick(
                         // donor-mass and acceptor-room clamps inside `flux_edge` — stay in raw
                         // mass units; normalising those too would break conservation (see
                         // `flux_edge`'s doc comment on why those clamps must stay in mass units).
-                        let head_a = h_a / cap_a + gravity_dir.y * GRAVITY_HEAD_SCALE;
+                        let base_head = gravity_dir.y * GRAVITY_HEAD_SCALE;
+                        // TASK #54 STEP 3: deep material falls faster. Without this, `H = h +
+                        // Phi(g)` on this gravity-aligned edge has no depth term at all -- a cell
+                        // resting under a hundred rows of overburden and a cell at the free
+                        // surface get the exact same downward pull. `column_depth[center_idx]`
+                        // (computed once for the whole grid in the standalone pass near the top
+                        // of this function, before this phase even started) is this cell's own
+                        // overburden; `janssen_effective_depth` gives it the right depth SHAPE per
+                        // material (linear/unbounded for liquid, saturating for granular -- see
+                        // that function's doc comment, Task #54 step 4) and `k_of_liquidity`
+                        // discounts it for granular material so sand's vertical bonus, like its
+                        // lateral one, stays lower magnitude than water's at every depth, not just
+                        // in the saturated regime. See `VERTICAL_PRESSURE_CAP_MULT`'s doc comment
+                        // for the CFL-style bound this is capped at and why it is needed.
+                        let vertical_bonus = if base_head.abs() > 1e-9 {
+                            let overburden = janssen_effective_depth(column_depth[center_idx], cell_liquidity);
+                            let raw_bonus = VERTICAL_PRESSURE_SCALE * k_of_liquidity(cell_liquidity) * overburden;
+                            raw_bonus.min(base_head.abs() * VERTICAL_PRESSURE_CAP_MULT) * base_head.signum()
+                        } else {
+                            0.0
+                        };
+                        let head_a = h_a / cap_a + base_head + vertical_bonus;
                         let head_b = h_b / cap_b;
                         // Sleeping edge (see `edge_sleeps`). This is the pass where sleeping pays
                         // most, because it is the one every cell in the domain enters: the
@@ -3432,79 +3649,14 @@ pub fn settle_tick(
                     // it earlier changes nothing about what it produces.
                     let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
 
-                    // Depth-integrated lateral pressure (see `LATERAL_PRESSURE_SCALE`): the amount
-                    // of resting liquid stacked strictly *above* this cell in its connected static
-                    // column, used below to make the lateral edge's driving head grow with depth
-                    // instead of saturating at one cell's capacity.
-                    //
-                    // Computed top-down with no second pass and no cross-tick lag needed: under
-                    // downward gravity this loop already visits every column top-to-bottom (see
-                    // the block/row order picked for `gravity_active && gravity_dir.y > 0.0`
-                    // earlier in this function), so by the time this cell is processed,
-                    // `column_depth[center_idx - w]` — the row directly above — already holds
-                    // *this* tick's freshly computed value, not a stale one. `column_depth` still
-                    // persists tick-to-tick like `edge_vel_h`/`edge_vel_v`, so a column standing
-                    // under a block the scheduler left asleep this tick keeps the last value it
-                    // actually computed instead of reporting zero overburden the instant it goes
-                    // quiet.
-                    //
-                    // A falling stream has `in_transit(above) ~= h(above)` at every interior cell
-                    // (phase 0 refills exactly what it drains, per the lateral edge's comment
-                    // below), so `resting_above ~= 0` and the sum stays ~0 the whole way down —
-                    // this term is inert for the case that must stay narrow. A genuinely resting
-                    // stack accumulates one cell of head per row, same units `h` itself uses, so a
-                    // shallow puddle (nothing above) reduces exactly to today's `head_a = h_a`.
-                    // STAGE C FOLLOW-ON: this used to be gated on `cell_liquidity > 0.0`, so a
-                    // pure granular cell had `column_depth == 0` and sand's lateral driving was
-                    // the LOCAL FILL DIFFERENCE alone -- a grain ten cells down felt exactly what
-                    // a grain at the surface felt. That is the user's original report stated
-                    // mechanically ("pressure from the side means most sand should drain from the
-                    // side at some depth"): there was no such pressure for sand, and never had
-                    // been. `column_depth` is now the raw overburden for EVERY material; how much
-                    // of it actually pushes sideways is the `k_lateral` coefficient applied at the
-                    // read site below, NOT here -- scaling the stored value would compound down
-                    // the column, since this is a running sum.
+                    // FALLBACK MEASUREMENT (Task #54): step 1 (the standalone column_depth pass)
+                    // temporarily reverted back to this inline, order-dependent computation to
+                    // measure steps 2-4 WITHOUT step 1, per the task brief. Restore the
+                    // standalone pass (see git history / the per-phase version) once this
+                    // measurement is taken; do not leave the tree in this state.
                     if gravity_active {
                         let above_idx = center_idx - w; // safe: the CA guard above requires y > 0
                         let depth_above = if is_inside(x, y - 1) {
-                            // `external_mass_this_tick` is signed (see its doc comment in
-                            // grid.rs): positive means externally-added mass, which is real and
-                            // should reduce `resting_above` exactly like `in_transit_at` does.
-                            // Negative is reserved for a future drain/sink and its meaning *here*
-                            // is deliberately undecided — subtracting a negative would currently
-                            // just ADD to `resting_above`, which is not unreasoned about by
-                            // accident but IS a placeholder: nothing has designed what a drain
-                            // should do to perceived overburden yet. `.max(0.0)` below neutralizes
-                            // that case rather than silently letting it through, until the drain's
-                            // `column_depth` semantics get designed on their own.
-                            //
-                            // `depth_scale` (see `REFERENCE_GRID_HEIGHT`) converts this row's
-                            // contribution from "one grid row's worth of fill" into "one
-                            // reference-resolution row's worth of physical depth" before it joins
-                            // the running sum, so refining the grid doesn't inflate the total by
-                            // adding more, smaller-physical-thickness terms.
-                            //
-                            // Deliberately divides by `w`, not `h`, even though this is a
-                            // *vertical* accumulation. Production (`GRID_SIZE` in `lib.rs`) is
-                            // always square -- `w == h` there, always -- so this is invisible to
-                            // the shipped app either way. It matters only for this crate's test
-                            // harness, which uses non-square convenience grids (e.g.
-                            // `test_liquid_stream_stays_coherent`'s 64-wide, 96-tall box, the
-                            // extra rows existing only to give a falling stream room to develop,
-                            // not because the container is "higher resolution" there). `w` is the
-                            // dimension that actually tracks resolution in that case: both of the
-                            // tests `LATERAL_PRESSURE_SCALE` was swept against share the same
-                            // native width (64) despite differing heights (64 and 96), so `w` is
-                            // what makes `depth_scale == 1.0` — an exact no-op — at the resolution
-                            // *both* were actually tuned at. Verified empirically: dividing by `h`
-                            // instead left `test_liquid_stream_stays_coherent` a no-op change in
-                            // theory but not in practice, because its scale=1 grid's `h` (96) is
-                            // not `REFERENCE_GRID_HEIGHT` (64) — that shifted its effective lateral
-                            // pressure down (64/96 of nominal) and pushed `max_width` from 8 to 9,
-                            // past the coherence cliff documented on `LATERAL_PRESSURE_SCALE`,
-                            // purely as an artifact of which axis this division used, not any
-                            // genuine resolution change. Dividing by `w` reproduces today's
-                            // numbers on both tests exactly (see docs/ARCHITECTURE.md).
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let resting_above =
                                 (temp_heights[above_idx]
@@ -3599,26 +3751,38 @@ pub fn settle_tick(
                         // `column_depth[nb_idx]` may be a tick stale if the neighbour's block ran
                         // after this one, or hasn't run yet this tick — harmless, since (like
                         // `GRAVITY_HEAD_SCALE`) it only ever feeds `driving`, never the mass limits.
-                        // `column_depth` itself stays gated on `cell_liquidity > 0.0` (unchanged
-                        // from before Stage C — see that computation above), so a pure granular
-                        // cell has `column_depth == 0` here and this reduces to local fill plus
-                        // dispersion, matching the old CA's `geom_slope`, which also never grew
-                        // with depth for sand.
-                        // How much of a cell's overburden pushes SIDEWAYS. A liquid is isotropic:
-                        // vertical stress transmits laterally in full, K = 1. A granular medium
-                        // does not -- grain contacts and wall friction carry part of the load, and
-                        // the ratio of lateral to vertical stress is the coefficient of lateral
-                        // earth pressure. See `LATERAL_EARTH_PRESSURE_K`. Blended by each cell's
-                        // OWN liquidity so mixed cells interpolate continuously and a fully liquid
-                        // cell is bit-identical to before this change (k == 1.0 exactly).
-                        let k_of = |liq: f32| liq + (1.0 - liq) * LATERAL_EARTH_PRESSURE_K;
-                        let k_a = k_of(cell_liquidity);
-                        let k_b = k_of(liquidity(cell_props[nb_idx * 4 + PROP_WETNESS]));
+                        // `column_depth` itself is now computed for EVERY material in the
+                        // standalone pass near the top of this function (see that pass's doc
+                        // comment) -- a pure granular cell gets its own genuine overburden here,
+                        // not the `== 0` a stale comment used to claim.
+                        //
+                        // TASK #54 STEP 4: the depth term below is `janssen_effective_depth(...)`,
+                        // not raw `column_depth`, for BOTH endpoints -- see that function's doc
+                        // comment. Raw `column_depth` is a linear, unbounded, hydrostatic ramp:
+                        // the right physical model for liquid, and known-wrong for granular
+                        // material, whose vertical stress saturates with depth (Janssen) because
+                        // wall friction carries load that would otherwise keep accumulating
+                        // straight down. `k_of_liquidity` (below) still does the SEPARATE job of
+                        // discounting how much of that (now depth-shaped) overburden reads through
+                        // laterally at all -- a liquid is isotropic (K = 1, full transmission,
+                        // `LATERAL_EARTH_PRESSURE_K` untouched); a granular medium's grain contacts
+                        // and wall friction carry part of the load sideways too, hence K < 1. The
+                        // two mechanisms are independent: the Janssen transform shapes HOW the raw
+                        // overburden itself behaves with depth, `k_of_liquidity` then discounts HOW
+                        // MUCH of that (already-shaped) result pushes sideways. Both blended by each
+                        // cell's own liquidity, so a fully liquid cell is bit-identical to before
+                        // this step (`janssen_effective_depth` is the identity transform at
+                        // `liquidity == 1.0`, `k_of_liquidity` is exactly `1.0`).
+                        let liq_b = liquidity(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        let k_a = k_of_liquidity(cell_liquidity);
+                        let k_b = k_of_liquidity(liq_b);
+                        let depth_a = janssen_effective_depth(column_depth[center_idx], cell_liquidity);
+                        let depth_b = janssen_effective_depth(column_depth[nb_idx], liq_b);
 
                         let head_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
-                            + k_a * LATERAL_PRESSURE_SCALE * column_depth[center_idx] + dispersion;
+                            + k_a * LATERAL_PRESSURE_SCALE * depth_a + dispersion;
                         let head_b_full =
-                            h_b_frozen + k_b * LATERAL_PRESSURE_SCALE * column_depth[nb_idx];
+                            h_b_frozen + k_b * LATERAL_PRESSURE_SCALE * depth_b;
 
                         // Stochastic locking (see `GRAVITY_LOCK_CHANCE`'s doc comment):
                         // reproduces the CA's flat 0.05 `lock_chance` under gravity ("Low locking
@@ -4337,6 +4501,7 @@ pub fn settle_tick(
             if by + 1 < rows { activate_neighbor(wake_b + cols, flow_val, &mut modified, &mut next_displacements); }
         }
     }
+
     } // end `for phase` — body left at the original indentation so the operator split reads as a
       // wrapper rather than as a 600-line reformat of the solver.
 
@@ -6160,6 +6325,89 @@ mod tests {
             "Draining liquid spent too long in walls: {} void cell-ticks over 400 ticks",
             total
         );
+    }
+
+    #[test]
+    #[ignore = "DIAGNOSTIC measurement, not a pass/fail spec — never assert on these numbers. \
+                Task #54 (\"make pressure drive every flow\") step 2: a 'dam break' scenario -- \
+                the LEFT half of a tall box is filled solid, the RIGHT half is completely empty, \
+                for the full height -- so there is a genuine, unambiguous 'empty space beside \
+                deep material' edge at every depth simultaneously, unlike a symmetric Hourglass \
+                probed at its own centreline (tried first; discarded because the centre of a \
+                symmetric fill has zero driving head BY CONSTRUCTION regardless of pressure, so \
+                it could never show a difference). Reports, at several depths and several tick \
+                counts, the fill-difference term, the k_lateral * LATERAL_PRESSURE_SCALE * \
+                column_depth term, tau, and the outcome that actually matters: how much has \
+                spread into the empty column (`h_b`) by that tick. \
+                Run with: cargo test -p sandart-sim --release --lib \
+                physics::tests::diag_lateral_pressure_term_magnitudes -- --ignored --nocapture"]
+    // Prime suspect going in (see the task brief): `yielded = sign(dH) * max(|dH| - tau, 0)`, so
+    // if `tau` is comparable in magnitude to the depth term, sand's lateral flow is gated off
+    // regardless of how deep the material is -- the depth term gets subtracted away before it
+    // can move anything. `tau` is 0 for liquid by construction (`granular_share == 0`), so this
+    // would explain a sand/water asymmetry in depth-driven spreading even though `column_depth`
+    // and `LATERAL_PRESSURE_SCALE` apply identically to both materials since the Stage C
+    // follow-on.
+    fn diag_lateral_pressure_term_magnitudes() {
+        let w = 64;
+        let h = 90;
+        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        // Same k_of blend the lateral edge itself uses (see the `k_of` closure in `settle_tick`,
+        // Stage C FOLLOW-ON): 1.0 for liquid, `LATERAL_EARTH_PRESSURE_K` for pure granular,
+        // interpolated by the cell's own liquidity.
+        let k_of = |liq: f32| liq + (1.0 - liq) * LATERAL_EARTH_PRESSURE_K;
+
+        let top = 2usize;
+        let bottom = h - 3;
+        let cx = 31usize; // last filled column; cx+1 = 32 is the first empty column
+        let depths = [1usize, 2, 5, 10, 15, 25, 40, 60];
+
+        for &material in &[MaterialMode::Water, MaterialMode::DrySand] {
+            for &ticks in &[1usize, 3, 10, 30] {
+                let props = get_test_props(material, w * h);
+                let threshold_prop = props[PROP_THRESHOLD]; // uniform across the grid in this harness
+                let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
+                // Left half solid from `top` to `bottom`, right half left at 0 -- an unambiguous
+                // dam break, with a genuinely deep column pressing on a genuinely empty one at
+                // every depth simultaneously.
+                for y in top..=bottom {
+                    for x in 2..=cx {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                for _ in 0..ticks {
+                    sim.tick(gravity_dir, usize::MAX);
+                }
+
+                println!("=== {:?}, ticks={} ===", material, ticks);
+                for &depth_rows in &depths {
+                    let y = top + depth_rows;
+                    if y > bottom {
+                        continue;
+                    }
+                    let idx = y * w + cx;
+                    let nb_idx = idx + 1;
+                    let h_a = sim.hm.data[idx];
+                    let h_b = sim.hm.data[nb_idx];
+                    let fill_diff = h_a - h_b;
+                    let wetness_a = sim.cell_props[idx * 4 + PROP_WETNESS];
+                    let liq_a = liquidity(wetness_a);
+                    let k_a = k_of(liq_a);
+                    let depth_term = k_a * LATERAL_PRESSURE_SCALE * sim.column_depth[idx];
+                    let granular_share = if gravity_dir.length_squared() > 1e-6 { 1.0 - liq_a } else { 1.0 };
+                    let tau = GRANULAR_TAU_SCALE * threshold_prop * granular_share;
+                    println!(
+                        "  depth={:>3} rows  h_a={:.4} h_b={:.4} fill_diff={:+.4}  \
+                         column_depth={:.4}  k_lateral*scale*column_depth={:+.4}  tau={:.4}  \
+                         depth_term/tau={}",
+                        depth_rows, h_a, h_b, fill_diff, sim.column_depth[idx], depth_term, tau,
+                        if tau > 1e-9 { format!("{:.1}", depth_term.abs() / tau) } else { "inf (tau=0)".to_string() }
+                    );
+                }
+            }
+        }
     }
 
     #[test]
