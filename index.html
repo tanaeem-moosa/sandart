@@ -782,13 +782,16 @@
             </div>
 
             <!-- ---- Shared: LOD scheduler debug instruments ----
-                 Both off by default. "Perfect simulation" bypasses the adaptive block budget
+                 Off by default. "Perfect simulation" bypasses the adaptive block budget
                  entirely (every block holding material simulates every tick, not just the ones
                  that win the budget competition) -- it exists to A/B the scheduler's own
                  approximation against ground truth, and it is deliberately slow. The heat-map
                  tints each 32x32 LOD block by how often it was actually simulated over roughly
                  the last 300 frames, cold = rarely, hot = every tick -- it shows exactly which
-                 blocks the budget is skipping, with or without the toggle above switched on. -->
+                 blocks the budget is skipping, with or without the toggle above switched on.
+                 "Fresh pressure field" swaps how the lateral-pressure overburden term is computed
+                 each tick (standalone whole-grid pass vs. today's in-loop default) -- experimental,
+                 here to A/B live, not a settled improvement. -->
             <div class="group">
                 <div class="group-title">Debug</div>
                 <label class="checkbox-container">
@@ -799,6 +802,11 @@
                 <label class="checkbox-container">
                     Block heat-map overlay
                     <input type="checkbox" id="check-heatmap">
+                    <span class="checkmark"></span>
+                </label>
+                <label class="checkbox-container">
+                    Fresh pressure field (experimental)
+                    <input type="checkbox" id="check-fresh-pressure">
                     <span class="checkmark"></span>
                 </label>
             </div>

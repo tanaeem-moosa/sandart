@@ -223,6 +223,17 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_color_mode(this.__wbg_ptr, mode);
     }
     /**
+     * "Fresh pressure field" debug toggle: forwarded straight to the sim, a plain field write
+     * (same shape as `set_perfect_simulation` just above — no reset, no reinitialisation). See
+     * `DrawingSimulation::fresh_pressure_field`'s doc comment in sandart-sim/src/lib.rs for what
+     * it switches between. Experimental — it exists to A/B the standalone `column_depth` pass
+     * against the shipped default live, not because it is known to be an improvement.
+     * @param {boolean} enabled
+     */
+    set_fresh_pressure_field(enabled) {
+        wasm.wasmsimulationstate_set_fresh_pressure_field(this.__wbg_ptr, enabled);
+    }
+    /**
      * @param {number} x
      * @param {number} y
      */
