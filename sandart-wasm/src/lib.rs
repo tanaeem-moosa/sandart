@@ -551,17 +551,46 @@ impl WasmSimulationState {
             8 => SandboxShape::MultiNeckHourglass,
             _ => SandboxShape::Circle,
         };
+
+        // Selecting the shape that is ALREADY selected is a no-op, and has to be, because this
+        // function is not only called when the user picks a shape. `syncSettings()` in demo.js
+        // pushes the ENTIRE settings panel down on every change to any control in it -- every
+        // slider `input`, every checkbox `change` -- and re-reads `shape-select` each time. So
+        // without this guard, dragging the speed slider, toggling shadows, or switching on either
+        // of the LOD debug overlays all ran the `sim.reset()` below and wiped whatever material
+        // layout was in the container back to a default single-material fill.
+        //
+        // That is how it surfaced: "setting heat map overlay overrides multi material selection.
+        // redoing material selection after selecting heat map works though" -- re-selecting the
+        // material simply re-applied what the reset had just discarded. The debug checkboxes did
+        // not introduce this; they only added two more triggers to a path every other control in
+        // the panel was already firing.
+        //
+        // Guarding here rather than in `syncSettings` deliberately: the invariant belongs to this
+        // function (a shape CHANGE resets, a shape non-change does not), and fixing it JS-side
+        // would leave the same trap armed for the next caller.
+        //
+        // Scoped to `sim.reset()` alone rather than an early return, because an early return
+        // would ALSO skip `generate_shape_mask()` and `full_upload_needed`, and the very first
+        // `syncSettings()` at startup is a same-shape call: the constructor initialises
+        // `sandbox_shape` to `Circle` and `shape-select`'s default option is Circle (value 0), so
+        // that first call sets nothing new and would have returned before generating the initial
+        // mask. Mask regeneration is idempotent and non-destructive; only the reset is not.
+        let shape_changed = new_shape != self.sandbox_shape;
+
         self.sandbox_shape = new_shape;
         self.sim.sandbox_shape = new_shape;
-        if matches!(
-            new_shape,
-            SandboxShape::Hourglass
-                | SandboxShape::MultiStageHourglass
-                | SandboxShape::GaltonBoard
-                | SandboxShape::StaircaseCascade
-                | SandboxShape::ProceduralFunnel
-                | SandboxShape::MultiNeckHourglass
-        ) {
+        if shape_changed
+            && matches!(
+                new_shape,
+                SandboxShape::Hourglass
+                    | SandboxShape::MultiStageHourglass
+                    | SandboxShape::GaltonBoard
+                    | SandboxShape::StaircaseCascade
+                    | SandboxShape::ProceduralFunnel
+                    | SandboxShape::MultiNeckHourglass
+            )
+        {
             self.sim.reset();
         } else {
             self.sim.generate_shape_mask();
