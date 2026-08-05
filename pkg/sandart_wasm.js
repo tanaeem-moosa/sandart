@@ -255,6 +255,15 @@ export class WasmSimulationState {
         }
     }
     /**
+     * Block-simulation heat-map debug overlay: purely a render-side toggle (see
+     * `heatmap_enabled`'s field doc comment) — the underlying per-block counter runs
+     * unconditionally in `sim`, this only gates whether `render()` uploads/draws it.
+     * @param {boolean} enabled
+     */
+    set_heatmap_overlay(enabled) {
+        wasm.wasmsimulationstate_set_heatmap_overlay(this.__wbg_ptr, enabled);
+    }
+    /**
      * @param {number} order
      */
     set_hilbert_order(order) {
@@ -353,6 +362,18 @@ export class WasmSimulationState {
         const ptr0 = passStringToWasm0(mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         wasm.wasmsimulationstate_set_pattern_mode(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * "Perfect simulation" debug toggle: forwarded straight to the sim, which force-admits
+     * every non-trivial (in-mask, holding material) block into its unconditional simulate tier
+     * every tick instead of letting the adaptive budget skip any of them. See
+     * `DrawingSimulation::perfect_simulation`'s doc comment in sandart-sim/src/lib.rs. Slow by
+     * design — it exists to A/B the scheduler's approximation against the ground truth, not to
+     * be left on.
+     * @param {boolean} enabled
+     */
+    set_perfect_simulation(enabled) {
+        wasm.wasmsimulationstate_set_perfect_simulation(this.__wbg_ptr, enabled);
     }
     /**
      * UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the
