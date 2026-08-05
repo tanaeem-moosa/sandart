@@ -1096,7 +1096,10 @@ impl eframe::App for SandArtApp {
                 // only, same as the quantile lines above; the native desktop app has no control
                 // for it, so it stays off here.
                 heatmap_enabled: 0,
-                _pad_heatmap: [0; 3],
+                // Same as `heatmap_enabled` just above: a sandart-wasm/web debug feature only,
+                // no native desktop control for it, so it stays off here.
+                pressure_heatmap_enabled: 0,
+                _pad_heatmap: [0; 2],
             };
 
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering

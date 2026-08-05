@@ -72,6 +72,11 @@ pub struct WasmSimulationState {
     // maintained regardless of whether this is on; this field only gates whether `render()`
     // bothers uploading/tinting with it).
     heatmap_enabled: bool,
+    // Per-cell pressure-field debug overlay (see `set_pressure_heatmap_overlay`). Same shape as
+    // `heatmap_enabled` just above: a pure render-side toggle, doesn't affect `sim` at all (the
+    // underlying `sim.column_depth` it displays is always maintained regardless of whether this
+    // is on; this field only gates whether `render()` bothers uploading/tinting with it).
+    pressure_heatmap_enabled: bool,
     // Last dt seen by `step()`, used to make the per-frame easing below frame-rate independent.
     last_dt: f32,
     // Displayed (eased) quantile line positions, plus whether they hold a meaningful previous
@@ -220,6 +225,7 @@ impl WasmSimulationState {
             color_mode: 0,
             quantile_mode: QuantileMode::Off,
             heatmap_enabled: false,
+            pressure_heatmap_enabled: false,
             last_dt: 1.0 / 60.0,
             quantile_eased: [0.0; MAX_QUANTILE_LINES],
             quantile_eased_valid: false,
@@ -701,6 +707,16 @@ impl WasmSimulationState {
         self.heatmap_enabled = enabled;
     }
 
+    /// Per-cell pressure-field debug overlay: plumbed exactly like `set_heatmap_overlay` just
+    /// above -- a plain field write, no reset/reinitialisation path. Purely a render-side toggle
+    /// (see `pressure_heatmap_enabled`'s field doc comment); the underlying `sim.column_depth`
+    /// runs unconditionally in `sim`, this only gates whether `render()` uploads/draws it. Shows
+    /// whichever pass currently populates `column_depth`, so it tracks the "Fresh pressure field"
+    /// toggle (`set_fresh_pressure_field`) automatically and can be used to compare the two.
+    pub fn set_pressure_heatmap_overlay(&mut self, enabled: bool) {
+        self.pressure_heatmap_enabled = enabled;
+    }
+
     pub fn load_pattern_gcode(&mut self, content: &str) -> bool {
         if let Ok(points) = parse_gcode(content) {
             self.playback.clear_waypoints();
@@ -1050,7 +1066,8 @@ impl WasmSimulationState {
             quantile_positions: quantile_positions_uniform,
             marbles: current_marbles,
             heatmap_enabled: if self.heatmap_enabled { 1 } else { 0 },
-            _pad_heatmap: [0; 3],
+            pressure_heatmap_enabled: if self.pressure_heatmap_enabled { 1 } else { 0 },
+            _pad_heatmap: [0; 2],
         };
         self.renderer.update_uniforms(&self.queue, &current_uniforms);
 
@@ -1062,6 +1079,15 @@ impl WasmSimulationState {
         if self.heatmap_enabled {
             let heat_texels = self.sim.block_heat_texels();
             self.renderer.update_block_heat(&self.queue, &heat_texels);
+        }
+
+        // Per-cell pressure-field debug overlay: same "costs nothing when disabled" contract as
+        // the block heat-map above -- `sim.column_depth` is always maintained, but building the
+        // per-cell byte array and uploading it only happens while this overlay is switched on;
+        // the shader-side `pressure_heatmap_enabled == 0u` early-out is the other half.
+        if self.pressure_heatmap_enabled {
+            let pressure_texels = self.sim.pressure_field_texels();
+            self.renderer.update_pressure_heat(&self.queue, &pressure_texels);
         }
 
         // Calculate view projection matrix

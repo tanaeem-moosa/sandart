@@ -51,6 +51,21 @@ const HEAT_NUM_BUCKETS: usize = 10;
 /// Ticks per heat-map bucket — see `HEAT_NUM_BUCKETS`.
 const HEAT_BUCKET_TICKS: u32 = 30;
 
+/// Fixed reference ceiling for the per-cell pressure-field heat-map overlay's log compression
+/// (`DrawingSimulation::pressure_field_texels`). Chosen with headroom above the highest
+/// `column_depth` measured in practice (464, for water 60 rows deep — see `column_depth`'s own
+/// field doc comment in this file), so legitimate values compress smoothly toward 1.0 instead of
+/// clipping in the common case.
+///
+/// This is a FIXED constant, not the current frame's own max (auto-normalisation): a fixed scale
+/// means a given `column_depth` value always maps to the same on-screen colour, so two frames —
+/// in particular the "Fresh pressure field" toggle's on/off states, which is exactly what this
+/// overlay exists to compare — stay comparable by eye. The tradeoff is the opposite of what
+/// auto-normalisation would give: a rarer value above this ceiling clips instead of the scale
+/// stretching to fit it, and a frame whose whole field sits well below the ceiling (e.g. a mostly
+/// empty grid) reads uniformly dim rather than being stretched to use the full range.
+const PRESSURE_HEATMAP_LOG_MAX: f32 = 512.0;
+
 pub const PROP_WETNESS: usize = 0;
 pub const PROP_THRESHOLD: usize = 1;
 pub const PROP_FLOW_RATE: usize = 2;
@@ -861,6 +876,41 @@ impl DrawingSimulation {
                     .map(|k| self.block_heat_buckets[b * HEAT_NUM_BUCKETS + k] as u32)
                     .sum();
                 ((sum.min(300) as f32 / 300.0) * 255.0).round() as u8
+            })
+            .collect()
+    }
+
+    /// Row-major per-CELL pressure-field heat-map texels, one byte per grid cell (`grid_size *
+    /// grid_size` — NOT the fixed 32x32 block grid `block_heat_texels` above uses), ready for
+    /// direct upload as an R8Unorm GPU texture. Tints `column_depth` directly (see that field's
+    /// doc comment for what it measures — the hydrostatic overburden driving lateral, and now
+    /// vertical, flow), so the overlay tracks whichever pass currently populates it: both the
+    /// default in-loop computation and the `fresh_pressure_field` standalone pass write the same
+    /// `column_depth` array, so flipping that toggle is automatically reflected here with no
+    /// extra plumbing.
+    ///
+    /// SCALING (the design decision that makes this overlay legible at all): `column_depth` is
+    /// unbounded and spans orders of magnitude in practice — 0 in voids, through roughly
+    /// 24/64/104/144 down a resting sand column, to 464 for water 60 rows deep. A naive linear
+    /// map against a fixed max would render as a nearly-black screen with a bright sliver at the
+    /// very bottom, revealing no structure at all.
+    ///
+    /// This instead uses `ln(1 + column_depth) / ln(1 + PRESSURE_HEATMAP_LOG_MAX)`, clamped to
+    /// [0, 1]. Log compression is the right shape here because `column_depth` is the interesting
+    /// quantity precisely where it's LOW (voids, shallow columns, the free surface) — the
+    /// derivative of `ln(1 + x)` is `1 / (1 + x)`, steepest near zero and flattening out at the
+    /// high end, so this gives maximum visual contrast to exactly the low-pressure structure a
+    /// reader is trying to resolve (e.g. the ~55-cell void this overlay was built to diagnose),
+    /// while still spreading the high end (deep water) across a visibly distinct hot range rather
+    /// than clipping it all to one color. See `PRESSURE_HEATMAP_LOG_MAX`'s own doc comment for
+    /// why the denominator is a fixed constant rather than each frame's own max.
+    pub fn pressure_field_texels(&self) -> Vec<u8> {
+        let log_max = (1.0 + PRESSURE_HEATMAP_LOG_MAX).ln();
+        self.column_depth
+            .iter()
+            .map(|&depth| {
+                let normalized = (1.0 + depth.max(0.0)).ln() / log_max;
+                (normalized.clamp(0.0, 1.0) * 255.0).round() as u8
             })
             .collect()
     }

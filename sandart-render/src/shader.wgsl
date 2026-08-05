@@ -7,6 +7,14 @@
 // grid doesn't scale with resolution. Read via `textureLoad` (integer block coords), same as
 // `shape_mask_tex`, so no sampler binding is needed for it.
 @group(0) @binding(6) var block_heat_tex: texture_2d<f32>;
+// Per-cell pressure-field debug overlay. Unlike `block_heat_tex` above, this IS sized
+// `uniforms.grid_size` x `uniforms.grid_size` (one texel per simulation cell), holding the
+// already log-compressed, normalised [0,1] `column_depth` value produced by
+// `sandart_sim::DrawingSimulation::pressure_field_texels` -- see that function's doc comment for
+// why a log scale against a fixed reference (not per-frame auto-normalisation) was chosen. Read
+// via `textureLoad` (integer cell coords), same as `shape_mask_tex`/`block_heat_tex`, so no
+// sampler binding is needed for it either.
+@group(0) @binding(7) var pressure_heat_tex: texture_2d<f32>;
 
 const PI: f32 = 3.14159265359;
 const Z_SCALE: f32 = 0.009; // Unified heightmap displacement scale
@@ -51,9 +59,13 @@ struct LightingUniforms {
     // shove this padding off to a different offset than the Rust side's plain, tightly-packed
     // `[u32; 3]` and desync every byte after it. Bare scalars stay 4-byte aligned, matching Rust.
     heatmap_enabled: u32,
+    // Per-cell pressure-field debug overlay: 1u = draw it, 0u = off (default). Repurposes one of
+    // the trailing pad scalars above rather than growing the struct -- mirrors the Rust-side
+    // `LightingUniforms::pressure_heatmap_enabled` in sandart-render/src/lib.rs exactly; see that
+    // field's doc comment for why this must stay a bare `u32` at this exact offset.
+    pressure_heatmap_enabled: u32,
     _pad_heatmap0: u32,
     _pad_heatmap1: u32,
-    _pad_heatmap2: u32,
 };
 
 struct CameraUniforms {
@@ -831,6 +843,45 @@ fn fs_main(
         // block, which needs to visibly differ from "no overlay at all" or the coldest blocks
         // would be indistinguishable from the overlay being off.
         final_color = mix(final_color, heat_color, 0.55);
+    }
+
+    // Per-cell pressure-field debug overlay. Same placement contract as the two overlays above:
+    // past the `in_casing` early-return and the marble-hit return, so it only ever tints actual
+    // sand/table, and `pressure_heatmap_enabled == 0u` (the default) skips this whole block,
+    // costing nothing.
+    if (uniforms.pressure_heatmap_enabled != 0u) {
+        // Unlike `heat_block_coord` above, this texture IS sized `grid_size` x `grid_size` (one
+        // texel per simulation cell, not per 32x32 LOD block -- see `pressure_heat_tex`'s binding
+        // comment), so the coordinate is the fragment's cell index, same math as `mask_coord`
+        // near the top of this function.
+        let grid_size_i2 = i32(uniforms.grid_size);
+        let pressure_coord = vec2<i32>(i32(uv.x * uniforms.grid_size), i32(uv.y * uniforms.grid_size));
+        let pressure = textureLoad(pressure_heat_tex, clamp(pressure_coord, vec2<i32>(0), vec2<i32>(grid_size_i2 - 1)), 0).r;
+
+        // Deep violet -> hot magenta -> pale warm yellow. Deliberately a different hue path from
+        // the block heat-map's blue/teal/orange-red above (270deg->320deg->50deg here vs.
+        // 230deg->160deg->20deg there) so the two overlays are never confusable mid-comparison
+        // when flipping between them -- exactly the use case this instrument exists for (A/B'ing
+        // the "Fresh pressure field" toggle). Like that ramp it moves in both lightness and hue at
+        // once (dark, saturated violet up to a pale, warm yellow), so the cold end still reads
+        // against pale sand and the hot end still reads against the near-black casing/table,
+        // rather than either extreme depending on luck for contrast. `pressure` already IS the
+        // log-compressed, normalised [0,1] value (see `pressure_field_texels`'s doc comment for
+        // the scaling rationale) -- this ramp only maps that scalar to colour, it does no further
+        // compression itself.
+        let p_cold = vec3<f32>(0.20, 0.05, 0.35);
+        let p_mid = vec3<f32>(0.85, 0.10, 0.55);
+        let p_hot = vec3<f32>(1.0, 0.92, 0.55);
+        var pressure_color: vec3<f32>;
+        if (pressure < 0.5) {
+            pressure_color = mix(p_cold, p_mid, pressure * 2.0);
+        } else {
+            pressure_color = mix(p_mid, p_hot, (pressure - 0.5) * 2.0);
+        }
+        // Same flat, strong blend as the block heat-map overlay, for the same reason: a debug
+        // instrument meant to be read at a glance, including over a genuinely-zero-pressure void
+        // (pressure = 0.0), which needs to visibly differ from "no overlay at all".
+        final_color = mix(final_color, pressure_color, 0.55);
     }
 
     return vec4<f32>(final_color, 1.0);
