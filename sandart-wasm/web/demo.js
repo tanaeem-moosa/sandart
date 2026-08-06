@@ -34,6 +34,51 @@ let totalRenderTime = 0;
 let renderTimeCount = 0;
 let frameDurations = [];
 
+// Pause / single-step instrumentation for task #55 (pressure field work): the pressure
+// heat-map overlay is unreadable while material is moving, so pause freezes the physics
+// while leaving render() running every frame (canvas + HUD + overlays stay live). This is
+// pure JS loop state -- it never reaches wasm and is never routed through syncSettings().
+let isPaused = false;
+let pendingSteps = 0;
+
+// Flips isPaused and reflects it in the UI: the button label/pressed-look, the Step button's
+// enabled state (stepping only means something while frozen), and the floating HUD's PAUSED
+// indicator. Purely cosmetic/loop-state -- does not touch wasm or syncSettings().
+function setPaused(paused) {
+    isPaused = paused;
+
+    const btnPause = document.getElementById('btn-pause');
+    if (btnPause) {
+        btnPause.textContent = isPaused ? 'Resume' : 'Pause';
+        btnPause.classList.toggle('primary', isPaused);
+    }
+    const btnStep = document.getElementById('btn-step');
+    if (btnStep) btnStep.disabled = !isPaused;
+
+    const hudPaused = document.getElementById('hud-paused');
+    if (hudPaused) hudPaused.style.display = isPaused ? '' : 'none';
+
+    if (!isPaused) pendingSteps = 0;
+}
+
+// Space toggles pause, '.' steps one tick while paused -- global shortcuts for this
+// watched-while-running diagnostic. Ignored while the user is typing into a form control so a
+// space in a text field doesn't freeze the simulation.
+function handlePauseStepKeydown(e) {
+    const target = e.target;
+    const tag = target && target.tagName;
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (target && target.isContentEditable)) {
+        return;
+    }
+
+    if (e.code === 'Space') {
+        e.preventDefault();
+        setPaused(!isPaused);
+    } else if (e.key === '.') {
+        if (isPaused) pendingSteps = 1;
+    }
+}
+
 async function start() {
     // Initialize WASM module
     await init();
@@ -211,11 +256,20 @@ function tick(now) {
         }
     }
 
-    // Step physics & render
+    // Step physics & render. Render always runs so the canvas and HUD overlays stay live
+    // even while paused; the physics step is skipped while paused, unless a single step has
+    // been requested via pendingSteps (the Step button / '.' key).
     if (state) {
-        const startStep = performance.now();
-        state.step(smoothDt, cursorX, cursorY, isDraggingMarble, frameTimeMs, detectedVsyncMs);
-        const stepTime = performance.now() - startStep;
+        const shouldStep = !isPaused || pendingSteps > 0;
+        let stepTime = 0;
+        if (shouldStep) {
+            if (isPaused && pendingSteps > 0) {
+                pendingSteps--;
+            }
+            const startStep = performance.now();
+            state.step(smoothDt, cursorX, cursorY, isDraggingMarble, frameTimeMs, detectedVsyncMs);
+            stepTime = performance.now() - startStep;
+        }
 
         const startRender = performance.now();
         state.render();
@@ -1035,6 +1089,16 @@ function setupPanelInput() {
     document.getElementById('check-fresh-pressure').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
     document.getElementById('check-elliptic-liquid').addEventListener('change', syncSettings);
+
+    // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above
+    // tick() for why this never touches syncSettings or wasm).
+    document.getElementById('btn-pause').addEventListener('click', () => {
+        setPaused(!isPaused);
+    });
+    document.getElementById('btn-step').addEventListener('click', () => {
+        if (isPaused) pendingSteps = 1;
+    });
+    window.addEventListener('keydown', handlePauseStepKeydown);
 
     // Operations buttons
     document.getElementById('btn-reset').addEventListener('click', () => {

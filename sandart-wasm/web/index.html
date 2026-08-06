@@ -334,6 +334,18 @@
             font-weight: 600;
         }
         button.primary:hover { background: var(--accent-bright); border-color: var(--accent-bright); }
+        /* Step is disabled unless the simulation is paused, so "disabled" has to read as a
+           state rather than as a dead control — without this it kept the full hover treatment
+           and the pointer cursor, which said "clickable" about a button that does nothing. */
+        button:disabled,
+        button:disabled:hover {
+            color: var(--label);
+            background: var(--face-2);
+            border-color: var(--rule);
+            cursor: not-allowed;
+            opacity: 0.45;
+        }
+        button:disabled:active { transform: none; }
         .btn-stack { display: grid; gap: 8px; }
 
         /* Checkbox as a lamp: off is an empty bezel, on is lit. */
@@ -607,6 +619,11 @@
             z-index: 15;
         }
         #stats-hud .sep { color: var(--rule-bright); }
+        #hud-paused {
+            display: none;
+            color: var(--accent);
+            font-weight: 600;
+        }
 
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after {
@@ -825,6 +842,16 @@
                     <input type="checkbox" id="check-pressure-heatmap">
                     <span class="checkmark"></span>
                 </label>
+                <!-- Pause / step: reading a heat-map that changes every frame is impossible.
+                     Pause freezes physics (render keeps running, so the canvas and overlays
+                     stay live); Step advances exactly one tick while paused. Pure JS loop
+                     state in demo.js -- never touches wasm, never routed through
+                     syncSettings(). Space toggles pause, "." steps, from anywhere except a
+                     text input. -->
+                <div class="row gap-above">
+                    <button id="btn-pause" title="Space">Pause</button>
+                    <button id="btn-step" title="." disabled>Step</button>
+                </div>
                 <label class="checkbox-container">
                     Fast liquid levelling (slow)
                     <input type="checkbox" id="check-elliptic-liquid">
@@ -1040,6 +1067,7 @@
                 Drag to rotate &middot; Scroll to zoom &middot; Shift-drag to move the magnet
             </div>
             <div id="stats-hud">
+                <span id="hud-paused">PAUSED</span>
                 <span id="hud-fps">-- fps</span>
                 <span class="sep">/</span>
                 <span id="hud-time">-- ms</span>
