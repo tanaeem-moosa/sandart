@@ -105,6 +105,12 @@ pub enum SandboxShape {
     StaircaseCascade,
     ProceduralFunnel,
     MultiNeckHourglass,
+    /// Task #61: a U-shaped flow-through vessel -- a test apparatus for pressure work, not a
+    /// sand cascade. Water fills the tall left reservoir arm, flows down through a partly
+    /// ROOFED bottom basin (deliberately: this is the Pascal-pressure test case), climbs the
+    /// shorter right arm, spills over its rim (the overflow lip) through a horizontal spout,
+    /// and falls into a catch well. See `physics::U_TUBE_RECTS` for the geometry.
+    UTubeFlowThrough,
 }
 
 impl Default for SandboxShape {
@@ -700,6 +706,7 @@ impl DrawingSimulation {
                 | SandboxShape::StaircaseCascade
                 | SandboxShape::ProceduralFunnel
                 | SandboxShape::MultiNeckHourglass
+                | SandboxShape::UTubeFlowThrough
         ) {
             self.heightmap.reset(0.0);
             self.initialize_hourglass();
@@ -752,6 +759,7 @@ impl DrawingSimulation {
 
         let w = self.heightmap.width;
         let h = self.heightmap.height;
+        let center_x = w as f32 / 2.0;
         let center_y = h as f32 / 2.0;
 
         // Fills exactly tier 0 (the widest tier) of the MultiStageHourglass merging cascade:
@@ -775,6 +783,23 @@ impl DrawingSimulation {
             for x in 0..w {
                 let idx = row_offset + x;
                 let inside = self.shape_mask[idx] != MASK_OUTSIDE;
+
+                // A single scalar `dy < fill_threshold` cutoff (the path every other shape
+                // below takes) cannot express "fill only the reservoir arm": the right arm and
+                // catch well overlap the reservoir's dy range, so any threshold that fills the
+                // reservoir also fills them. Instead, fill exactly the reservoir rect --
+                // `physics::U_TUBE_RECTS[U_TUBE_RESERVOIR_RECT]`, the same constant the mask
+                // geometry itself is built from, so this can never drift out of sync with it.
+                if self.sandbox_shape == SandboxShape::UTubeFlowThrough {
+                    let dx = x as f32 - center_x;
+                    let r = &physics::U_TUBE_RECTS[physics::U_TUBE_RESERVOIR_RECT];
+                    let in_reservoir = dx >= r[0] * w as f32
+                        && dx < r[1] * w as f32
+                        && dy >= r[2] * h as f32
+                        && dy < r[3] * h as f32;
+                    self.heightmap.data[idx] = if inside && in_reservoir { 1.00 } else { 0.0 };
+                    continue;
+                }
 
                 let fill_threshold = if self.sandbox_shape == SandboxShape::MultiStageHourglass {
                     multistage_fill_threshold
@@ -1066,7 +1091,8 @@ impl DrawingSimulation {
             | SandboxShape::GaltonBoard
             | SandboxShape::StaircaseCascade
             | SandboxShape::ProceduralFunnel
-            | SandboxShape::MultiNeckHourglass => {
+            | SandboxShape::MultiNeckHourglass
+            | SandboxShape::UTubeFlowThrough => {
                 let chamber_r = 0.92 - marble_radius;  // normalized coords
                 let chamber_offset = 0.58;             // normalized vertical offset
                 let neck_hw = 0.07 - marble_radius;    // normalized neck half-width
@@ -1449,13 +1475,14 @@ mod tests {
     /// Every shape offered under the "Sand-fall Funnels" group in the UI. Kept in one place so a
     /// new funnel is covered by the geometry and mass-conservation tests by default rather than
     /// by remembering to add it to each.
-    const SANDFALL_FUNNEL_SHAPES: [SandboxShape; 6] = [
+    const SANDFALL_FUNNEL_SHAPES: [SandboxShape; 7] = [
         SandboxShape::Hourglass,
         SandboxShape::MultiStageHourglass,
         SandboxShape::GaltonBoard,
         SandboxShape::StaircaseCascade,
         SandboxShape::ProceduralFunnel,
         SandboxShape::MultiNeckHourglass,
+        SandboxShape::UTubeFlowThrough,
     ];
 
     /// Every material's string id must round-trip through `from_str`/`as_str`, and `ALL` must

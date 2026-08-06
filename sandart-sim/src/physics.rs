@@ -3371,6 +3371,31 @@ pub fn effective_neck_half_width_cells(w: usize, shape: crate::SandboxShape, nec
     }
 }
 
+/// Task #61: the U-tube flow-through vessel's five axis-aligned rects, expressed as fractions
+/// of `(w_f, h_f)` so the shape is resolution-invariant. `[x_lo, x_hi, y_lo, y_hi]`, same
+/// coordinate convention as `eval_sandbox_shape` (`dx = x - cx`, `dy = y - cy`, y increases
+/// downward). Union of all five is ONE connected region: reservoir (index
+/// `U_TUBE_RESERVOIR_RECT`) feeds down the left arm, through a bottom basin that is only
+/// PARTLY roofed (the strip between the two arms has no rect above it -- that gap is
+/// deliberate, the Pascal-pressure test case this apparatus exists for), up the right arm,
+/// over its rim (the overflow lip) via the spout, and down into the catch well.
+///
+/// Single source of truth for both `eval_sandbox_shape`'s `UTubeFlowThrough` branch below and
+/// `DrawingSimulation::initialize_hourglass`'s `UTubeFlowThrough` branch (`lib.rs`), which reads
+/// `U_TUBE_RECTS[U_TUBE_RESERVOIR_RECT]` to prefill only the reservoir arm -- kept here, not
+/// duplicated, so the two can never drift apart.
+pub(crate) const U_TUBE_RECTS: [[f32; 4]; 5] = [
+    [-0.42, -0.24, -0.40, 0.36], // reservoir / left arm
+    [-0.42, 0.02, 0.36, 0.42],   // basin (bottom, partly roofed)
+    [-0.04, 0.02, 0.10, 0.36],   // right arm
+    [-0.04, 0.16, 0.10, 0.17],   // spout (overflow lip is the right arm's top, dy = 0.10)
+    [0.16, 0.42, 0.10, 0.42],    // catch well
+];
+
+/// Index into `U_TUBE_RECTS` of the reservoir / left-arm rect -- the only one
+/// `initialize_hourglass` prefills.
+pub(crate) const U_TUBE_RESERVOIR_RECT: usize = 0;
+
 pub fn eval_sandbox_shape(
     cx: usize,
     cy: usize,
@@ -3746,6 +3771,37 @@ pub fn eval_sandbox_shape(
             } else {
                 (false, false)
             }
+        }
+        crate::SandboxShape::UTubeFlowThrough => {
+            // Task #61: a fixed union of five axis-aligned rects (`U_TUBE_RECTS`) -- not a
+            // tapered funnel -- so `neck_width` and `hourglass_curve` are unused here. Both
+            // are still accepted (this match arm's signature is shared with every other shape)
+            // but this apparatus has no neck to narrow and no curve to bend; that is
+            // intentional, not an oversight.
+            let _ = (neck_width, hourglass_curve);
+
+            let in_rect = |px: f32, py: f32, r: &[f32; 4]| -> bool {
+                px >= r[0] * w_f && px < r[1] * w_f && py >= r[2] * h_f && py < r[3] * h_f
+            };
+            let in_union = |px: f32, py: f32| -> bool {
+                U_TUBE_RECTS.iter().any(|r| in_rect(px, py, r))
+            };
+
+            if !in_union(dx, dy) {
+                return (false, false);
+            }
+
+            // Safe (interior, non-boundary-adjacent) iff the union still contains the point
+            // after nudging by 1.5 cells along each axis independently -- so any region less
+            // than 3 cells thick along x or y (e.g. the basin's roofed strip, if it were ever
+            // narrowed) can never report safe.
+            let margin = 1.5;
+            let is_safe = in_union(dx - margin, dy)
+                && in_union(dx + margin, dy)
+                && in_union(dx, dy - margin)
+                && in_union(dx, dy + margin);
+
+            (true, is_safe)
         }
     }
 }
@@ -17621,6 +17677,177 @@ mod tests {
         assert!(
             (mass_after - mass_before).abs() < 1e-3,
             "mass must be conserved: before={mass_before:.6} after={mass_after:.6}"
+        );
+    }
+
+    // ---- Task #61: U-tube flow-through vessel ------------------------------------------------
+    //
+    // These three tests exercise `SandboxShape::UTubeFlowThrough`'s geometry, sourced from
+    // `U_TUBE_RECTS` so they can never drift from the shape they are testing. A fourth check --
+    // that this shape is covered "for free" by the existing geometry/mass-conservation tests
+    // that iterate `SANDFALL_FUNNEL_SHAPES` (in `lib.rs`) -- needs no new test here: extending
+    // that const to include `UTubeFlowThrough` is what wires it in.
+
+    /// The five `U_TUBE_RECTS` are meant to union into ONE connected region -- reservoir, basin,
+    /// right arm, spout, catch well -- not five separate islands. Flood-fills the generated mask
+    /// from a cell in the reservoir and asserts every non-OUTSIDE cell is reachable, at four grid
+    /// sizes so a pinch-off that only appears at a particular rasterisation (e.g. a rect boundary
+    /// landing between two cell centres) is caught rather than hidden by whichever resolution
+    /// happens to get tested.
+    #[test]
+    fn test_u_tube_is_one_connected_region() {
+        for &grid in &[64usize, 128, 256, 512] {
+            let w = grid;
+            let h = grid;
+            let mask = make_test_mask(w, h, SandboxShape::UTubeFlowThrough, 0.05, 1.0);
+
+            let reservoir = U_TUBE_RECTS[U_TUBE_RESERVOIR_RECT];
+            let start_dx = (reservoir[0] + reservoir[1]) / 2.0;
+            let start_dy = (reservoir[2] + reservoir[3]) / 2.0;
+            let start_x = ((w as f32 / 2.0) + start_dx * w as f32).round() as usize;
+            let start_y = ((h as f32 / 2.0) + start_dy * h as f32).round() as usize;
+            let start = start_y * w + start_x;
+            assert_ne!(
+                mask[start],
+                crate::MASK_OUTSIDE,
+                "grid={grid}: flood-fill start cell ({start_x},{start_y}), the reservoir's \
+                 centre, is not inside the mask"
+            );
+
+            let total_inside = mask.iter().filter(|&&m| m != crate::MASK_OUTSIDE).count();
+
+            let mut visited = vec![false; w * h];
+            let mut stack = vec![start];
+            visited[start] = true;
+            let mut reached = 0usize;
+            while let Some(idx) = stack.pop() {
+                reached += 1;
+                let x = idx % w;
+                let y = idx / w;
+                let neighbors = [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ];
+                for (nx, ny) in neighbors {
+                    if nx < w && ny < h {
+                        let nidx = ny * w + nx;
+                        if !visited[nidx] && mask[nidx] != crate::MASK_OUTSIDE {
+                            visited[nidx] = true;
+                            stack.push(nidx);
+                        }
+                    }
+                }
+            }
+
+            assert_eq!(
+                reached, total_inside,
+                "grid={grid}: flood-fill from the reservoir reached {reached} of {total_inside} \
+                 non-OUTSIDE cells -- the U-tube is not one connected region (a pinch-off exists \
+                 at this resolution)"
+            );
+        }
+    }
+
+    /// The strip of the basin between the reservoir's right edge and the right arm's left edge
+    /// is deliberately NOT covered by any rect above it -- that roofed channel is the whole
+    /// reason this apparatus exists (the Pascal pressure test case). Confirms at least one
+    /// in-mask basin cell in that strip has an OUTSIDE cell directly above it (smaller y, i.e.
+    /// higher on screen, per `eval_sandbox_shape`'s "y increases downward" convention).
+    #[test]
+    fn test_u_tube_basin_has_a_roof() {
+        let w = 256usize;
+        let h = 256usize;
+        let mask = make_test_mask(w, h, SandboxShape::UTubeFlowThrough, 0.05, 1.0);
+
+        let reservoir = U_TUBE_RECTS[U_TUBE_RESERVOIR_RECT];
+        let right_arm = U_TUBE_RECTS[2];
+        let basin = U_TUBE_RECTS[1];
+
+        // The unroofed gap between the two arms, in x.
+        let gap_lo = reservoir[1]; // reservoir's right edge
+        let gap_hi = right_arm[0]; // right arm's left edge
+        assert!(
+            gap_lo < gap_hi,
+            "reservoir and right arm overlap or touch in x (gap_lo={gap_lo:.4} \
+             gap_hi={gap_hi:.4}) -- there is no gap left for the basin roof to cover"
+        );
+
+        let w_f = w as f32;
+        let h_f = h as f32;
+        let center_x = w_f / 2.0;
+        let center_y = h_f / 2.0;
+
+        let mut found_roof = false;
+        'outer: for x in 0..w {
+            let dx = x as f32 - center_x;
+            if dx < gap_lo * w_f || dx >= gap_hi * w_f {
+                continue;
+            }
+            for y in 1..h {
+                let dy = y as f32 - center_y;
+                if dy < basin[2] * h_f || dy >= basin[3] * h_f {
+                    continue;
+                }
+                let idx = y * w + x;
+                let above = (y - 1) * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE && mask[above] == crate::MASK_OUTSIDE {
+                    found_roof = true;
+                    break 'outer;
+                }
+            }
+        }
+
+        assert!(
+            found_roof,
+            "no in-mask basin cell in the unroofed gap (x fraction {gap_lo:.3}..{gap_hi:.3}, y \
+             fraction {:.3}..{:.3}) has an OUTSIDE cell directly above it -- the deliberately \
+             roofed Pascal-pressure channel is missing",
+            basin[2], basin[3]
+        );
+    }
+
+    /// Purely geometric (no simulation): from `U_TUBE_RECTS` alone, confirms the vessel
+    /// genuinely spills over the lip rather than merely filling up to it -- the reservoir's
+    /// capacity above the lip line must exceed the basin's plus the right arm's capacity below
+    /// it -- and that the catch well is large enough to hold the entire spilled remainder
+    /// without itself overflowing.
+    #[test]
+    fn test_u_tube_reservoir_overflows_the_lip() {
+        let reservoir = U_TUBE_RECTS[U_TUBE_RESERVOIR_RECT];
+        let basin = U_TUBE_RECTS[1];
+        let right_arm = U_TUBE_RECTS[2];
+        let catch_well = U_TUBE_RECTS[4];
+
+        // The overflow lip is the right arm's top edge.
+        let lip_y = right_arm[2];
+        assert!(
+            lip_y > reservoir[2] && lip_y < reservoir[3],
+            "lip_y={lip_y:.4} must fall strictly inside the reservoir's y range \
+             ({:.4}..{:.4}) for 'area above the lip' to mean anything",
+            reservoir[2],
+            reservoir[3]
+        );
+
+        let reservoir_area_above_lip = (reservoir[1] - reservoir[0]) * (lip_y - reservoir[2]);
+        let basin_area = (basin[1] - basin[0]) * (basin[3] - basin[2]);
+        let right_arm_area_below_lip = (right_arm[1] - right_arm[0]) * (right_arm[3] - lip_y);
+        let downstream_capacity = basin_area + right_arm_area_below_lip;
+        let expected_spill = reservoir_area_above_lip - downstream_capacity;
+        let catch_well_area = (catch_well[1] - catch_well[0]) * (catch_well[3] - catch_well[2]);
+
+        assert!(
+            reservoir_area_above_lip > downstream_capacity,
+            "vessel does not genuinely spill: reservoir_area_above_lip={reservoir_area_above_lip:.5} \
+             <= basin_area({basin_area:.5}) + right_arm_area_below_lip({right_arm_area_below_lip:.5}) \
+             = downstream_capacity({downstream_capacity:.5})"
+        );
+        assert!(
+            catch_well_area > expected_spill,
+            "catch well cannot hold the spill: catch_well_area={catch_well_area:.5} <= \
+             expected_spill={expected_spill:.5} (reservoir_area_above_lip={reservoir_area_above_lip:.5}, \
+             downstream_capacity={downstream_capacity:.5})"
         );
     }
 }

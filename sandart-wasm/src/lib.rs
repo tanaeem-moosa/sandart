@@ -562,6 +562,7 @@ impl WasmSimulationState {
             6 => SandboxShape::StaircaseCascade,
             7 => SandboxShape::ProceduralFunnel,
             8 => SandboxShape::MultiNeckHourglass,
+            9 => SandboxShape::UTubeFlowThrough,
             _ => SandboxShape::Circle,
         };
 
@@ -602,6 +603,7 @@ impl WasmSimulationState {
                     | SandboxShape::StaircaseCascade
                     | SandboxShape::ProceduralFunnel
                     | SandboxShape::MultiNeckHourglass
+                    | SandboxShape::UTubeFlowThrough
             )
         {
             self.sim.reset();
