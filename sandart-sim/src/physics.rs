@@ -400,6 +400,98 @@ fn janssen_effective_depth(column_depth: f32, liquidity: f32) -> f32 {
     liquidity * column_depth + (1.0 - liquidity) * saturating
 }
 
+/// TASK #55. Alternative, gated (`multiplicative_lateral_gate`, default OFF) form of the lateral
+/// edge's driving head. Diagnosis: `LATERAL_PRESSURE_SCALE`'s term is ADDITIVE --
+/// `driving = (h_a - h_b) + k_lateral * SCALE * (depth_a - depth_b)` -- when the physically correct
+/// free-surface form is multiplicative: `flux ~ conveyance(depth) * grad(free-surface elevation)`.
+/// An additive depth term can drive flow between two columns that are NOT actually at different
+/// surface heights (whenever the fill-difference and depth-difference terms don't cancel in the
+/// same proportion they'd need to for the additive sum to track true elevation), and -- because it
+/// is only ever a bonus on top of a separately-computed fill term -- it does not stop flow when the
+/// true surface actually is flat, it just adds less. The multiplicative form fixes this
+/// structurally: a factor that is exactly zero forces the *whole* driving term to zero, not just
+/// one component of a sum.
+///
+/// **`grad(eta)`, the free-surface term.** This solver has no separate stored "bed elevation" +
+/// "flow depth" pair (see `column_depth`'s own doc comment: it is a per-CELL top-down accumulation,
+/// not a per-COLUMN scalar). The best available proxy for "how tall is the material stack down to
+/// and including this row" is `h[idx] * depth_scale + column_depth[idx]` -- this cell's own local
+/// fill plus everything resting on top of it, BOTH converted into the same units first (see the
+/// `depth_scale` paragraph below -- this was originally shipped as an un-scaled `h[idx] +
+/// column_depth[idx]`, which is where TASK #55's unit bug lived; see the call site's own comment
+/// and `diag_task55_eta_depth_scale_consistency`'s resolution sweep for the fix and its proof).
+/// For a LATERAL edge both endpoints share the same row, so the
+/// row-index terms that would otherwise appear in an absolute elevation cancel in the subtraction,
+/// leaving exactly this sum's difference as the estimate of `eta_a - eta_b`. Deliberately RAW
+/// (`column_depth` unshaped by Janssen, unweighted by `k_of_liquidity`): `eta` is meant to answer a
+/// purely geometric question -- how tall is the pile, physically -- and a pile's physical height
+/// does not depend on how its internal stress is distributed. Two columns holding the same amount
+/// of material to the same row are at the same surface height whether that material is water or
+/// sand; Janssen and `LATERAL_EARTH_PRESSURE_K` are about how much of that column's weight
+/// transmits as *stress*, not about how tall the column *is*. Folding either into `eta` would make
+/// a granular and a liquid column disagree about their own geometry, which is not what either
+/// mechanism is for.
+///
+/// **`conveyance(depth)`, the material-dependent factor.** This is where Janssen and
+/// `k_of_liquidity` belong instead: how much of a column's depth actually participates in carrying
+/// *lateral flow*, which is exactly the question Janssen answers for granular material (wall
+/// friction bleeds load out of the vertical stress column, so it saturates) and `k_of_liquidity`
+/// answers for the isotropic/anisotropic split (liquid transmits stress sideways in full, granular
+/// only partially). Composition check, since the task brief asks this be reasoned about rather than
+/// silently assumed: `janssen_effective_depth` is read exactly ONCE per endpoint, feeding
+/// `conveyance` only -- never also added a second time into `eta` -- so there is no double
+/// application of the `1 - exp(-z/z_c)` saturation. The two mechanisms answer two different
+/// questions (how tall IS it vs. how much of it CONVEYS) from the same underlying `column_depth`
+/// reading, the same way the additive form's `k_a * LATERAL_PRESSURE_SCALE * depth_a` term already
+/// combined `k_of_liquidity` and `janssen_effective_depth` into one read of `column_depth`, not two.
+/// `conveyance` also folds in this cell's own local fill (`h[idx]`, unshaped -- it is not
+/// "overburden", there is nothing above it to saturate) precisely so a genuinely shallow, unstacked
+/// puddle (`column_depth == 0` on both sides, `h > 0`) still has nonzero conveyance and can still
+/// level under its own local fill difference -- the base case `LATERAL_PRESSURE_SCALE`'s own doc
+/// comment calls out ("a shallow, undifferentiated puddle... reduces exactly to the pre-existing
+/// head_a = h_a + Phi formula"). Without this, conveyance would be exactly zero for every surface
+/// cell of every pile regardless of how tall the pile beneath it is, which would silently stop ALL
+/// surface-layer levelling, not just the flat-surface case this change targets -- see
+/// `mult_lateral_conveyance`'s own doc comment for the exact place this matters (a cusp).
+#[inline]
+fn mult_lateral_conveyance(local_fill: f32, column_depth: f32, k: f32, liq: f32) -> f32 {
+    let janssen_depth = janssen_effective_depth(column_depth, liq);
+    (local_fill + k * janssen_depth).max(0.0).powf(MULT_LATERAL_CONVEYANCE_EXPONENT)
+}
+
+/// Exponent for `mult_lateral_conveyance`. Open-channel diffusive-wave models commonly use a power
+/// law of local depth for unit discharge (Manning: `q ~ h^(5/3) * sqrt(S)`; broad-crested weir flow:
+/// `Q ~ h^(3/2)`). `1.5` is picked over Manning's `5/3` because it is the simpler, better-known
+/// closed form the task brief itself floats ("depth^(3/2) or similar") and because this solver has
+/// no analogue of Manning's hydraulic-radius/wetted-perimeter geometry to justify the extra `1/6`
+/// power over -- a per-cell CA has no channel cross-section, so borrowing Manning's *exponent*
+/// without its *premise* would be spurious precision. `1.5` is NOT measured or fitted; it is a
+/// defensible first choice, exactly as the task brief permits, and reported as such rather than as
+/// a swept constant.
+const MULT_LATERAL_CONVEYANCE_EXPONENT: f32 = 1.5;
+
+/// Overall scale on the multiplicative driving head (`MULT_LATERAL_SCALE * conveyance(depth) *
+/// grad(eta)`, see `mult_lateral_conveyance`). `1.0` -- chosen, not swept, so that a single
+/// near-capacity cell of material (`local_fill ~ 1`, `column_depth ~ 0` on both sides, i.e. the
+/// same "shallow, undifferentiated puddle" baseline `LATERAL_PRESSURE_SCALE`'s doc comment
+/// anchors to) gives `conveyance ~= 1^1.5 = 1`, so the multiplicative driving head reduces to
+/// approximately the same order of magnitude as the legacy `h_a - h_b` baseline in that base case
+/// -- not bit-identical (the two forms are structurally different away from that one anchor point),
+/// but not an arbitrary order of magnitude off either. Deliberately left at this un-swept starting
+/// point per the task brief's instruction not to tune constants to land inside a passing window;
+/// see this task's report for what `1.0` actually measures like against
+/// `test_liquid_flowing_liquid_does_not_stand_in_walls` and the flat-surface check.
+///
+/// TASK #55 UNIT FIX addendum: the call site now passes `mult_lateral_conveyance` a `local_fill`
+/// already lifted into `column_depth`'s reference-row units (`h * depth_scale`, see that call
+/// site's own comment) rather than raw `h`, so this anchor (`local_fill ~ 1` giving
+/// `conveyance ~= 1`) is exact only where `depth_scale == 1`, i.e. production's `w ==
+/// REFERENCE_GRID_HEIGHT == 512`. That is deliberate, not a new drift: `depth_scale` is a no-op at
+/// that resolution, so this constant's anchor case is unchanged there; away from it, the anchor
+/// scales by `depth_scale` along with everything else `column_depth` touches, which is exactly the
+/// resolution-invariance property the fix is for (see `diag_task55_eta_depth_scale_consistency`).
+const MULT_LATERAL_SCALE: f32 = 1.0;
+
 /// STEP 3 (Task #54). How much of a cell's OWN (Janssen-shaped, see `janssen_effective_depth`)
 /// vertical overburden feeds back into the GRAVITY-ALIGNED edge's driving head, on top of the
 /// existing flat `gravity_dir.y * GRAVITY_HEAD_SCALE` term every cell already gets regardless of
@@ -1788,6 +1880,42 @@ mod fresh_overburden_gate {
     #[inline(always)]
     pub fn variant() -> FreshOverburdenVariant {
         FreshOverburdenVariant::UnsupportedAndRoom
+    }
+}
+
+/// TASK #55 DIAGNOSTIC-ONLY A/B TOGGLE for the multiplicative lateral driving head (see
+/// `mult_lateral_driving`'s doc comment for the mechanism). Same thread-local-per-test pattern as
+/// `upstream_wake_gate`/`pressure_gate`/`fresh_overburden_gate` -- `#[cfg(test)]`-gated so it does
+/// not exist in production at all, `#[cfg(not(test))]` twin hardcodes the shipped choice so a
+/// non-test build pays no thread-local read.
+///
+/// Named and defaulted the OPPOSITE way from its three siblings above: they gate a shipped FIX
+/// that is active by default (`is_disabled()`, default `false` == fix on), because in each of
+/// those cases the additive/legacy behaviour was the thing being replaced. This gate instead ships
+/// OFF by default (`is_enabled()`, default `false` == legacy additive lateral head, unchanged) --
+/// the multiplicative form is a live experiment being measured, not yet a decided replacement for
+/// `LATERAL_PRESSURE_SCALE`'s additive term. Flipping the polarity keeps the *shipped* behaviour
+/// at `false` in both conventions (nothing here changes what ships), it just means "false" reads
+/// naturally in each case as "the thing that ships today".
+#[cfg(test)]
+pub(crate) mod multiplicative_lateral_gate {
+    use std::cell::Cell;
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+    }
+    pub fn set_enabled(v: bool) {
+        ENABLED.with(|c| c.set(v));
+    }
+    #[inline(always)]
+    pub fn is_enabled() -> bool {
+        ENABLED.with(|c| c.get())
+    }
+}
+#[cfg(not(test))]
+mod multiplicative_lateral_gate {
+    #[inline(always)]
+    pub fn is_enabled() -> bool {
+        false
     }
 }
 
@@ -4246,10 +4374,76 @@ pub fn settle_tick(
                         let depth_a = janssen_effective_depth(column_depth[center_idx], cell_liquidity);
                         let depth_b = janssen_effective_depth(column_depth[nb_idx], liq_b);
 
-                        let head_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
-                            + k_a * LATERAL_PRESSURE_SCALE * depth_a + dispersion;
-                        let head_b_full =
-                            h_b_frozen + k_b * LATERAL_PRESSURE_SCALE * depth_b;
+                        // TASK #55, gated (default OFF -- see `multiplicative_lateral_gate`):
+                        // `head_a`/`head_b_full` below are ADDITIVE (fill + independently-scaled
+                        // depth bonus). The gated alternative is MULTIPLICATIVE
+                        // (`mult_lateral_conveyance(depth) * grad(eta)`, see that function's doc
+                        // comment for the full reasoning) -- folded entirely into `head_a`, with
+                        // `head_b_full` left at `0.0`, so the single `driving = head_a - head_b`
+                        // read by `edge_sleeps` and `flux_edge_candidate` below is unaffected by
+                        // which branch produced it and neither of those two functions needs to
+                        // know this gate exists.
+                        let (head_a, head_b_full) = if multiplicative_lateral_gate::is_enabled() {
+                            // TASK #55 UNIT FIX: `h_a_frozen`/`h_b_frozen` are a LOCAL cell's own
+                            // fill fraction -- unscaled, one cell's worth of physical thickness at
+                            // THIS grid's own resolution `w`. `column_depth` is a top-down running
+                            // sum whose per-row contribution is pre-multiplied by `depth_scale =
+                            // REFERENCE_GRID_HEIGHT / w` (see `recompute_column_depth` and the
+                            // inline fallback above) specifically so it estimates physical depth
+                            // in "reference-resolution row" units, invariant to `w`. Adding the two
+                            // directly, as this branch used to, summed a local-cell-unit quantity
+                            // with a reference-row-unit quantity -- off by exactly `depth_scale`,
+                            // which is 1.0 only at production's `w == REFERENCE_GRID_HEIGHT == 512`
+                            // and up to 8x+ at the 64/128-wide grids every task-55 diagnostic runs
+                            // at (see `diag_task55_eta_depth_scale_consistency`). Fixed by lifting
+                            // the local term into the SAME reference-row units column_depth already
+                            // uses: `h * depth_scale`. `cell_capacity_for`'s material-dependent cap
+                            // (1.5 dry sand / 1.0 liquid) does NOT need a matching correction here
+                            // -- it depends only on wetness, never on `w`, so it cannot introduce
+                            // any resolution-DEPENDENT error; it only affects how `h`'s absolute
+                            // magnitude compares to a liquid's, which is a pre-existing, unrelated
+                            // design choice this task does not touch.
+                            //
+                            // `gravity_dir.x * GRAVITY_HEAD_SCALE` is deliberately left unscaled:
+                            // per its own doc comment it is calibrated "per cell of travel", a
+                            // discretization-relative CFL-style forcing term, not a physical-depth
+                            // estimate -- it was never in `column_depth`'s units to begin with, in
+                            // either the additive or multiplicative branch, and scaling it here
+                            // would be a new behaviour change this task does not ask for.
+                            //
+                            // With both terms in reference-row units, `conveyance`'s argument
+                            // (`local_fill + k * janssen_effective_depth(column_depth, liq)`) is
+                            // now a genuinely resolution-invariant physical quantity for a fixed
+                            // physical pile, so raising it to the `MULT_LATERAL_CONVEYANCE_EXPONENT`
+                            // power keeps `conveyance` itself resolution-invariant too -- no
+                            // separate per-resolution rescaling of `MULT_LATERAL_SCALE` is needed
+                            // (see `diag_task55_eta_depth_scale_consistency`'s resolution sweep).
+                            // The other candidate unit choice (deflating `column_depth` down to
+                            // local-cell units, `column_depth / depth_scale`) does NOT have this
+                            // property: `column_depth / depth_scale` is the local row COUNT, which
+                            // scales linearly with `w` for a fixed physical pile, so `conveyance`
+                            // would scale as `w^1.5` and `MULT_LATERAL_SCALE` would need
+                            // re-deriving at every resolution -- reference-row units avoid that.
+                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                            let h_a_ref = h_a_frozen * depth_scale;
+                            let h_b_ref = h_b_frozen * depth_scale;
+                            let eta_a = h_a_ref + gravity_dir.x * GRAVITY_HEAD_SCALE
+                                + column_depth[center_idx];
+                            let eta_b = h_b_ref + column_depth[nb_idx];
+                            let conveyance_a =
+                                mult_lateral_conveyance(h_a_ref, column_depth[center_idx], k_a, cell_liquidity);
+                            let conveyance_b =
+                                mult_lateral_conveyance(h_b_ref, column_depth[nb_idx], k_b, liq_b);
+                            let conveyance = 0.5 * (conveyance_a + conveyance_b);
+                            let driving = MULT_LATERAL_SCALE * conveyance * (eta_a - eta_b) + dispersion;
+                            (driving, 0.0)
+                        } else {
+                            (
+                                h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
+                                    + k_a * LATERAL_PRESSURE_SCALE * depth_a + dispersion,
+                                h_b_frozen + k_b * LATERAL_PRESSURE_SCALE * depth_b,
+                            )
+                        };
 
                         // Stochastic locking (see `GRAVITY_LOCK_CHANCE`'s doc comment):
                         // reproduces the CA's flat 0.05 `lock_chance` under gravity ("Low locking
@@ -6808,6 +7002,298 @@ mod tests {
             "Draining liquid spent too long in walls: {} void cell-ticks over 400 ticks",
             total
         );
+    }
+
+    /// TASK #55, prediction 1: "a flat surface cannot drive flow at any depth" under the gated
+    /// multiplicative lateral head (`multiplicative_lateral_gate`), and, as the documented CONTRAST,
+    /// the legacy additive term (`LATERAL_PRESSURE_SCALE`) *can* spuriously drive flow between two
+    /// columns whose true free-surface elevation is level but whose `column_depth` differs.
+    ///
+    /// DIRECT CONSTRUCTION, not an emergent scenario left to develop over many ticks -- deliberately
+    /// so, because it turns out "same top row, different floor" (the first, more obvious geometric
+    /// shape tried here) does NOT exercise this bug at all: `column_depth` only ever accumulates
+    /// what is genuinely ABOVE a cell within its own column, so two columns that share the same fill
+    /// pattern down from a common top row read IDENTICAL `column_depth` at every shared row
+    /// regardless of how much deeper one of them continues below -- the extra depth lives entirely
+    /// below the row where a lateral neighbour would need to exist to compare against it. To make
+    /// `column_depth` itself differ at a row where a real lateral edge exists, the columns need
+    /// different amounts of material stacked ABOVE that row -- so this builds exactly that, with
+    /// `fresh_pressure_field = true` so `column_depth` is a single deterministic top-down sum over a
+    /// frozen pre-tick snapshot (see `recompute_column_depth`) rather than the order-dependent
+    /// in-loop fallback, making the two `column_depth` values exactly hand-computable:
+    ///
+    /// Two adjacent columns `xa`/`xb`. One row above the comparison row (`row_stack`), each column
+    /// gets a small resting fill (`stack_a`/`stack_b`, deliberately UNEQUAL). Given
+    /// `depth_scale = REFERENCE_GRID_HEIGHT / w`, `recompute_column_depth` gives
+    /// `column_depth[row_cmp] = stack * depth_scale` (nothing sits above `row_stack` itself, so its
+    /// own `column_depth` is 0). At `row_cmp`, each column's OWN local fill (`h_a`/`h_b`) is then set
+    /// so the true free-surface proxy `eta = h * depth_scale + column_depth` matches EXACTLY
+    /// between the two columns (`h_b = h_a + (stack_a - stack_b)`) even though `column_depth`
+    /// itself does not match at all -- precisely "two columns at the same surface level [with]
+    /// different depths" from the task brief.
+    ///
+    /// TASK #55 UNIT FIX: `eta`'s `h` term is now lifted into `column_depth`'s reference-row units
+    /// (`h * depth_scale`, see `mult_lateral_conveyance`'s call site) rather than added raw, so the
+    /// flat-eta construction here solves `h_a * depth_scale + depth_a == h_b * depth_scale +
+    /// depth_b` for `h_b`, i.e. `h_b = h_a + (depth_a - depth_b) / depth_scale = h_a + (stack_a -
+    /// stack_b)` -- NOT `h_a + depth_scale * (stack_a - stack_b)` (that was the pre-fix formula's
+    /// flat-eta condition, and produces a badly non-flat `eta` under the corrected one: measured,
+    /// it drove `lateral_drift_on = 0.88` here, an order of magnitude over this test's `< 1e-3`
+    /// bound, simply because the old `h_b` no longer describes a flat surface once `h`'s units are
+    /// fixed).
+    #[test]
+    fn test_mult_lateral_flat_surface_same_eta_different_depth_no_flux() {
+        let w = 16usize;
+        let h = 16usize;
+        let wall = 2usize;
+        let xa = 6usize;
+        let xb = 7usize; // lateral neighbour of xa
+        let row_stack = 4usize; // feeds column_depth[row_cmp] via recompute_column_depth
+        let row_cmp = 5usize; // the actual lateral edge under test
+
+        // A narrow, two-column-wide chamber containing ONLY `xa` and `xb`, walled on every other
+        // side. Two things this closes off, both confirmed empirically, not assumed:
+        //
+        // 1. The floor sits immediately below `row_cmp` (`row_cmp + 1` onward is OUTSIDE) -- not
+        //    merely "pre-filled to capacity", a REAL floor, so there is no vertical edge leaving
+        //    `row_cmp` downward at all. GRAVITY_HEAD_SCALE's flat, depth-independent driving fully
+        //    drains any resting material into any empty room below in a single tick regardless of
+        //    source amount; with an empty row below THAT too, a pre-filled-but-unwalled cushion just
+        //    moved the cascade one row further before spilling into row_cmp+2. `row_stack` draining
+        //    into `row_cmp` is still possible (there IS room there) but has nowhere further to
+        //    cascade to, so it is bounded to that one, equal-on-both-branches transfer.
+        // 2. `xa` and `xb` have no OTHER lateral neighbour (walls immediately outside both) -- with
+        //    open neighbours on the outside, `k_a * LATERAL_PRESSURE_SCALE * depth_a` is large
+        //    enough relative to the cells' own small fill that BOTH cells drain hard toward their
+        //    OWN empty far side simultaneously, which swamps the one edge (`xa` |-> `xb`) this test
+        //    means to isolate with unrelated three- and four-cell redistribution.
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        for y in wall..=row_cmp {
+            for x in [xa, xb] {
+                mask[y * w + x] = crate::MASK_INSIDE;
+            }
+        }
+
+        let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32; // 512/16 = 32
+        let stack_a = 0.03f32;
+        let stack_b = 0.02f32;
+        let depth_a = stack_a * depth_scale;
+        let depth_b = stack_b * depth_scale;
+        let h_a = 0.10f32;
+        // TASK #55 UNIT FIX: eta_new = h * depth_scale + column_depth, so the flat-eta condition
+        // is h_a * depth_scale + depth_a == h_b * depth_scale + depth_b, i.e. h_b = h_a +
+        // (depth_a - depth_b) / depth_scale = h_a + (stack_a - stack_b). See this test's own doc
+        // comment for why this replaced the pre-fix `h_a + (depth_a - depth_b)`.
+        let h_b = h_a + (stack_a - stack_b); // eta_a == eta_b by construction, post-unit-fix
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let props = get_test_props(MaterialMode::Water, w * h);
+
+        let run = |mult_enabled: bool| -> (f32, f32, f32, f32) {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 16);
+            sim.fresh_pressure_field = true;
+            sim.hm.data[row_stack * w + xa] = stack_a;
+            sim.hm.data[row_stack * w + xb] = stack_b;
+            sim.hm.data[row_cmp * w + xa] = h_a;
+            sim.hm.data[row_cmp * w + xb] = h_b;
+            multiplicative_lateral_gate::set_enabled(mult_enabled);
+            sim.tick(gravity_dir, usize::MAX);
+            multiplicative_lateral_gate::set_enabled(false);
+            (
+                sim.hm.data[row_cmp * w + xa],
+                sim.hm.data[row_cmp * w + xb],
+                sim.column_depth[row_cmp * w + xa],
+                sim.column_depth[row_cmp * w + xb],
+            )
+        };
+
+        let (a_off, b_off, cd_a_off, cd_b_off) = run(false);
+        let (a_on, b_on, cd_a_on, cd_b_on) = run(true);
+        // `row_stack` draining vertically into `row_cmp` (see the mask's own doc comment) is
+        // expected and identical regardless of the gate -- it is the phase-0 VERTICAL edge, which
+        // this change does not touch. Isolate LATERAL drift by comparing against
+        // `h_a + stack_a` / `h_b + stack_b` (what each cell holds after that vertical settling but
+        // before any lateral edge could move anything), not against the pre-tick `h_a`/`h_b`.
+        let expect_a = h_a + stack_a;
+        let expect_b = h_b + stack_b;
+        let lateral_drift_off = (a_off - expect_a).abs() + (b_off - expect_b).abs();
+        let lateral_drift_on = (a_on - expect_a).abs() + (b_on - expect_b).abs();
+        println!(
+            "test_mult_lateral_flat_surface_same_eta_different_depth_no_flux: \
+             h_a={:.4} h_b={:.4} depth_a={:.4} depth_b={:.4} (eta_a={:.4} eta_b={:.4})  \
+             additive: column_depth=({:.4},{:.4}) after=({:.4},{:.4}) lateral_drift={:.5}  \
+             multiplicative: column_depth=({:.4},{:.4}) after=({:.4},{:.4}) lateral_drift={:.5}",
+            h_a, h_b, depth_a, depth_b, h_a * depth_scale + depth_a, h_b * depth_scale + depth_b,
+            cd_a_off, cd_b_off, a_off, b_off, lateral_drift_off,
+            cd_a_on, cd_b_on, a_on, b_on, lateral_drift_on
+        );
+
+        // Harness sanity: `column_depth` really did come out different between the two columns
+        // (otherwise this test would trivially pass without exercising anything), AND the additive
+        // (legacy, default-shipping) form really does show the documented bug here -- otherwise
+        // this test would prove nothing about what the multiplicative gate changes.
+        assert!(
+            (cd_a_off - cd_b_off).abs() > 0.1,
+            "harness sanity: column_depth did not differ between the two columns ({:.4} vs {:.4})",
+            cd_a_off, cd_b_off
+        );
+        assert!(
+            lateral_drift_off > 0.1,
+            "harness sanity: the legacy additive form (gate off, today's shipped default) did not \
+             show the documented same-surface/different-depth bug here (lateral_drift={:.5}) -- this \
+             test's construction needs revisiting, it isn't exercising what it claims to.",
+            lateral_drift_off
+        );
+
+        // The actual prediction: with the multiplicative gate on, a driving term proportional to
+        // `eta_a - eta_b` (== 0 by construction) must not move any material laterally, regardless
+        // of how different the two columns' `column_depth` is.
+        assert!(
+            lateral_drift_on < 1e-3,
+            "Same-eta, different-depth columns saw lateral flux under the multiplicative gate: \
+             lateral_drift={:.5} (expected ~0, since grad(eta) == 0 by construction)",
+            lateral_drift_on
+        );
+    }
+
+    /// TASK #55: own quick check of `test_liquid_flowing_liquid_does_not_stand_in_walls`'s void
+    /// count with `multiplicative_lateral_gate` on vs off, run inside the SAME build so both
+    /// numbers come from one compile (see the gate's own doc comment for why this pattern exists).
+    /// Not a pass/fail spec on its own -- the task brief's real metric is a separate agent's
+    /// diagnostic -- this exists only so a reader of this change can see, without trusting a
+    /// second-hand number, what the multiplicative form actually does to this specific scenario.
+    /// Reproduces the exact scenario `test_liquid_flowing_liquid_does_not_stand_in_walls` uses
+    /// (same mask, same fill, same 400-tick run, same void-count metric) at `test_scale()`.
+    #[test]
+    #[ignore = "DIAGNOSTIC measurement, not a pass/fail spec — never assert on these numbers. \
+                Run with: cargo test -p sandart-sim --release --lib \
+                physics::tests::diag_mult_lateral_void_count_gate_on_vs_off -- --ignored --nocapture"]
+    fn diag_mult_lateral_void_count_gate_on_vs_off() {
+        let s = test_scale();
+        let w = 64 * s;
+        let h = 64 * s;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let count_voids = |sim: &TestSim| -> usize {
+            let mut voids = 0;
+            for y in 1..h - 1 {
+                let mut liquid_to_the_left = false;
+                for x in 0..w {
+                    if mask[y * w + x] == crate::MASK_OUTSIDE {
+                        liquid_to_the_left = false;
+                        continue;
+                    }
+                    let v = sim.hm.data[y * w + x];
+                    if v > 0.5 {
+                        liquid_to_the_left = true;
+                        continue;
+                    }
+                    if !liquid_to_the_left || v > 0.05 {
+                        continue;
+                    }
+                    let liquid_to_the_right = (x + 1..w)
+                        .take_while(|&x2| mask[y * w + x2] != crate::MASK_OUTSIDE)
+                        .any(|x2| sim.hm.data[y * w + x2] > 0.5);
+                    if liquid_to_the_right {
+                        voids += 1;
+                    }
+                }
+            }
+            voids
+        };
+
+        let run = |mult_enabled: bool| -> (usize, usize, usize) {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 32);
+            for y in 0..h / 2 {
+                for x in 0..w {
+                    if mask[y * w + x] != crate::MASK_OUTSIDE {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+            }
+            multiplicative_lateral_gate::set_enabled(mult_enabled);
+            let mut at_120 = 0;
+            let mut at_160 = 0;
+            let mut total = 0;
+            for t in 0..(400 * s) {
+                sim.tick(gravity_dir, usize::MAX);
+                let voids = count_voids(&sim);
+                total += voids;
+                if t + 1 == 120 * s {
+                    at_120 = voids;
+                }
+                if t + 1 == 160 * s {
+                    at_160 = voids;
+                }
+            }
+            multiplicative_lateral_gate::set_enabled(false);
+            (at_120, at_160, total)
+        };
+
+        let (off_120, off_160, off_total) = run(false);
+        let (on_120, on_160, on_total) = run(true);
+        println!(
+            "diag_mult_lateral_void_count_gate_on_vs_off: scale={} \
+             additive(off)   voids@120={} voids@160={} total={} \
+             multiplicative(on) voids@120={} voids@160={} total={}",
+            s, off_120, off_160, off_total, on_120, on_160, on_total
+        );
+    }
+
+    /// TASK #55, granular sanity check (Janssen composition): does the gated multiplicative form
+    /// stay well-behaved (mass-conserving, no NaN/explosion) for a GRANULAR material, where
+    /// `mult_lateral_conveyance` routes `column_depth` through `janssen_effective_depth` before the
+    /// power law -- rather than only through Water, where `janssen_effective_depth` is the identity
+    /// transform and this path is never really exercised. Not a repose-angle measurement (that
+    /// needs `test_dry_sand_has_angle_of_repose`'s much more careful rig); just: does draining
+    /// DrySand down an Hourglass under the multiplicative gate conserve mass and stay finite,
+    /// same as it does under the legacy additive term.
+    #[test]
+    #[ignore = "DIAGNOSTIC measurement, not a pass/fail spec — never assert on these numbers. \
+                Run with: cargo test -p sandart-sim --release --lib \
+                physics::tests::diag_mult_lateral_dry_sand_gate_on_vs_off -- --ignored --nocapture"]
+    fn diag_mult_lateral_dry_sand_gate_on_vs_off() {
+        let w = 64;
+        let h = 64;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+        let props = get_test_props(MaterialMode::DrySand, w * h);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let run = |mult_enabled: bool| -> (f64, f64, bool) {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 32);
+            for y in 0..h / 2 {
+                for x in 0..w {
+                    if mask[y * w + x] != crate::MASK_OUTSIDE {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+            }
+            let initial_mass = sim.mass();
+            multiplicative_lateral_gate::set_enabled(mult_enabled);
+            let mut any_non_finite = false;
+            for _ in 0..400 {
+                sim.tick(gravity_dir, usize::MAX);
+                if sim.hm.data.iter().any(|v| !v.is_finite()) {
+                    any_non_finite = true;
+                }
+            }
+            multiplicative_lateral_gate::set_enabled(false);
+            (initial_mass, sim.mass(), any_non_finite)
+        };
+
+        let (init_off, final_off, nan_off) = run(false);
+        let (init_on, final_on, nan_on) = run(true);
+        println!(
+            "diag_mult_lateral_dry_sand_gate_on_vs_off: \
+             additive(off)   mass {:.3} -> {:.3} (drift={:.4}) non_finite={}  \
+             multiplicative(on) mass {:.3} -> {:.3} (drift={:.4}) non_finite={}",
+            init_off, final_off, final_off - init_off, nan_off,
+            init_on, final_on, final_on - init_on, nan_on
+        );
+        assert!(!nan_off, "additive (default) path produced non-finite heights");
+        assert!(!nan_on, "multiplicative path produced non-finite heights");
     }
 
     #[test]
@@ -14339,5 +14825,1026 @@ mod tests {
                 report_fresh_overburden_fraction("fresh flip", grid, &sim, &mask, block_size);
             }
         }
+    }
+
+    /// Task #55 diagnostic harness. Sums material in `[y0, y1) x [x0, x1)` -- used by every
+    /// `diag_task55_*` test below to read off a scalar "how much material is here" without
+    /// repeating the double loop at each call site.
+    fn diag_task55_region_mass(data: &[f32], w: usize, x0: usize, x1: usize, y0: usize, y1: usize) -> f64 {
+        let mut m = 0.0f64;
+        for y in y0..y1 {
+            let row = y * w;
+            for x in x0..x1 {
+                m += data[row + x] as f64;
+            }
+        }
+        m
+    }
+
+    /// Task #55 diagnostic harness. Topmost row in `[y_lo, y_hi)` at column `x` holding more than
+    /// `eps` material -- the free-surface readout every `diag_task55_*` test below uses. `None`
+    /// means the whole probed range is empty (dry) at this column.
+    fn diag_task55_surface_row(
+        data: &[f32], w: usize, x: usize, y_lo: usize, y_hi: usize, eps: f32,
+    ) -> Option<usize> {
+        (y_lo..y_hi).find(|&y| data[y * w + x] > eps)
+    }
+
+    /// Task #55, defect 1: "a standing arch of liquid over a void does not collapse... it slowly
+    /// drains instead of flattening fast". The user's acceptance bar (verbatim, from the task
+    /// brief): "arch fixes itself even if there is outflow at the bottom of the arch. not arch
+    /// can't happen" -- so this measures the DECAY RATE of the arch's own unsupported span while
+    /// material is actively falling off it into the void below, not merely whether an arch can
+    /// exist at all.
+    ///
+    /// Hand-built container (no existing `SandboxShape` gives two solid piers with a clean gap --
+    /// see this task's report): an open rectangular box, two solid liquid piers on the left/right
+    /// walls, and a thin liquid slab ("the arch") spanning the gap between them at the same height
+    /// as the piers' own tops. Below the arch, down to the floor, is empty -- the void. As soon as
+    /// the arch is unsupported it starts shedding material into that void (the "outflow" the brief
+    /// asks for: material draining out of the arch's underside), which piles up on the floor --
+    /// but the void is deep enough (58 rows) that this pile cannot climb back up to arch height
+    /// within the run, so "unsupported span shrinking" here can only mean the arch itself is
+    /// spreading/sinking, not that a pile grew up to meet it from below.
+    ///
+    /// `unsupported_span(t)`: POSITION-INDEPENDENT by construction (see the metric's own inline
+    /// comment for why a "does the original 4-row band still hold material" version is wrong -- a
+    /// completely unsupported slab free-falls as a coherent body and vacates its starting rows in
+    /// 1-2 ticks regardless of whether it is flattening or just falling intact, which a first
+    /// version of this metric measured and reported a meaningless `ticks_to_halve = 1`). Per void
+    /// column, this walks up from the floor while cells are continuously filled to find the
+    /// CURRENT floor-connected pile's own top, then sums material at least 3 rows above that --
+    /// i.e. still genuinely suspended over empty space, wherever it currently is. Reported as an
+    /// absolute time series (in cell-mass units) plus the tick at which it first drops to <= half
+    /// its initial value, for both the shipped adaptive scheduler (`budget_n = 256`, exactly what
+    /// ships) and `perfect_sim_tick` (every block always simulated, `MUST_SIMULATE_THRESHOLD`-
+    /// admitted every tick) -- comparing the two separates "the scheduler isn't waking these
+    /// blocks" from "the physics doesn't level", per the task brief. DIAGNOSTIC (reproduce-only,
+    /// no assertions). Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_arch_collapse_rate() {
+        let w = 64usize;
+        let h = 100usize;
+        let margin = 2usize;
+        let block_size = 2usize;
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        for y in margin..h - margin {
+            for x in margin..w - margin {
+                mask[y * w + x] = crate::MASK_INSIDE;
+            }
+        }
+
+        let pillar_w = 12usize;
+        let gap_x0 = margin + pillar_w; // first void column
+        let gap_x1 = w - margin - pillar_w; // one past the last void column
+        let arch_top = 36usize; // top row of both piers and the arch slab
+        let arch_bot = arch_top + 4; // one past the arch slab's 4 rows
+        let floor = h - margin; // first OUTSIDE row
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let props = get_test_props(MaterialMode::Water, w * h);
+
+        let build_sim = || -> TestSim {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+            for y in arch_top..floor {
+                for x in margin..gap_x0 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+                for x in gap_x1..w - margin {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+            for y in arch_top..arch_bot {
+                for x in gap_x0..gap_x1 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+            sim
+        };
+
+        // POSITION-INDEPENDENT metric -- deliberately NOT "how much of the original 4 arch rows
+        // still has material in them". A first version tried that and it is wrong: a completely
+        // unsupported liquid slab free-falls as a coherent body, so it vacates its ORIGINAL rows
+        // within 1-2 ticks regardless of whether it is "flattening" or just falling intact and
+        // landing elsewhere -- that version measured "did the material leave its starting
+        // position", not "is material still suspended over empty space", and reported a
+        // ticks_to_halve of 1 under BOTH adaptive and perfect_sim that turned out to mean nothing
+        // (see this task's report).
+        //
+        // This version tracks, per void column, the CURRENT floor-connected pile (walking up from
+        // the floor while cells are continuously filled) and sums material sitting at least
+        // `gap_buffer` empty rows above that pile's own top -- i.e. still genuinely hanging with
+        // real clearance beneath it, wherever it currently is. This reads 144.0 at t=0 (no pile
+        // exists yet) and can only fall as fast as material actually gains support (whether by
+        // landing on the growing pile or by spreading down the pillars' own sides), not merely by
+        // moving.
+        let eps = 0.05f32;
+        let gap_buffer = 3usize;
+        let unsupported_span = |data: &[f32]| -> f64 {
+            let mut total = 0.0f64;
+            for x in gap_x0..gap_x1 {
+                let mut pile_top = floor;
+                while pile_top > arch_top && data[(pile_top - 1) * w + x] > eps {
+                    pile_top -= 1;
+                }
+                let hanging_hi = pile_top.saturating_sub(gap_buffer).max(arch_top);
+                total += diag_task55_region_mass(data, w, x, x + 1, arch_top, hanging_hi);
+            }
+            total
+        };
+
+        let budget_n = 256usize;
+        let run_ticks = 400usize;
+        let probe_ticks: [usize; 20] = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 400,
+        ];
+
+        println!(
+            "diag_task55_arch_collapse_rate: w={w} h={h} block_size={block_size} budget_n={budget_n} \
+             gap=[{gap_x0},{gap_x1}) arch_rows=[{arch_top},{arch_bot})"
+        );
+
+        // TASK #55 cross-measurement: defensive reset before this test's own loop runs, in case a
+        // prior test on this same thread panicked mid-toggle (same pattern as
+        // `diag_task47_variant_divergence_comparison`'s use of `fresh_overburden_gate`).
+        multiplicative_lateral_gate::set_enabled(false);
+        for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
+            for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
+                let mut sim = build_sim();
+                multiplicative_lateral_gate::set_enabled(mult_enabled);
+                let initial = unsupported_span(&sim.hm.data);
+                let target = initial * 0.5;
+                let mut half_life_tick: Option<usize> = None;
+                let mut next_probe = 0usize;
+                println!(
+                    "diag_task55_arch_collapse_rate: --- {gate_label} / {label} --- initial_unsupported={initial:.4}"
+                );
+                for t in 0..=run_ticks {
+                    let span = unsupported_span(&sim.hm.data);
+                    if half_life_tick.is_none() && t > 0 && span <= target {
+                        half_life_tick = Some(t);
+                    }
+                    if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                        next_probe += 1;
+                        println!(
+                            "diag_task55_arch_collapse_rate: {gate_label:<22} {label:<20} tick={t:>4} unsupported_span={span:>10.4} \
+                             fraction_of_initial={:.4}",
+                            span / initial.max(1e-9)
+                        );
+                    }
+                    if t == run_ticks {
+                        break;
+                    }
+                    if use_perfect {
+                        perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                    } else {
+                        sim.tick(gravity_dir, budget_n);
+                    }
+                }
+                multiplicative_lateral_gate::set_enabled(false);
+                println!(
+                    "diag_task55_arch_collapse_rate: {gate_label:<22} {label:<20} ticks_to_halve={half_life_tick:?} \
+                     (initial={initial:.4}, target<={target:.4})"
+                );
+            }
+        }
+    }
+
+    /// Task #55, defect 2: "enclosed pockets in a procedural cave do not equalise their surface
+    /// level" -- the user's own suggested reproduction ("I think there is an easy way to reproduce
+    /// this with procedural caves"). Uses the actual procedural-cave shape, `SandboxShape::
+    /// ProceduralFunnel` (`eval_sandbox_shape`'s noise-carved stalactite/stalagmite chamber -- see
+    /// its own match arm's doc comment), at its production default parameters
+    /// (`neck_width=0.005, hourglass_curve=0.6`, `w=h=128`).
+    ///
+    /// Geometry (found by dumping this exact mask as ASCII and reading off real coordinates --
+    /// see this task's report for the dump): the noise carving splits the lower half of the cave
+    /// into two separate vertical wells, columns roughly x=[43,70) (left) and x=[72,94) (right),
+    /// spanning rows 93-105, which share a common ceiling opening at row 92 above them AND a
+    /// common basin below them (rows >= 106, single wide open span) -- a genuine two-wells-plus-
+    /// shared-basin ("communicating vessels") topology, not a hand-built one. Filling the shared
+    /// basin solid and each well to a DIFFERENT height (left well surface at row 97, right well at
+    /// row 100 -- both still safely inside their own well, below the row-92 ceiling) gives two
+    /// separate free surfaces connected only through the submerged basin beneath both, i.e.
+    /// exactly the differing-level, passage-connected setup the task brief asks for.
+    ///
+    /// `level_diff(t)`: |surface_row(right probe column) - surface_row(left probe column)|, probed
+    /// at x=60 (left well) and x=87 (right well), read from `diag_task55_surface_row` over each
+    /// well's own row range (falling back to the basin's top row, 106, if a well runs dry -- the
+    /// natural "fully equalised" reading). Reported as a time series plus ticks-to-halve, for both
+    /// the shipped adaptive scheduler and `perfect_sim_tick` -- see `diag_task55_arch_collapse_rate`
+    /// for why both are reported. DIAGNOSTIC (reproduce-only, no assertions). Run with --ignored
+    /// --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_pocket_equalisation() {
+        let w = 128usize;
+        let h = 128usize;
+        let block_size = 4usize; // grid / 32, per this file's own convention
+        let mask = make_test_mask(w, h, SandboxShape::ProceduralFunnel, 0.005, 0.6);
+
+        let left_x0 = 55usize;
+        let left_x1 = 66usize; // exclusive
+        let right_x0 = 83usize;
+        let right_x1 = 91usize; // exclusive
+        let well_top = 93usize; // shared ceiling opening is row 92; wells start at 93
+        let well_bot = 106usize; // basin's own top row (first row both wells merge into)
+        let basin_bot = 115usize; // stop just above the funnel's bottom taper wall
+        let left_surface0 = 97usize; // left well filled [97, well_bot) -- taller column
+        let right_surface0 = 100usize; // right well filled [100, well_bot) -- shorter column
+        let left_probe = 60usize;
+        let right_probe = 87usize;
+
+        // Harness sanity: every cell this test fills must actually be inside the cave. If the
+        // noise carving ever changes, this fails loudly instead of silently reading a wall.
+        for x in left_x0..left_x1 {
+            for y in left_surface0..well_bot {
+                assert_ne!(
+                    mask[y * w + x], crate::MASK_OUTSIDE,
+                    "left well cell (x={x}, y={y}) is outside the cave -- geometry assumption stale"
+                );
+            }
+        }
+        for x in right_x0..right_x1 {
+            for y in right_surface0..well_bot {
+                assert_ne!(
+                    mask[y * w + x], crate::MASK_OUTSIDE,
+                    "right well cell (x={x}, y={y}) is outside the cave -- geometry assumption stale"
+                );
+            }
+        }
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let props = get_test_props(MaterialMode::Water, w * h);
+
+        let build_sim = || -> TestSim {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    if mask[idx] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    let in_basin = y >= well_bot && y < basin_bot;
+                    let in_left_well = x >= left_x0 && x < left_x1 && y >= left_surface0 && y < well_bot;
+                    let in_right_well =
+                        x >= right_x0 && x < right_x1 && y >= right_surface0 && y < well_bot;
+                    if in_basin || in_left_well || in_right_well {
+                        sim.hm.data[idx] = 1.0;
+                    }
+                }
+            }
+            sim
+        };
+
+        let eps = 0.05f32;
+        let level_diff = |data: &[f32]| -> f64 {
+            let left = diag_task55_surface_row(data, w, left_probe, well_top, well_bot, eps)
+                .unwrap_or(well_bot);
+            let right = diag_task55_surface_row(data, w, right_probe, well_top, well_bot, eps)
+                .unwrap_or(well_bot);
+            (right as f64 - left as f64).abs()
+        };
+
+        let budget_n = 256usize;
+        let run_ticks = 300usize;
+        let probe_ticks: [usize; 11] = [0, 2, 5, 10, 20, 30, 50, 75, 100, 150, 300];
+
+        println!(
+            "diag_task55_pocket_equalisation: w={w} h={h} block_size={block_size} budget_n={budget_n} \
+             left_well=[{left_x0},{left_x1})x[{left_surface0},{well_bot}) \
+             right_well=[{right_x0},{right_x1})x[{right_surface0},{well_bot}) basin=[{well_bot},{basin_bot})"
+        );
+
+        // TASK #55 cross-measurement: defensive reset before this test's own loop runs, in case a
+        // prior test on this same thread panicked mid-toggle (same pattern as
+        // `diag_task47_variant_divergence_comparison`'s use of `fresh_overburden_gate`).
+        multiplicative_lateral_gate::set_enabled(false);
+        for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
+            for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
+                let mut sim = build_sim();
+                multiplicative_lateral_gate::set_enabled(mult_enabled);
+                let initial = level_diff(&sim.hm.data);
+                let target = initial * 0.5;
+                let mut half_life_tick: Option<usize> = None;
+                let mut next_probe = 0usize;
+                println!(
+                    "diag_task55_pocket_equalisation: --- {gate_label} / {label} --- initial_level_diff={initial:.4} rows"
+                );
+                for t in 0..=run_ticks {
+                    let diff = level_diff(&sim.hm.data);
+                    if half_life_tick.is_none() && t > 0 && diff <= target {
+                        half_life_tick = Some(t);
+                    }
+                    if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                        next_probe += 1;
+                        let left = diag_task55_surface_row(&sim.hm.data, w, left_probe, well_top, well_bot, eps)
+                            .unwrap_or(well_bot);
+                        let right = diag_task55_surface_row(&sim.hm.data, w, right_probe, well_top, well_bot, eps)
+                            .unwrap_or(well_bot);
+                        println!(
+                            "diag_task55_pocket_equalisation: {gate_label:<22} {label:<20} tick={t:>4} left_surface_row={left:>3} \
+                             right_surface_row={right:>3} level_diff={diff:>7.4} fraction_of_initial={:.4}",
+                            diff / initial.max(1e-9)
+                        );
+                    }
+                    if t == run_ticks {
+                        break;
+                    }
+                    if use_perfect {
+                        perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                    } else {
+                        sim.tick(gravity_dir, budget_n);
+                    }
+                }
+                multiplicative_lateral_gate::set_enabled(false);
+                println!(
+                    "diag_task55_pocket_equalisation: {gate_label:<22} {label:<20} ticks_to_halve={half_life_tick:?} \
+                     (initial={initial:.4}, target<={target:.4})"
+                );
+            }
+        }
+    }
+
+    /// Task #55, defect 3: "a draining lake does not stay level while it drains". Reuses the
+    /// `Hourglass`/mid-drain recipe `diag_task47_block_fraction_table`'s "mid-drain hourglass"
+    /// scenario already exercises (`neck_width=0.15, hourglass_curve=0.6`), but with Water instead
+    /// of DrySand -- defect 3 is specifically about liquid -- and a shallower initial fill so the
+    /// lake has room to visibly drain over the run instead of staying pinned at the chamber's own
+    /// ceiling.
+    ///
+    /// `spread(t)`: max - min of the per-column free-surface row (`diag_task55_surface_row`) over
+    /// every "wetted" column (any column with material above `eps` anywhere in the top chamber) --
+    /// exactly "max-minus-min free surface height across the wetted region" from the task brief.
+    /// Also reports the mean surface row each probe tick, to confirm the lake is actually draining
+    /// (mean row increasing) rather than sitting static -- a flat `spread` on a lake that never
+    /// drains would not be evidence of anything. DIAGNOSTIC (reproduce-only, no assertions,
+    /// reported as a full time series plus the run's peak spread rather than a ticks-to-halve
+    /// number -- the brief does not ask for a decay rate here, and a lake that starts flat by
+    /// construction has nothing to halve from). Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_draining_lake_flatness() {
+        let w = 64usize;
+        let h = 64usize;
+        let block_size = 2usize;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+        let center_y = h / 2;
+        let fill_lo = 12usize; // top of the initial lake (leaves headroom below the chamber ceiling)
+        let fill_hi = center_y; // bottom of the top chamber, i.e. down to the neck
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let props = get_test_props(MaterialMode::Water, w * h);
+
+        let build_sim = || -> TestSim {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+            for y in fill_lo..fill_hi {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    if mask[idx] != crate::MASK_OUTSIDE {
+                        sim.hm.data[idx] = 1.0;
+                    }
+                }
+            }
+            sim
+        };
+
+        let eps = 0.05f32;
+        // (spread, mean_row, wetted_columns) over every column with material anywhere in the top
+        // chamber's row range.
+        let surface_stats = |data: &[f32]| -> (f64, f64, usize) {
+            let mut rows = Vec::new();
+            for x in 0..w {
+                if mask[fill_lo * w + x] == crate::MASK_OUTSIDE
+                    && (fill_lo..center_y).all(|y| mask[y * w + x] == crate::MASK_OUTSIDE)
+                {
+                    continue;
+                }
+                if let Some(r) = diag_task55_surface_row(data, w, x, fill_lo, center_y, eps) {
+                    rows.push(r);
+                }
+            }
+            if rows.is_empty() {
+                return (0.0, center_y as f64, 0);
+            }
+            let min_r = *rows.iter().min().unwrap();
+            let max_r = *rows.iter().max().unwrap();
+            let mean_r = rows.iter().sum::<usize>() as f64 / rows.len() as f64;
+            ((max_r - min_r) as f64, mean_r, rows.len())
+        };
+
+        let budget_n = 256usize;
+        let run_ticks = 400usize;
+        let probe_ticks: [usize; 13] =
+            [0, 2, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 400];
+
+        println!(
+            "diag_task55_draining_lake_flatness: w={w} h={h} block_size={block_size} budget_n={budget_n} \
+             fill=[{fill_lo},{fill_hi}) neck_width=0.15 hourglass_curve=0.6"
+        );
+
+        // TASK #55 cross-measurement: defensive reset before this test's own loop runs, in case a
+        // prior test on this same thread panicked mid-toggle (same pattern as
+        // `diag_task47_variant_divergence_comparison`'s use of `fresh_overburden_gate`).
+        multiplicative_lateral_gate::set_enabled(false);
+        for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
+            for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
+                let mut sim = build_sim();
+                multiplicative_lateral_gate::set_enabled(mult_enabled);
+                let mut peak_spread = 0.0f64;
+                let mut peak_spread_tick = 0usize;
+                let mut next_probe = 0usize;
+                println!("diag_task55_draining_lake_flatness: --- {gate_label} / {label} ---");
+                for t in 0..=run_ticks {
+                    let (spread, mean_row, wetted) = surface_stats(&sim.hm.data);
+                    if spread > peak_spread {
+                        peak_spread = spread;
+                        peak_spread_tick = t;
+                    }
+                    if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                        next_probe += 1;
+                        println!(
+                            "diag_task55_draining_lake_flatness: {gate_label:<22} {label:<20} tick={t:>4} spread={spread:>7.4} \
+                             mean_surface_row={mean_row:>7.3} wetted_columns={wetted:>3}"
+                        );
+                    }
+                    if t == run_ticks {
+                        break;
+                    }
+                    if use_perfect {
+                        perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                    } else {
+                        sim.tick(gravity_dir, budget_n);
+                    }
+                }
+                multiplicative_lateral_gate::set_enabled(false);
+                println!(
+                    "diag_task55_draining_lake_flatness: {gate_label:<22} {label:<20} peak_spread={peak_spread:.4} \
+                     at tick={peak_spread_tick}"
+                );
+            }
+        }
+    }
+
+    /// Task #55 "cheap prediction worth testing": today's lateral driving head is ADDITIVE
+    /// (`head_a = h_a + k * LATERAL_PRESSURE_SCALE * depth_a`, see `LATERAL_PRESSURE_SCALE`'s own
+    /// doc comment) -- the brief's hypothesis is that a FLAT liquid surface sitting over columns of
+    /// DIFFERENT depth (e.g. a flat lake over a sloping floor) might still be driven to flow,
+    /// because the `depth_a`/`depth_b` (`column_depth`) terms differ even though the surfaces do
+    /// not.
+    ///
+    /// Hand-built container: a step in the floor (left region's floor 10 rows deeper than the
+    /// right region's, `step_x` splits the two), filled with Water so BOTH regions' material tops
+    /// out at the exact same row (`top_row`) -- a genuinely flat free surface over a stepped floor,
+    /// left column 18 rows deep, right column 8 rows deep at the moment of construction. This
+    /// mirrors the already-in-tree `test_mult_lateral_flat_surface_over_sloping_floor_no_drift`'s
+    /// construction (same idea, independently sized here) rather than inventing a new one, since
+    /// that scenario is already known to isolate the mechanism cleanly.
+    ///
+    /// Reports two independent things: (1) an ANALYTIC check -- `column_depth` at a row comfortably
+    /// inside both columns and above the step (row 25, i.e. 5 rows below the shared surface on both
+    /// sides), computed directly via `recompute_column_depth` before any tick runs, for both
+    /// columns; `column_depth` is a per-CELL top-down accumulation of resting material above THAT
+    /// cell (see its own doc comment), which counts filled rows above the free surface -- at equal
+    /// depth-below-a-shared-flat-surface this should read identically regardless of how deep the
+    /// floor is beneath either column, so this check is a direct test of whether the mechanism the
+    /// brief names is even live at a row unaffected by the step's own sidewall. (2) an EMPIRICAL
+    /// check -- net mass drift into the shallow (right) region over 60 ticks, both under the
+    /// shipped additive head (`perfect_sim_tick`, ground truth) and, as a bonus (this gate already
+    /// exists in the tree, `multiplicative_lateral_gate` -- an experimental candidate fix for
+    /// exactly this mechanism; toggling it is read-only, it changes no default), under the
+    /// multiplicative alternative, so a reader can see both numbers from one build.
+    ///
+    /// DIAGNOSTIC (reproduce-only, no assertions). Reports the answer plainly either way --  a null
+    /// result (no drift, `column_depth` equal) is as useful as a positive one. Run with --ignored
+    /// --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_flat_surface_over_sloping_floor() {
+        let w = 24usize;
+        let h = 40usize;
+        let wall = 2usize;
+        let step_x = 12usize; // x < step_x: deep (left) region; x >= step_x: shallow (right) region
+        let floor_left = h - wall; // first OUTSIDE row, left region
+        let floor_right = floor_left - 10; // right region's floor is 10 rows shallower
+        let top_row = 20usize; // shared, flat top row for both regions
+        let probe_row = 25usize; // 5 rows below the shared surface, above the step's own sidewall
+        assert!(top_row < floor_right && probe_row < floor_right, "harness sanity");
+
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                if x < wall || x >= w - wall {
+                    continue;
+                }
+                let floor = if x < step_x { floor_left } else { floor_right };
+                if y >= wall && y < floor {
+                    mask[y * w + x] = crate::MASK_INSIDE;
+                }
+            }
+        }
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let props = get_test_props(MaterialMode::Water, w * h);
+
+        let build_sim = || -> TestSim {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 4);
+            for y in top_row..h {
+                for x in wall..w - wall {
+                    let floor = if x < step_x { floor_left } else { floor_right };
+                    if y < floor {
+                        sim.hm.data[y * w + x] = 0.9; // see the in-tree sibling test: 0.9, not 1.0,
+                        // so `room_a`/`room_b` aren't both zero everywhere, which would sleep
+                        // every edge on the "pooled interior" branch regardless of driving head.
+                    }
+                }
+            }
+            sim
+        };
+
+        // --- (1) Analytic check: column_depth at equal depth-below-surface, both sides of the step.
+        {
+            let sim0 = build_sim();
+            let mut column_depth = vec![0.0f32; w * h];
+            recompute_column_depth(
+                w, h, &mask, &sim0.hm.data, &sim0.hm.data, &sim0.hm.external_mass_this_tick,
+                &sim0.cell_props, &sim0.edge_vel_v, &mut column_depth[..],
+            );
+            let left_x = step_x - 1;
+            let right_x = step_x + 1;
+            let left_depth = column_depth[probe_row * w + left_x];
+            let right_depth = column_depth[probe_row * w + right_x];
+            println!(
+                "diag_task55_flat_surface_over_sloping_floor: ANALYTIC row={probe_row} \
+                 (both sides {}rows below shared surface row={top_row}) \
+                 left_x={left_x} (floor={floor_left}, depth-to-floor={}) column_depth={left_depth:.4} | \
+                 right_x={right_x} (floor={floor_right}, depth-to-floor={}) column_depth={right_depth:.4} | \
+                 delta={:.4}",
+                probe_row - top_row, floor_left - probe_row, floor_right - probe_row,
+                (left_depth - right_depth).abs()
+            );
+        }
+
+        // --- (2) Empirical check: net mass drift into the shallow region over time, shipped head
+        // vs. (bonus) the multiplicative candidate.
+        let right_mass = |data: &[f32]| -> f64 {
+            diag_task55_region_mass(data, w, step_x, w - wall, top_row, floor_right)
+        };
+        let run_ticks = 60usize;
+        let probe_ticks: [usize; 8] = [0, 1, 2, 5, 10, 20, 40, 60];
+
+        for (label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(bonus,gated)", true)] {
+            let mut sim = build_sim();
+            let initial = right_mass(&sim.hm.data);
+            multiplicative_lateral_gate::set_enabled(mult_enabled);
+            let mut next_probe = 0usize;
+            println!(
+                "diag_task55_flat_surface_over_sloping_floor: EMPIRICAL --- {label} --- \
+                 initial_right_mass={initial:.4}"
+            );
+            for t in 0..=run_ticks {
+                if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                    next_probe += 1;
+                    let mass = right_mass(&sim.hm.data);
+                    println!(
+                        "diag_task55_flat_surface_over_sloping_floor: {label:<28} tick={t:>3} \
+                         right_mass={mass:>9.4} drift={:>9.4}",
+                        mass - initial
+                    );
+                }
+                if t == run_ticks {
+                    break;
+                }
+                perfect_sim_tick(&mut sim, &mask, gravity_dir);
+            }
+            multiplicative_lateral_gate::set_enabled(false);
+        }
+    }
+
+    /// TASK #55, Job 2 investigation: why does `test_liquid_flowing_liquid_does_not_stand_in_walls`
+    /// regress at tick 160 (6 -> 12 voids) under `multiplicative_lateral_gate` even though it
+    /// improves at tick 120 (60 -> 54, see `diag_mult_lateral_void_count_gate_on_vs_off`)? Hypothesis
+    /// under test (from the task brief): `mult_lateral_conveyance` raises local depth to a POWER
+    /// (`MULT_LATERAL_CONVEYANCE_EXPONENT = 1.5`), so once the scenario is past its deep-pool phase
+    /// and into a thin trickle, conveyance collapses super-linearly (`x^1.5 < x` for `x < 1`) exactly
+    /// where the additive form's driving stays merely linear in depth -- i.e. the multiplicative form
+    /// may be too weak in the endgame, precisely when the last few voids need closing.
+    ///
+    /// Reads `h` and `column_depth` directly off the running `TestSim` post-tick (not a separate
+    /// recompute) and reproduces `settle_tick`'s own horizontal-edge formulas exactly (both forms),
+    /// for every edge flanking a still-open void, at each probe tick -- `gravity_dir.x == 0` in this
+    /// scenario so the tilt term both formulas carry (`gravity_dir.x * GRAVITY_HEAD_SCALE`) is
+    /// identically zero and dropped here. `liq == 1.0` unconditionally (Water, no granular blend),
+    /// so `k_of_liquidity(1.0) == 1.0` and `janssen_effective_depth` is the identity transform for
+    /// both forms -- this scenario never exercises the Janssen saturation curve either.
+    ///
+    /// Same scenario, same 64x64 Hourglass/Water/half-fill setup, same `budget_n = usize::MAX` as
+    /// `test_liquid_flowing_liquid_does_not_stand_in_walls` itself (not the 256-budget adaptive
+    /// scheduler the other `diag_task55_*` tests use) -- this is specifically about that test's own
+    /// regression, not the scheduler. DIAGNOSTIC (reproduce-only, no assertions). Run with --ignored
+    /// --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_mult_lateral_settling_falloff() {
+        let w = 64usize;
+        let h = 64usize;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
+        for y in 0..h / 2 {
+            for x in 0..w {
+                if mask[y * w + x] != crate::MASK_OUTSIDE {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+        }
+
+        // Same void definition as `test_liquid_flowing_liquid_does_not_stand_in_walls`'s own
+        // `count_voids`, but returning the void cells themselves rather than just a count.
+        let find_voids = |data: &[f32]| -> Vec<(usize, usize)> {
+            let mut voids = Vec::new();
+            for y in 1..h - 1 {
+                let mut liquid_to_the_left = false;
+                for x in 0..w {
+                    if mask[y * w + x] == crate::MASK_OUTSIDE {
+                        liquid_to_the_left = false;
+                        continue;
+                    }
+                    let v = data[y * w + x];
+                    if v > 0.5 {
+                        liquid_to_the_left = true;
+                        continue;
+                    }
+                    if !liquid_to_the_left || v > 0.05 {
+                        continue;
+                    }
+                    let liquid_to_the_right = (x + 1..w)
+                        .take_while(|&x2| mask[y * w + x2] != crate::MASK_OUTSIDE)
+                        .any(|x2| data[y * w + x2] > 0.5);
+                    if liquid_to_the_right {
+                        voids.push((y, x));
+                    }
+                }
+            }
+            voids
+        };
+
+        let liq = 1.0f32; // Water: liquidity(wetness) == 1 everywhere in this scenario.
+        let k = k_of_liquidity(liq); // == 1.0 for a fully liquid cell, both forms.
+        let mult_edge = |data: &[f32], cd: &[f32], a: usize, b: usize| -> (f32, f32, f32) {
+            let eta_a = data[a] + cd[a];
+            let eta_b = data[b] + cd[b];
+            let conveyance_a = mult_lateral_conveyance(data[a], cd[a], k, liq);
+            let conveyance_b = mult_lateral_conveyance(data[b], cd[b], k, liq);
+            let conveyance = 0.5 * (conveyance_a + conveyance_b);
+            (eta_a - eta_b, conveyance, MULT_LATERAL_SCALE * conveyance * (eta_a - eta_b))
+        };
+        let additive_edge = |data: &[f32], cd: &[f32], a: usize, b: usize| -> f32 {
+            let depth_a = janssen_effective_depth(cd[a], liq);
+            let depth_b = janssen_effective_depth(cd[b], liq);
+            (data[a] + k * LATERAL_PRESSURE_SCALE * depth_a)
+                - (data[b] + k * LATERAL_PRESSURE_SCALE * depth_b)
+        };
+
+        multiplicative_lateral_gate::set_enabled(true);
+        let probe_ticks: [usize; 13] = [80, 100, 110, 120, 130, 140, 150, 155, 160, 165, 170, 175, 180];
+        let mut next_probe = 0usize;
+        println!(
+            "diag_task55_mult_lateral_settling_falloff: w={w} h={h} \
+             (multiplicative gate ON, budget_n=usize::MAX, matching test_liquid_flowing_liquid_does_not_stand_in_walls)"
+        );
+        for t in 0..=180usize {
+            if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                next_probe += 1;
+                let voids = find_voids(&sim.hm.data);
+                let mut sum_grad = 0.0f64;
+                let mut sum_conv = 0.0f64;
+                let mut sum_mult_drive = 0.0f64;
+                let mut sum_add_drive = 0.0f64;
+                let mut n_edges = 0usize;
+                for &(y, x) in &voids {
+                    for &nx in &[x.wrapping_sub(1), x + 1] {
+                        if nx >= w || mask[y * w + nx] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        let a = y * w + x.min(nx);
+                        let b = y * w + x.max(nx);
+                        let (grad, conv, drive) = mult_edge(&sim.hm.data, &sim.column_depth, a, b);
+                        let add_drive = additive_edge(&sim.hm.data, &sim.column_depth, a, b);
+                        sum_grad += grad.abs() as f64;
+                        sum_conv += conv as f64;
+                        sum_mult_drive += drive.abs() as f64;
+                        sum_add_drive += add_drive.abs() as f64;
+                        n_edges += 1;
+                    }
+                }
+                let n = n_edges.max(1) as f64;
+                println!(
+                    "diag_task55_mult_lateral_settling_falloff: tick={t:>4} voids={:>3} void_edges={n_edges:>3} \
+                     mean|eta_grad|={:>9.5} mean_conveyance={:>10.4} mean|mult_drive|={:>10.6} mean|additive_drive|={:>9.5}",
+                    voids.len(), sum_grad / n, sum_conv / n, sum_mult_drive / n, sum_add_drive / n
+                );
+            }
+            if t == 180 {
+                break;
+            }
+            sim.tick(gravity_dir, usize::MAX);
+        }
+        multiplicative_lateral_gate::set_enabled(false);
+    }
+
+    /// TASK #55, Job 2 investigation, part 2: `diag_task55_mult_lateral_settling_falloff`'s
+    /// per-probe void counts under the multiplicative gate are NOT monotonically decreasing near
+    /// tick 160 (9 at t=155, 12 at t=160, 6 at t=165 -- a bump, not a plateau or a stall). Before
+    /// concluding "conveyance is too weak to close the endgame", this checks whether that kind of
+    /// transient bump is a normal feature of this scenario's settling (i.e. would show up under the
+    /// shipped additive form too, just at different ticks, and `test_liquid_flowing_liquid_does_not_
+    /// stand_in_walls`'s fixed 120/160 probes simply catch the multiplicative form's bump and miss
+    /// the additive form's), or whether it is specific to the multiplicative gate.
+    ///
+    /// Same scenario as `diag_task55_mult_lateral_settling_falloff`, EVERY tick from 100 to 180
+    /// (not sparse probes) under both gate states from one fresh sim each. DIAGNOSTIC
+    /// (reproduce-only, no assertions). Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_mult_lateral_settling_void_trajectory() {
+        let w = 64usize;
+        let h = 64usize;
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+        let props = get_test_props(MaterialMode::Water, w * h);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let count_voids = |sim: &TestSim| -> usize {
+            let mut voids = 0;
+            for y in 1..h - 1 {
+                let mut liquid_to_the_left = false;
+                for x in 0..w {
+                    if mask[y * w + x] == crate::MASK_OUTSIDE {
+                        liquid_to_the_left = false;
+                        continue;
+                    }
+                    let v = sim.hm.data[y * w + x];
+                    if v > 0.5 {
+                        liquid_to_the_left = true;
+                        continue;
+                    }
+                    if !liquid_to_the_left || v > 0.05 {
+                        continue;
+                    }
+                    let liquid_to_the_right = (x + 1..w)
+                        .take_while(|&x2| mask[y * w + x2] != crate::MASK_OUTSIDE)
+                        .any(|x2| sim.hm.data[y * w + x2] > 0.5);
+                    if liquid_to_the_right {
+                        voids += 1;
+                    }
+                }
+            }
+            voids
+        };
+
+        multiplicative_lateral_gate::set_enabled(false);
+        for (label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 32);
+            for y in 0..h / 2 {
+                for x in 0..w {
+                    if mask[y * w + x] != crate::MASK_OUTSIDE {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+            }
+            multiplicative_lateral_gate::set_enabled(mult_enabled);
+            let mut trajectory = String::new();
+            for t in 0..=180usize {
+                if t >= 100 {
+                    trajectory.push_str(&format!("{}:{} ", t, count_voids(&sim)));
+                }
+                if t == 180 {
+                    break;
+                }
+                sim.tick(gravity_dir, usize::MAX);
+            }
+            multiplicative_lateral_gate::set_enabled(false);
+            println!("diag_task55_mult_lateral_settling_void_trajectory: {label}\n  {trajectory}");
+        }
+    }
+
+    /// TASK #55, Job 3 investigation: is `eta = h + column_depth` (the free-surface elevation the
+    /// gated multiplicative lateral head's `grad(eta)` term reads, see `mult_lateral_conveyance`'s
+    /// doc comment) actually a coherent height, or off by `depth_scale = REFERENCE_GRID_HEIGHT / w`
+    /// (see `REFERENCE_GRID_HEIGHT`'s own doc comment) away from reference resolution?
+    ///
+    /// `column_depth` is DELIBERATELY resolution-normalised: `recompute_column_depth` multiplies
+    /// each row's `resting_above` contribution by `depth_scale` before accumulating specifically SO
+    /// THAT a column spanning many LOCAL rows contributes the same total regardless of grid
+    /// resolution (see `REFERENCE_GRID_HEIGHT`'s doc comment, "The fix"). `h`, by contrast, is never
+    /// touched by `depth_scale` anywhere -- it stays a fraction of ONE local cell's own capacity
+    /// (`cell_capacity_for`, ~1.0-1.5), which does not shrink or grow with grid resolution. Summing
+    /// them (`h + column_depth`) therefore adds a resolution-INDEPENDENT quantity to a resolution-
+    /// DEPENDENT one: only at `w == REFERENCE_GRID_HEIGHT == 512` (`depth_scale == 1.0`) do the two
+    /// terms share units. This test computes `column_depth` (via `recompute_column_depth`, the same
+    /// function `eta`'s `column_depth` term reads) for the IDENTICAL physical fill pattern (same
+    /// count of fully-filled rows above the probe, same probe-row fill fraction) at two different
+    /// grid widths, to show the resulting `eta` numerically, not just algebraically.
+    ///
+    /// DIAGNOSTIC (reproduce-only, no assertions -- this is a correctness question the task brief
+    /// asks be checked, not a regression gate). Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_eta_depth_scale_consistency() {
+        // PART 1 -- single column, SAME PHYSICAL GEOMETRY across w = 64/128/256/512.
+        //
+        // `column_depth`'s own design (`REFERENCE_GRID_HEIGHT`'s doc comment, "The fix") makes a
+        // FIXED PHYSICAL depth correspond to a row COUNT that scales linearly with `w`: refining
+        // the grid N-fold to cover the same physical container multiplies the rows spanning it by
+        // N, and `depth_scale = REFERENCE_GRID_HEIGHT / w` divides that back out. So "the same
+        // physical pile" at different `w` is NOT "the same number of stacked rows" (that was the
+        // original version of this test, and is itself a physically SHRINKING pile at higher `w`
+        // -- more on that below) -- it is `stacked_rows(w) = stacked_rows_ref * w /
+        // REFERENCE_GRID_HEIGHT`, i.e. a row count derived from a FIXED reference-row-unit
+        // quantity `stacked_rows_ref`, the same quantity `column_depth` itself is designed to
+        // report regardless of `w`.
+        //
+        // Consistency requires going further than the original test did: `probe_h`, the LOCAL
+        // partial-row remainder at the probe, must be derived from a fixed reference-row-unit
+        // quantity the SAME way -- `probe_h(w) = probe_h_ref / depth_scale(w) = probe_h_ref * w /
+        // REFERENCE_GRID_HEIGHT` -- not held at one constant LOCAL fraction across every `w` (the
+        // original test's choice). Holding `probe_h` fixed in LOCAL units is itself a hidden unit
+        // bug of exactly the same shape this task fixes: a fixed local fraction represents a
+        // SHRINKING physical remainder as `w` grows (thinner local rows), so it is not "the same
+        // physical geometry" either, and using it here would corrupt this very test's premise
+        // with the same mistake being fixed in `settle_tick`. Deriving `probe_h` from
+        // `probe_h_ref` the way `stacked_rows` is derived from `stacked_rows_ref` keeps the WHOLE
+        // scenario -- not just the stacked full rows -- pinned to one fixed physical shape at
+        // every resolution.
+        //
+        // Two depths swept: `40` (SHALLOW -- reduces to the original test's literal "5 rows at
+        // w=64" case, where `column_depth` and `h`'s reference-row-scaled contribution are close
+        // enough in magnitude that the old bug is clearly visible) and `320` (DEEP -- typical of
+        // an established pile, where `column_depth` dominates and the bug's effect on `eta`'s
+        // absolute value is small in percentage terms even though it is exactly the same
+        // dimensional error). Both `stacked_rows_ref` values divide evenly by every swept width's
+        // `REFERENCE_GRID_HEIGHT / w`, so `stacked_rows(w)` stays an exact integer throughout.
+        let probe_h_ref = 0.4f32;
+
+        for &(label, stacked_rows_ref) in &[("SHALLOW", 40usize), ("DEEP", 320usize)] {
+        println!(
+            "diag_task55_eta_depth_scale_consistency PART 1 [{label}]: single column, SAME \
+             physical geometry at every w (stacked_rows_ref={stacked_rows_ref}, \
+             probe_h_ref={probe_h_ref:.4}, both expressed in fixed reference-row units and \
+             converted to this w's local grid representation before simulating)"
+        );
+        let mut part1_new_eta = Vec::new();
+        let mut part1_old_eta = Vec::new();
+        for &w in &[64usize, 128usize, 256usize, 512usize] {
+            let h = w;
+            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+            let stacked_rows = stacked_rows_ref * w / REFERENCE_GRID_HEIGHT;
+            let probe_h_local = probe_h_ref * w as f32 / REFERENCE_GRID_HEIGHT as f32;
+            let probe_row = stacked_rows + 10;
+            let mask = vec![crate::MASK_INSIDE; w * h];
+            let mut heights = vec![0.0f32; w * h];
+            let probe_x = w / 2;
+            for r in (probe_row - stacked_rows)..probe_row {
+                heights[r * w + probe_x] = 1.0;
+            }
+            heights[probe_row * w + probe_x] = probe_h_local;
+
+            let external_mass_this_tick = vec![0.0f32; w * h];
+            let cell_props = get_test_props(MaterialMode::Water, w * h);
+            let edge_vel_v = vec![0.0f32; w * h];
+            let mut column_depth = vec![0.0f32; w * h];
+            recompute_column_depth(
+                w, h, &mask, &heights, &heights, &external_mass_this_tick, &cell_props, &edge_vel_v,
+                &mut column_depth[..],
+            );
+
+            let cd = column_depth[probe_row * w + probe_x];
+            let h_local = heights[probe_row * w + probe_x];
+            let eta_old = h_local + cd; // pre-fix: raw h, unscaled
+            let eta_new = h_local * depth_scale + cd; // post-fix: h lifted to column_depth's units
+            part1_old_eta.push(eta_old);
+            part1_new_eta.push(eta_new);
+            println!(
+                "  w={w:>4} depth_scale={depth_scale:>7.4} stacked_rows={stacked_rows:>3} \
+                 probe_h_local={probe_h_local:>8.5} column_depth={cd:>9.4} | \
+                 eta_OLD(h+cd)={eta_old:>9.4} eta_NEW(h*scale+cd)={eta_new:>9.4}"
+            );
+        }
+        let part1_new_baseline = *part1_new_eta.last().unwrap(); // w=512, depth_scale==1, no-op
+        let part1_old_baseline = *part1_old_eta.last().unwrap();
+        for (i, &w) in [64usize, 128, 256, 512].iter().enumerate() {
+            let pct_old = 100.0 * (part1_old_eta[i] - part1_old_baseline) / part1_old_baseline;
+            let pct_new = 100.0 * (part1_new_eta[i] - part1_new_baseline) / part1_new_baseline;
+            println!(
+                "  w={w:>4} eta deviation from w=512 baseline: OLD={pct_old:+7.2}%  \
+                 NEW={pct_new:+7.2}%"
+            );
+        }
+        } // end SHALLOW/DEEP loop
+
+        // PART 2 -- lateral EDGE (two adjacent columns, same row), same fixed-physical-geometry
+        // construction as PART 1 (both `stacked_rows` and `probe_h` derived from fixed
+        // reference-row-unit quantities), reporting the actual quantity the flux solver uses:
+        // `conveyance * (eta_a - eta_b)`. This is the acceptance criterion that matters -- Job 1
+        // asks for the FLUX to be resolution invariant, and an invariant absolute `eta` alone is
+        // necessary but not sufficient proof of that (a per-resolution offset that cancelled in
+        // the subtraction would still pass PART 1's per-column check but fail here). Column A
+        // gets `stacked_a_ref = 320` / `probe_h_a_ref = 0.4`, column B gets `stacked_b_ref = 192`
+        // / `probe_h_b_ref = 0.25` -- a fixed physical elevation difference between the two
+        // columns at every resolution. Swept at the same SHALLOW (40/24 rows at reference
+        // resolution) and DEEP (320/192) depths as PART 1, for the same reason.
+        let probe_h_a_ref = 0.4f32;
+        let probe_h_b_ref = 0.25f32;
+        for &(label, stacked_a_ref, stacked_b_ref) in &[("SHALLOW", 40usize, 24usize), ("DEEP", 320usize, 192usize)] {
+        println!(
+            "\ndiag_task55_eta_depth_scale_consistency PART 2 [{label}]: lateral edge, two \
+             columns at a fixed physical elevation difference (A taller than B), reporting \
+             conveyance*(eta_a-eta_b) -- the actual driving-head magnitude the gated \
+             multiplicative flux term computes"
+        );
+        let mut part2_new_driving = Vec::new();
+        let mut part2_old_driving = Vec::new();
+        for &w in &[64usize, 128usize, 256usize, 512usize] {
+            let h = w;
+            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+            let stacked_a = stacked_a_ref * w / REFERENCE_GRID_HEIGHT;
+            let stacked_b = stacked_b_ref * w / REFERENCE_GRID_HEIGHT;
+            let probe_h_a_local = probe_h_a_ref * w as f32 / REFERENCE_GRID_HEIGHT as f32;
+            let probe_h_b_local = probe_h_b_ref * w as f32 / REFERENCE_GRID_HEIGHT as f32;
+            let probe_row = stacked_a.max(stacked_b) + 10;
+            let mask = vec![crate::MASK_INSIDE; w * h];
+            let mut heights = vec![0.0f32; w * h];
+            let col_a = w / 2;
+            let col_b = col_a + 1;
+            for r in (probe_row - stacked_a)..probe_row {
+                heights[r * w + col_a] = 1.0;
+            }
+            heights[probe_row * w + col_a] = probe_h_a_local;
+            for r in (probe_row - stacked_b)..probe_row {
+                heights[r * w + col_b] = 1.0;
+            }
+            heights[probe_row * w + col_b] = probe_h_b_local;
+
+            let external_mass_this_tick = vec![0.0f32; w * h];
+            let cell_props = get_test_props(MaterialMode::Water, w * h); // liquidity==1: k==1,
+                                                                          // janssen_effective_depth
+                                                                          // is the identity
+                                                                          // transform, keeping this
+                                                                          // a clean unit-scale
+                                                                          // demonstration.
+            let edge_vel_v = vec![0.0f32; w * h];
+            let mut column_depth = vec![0.0f32; w * h];
+            recompute_column_depth(
+                w, h, &mask, &heights, &heights, &external_mass_this_tick, &cell_props, &edge_vel_v,
+                &mut column_depth[..],
+            );
+
+            let cd_a = column_depth[probe_row * w + col_a];
+            let cd_b = column_depth[probe_row * w + col_b];
+            let h_a = heights[probe_row * w + col_a];
+            let h_b = heights[probe_row * w + col_b];
+            let k = 1.0f32;
+            let liq = 1.0f32;
+
+            // OLD (pre-fix): raw h, unscaled.
+            let eta_a_old = h_a + cd_a;
+            let eta_b_old = h_b + cd_b;
+            let conv_a_old = mult_lateral_conveyance(h_a, cd_a, k, liq);
+            let conv_b_old = mult_lateral_conveyance(h_b, cd_b, k, liq);
+            let driving_old =
+                MULT_LATERAL_SCALE * 0.5 * (conv_a_old + conv_b_old) * (eta_a_old - eta_b_old);
+
+            // NEW (post-fix): h lifted into column_depth's reference-row units.
+            let h_a_ref = h_a * depth_scale;
+            let h_b_ref = h_b * depth_scale;
+            let eta_a_new = h_a_ref + cd_a;
+            let eta_b_new = h_b_ref + cd_b;
+            let conv_a_new = mult_lateral_conveyance(h_a_ref, cd_a, k, liq);
+            let conv_b_new = mult_lateral_conveyance(h_b_ref, cd_b, k, liq);
+            let driving_new =
+                MULT_LATERAL_SCALE * 0.5 * (conv_a_new + conv_b_new) * (eta_a_new - eta_b_new);
+
+            part2_old_driving.push(driving_old);
+            part2_new_driving.push(driving_new);
+            println!(
+                "  w={w:>4} depth_scale={depth_scale:>7.4} stacked_a={stacked_a:>3} \
+                 stacked_b={stacked_b:>3} | driving_OLD={driving_old:>14.4} \
+                 driving_NEW={driving_new:>14.4}"
+            );
+        }
+        let part2_new_baseline = *part2_new_driving.last().unwrap(); // w=512 anchor
+        let part2_old_baseline = *part2_old_driving.last().unwrap();
+        for (i, &w) in [64usize, 128, 256, 512].iter().enumerate() {
+            let pct_new = 100.0 * (part2_new_driving[i] - part2_new_baseline) / part2_new_baseline;
+            let pct_old = 100.0 * (part2_old_driving[i] - part2_old_baseline) / part2_old_baseline;
+            println!(
+                "  w={w:>4} driving deviation from w=512 baseline: OLD={pct_old:+9.2}%  \
+                 NEW={pct_new:+9.2}%"
+            );
+        }
+        } // end SHALLOW/DEEP loop
     }
 }
