@@ -420,6 +420,21 @@ pub struct DrawingSimulation {
     /// scalar — it is experimental, not a settled replacement for the default.
     pub fresh_pressure_field: bool,
 
+    /// "Fast liquid levelling" debug toggle. Off by default (today's shipped one-cell-per-tick
+    /// liquid edge solver, unchanged). When on, `settle_tick` also runs
+    /// `physics::elliptic_liquid_level_pass` once per tick, before the phase loop, over the
+    /// frozen pre-tick heightmap snapshot -- a liquid-only multigrid-style relaxation that
+    /// equalises connected liquid pockets far faster than the incremental per-edge solver alone
+    /// (measured: pocket equalisation at w=512 drops from 29 ticks-to-halve with this off to 6
+    /// with it on). This is `settle_tick`'s `elliptic_liquid_level` parameter, threaded straight
+    /// through, same shape as `fresh_pressure_field` just above. It is plumbed as a real,
+    /// user-facing toggle (this field, not the test-only `physics::elliptic_head_gate` thread-
+    /// local the pass was originally developed behind -- that gate still exists and still drives
+    /// the TASK #55 diagnostics/tests, but is OR'd with this field at the call site so either can
+    /// enable the pass). Expensive by design: roughly 16x the ms/tick of a normal tick at w=512
+    /// (about 18fps) -- sluggish but usable, not a bug.
+    pub elliptic_liquid_level: bool,
+
     /// Per-block "how often was this block actually simulated" heat-map counter for the debug
     /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
     /// (see that constant's doc comment). Length is always `active_blocks.len() *
@@ -609,6 +624,7 @@ impl DrawingSimulation {
             quantile_targets: Vec::new(),
             perfect_simulation: false,
             fresh_pressure_field: false,
+            elliptic_liquid_level: false,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -1310,6 +1326,7 @@ impl DrawingSimulation {
                     self.tick_count + iter as u32,
                     self.gravity_dir,
                     self.fresh_pressure_field,
+                    self.elliptic_liquid_level,
                 );
             }
         } else {

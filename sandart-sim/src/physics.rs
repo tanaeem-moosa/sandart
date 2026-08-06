@@ -852,6 +852,73 @@ fn recompute_column_depth(
     }
 }
 
+/// TASK #55 JOB 2. A column-and-row-scoped twin of `recompute_column_depth`, used ONLY by
+/// `elliptic_liquid_level_pass` (see its own step-2 comment for why: that pass needs
+/// `column_depth` only for cells inside a bounding rectangle it has already proven contains every
+/// domain node, and paying for the other function's unconditional full-grid pass on every tick a
+/// liquid body exists anywhere was the dominant cost this task's Job 1 measured).
+///
+/// Deliberately a SEPARATE function rather than an added parameter on `recompute_column_depth`
+/// itself: that function is also `fresh_pressure_field`'s call site, which this task must not
+/// perturb in any way (see this task's brief) -- duplicating the ~15 lines of per-cell formula
+/// here costs far less than the risk of a shared, parameterised version drifting the two callers'
+/// behaviour apart under future edits.
+///
+/// **Why this is exact, not approximate.** The per-cell formula below reads `column_depth` only
+/// at `above_idx = center_idx - w` -- the SAME column, one row up -- never a neighbouring column.
+/// There is no lateral term anywhere in this computation, so skipping a column this function is
+/// not asked about cannot change the value computed for any column it IS asked about: the two
+/// functions produce bit-identical `column_depth[idx]` for every `idx` this one actually writes.
+/// `participating_columns[x]`: skip column `x` entirely when the caller has already established
+/// (by direct construction, not sampling) that it contains no node this pass will ever read
+/// `column_depth` for. `max_row`: skip rows past the caller's already-known deepest domain row,
+/// for the same reason -- but rows are still walked from `y = 1` on every participating column
+/// (never cropped from the top), because a cell can carry overburden accumulated from a
+/// NON-domain cell resting above it (dry sand over a wet pocket, say), which this scoping must
+/// still see to get that domain cell's `column_depth` right.
+#[allow(clippy::too_many_arguments)]
+fn recompute_column_depth_scoped(
+    w: usize,
+    h: usize,
+    shape_mask: &[u8],
+    source_heights: &[f32],
+    heightmap_data: &[f32],
+    external_mass_this_tick: &[f32],
+    cell_props: &[f32],
+    edge_vel_v: &[f32],
+    column_depth: &mut [f32],
+    participating_columns: &[bool],
+    max_row: usize,
+) {
+    let is_inside = |cx: usize, cy: usize| -> bool { shape_mask[cy * w + cx] != crate::MASK_OUTSIDE };
+    let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+    let y_end = (max_row + 1).min(h.saturating_sub(1));
+    for y in 1..y_end {
+        let row_offset = y * w;
+        for x in 1..w.saturating_sub(1) {
+            if !participating_columns[x] {
+                continue;
+            }
+            let center_idx = row_offset + x;
+            if !is_inside(x, y) {
+                continue;
+            }
+            let above_idx = center_idx - w;
+            let depth_above = if is_inside(x, y - 1) {
+                let resting_above = (source_heights[above_idx]
+                    - in_transit_at(above_idx, w, h, source_heights, heightmap_data, cell_props, edge_vel_v, shape_mask)
+                    - external_mass_this_tick[above_idx].max(0.0))
+                    .max(0.0)
+                    * depth_scale;
+                resting_above + column_depth[above_idx]
+            } else {
+                0.0
+            };
+            column_depth[center_idx] = depth_above;
+        }
+    }
+}
+
 /// Task #47: which population the fresh-overburden predicate promotes. History, corrected across
 /// three rounds and tested empirically each time (`diag_task47_block_fraction_table`,
 /// `diag_task47_variant_divergence_comparison`, `diag_task47_in_transit_underdetection`) rather
@@ -1445,7 +1512,59 @@ fn clamp_edge_feasible(raw: f32, temp_heights: &[f32], cap_a: f32, cap_b: f32, a
     }
 }
 
+/// Union-find `find`, with path compression (iterative, not recursive -- a component can span
+/// tens of thousands of cells at production width, and this is called from a hot loop). Used only
+/// by `elliptic_liquid_level_pass`'s coarse-level component discovery (step 4a); see that step's
+/// doc comment for why connectivity is found algebraically (from the SAME edge list the fine
+/// smoother already builds) rather than by any geometric/spatial coarsening.
+#[inline]
+fn uf_find(parent: &mut [usize], mut x: usize) -> usize {
+    let mut root = x;
+    while parent[root] != root {
+        root = parent[root];
+    }
+    // Path compression: repoint every visited node directly at the root, so subsequent `find`
+    // calls on this chain are O(1) amortised.
+    while parent[x] != root {
+        let next = parent[x];
+        parent[x] = root;
+        x = next;
+    }
+    root
+}
+
+/// Union-find `union` by attaching one root under the other. No rank/size heuristic -- the chains
+/// this ever builds are bounded by grid adjacency (never deeper than a `find` call's own path
+/// compression collapses in the very next lookup), so the extra bookkeeping a rank-based union
+/// would need is not worth it here.
+#[inline]
+fn uf_union(parent: &mut [usize], a: usize, b: usize) {
+    let ra = uf_find(parent, a);
+    let rb = uf_find(parent, b);
+    if ra != rb {
+        parent[ra] = rb;
+    }
+}
+
 /// TASK #55, second half (propagation), gated (`elliptic_head_gate`, default OFF).
+///
+/// **MULTIGRID ADDENDUM (this revision).** The original version of this pass was a FLAT smoother
+/// only -- 48 fixed Gauss-Seidel iterations, whose reach per tick is bounded in absolute cell
+/// count (on the order of the iteration count), not in domain fraction. Measured directly: with
+/// only the flat smoother, `ticks_to_halve` normalised by `w/64` stayed ~57-58 at both w=128 and
+/// w=512 (against ~64-68 with the gate off entirely) -- a real constant-factor win, but NOT the
+/// qualitative fix (normalised figure falling as `w` grows) that would prove genuine global
+/// propagation. This revision adds a coarse-grid step (step 4a, below) ahead of a much-shortened
+/// smoother: per connected component (found from the SAME edge graph the smoother uses), the
+/// coarse step computes that component's own exact free-surface equilibrium DIRECTLY -- no
+/// iteration -- because the equilibrium of a source-free diffusion problem on a connected domain
+/// is provably `eta = constant`, so "the coarse grid" is algebraically one node per component, not
+/// a spatially-downsampled copy of the fine grid. This is what removes the cell-count-bounded
+/// reach: a disturbance anywhere in a component changes that component's own total mass, which the
+/// coarse solve reads fresh every call, so the WHOLE component's target level updates in the same
+/// tick regardless of how many cells separate the disturbance from the far side. See step 4a's own
+/// doc comment for the full derivation, and this task's report for the measured before/after
+/// resolution-scaling numbers.
 ///
 /// **The defect this closes.** The per-edge lateral solver (`multiplicative_lateral_gate`'s call
 /// site, and the additive form it gates) computes every edge's driving head from that ONE edge's
@@ -1549,7 +1668,20 @@ fn elliptic_liquid_level_pass(
     let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
 
     // 1. Domain: interior, in-mask, (near-)pure-liquid, wet cells. See "Why liquid-only" above.
+    //
+    // TASK #55 JOB 2 (scoping). This is the one full-grid scan this pass cannot avoid (there is
+    // no cached "which cells are liquid" structure anywhere in physics.rs/lib.rs to reuse -- see
+    // this task's report for the survey that confirmed this before writing the below). Every
+    // OTHER full-grid-shaped pass this function used to run unconditionally (the old steps 2-4)
+    // is scoped below to the bounding rectangle actually spanned by domain nodes, which this same
+    // loop derives for free as a side effect: `participating_columns[x]` records whether column
+    // `x` contains any domain node at all, and `max_domain_row` is the largest `y` any domain node
+    // occupies. Both are exact (not sampled/approximate), so everything scoped against them below
+    // is provably lossless -- see each scoped step's own comment for why.
     let mut is_node = vec![false; cell_count];
+    let mut participating_columns = vec![false; w];
+    let mut max_domain_row: usize = 0;
+    let mut domain_cell_count: usize = 0;
     for y in 1..h - 1 {
         let row = y * w;
         for x in 1..w - 1 {
@@ -1563,14 +1695,44 @@ fn elliptic_liquid_level_pass(
             }
             if temp_heights[idx] > ELLIPTIC_WET_EPS {
                 is_node[idx] = true;
+                participating_columns[x] = true;
+                if y > max_domain_row {
+                    max_domain_row = y;
+                }
+                domain_cell_count += 1;
             }
         }
     }
 
+    // Cheap pre-check: "nothing is out of equilibrium" is trivially true when fewer than two
+    // cells are even eligible to be a graph node, since no edge (a pair of ADJACENT domain nodes)
+    // can possibly exist -- exactly the condition the old code detected only AFTER paying for
+    // steps 2-4 below (`if edges.is_empty() { return ... }`, now nearer the bottom of this
+    // function). This early return produces the IDENTICAL tuple that path already returns
+    // (`Vec::new()` residuals, an all-zero `net_activity`), so it changes nothing observable --
+    // it only changes how much work is paid to reach that same answer. This is what makes an
+    // all-dry or all-granular tick (the common case whenever no liquid is on screen at all) cost
+    // O(w*h) for this one domain scan and NOTHING else, instead of four full-grid passes.
+    if domain_cell_count < 2 {
+        return (Vec::new(), vec![0.0f32; cell_count]);
+    }
+
     // 2. A private, fresh `column_depth` snapshot for this call only -- see the doc comment above
     // on why this never touches the shared, persistent `column_depth` buffer `settle_tick` owns.
+    //
+    // Scoped (not the shared `recompute_column_depth`, which stays untouched so
+    // `fresh_pressure_field` -- the OTHER caller of that exact function -- is provably unaffected
+    // by this change) to `participating_columns` and rows `1..=max_domain_row`. This is exact,
+    // not approximate: `recompute_column_depth`'s own per-cell formula reads only `column_depth`
+    // at `center_idx - w` (the SAME column, one row up) -- there is no lateral (cross-column)
+    // term anywhere in it -- so restricting to a subset of columns cannot change the computed
+    // value for any column that IS processed. Rows beyond `max_domain_row` are skipped because no
+    // domain node ever sits there (by construction, from step 1), so their column-depth value is
+    // never read by anything below; rows at/above `max_domain_row` still start accumulating from
+    // row 1 (never cropped from the top), because overburden resting above a domain cell can come
+    // from a non-domain (e.g. dry sand) cell in the same column, which this scoping must still see.
     let mut cd = vec![0.0f32; cell_count];
-    recompute_column_depth(
+    recompute_column_depth_scoped(
         w,
         h,
         shape_mask,
@@ -1580,37 +1742,77 @@ fn elliptic_liquid_level_pass(
         cell_props,
         edge_vel_v,
         &mut cd[..],
+        &participating_columns[..],
+        max_domain_row,
     );
 
     // 3. Per-node conveyance and capacity, cached once (both depend only on `wetness` and the
     // frozen `cd` snapshot, neither of which this pass's own edge sweeps mutate).
+    //
+    // Scoped to the same bounding rectangle as step 2: every `is_node[idx]` cell has `x` in a
+    // participating column and `y <= max_domain_row` by construction (step 1 is exactly where
+    // both were derived from), so no domain cell is ever skipped by this restriction -- it only
+    // skips iterations that step 1 already proved are `is_node[idx] == false`.
+    //
+    // `parent` is the union-find array for step 4a's coarse-level component discovery (see that
+    // step's doc comment). Its self-loop initialisation (`parent[idx] = idx`) is folded into THIS
+    // loop -- which already visits every domain node exactly once -- rather than paying a separate
+    // pass. Non-domain cells are never read (every `find`/`union` call below is seeded from an
+    // edge endpoint, and every edge endpoint is a domain node by construction), so leaving them at
+    // the allocator's `0` is harmless.
     let mut conv = vec![0.0f32; cell_count];
     let mut cap = vec![0.0f32; cell_count];
-    for idx in 0..cell_count {
-        if !is_node[idx] {
-            continue;
+    let mut parent = vec![0usize; cell_count];
+    for y in 1..=max_domain_row {
+        let row = y * w;
+        for x in 1..w - 1 {
+            if !participating_columns[x] {
+                continue;
+            }
+            let idx = row + x;
+            if !is_node[idx] {
+                continue;
+            }
+            let h_ref = heightmap_data[idx] * depth_scale;
+            conv[idx] = mult_lateral_conveyance(h_ref, cd[idx], 1.0, 1.0).max(ELLIPTIC_MIN_CONVEYANCE);
+            cap[idx] = cell_capacity_for(cell_props[idx * 4 + PROP_WETNESS]);
+            parent[idx] = idx;
         }
-        let h_ref = heightmap_data[idx] * depth_scale;
-        conv[idx] = mult_lateral_conveyance(h_ref, cd[idx], 1.0, 1.0).max(ELLIPTIC_MIN_CONVEYANCE);
-        cap[idx] = cell_capacity_for(cell_props[idx * 4 + PROP_WETNESS]);
     }
 
     // 4. Graph edges: every adjacent (right, down) pair of domain nodes. Built once, in fixed
     // row-major order, and reused every iteration (both the forward and the reversed order below
     // are permutations of this SAME list, so the two directions are strictly comparable).
+    //
+    // Scoped identically to step 3, for the identical reason: `is_node` is false everywhere
+    // outside the bounding rectangle, so this only skips iterations that would have produced
+    // nothing anyway -- the edge list built is IDENTICAL, element for element, to the unscoped
+    // version (same row-major traversal order over the same true `is_node` cells).
+    //
+    // Each edge is also unioned into `parent` here, in the SAME pass -- see step 4a below for what
+    // this buys: every adjacent pair of domain nodes is, by definition, connected, so folding the
+    // union into edge discovery (rather than a separate pass over `edges` afterward) costs nothing
+    // extra and is exactly as correct: the resulting components are precisely the graph's connected
+    // components, including two wells joined only through a submerged basin (a chain of basin-cell
+    // edges unions them transitively, with no special-casing needed -- see step 4a's own comment).
     let mut edges: Vec<(usize, usize, f32)> = Vec::new();
-    for y in 1..h - 1 {
+    for y in 1..=max_domain_row {
         let row = y * w;
         for x in 1..w - 1 {
+            if !participating_columns[x] {
+                continue;
+            }
             let idx = row + x;
             if !is_node[idx] {
                 continue;
             }
             if x + 1 < w - 1 && is_node[idx + 1] {
                 edges.push((idx, idx + 1, 0.5 * (conv[idx] + conv[idx + 1])));
+                uf_union(&mut parent[..], idx, idx + 1);
             }
             if y + 1 < h - 1 && is_node[idx + w] {
                 edges.push((idx, idx + w, 0.5 * (conv[idx] + conv[idx + w])));
+                uf_union(&mut parent[..], idx, idx + w);
             }
         }
     }
@@ -1637,6 +1839,125 @@ fn elliptic_liquid_level_pass(
     if edges.is_empty() {
         return (residuals, net_activity);
     }
+
+    // 4a. TASK #55 MULTIGRID. The coarse-grid solve, exploiting the one fact that makes it cheap:
+    // for a connected body of liquid with no source term, the equilibrium of
+    // `div(conveyance * grad(eta)) = 0` is `eta = constant` everywhere in the component --
+    // regardless of `conveyance`'s spatial variation, which only affects the RATE of approach, not
+    // the equilibrium itself (this is why the coarse solve below never reads `conv`: it computes
+    // the target state directly, not a diffusion step toward it). So "the coarse grid" here is not
+    // a spatially-downsampled copy of the fine grid (which is where 2x2-style aggregation would
+    // need to reason about mask boundaries and risk straddling one) -- it is algebraically ONE
+    // node per connected component, and "connected" is answered exactly by the union-find already
+    // built from the SAME edge list the fine smoother uses (step 4's `uf_union` calls). This is
+    // what makes the two-well-through-a-shared-basin case (`diag_task55_composition_pockets_w512`)
+    // safe by construction rather than by special-casing: the basin's own chain of cell-to-cell
+    // edges transitively unions both wells into ONE component, exactly as the fine solver already
+    // treats them as one connected graph.
+    //
+    // **The per-component solve.** Every node `i` has `eta_i(h) = h * depth_scale + b_i` where
+    // `b_i = cd[i] - row(i) * depth_scale` is fixed (independent of `h`) -- so for a TARGET shared
+    // level `eta*`, the corresponding fill is `h_i(eta*) = (eta* - b_i) / depth_scale`, clamped to
+    // `[0, cap[i]]` (a cell cannot hold negative fill or more than its own capacity -- the free-
+    // surface/obstacle part of the problem). Every node's fill-vs-eta* slope (`1 / depth_scale`) is
+    // IDENTICAL, so "how much total mass does the component hold at a given eta*" is a monotone
+    // non-decreasing piecewise-linear function of eta* with exactly 2 breakpoints per node (where
+    // it turns on at `b_i`, where it saturates at `b_i + cap[i] * depth_scale`) -- which means the
+    // eta* that makes total mass match the component's ACTUAL current mass is found EXACTLY (no
+    // iteration, no bisection) by sorting those `2n` breakpoints once and sweeping them in order,
+    // tracking how many nodes are "active" (turned on, not yet saturated) between consecutive
+    // breakpoints: mass accumulates at rate `active_count / depth_scale` per unit of eta* over each
+    // such interval, so the interval containing the target mass is solved for directly by one
+    // division. `O(n log n)` per component (the sort dominates), not `O(iterations * n)` -- this is
+    // the propagation win: a disturbance anywhere in the component changes that component's TOTAL
+    // mass or its members' `b_i`/`cap[i]`, which this solve reads fresh every call, so the whole
+    // component's target level updates in the SAME call regardless of how many cells lie between
+    // the disturbance and the far side.
+    //
+    // **Applying the correction: damped, mass-exact, capacity-exact.** Full-strength (`omega = 1`)
+    // would jump every component straight to its exact free-surface equilibrium in a single tick,
+    // which is feasible (the target respects capacity by construction) but would make a large lake
+    // visibly snap flat in one frame regardless of size -- a much stronger behaviour change than
+    // this task asked for. `MULTIGRID_COARSE_OMEGA` (see its own doc comment) linearly interpolates
+    // each node from its CURRENT fill toward its target fill by that fraction. This is exact for
+    // both invariants without any extra bookkeeping: (1) capacity -- `[0, cap[i]]` is convex, and
+    // both the current value and the target value already lie in it, so any convex combination of
+    // the two does too; (2) mass -- summing the per-node delta over the whole component telescopes
+    // to `omega * (sum(target) - sum(current))`, and `sum(target) == sum(current)` by construction
+    // of `eta*` (that is the equation the breakpoint sweep solves), so the component's total mass
+    // moves by (approximately, to float precision) exactly zero. No `clamp_edge_feasible` call is
+    // needed here because this is not an edge transfer between two cells -- it is a single node-
+    // local convex interpolation per cell, which cannot violate that cell's own capacity by
+    // construction, independent of what any other cell in the component does.
+    {
+        let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+        for y in 1..=max_domain_row {
+            let row = y * w;
+            for x in 1..w - 1 {
+                if !participating_columns[x] {
+                    continue;
+                }
+                let idx = row + x;
+                if !is_node[idx] {
+                    continue;
+                }
+                let root = uf_find(&mut parent[..], idx);
+                groups.entry(root).or_default().push(idx);
+            }
+        }
+        for members in groups.values() {
+            if members.len() < 2 {
+                continue; // singleton component: no neighbour to level against, target == current.
+            }
+            let b_of = |i: usize| -> f32 { cd[i] - (i / w) as f32 * depth_scale };
+            let mut total_mass = 0.0f32;
+            let mut events: Vec<(f32, i32)> = Vec::with_capacity(members.len() * 2);
+            for &i in members {
+                total_mass += temp_heights[i];
+                let base = b_of(i);
+                let cap_level = base + cap[i] * depth_scale;
+                events.push((base, 1));
+                events.push((cap_level, -1));
+            }
+            events.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+            let mut active: i32 = 0;
+            let mut cum_mass = 0.0f32;
+            let mut prev_eta = events[0].0;
+            let mut eta_star = events[events.len() - 1].0; // fallback: fully saturated component
+            for &(eta, delta) in events.iter() {
+                let seg_mass = active as f32 * (eta - prev_eta) / depth_scale;
+                if active > 0 && total_mass <= cum_mass + seg_mass + 1e-6 {
+                    let frac = ((total_mass - cum_mass) / (active as f32) * depth_scale).max(0.0);
+                    eta_star = prev_eta + frac;
+                    break;
+                }
+                cum_mass += seg_mass;
+                active += delta;
+                prev_eta = eta;
+            }
+            for &i in members {
+                let base = b_of(i);
+                let h_target = ((eta_star - base) / depth_scale).clamp(0.0, cap[i]);
+                let delta = MULTIGRID_COARSE_OMEGA * (h_target - temp_heights[i]);
+                if delta != 0.0 {
+                    temp_heights[i] += delta;
+                    net_activity[i] += delta.abs();
+                }
+            }
+        }
+    }
+    let coarse_residual = edges
+        .iter()
+        .map(|&(a, b, _)| (eta_of(a, temp_heights) - eta_of(b, temp_heights)).abs())
+        .fold(0.0f32, f32::max);
+    residuals.push(coarse_residual);
+
+    // 5. Gauss-Seidel post-smoother -- a MUCH smaller budget than before the coarse step existed
+    // (see `ELLIPTIC_ITERATIONS`'s own doc comment for why): the coarse step above already carries
+    // each component to (a damped fraction of) its exact equilibrium in one call, so what is left
+    // for this sweep to clean up is local structure the coarse step's per-node-independent target
+    // does not model -- e.g. `conv`-driven relaxation-RATE differences between neighbours, which
+    // affect how fast an edge approaches the shared level but not the level itself.
     for iter in 0..ELLIPTIC_ITERATIONS {
         let residual = edges
             .iter()
@@ -1737,21 +2058,46 @@ const ELLIPTIC_MIN_CONVEYANCE: f32 = 1e-6;
 /// this task's multiplicative-head work anchors against.
 const ELLIPTIC_CONV_REF: f32 = 1.0;
 
-/// Sweep count for `elliptic_liquid_level_pass`'s Gauss-Seidel relaxation. Chosen, not tuned to a
-/// pass/fail window (per this task's own instruction) -- reported against the actual measured
-/// residual-decay traces in this task's report, not reverse-engineered from a target metric. `48`:
-/// large enough that a full forward+backward pair (2 iterations) sweeps a graph of a few hundred
-/// nodes in either direction several times over within the run, small enough that the per-tick cost
-/// (see the report's `bench_sandfall` numbers) stays bounded. Gauss-Seidel is sound here -- unlike
-/// the liquid WAVE solver, which explicitly rejects swept/Gauss-Seidel driving because it turns a
-/// momentum-carrying wave equation into a diverging one (see the "Jacobi driving" comment on the
-/// g=0 liquid branch: measured spectral radius 1.20 swept vs. 0.994 Jacobi) -- because this pass
+/// Post-smoother sweep count for `elliptic_liquid_level_pass`'s Gauss-Seidel relaxation, run AFTER
+/// step 4a's coarse-grid correction (see that step's doc comment for the multigrid design this is
+/// now half of).
+///
+/// **TASK #55 MULTIGRID.** Before the coarse step existed, this was `48` and carried the entire
+/// levelling job by itself -- a one-cell-per-iteration relaxation whose reach per tick was bounded
+/// by iteration count alone (measured: `ticks_to_halve` normalised by `w/64` stayed ~57-58 at both
+/// w=128 and w=512, i.e. still scaling with domain width, not a fix). Now the coarse step carries
+/// the GLOBAL part of the correction (every component jumps a damped fraction toward its own exact
+/// equilibrium in one call, independent of domain diameter -- see step 4a), so this sweep's job
+/// shrinks to polishing local structure the coarse step's per-node-independent target does not
+/// model (conveyance-driven rate differences between neighbours; any residual left by the coarse
+/// step's float-precision breakpoint sweep). `8`: small enough that this sweep's own cost is no
+/// longer the dominant term (see the report's `bench_sandfall` numbers), large enough that a full
+/// forward+backward pair runs 4 times over -- chosen as a modest, round starting budget for a
+/// clean-up pass, not tuned to a target pass/fail window (per this task's own instruction; the
+/// actual measured residual-decay and resolution-scaling traces are in the report, not reverse-
+/// engineered from this number). Gauss-Seidel is sound here for the same reason it always was --
+/// unlike the liquid WAVE solver, which explicitly rejects swept/Gauss-Seidel driving because it
+/// turns a momentum-carrying wave equation into a diverging one (see the "Jacobi driving" comment
+/// on the g=0 liquid branch: measured spectral radius 1.20 swept vs. 0.994 Jacobi) -- this pass
 /// carries no momentum term at all: it is a pure relaxation toward a diffusion equation's
 /// equilibrium, and sequential (Gauss-Seidel) relaxation of a pure diffusion problem is
 /// unconditionally stable; each step also individually re-derives its own feasibility bound from
 /// the live buffer via `clamp_edge_feasible`, so there is no accumulation path for an unstable
 /// overshoot even in principle.
-const ELLIPTIC_ITERATIONS: usize = 48;
+const ELLIPTIC_ITERATIONS: usize = 8;
+
+/// Under-relaxation factor for step 4a's coarse-grid (per-connected-component) correction in
+/// `elliptic_liquid_level_pass` -- see that step's own doc comment for the full derivation. Each
+/// node is linearly interpolated from its current fill toward its exact-equilibrium target fill by
+/// this fraction; `1.0` would jump every component straight to equilibrium in a single tick
+/// (feasible -- the target already respects capacity and conserves the component's total mass by
+/// construction -- but a much larger single-tick behaviour change than this task asked for: a
+/// large lake would visibly snap flat in one frame regardless of size). `0.5`, matching
+/// `ELLIPTIC_EDGE_OMEGA`'s own reasoning and value (a conservative starting point, not swept
+/// against a target window): never move more than half the remaining distance to equilibrium in a
+/// single call, leaving the rest to accumulate visibly over subsequent ticks the way every other
+/// mechanism in this file does.
+const MULTIGRID_COARSE_OMEGA: f32 = 0.5;
 
 /// Under-relaxation factor for each edge step inside `elliptic_liquid_level_pass`'s Gauss-Seidel
 /// sweep. `0.5`, chosen (not swept) as a conservative starting point -- there is no single spectral
@@ -2247,10 +2593,15 @@ mod multiplicative_lateral_gate {
 /// TASK #55, second half (propagation). Same pattern as `multiplicative_lateral_gate`:
 /// `#[cfg(test)]`-gated thread-local so it does not exist in production at all, `#[cfg(not(test))]`
 /// twin hardcodes the shipped choice (off) so a non-test build pays no thread-local read. `false`
-/// by default, matching `multiplicative_lateral_gate`'s polarity convention: this is a live
-/// experiment being measured, not a decided replacement for the one-cell-per-tick edge solver.
+/// by default, matching `multiplicative_lateral_gate`'s polarity convention.
 ///
 /// Gates `elliptic_liquid_level_pass` (see that function's doc comment for what it does and why).
+/// NOTE: this thread-local is a TEST-ONLY diagnostics knob (the TASK #55 diagnostics and
+/// `test_elliptic_residual_falls_monotonically`/`diag_task55_*` toggle it directly, still via
+/// `set_enabled`) -- it is not how the pass is reachable from the shipped app. The real,
+/// user-facing route is `settle_tick`'s own `elliptic_liquid_level` parameter
+/// (`DrawingSimulation::elliptic_liquid_level`), OR'd with `is_enabled()` below at the call site
+/// so both routes keep working without interfering with each other.
 #[cfg(test)]
 pub(crate) mod elliptic_head_gate {
     use std::cell::Cell;
@@ -3746,6 +4097,14 @@ pub fn settle_tick(
     // once-per-tick/before-phase-0 placement, vs. 85 for a once-per-phase placement that was
     // also tried and rejected).
     fresh_pressure_field: bool,
+    // "Fast liquid levelling" debug toggle (`DrawingSimulation::elliptic_liquid_level`; see that
+    // field's doc comment). `false` (default): unchanged from the tree before this parameter
+    // existed. `true`: OR'd with `elliptic_head_gate::is_enabled()` at this function's own call
+    // site just below to also run `elliptic_liquid_level_pass` once per tick -- see that call
+    // site's own comment for placement/mechanics. The thread-local gate remains the mechanism
+    // the TASK #55 diagnostics/tests toggle directly; this parameter is the real, user-facing
+    // route the shipped app uses instead.
+    elliptic_liquid_level: bool,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -4060,7 +4419,7 @@ pub fn settle_tick(
     // uses a few hundred lines below when IT moves mass) makes this pass's own effect persist, and
     // gives the adaptive scheduler an honest displacement signal so it keeps prioritising a block
     // this pass is still actively correcting.
-    if elliptic_head_gate::is_enabled() {
+    if elliptic_liquid_level || elliptic_head_gate::is_enabled() {
         let (_, net_activity) = elliptic_liquid_level_pass(
             w,
             h,
@@ -5789,6 +6148,12 @@ mod tests {
         /// unaffected; set directly (`sim.fresh_pressure_field = true`) to A/B the standalone
         /// `column_depth` pass against a specific scenario without touching `tick()`'s signature.
         fresh_pressure_field: bool,
+        /// Mirrors `DrawingSimulation::elliptic_liquid_level` / `settle_tick`'s parameter of the
+        /// same name. Defaults to `false` in `new()`. The TASK #55 diagnostics/tests toggle the
+        /// pass via `elliptic_head_gate::set_enabled` directly instead (unaffected by this field,
+        /// since `settle_tick` OR's the two together); this field exists so a `TestSim`-based test
+        /// can also exercise the real, user-facing parameter route if it ever needs to.
+        elliptic_liquid_level: bool,
     }
 
     impl TestSim {
@@ -5813,6 +6178,7 @@ mod tests {
                 block_size,
                 tick_count: 0,
                 fresh_pressure_field: false,
+                elliptic_liquid_level: false,
             }
         }
 
@@ -5838,6 +6204,7 @@ mod tests {
                 self.tick_count,
                 gravity_dir,
                 self.fresh_pressure_field,
+                self.elliptic_liquid_level,
             );
             self.tick_count += 1;
             flow
@@ -6162,6 +6529,7 @@ mod tests {
                 i as u32,
                 glam::Vec2::ZERO,
                 false,
+                false,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -6228,6 +6596,7 @@ mod tests {
             &mask,
             0,
             glam::Vec2::ZERO,
+            false,
             false,
         );
         assert_eq!(flow, 0.0);
@@ -6302,6 +6671,7 @@ mod tests {
                 &mask,
                 0,
                 glam::Vec2::ZERO,
+                false,
                 false,
             );
 
@@ -6403,6 +6773,7 @@ mod tests {
             &mask,
             0,
             glam::Vec2::ZERO,
+            false,
             false,
         );
 
@@ -6709,6 +7080,7 @@ mod tests {
                 i as u32,
                 gravity_dir,
                 false,
+                false,
             );
         }
 
@@ -6803,6 +7175,7 @@ mod tests {
                 i as u32,
                 gravity_dir,
                 false,
+                false,
             );
         }
 
@@ -6851,6 +7224,7 @@ mod tests {
                 &mask,
                 (500 + i) as u32,
                 gravity_dir,
+                false,
                 false,
             );
         }
@@ -6920,6 +7294,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
                 false,
             );
         }
@@ -7020,6 +7395,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
                 false,
             );
         }
@@ -10154,6 +10530,7 @@ mod tests {
                 i,
                 gravity_dir,
                 false,
+                false,
             );
         }
 
@@ -10265,7 +10642,7 @@ mod tests {
                     &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                     &mut last_simulated_ticks, cols * rows, block_size, &[],
                     12345u32.wrapping_add(i),
-                    &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir, false,
+                    &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir, false, false,
                 );
             }
 
@@ -10361,7 +10738,7 @@ mod tests {
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[],
                 12345u32.wrapping_add(i),
-                &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir, false,
+                &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir, false, false,
             );
         }
 
@@ -10445,6 +10822,7 @@ mod tests {
                 i as u32,
                 gravity_dir,
                 false,
+                false,
             );
         }
 
@@ -10526,6 +10904,7 @@ mod tests {
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
                 false,
             );
             if i > 200 && flow == 0.0 {
@@ -10772,6 +11151,7 @@ mod tests {
                 i as u32,
                 gravity_dir,
                 false,
+                false,
             );
         }
 
@@ -10948,6 +11328,7 @@ mod tests {
                 i as u32,
                 gravity_dir,
                 false,
+                false,
             );
         }
 
@@ -11085,6 +11466,7 @@ mod tests {
                 &mask,
                 i,
                 gravity_dir,
+                false,
                 false,
             ) as f64;
         }
@@ -11324,6 +11706,7 @@ mod tests {
                 &mask,
                 i,
                 gravity_dir,
+                false,
                 false,
             );
 
@@ -11858,7 +12241,7 @@ mod tests {
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[], t as u32,
                 &mut edge_vel_h,
-                &mut edge_vel_v, &mut column_depth, &mask, t as u32, gravity_dir, false,
+                &mut edge_vel_v, &mut column_depth, &mask, t as u32, gravity_dir, false, false,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();
@@ -15754,6 +16137,294 @@ mod tests {
                          (initial={initial:.4}, target<={target:.4})"
                     );
                 }
+            }
+        }
+    }
+
+    /// TASK #55 JOB 3. The composition question: does `elliptic_head_gate` cancel the arch-
+    /// collapse regression `fresh_pressure_field` causes, when both are on together? Reuses
+    /// `diag_task55_arch_collapse_rate`'s own w=512 scenario construction and `unsupported_span`
+    /// metric VERBATIM (same pillars/arch geometry, same `gap_buffer`/`eps`, same `run_ticks=600`,
+    /// `budget_n=256` at w=512 -- see that function's own doc comment for why those numbers), but
+    /// swaps its (`multiplicative_lateral_gate` x scheduler) axes for (`fresh_pressure_field` x
+    /// `elliptic_head_gate`) -- the axes this task's composition question is actually about.
+    /// Adaptive scheduler only (`sim.tick`, not `perfect_sim_tick`): the composition question is
+    /// "can these two ship together", which is a question about the SHIPPED scheduler, not an
+    /// idealised one. Tick budget is IDENTICAL across all four matrix cells by construction (one
+    /// shared `run_ticks`, one shared loop body). DIAGNOSTIC (reproduce-only, no assertions). Run
+    /// with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_composition_arch_w512() {
+        let w = 512usize;
+        let run_ticks = 600usize;
+        let s = w as f64 / 64.0;
+        let sc = |base: usize| ((base as f64 * s).round() as usize).max(1);
+        let h = sc(100);
+        let margin = sc(2);
+        let block_size = (w / 32).max(1);
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        for y in margin..h - margin {
+            for x in margin..w - margin {
+                mask[y * w + x] = crate::MASK_INSIDE;
+            }
+        }
+
+        let pillar_w = sc(12);
+        let gap_x0 = margin + pillar_w;
+        let gap_x1 = w - margin - pillar_w;
+        let arch_top = sc(36);
+        let arch_bot = arch_top + sc(4);
+        let floor = h - margin;
+        let gap_buffer = sc(3);
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let props = get_test_props(MaterialMode::Water, w * h);
+
+        let build_sim = || -> TestSim {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+            for y in arch_top..floor {
+                for x in margin..gap_x0 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+                for x in gap_x1..w - margin {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+            for y in arch_top..arch_bot {
+                for x in gap_x0..gap_x1 {
+                    sim.hm.data[y * w + x] = 1.0;
+                }
+            }
+            sim
+        };
+
+        let eps = 0.05f32;
+        let unsupported_span = |data: &[f32]| -> f64 {
+            let mut total = 0.0f64;
+            for x in gap_x0..gap_x1 {
+                let mut pile_top = floor;
+                while pile_top > arch_top && data[(pile_top - 1) * w + x] > eps {
+                    pile_top -= 1;
+                }
+                let hanging_hi = pile_top.saturating_sub(gap_buffer).max(arch_top);
+                total += diag_task55_region_mass(data, w, x, x + 1, arch_top, hanging_hi);
+            }
+            total
+        };
+
+        let budget_n = 256usize;
+        let probe_ticks = task55_probe_ticks(run_ticks);
+
+        println!(
+            "diag_task55_composition_arch_w512: w={w} h={h} block_size={block_size} \
+             budget_n={budget_n} run_ticks={run_ticks} gap=[{gap_x0},{gap_x1}) \
+             arch_rows=[{arch_top},{arch_bot}) gap_buffer={gap_buffer}"
+        );
+
+        // Defensive reset, same pattern as the diagnostics this is modelled on.
+        elliptic_head_gate::set_enabled(false);
+        for (fp_label, fresh_pressure) in [("fresh_pressure=OFF", false), ("fresh_pressure=ON", true)] {
+            for (ell_label, elliptic_on) in [("elliptic=OFF", false), ("elliptic=ON", true)] {
+                let mut sim = build_sim();
+                sim.fresh_pressure_field = fresh_pressure;
+                elliptic_head_gate::set_enabled(elliptic_on);
+                let initial = unsupported_span(&sim.hm.data);
+                let target = initial * 0.5;
+                let mut half_life_tick: Option<usize> = None;
+                let mut next_probe = 0usize;
+                println!(
+                    "diag_task55_composition_arch_w512: --- {fp_label} / {ell_label} --- \
+                     initial_unsupported={initial:.4}"
+                );
+                for t in 0..=run_ticks {
+                    let span = unsupported_span(&sim.hm.data);
+                    if half_life_tick.is_none() && t > 0 && span <= target {
+                        half_life_tick = Some(t);
+                    }
+                    if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                        next_probe += 1;
+                        println!(
+                            "diag_task55_composition_arch_w512: {fp_label:<16} {ell_label:<12} \
+                             tick={t:>4} unsupported_span={span:>10.4} \
+                             fraction_of_initial={:.4}",
+                            span / initial.max(1e-9)
+                        );
+                    }
+                    if t == run_ticks {
+                        break;
+                    }
+                    sim.tick(gravity_dir, budget_n);
+                }
+                elliptic_head_gate::set_enabled(false);
+                println!(
+                    "diag_task55_composition_arch_w512: {fp_label:<16} {ell_label:<12} \
+                     ticks_to_halve={half_life_tick:?} run_ticks_budget={run_ticks} \
+                     (initial={initial:.4}, target<={target:.4})"
+                );
+            }
+        }
+    }
+
+    /// TASK #55 JOB 3, pocket-equalisation twin of `diag_task55_composition_arch_w512` -- see that
+    /// function's own doc comment for the composition question this answers and why the adaptive
+    /// scheduler only. Reuses `diag_task55_pocket_equalisation`'s own w=512 scenario construction
+    /// VERBATIM (same `ProceduralFunnel` two-well+basin search, same fill fractions, same
+    /// `run_ticks=150`, `budget_n=256` at w=512), swapping its (`multiplicative_lateral_gate` x
+    /// scheduler) axes for (`fresh_pressure_field` x `elliptic_head_gate`). Tick budget IDENTICAL
+    /// across all four matrix cells by construction. DIAGNOSTIC (reproduce-only, no assertions).
+    /// Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_composition_pockets_w512() {
+        let w = 512usize;
+        let h = w;
+        let run_ticks = 150usize;
+        let block_size = (w / 32).max(1);
+        let mask = make_test_mask(w, h, SandboxShape::ProceduralFunnel, 0.005, 0.6);
+
+        let topo = match find_two_well_topology(&mask, w, h) {
+            Some(t) => t,
+            None => {
+                println!(
+                    "diag_task55_composition_pockets_w512: w={w} h={h} -- NO two-well+shared-basin \
+                     topology found in this mask at this width. SKIPPING."
+                );
+                return;
+            }
+        };
+
+        let band_h = topo.well_bot - topo.well_top;
+        let mut left_surface0 = topo.well_top + ((0.35 * band_h as f64).round() as usize);
+        let mut right_surface0 = topo.well_top + ((0.65 * band_h as f64).round() as usize);
+        left_surface0 = left_surface0.min(topo.well_bot.saturating_sub(1));
+        if right_surface0 <= left_surface0 {
+            right_surface0 = (left_surface0 + 1).min(topo.well_bot.saturating_sub(1));
+        }
+
+        let basin_cap = ((0.09 * h as f64).round() as usize).max(3);
+        let basin_bot = (topo.well_bot + basin_cap).min(topo.basin_bot);
+        let basin_x0 = topo.left_x0.min(topo.right_x0);
+        let basin_x1 = topo.left_x1.max(topo.right_x1);
+
+        let left_probe = (topo.left_x0 + topo.left_x1) / 2;
+        let right_probe = (topo.right_x0 + topo.right_x1) / 2;
+
+        println!(
+            "diag_task55_composition_pockets_w512: w={w} h={h} block_size={block_size} \
+             budget_n=256 run_ticks={run_ticks} left_well=[{},{})x[{},{}) \
+             right_well=[{},{})x[{},{}) basin=[{},{})x[{},{}) left_probe={left_probe} \
+             right_probe={right_probe}",
+            topo.left_x0, topo.left_x1, left_surface0, topo.well_bot,
+            topo.right_x0, topo.right_x1, right_surface0, topo.well_bot,
+            basin_x0, basin_x1, topo.well_bot, basin_bot
+        );
+
+        for x in topo.left_x0..topo.left_x1 {
+            for y in left_surface0..topo.well_bot {
+                assert_ne!(
+                    mask[y * w + x], crate::MASK_OUTSIDE,
+                    "w={w}: left well cell (x={x}, y={y}) outside -- geometry search is wrong"
+                );
+            }
+        }
+        for x in topo.right_x0..topo.right_x1 {
+            for y in right_surface0..topo.well_bot {
+                assert_ne!(
+                    mask[y * w + x], crate::MASK_OUTSIDE,
+                    "w={w}: right well cell (x={x}, y={y}) outside -- geometry search is wrong"
+                );
+            }
+        }
+        for x in basin_x0..basin_x1 {
+            for y in topo.well_bot..basin_bot {
+                assert_ne!(
+                    mask[y * w + x], crate::MASK_OUTSIDE,
+                    "w={w}: basin cell (x={x}, y={y}) outside -- geometry search is wrong"
+                );
+            }
+        }
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let props = get_test_props(MaterialMode::Water, w * h);
+
+        let build_sim = || -> TestSim {
+            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    if mask[idx] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    let in_basin =
+                        y >= topo.well_bot && y < basin_bot && x >= basin_x0 && x < basin_x1;
+                    let in_left_well = x >= topo.left_x0 && x < topo.left_x1
+                        && y >= left_surface0 && y < topo.well_bot;
+                    let in_right_well = x >= topo.right_x0 && x < topo.right_x1
+                        && y >= right_surface0 && y < topo.well_bot;
+                    if in_basin || in_left_well || in_right_well {
+                        sim.hm.data[idx] = 1.0;
+                    }
+                }
+            }
+            sim
+        };
+
+        let eps = 0.05f32;
+        let level_diff = |data: &[f32]| -> f64 {
+            let left = diag_task55_surface_row(data, w, left_probe, topo.well_top, topo.well_bot, eps)
+                .unwrap_or(topo.well_bot);
+            let right = diag_task55_surface_row(data, w, right_probe, topo.well_top, topo.well_bot, eps)
+                .unwrap_or(topo.well_bot);
+            (right as f64 - left as f64).abs()
+        };
+
+        let budget_n = 256usize;
+        let probe_ticks = task55_probe_ticks(run_ticks);
+
+        elliptic_head_gate::set_enabled(false);
+        for (fp_label, fresh_pressure) in [("fresh_pressure=OFF", false), ("fresh_pressure=ON", true)] {
+            for (ell_label, elliptic_on) in [("elliptic=OFF", false), ("elliptic=ON", true)] {
+                let mut sim = build_sim();
+                sim.fresh_pressure_field = fresh_pressure;
+                elliptic_head_gate::set_enabled(elliptic_on);
+                let initial = level_diff(&sim.hm.data);
+                let target = initial * 0.5;
+                let mut half_life_tick: Option<usize> = None;
+                let mut next_probe = 0usize;
+                println!(
+                    "diag_task55_composition_pockets_w512: --- {fp_label} / {ell_label} --- \
+                     initial_level_diff={initial:.4} rows"
+                );
+                for t in 0..=run_ticks {
+                    let diff = level_diff(&sim.hm.data);
+                    if half_life_tick.is_none() && t > 0 && diff <= target {
+                        half_life_tick = Some(t);
+                    }
+                    if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                        next_probe += 1;
+                        let left = diag_task55_surface_row(&sim.hm.data, w, left_probe, topo.well_top, topo.well_bot, eps)
+                            .unwrap_or(topo.well_bot);
+                        let right = diag_task55_surface_row(&sim.hm.data, w, right_probe, topo.well_top, topo.well_bot, eps)
+                            .unwrap_or(topo.well_bot);
+                        println!(
+                            "diag_task55_composition_pockets_w512: {fp_label:<16} {ell_label:<12} \
+                             tick={t:>4} left_surface_row={left:>3} right_surface_row={right:>3} \
+                             level_diff={diff:>7.4} fraction_of_initial={:.4}",
+                            diff / initial.max(1e-9)
+                        );
+                    }
+                    if t == run_ticks {
+                        break;
+                    }
+                    sim.tick(gravity_dir, budget_n);
+                }
+                elliptic_head_gate::set_enabled(false);
+                println!(
+                    "diag_task55_composition_pockets_w512: {fp_label:<16} {ell_label:<12} \
+                     ticks_to_halve={half_life_tick:?} run_ticks_budget={run_ticks} \
+                     (initial={initial:.4}, target<={target:.4})"
+                );
             }
         }
     }

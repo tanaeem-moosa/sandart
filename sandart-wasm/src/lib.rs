@@ -346,6 +346,7 @@ impl WasmSimulationState {
         let multistage_chambers = self.sim.multistage_chambers;
         let perfect_simulation = self.sim.perfect_simulation;
         let fresh_pressure_field = self.sim.fresh_pressure_field;
+        let elliptic_liquid_level = self.sim.elliptic_liquid_level;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -363,6 +364,8 @@ impl WasmSimulationState {
         // Same reasoning as `perfect_simulation` just above: a UI debug toggle, not simulation
         // state, so it should survive a resolution rebuild rather than silently reset to default.
         sim.fresh_pressure_field = fresh_pressure_field;
+        // Same reasoning again: a UI debug toggle, not simulation state.
+        sim.elliptic_liquid_level = elliptic_liquid_level;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -698,6 +701,16 @@ impl WasmSimulationState {
     /// against the shipped default live, not because it is known to be an improvement.
     pub fn set_fresh_pressure_field(&mut self, enabled: bool) {
         self.sim.fresh_pressure_field = enabled;
+    }
+
+    /// "Fast liquid levelling" debug toggle: forwarded straight to the sim, a plain field write
+    /// (same shape as `set_fresh_pressure_field` just above — no reset, no reinitialisation). See
+    /// `DrawingSimulation::elliptic_liquid_level`'s doc comment in sandart-sim/src/lib.rs for what
+    /// it switches on: a liquid-only multigrid-style relaxation pass that equalises connected
+    /// liquid pockets much faster than the default per-edge solver. Expensive by design (~16x
+    /// ms/tick at 512, ~18fps) — sluggish but usable, not a bug.
+    pub fn set_elliptic_liquid_level(&mut self, enabled: bool) {
+        self.sim.elliptic_liquid_level = enabled;
     }
 
     /// Block-simulation heat-map debug overlay: purely a render-side toggle (see
