@@ -4,6 +4,12 @@ on:
   push:
     branches:
       - main
+  # Manual re-run from the Actions tab. Added after three consecutive pushes to main
+  # (53516eb, 8da0224, 916ad1d) landed their refs on GitHub but produced no workflow
+  # runs and no check-runs at all, leaving the deployed site four commits behind main
+  # with no way to kick it. With only `on: push` configured there was no way to
+  # redeploy without inventing a commit.
+  workflow_dispatch:
 
 permissions:
   contents: write
