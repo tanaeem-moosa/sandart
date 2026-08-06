@@ -17851,3 +17851,11 @@ mod tests {
         );
     }
 }
+
+// Task #55, step 1: an ISOLATION SPEC for the pressure field, kept in its own file (see that
+// file's module doc comment for why). Declared as a CHILD of `physics` (not of the crate root)
+// so `use super::*` there reaches `recompute_column_depth`, `REFERENCE_GRID_HEIGHT`, and every
+// other private item it needs without widening anyone's visibility.
+#[cfg(test)]
+#[path = "task55_head_spec.rs"]
+mod task55_head_spec;
