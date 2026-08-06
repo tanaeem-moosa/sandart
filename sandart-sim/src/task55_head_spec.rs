@@ -80,23 +80,28 @@ fn frac_idx(frac: f32, n: usize) -> usize {
     ((frac * n as f32).round() as usize).clamp(1, n.saturating_sub(2))
 }
 
+/// `cell_props` for every scenario in this module: `MaterialMode::Water`'s own preset (`lib.rs`:
+/// `preset_props() => (1.00, 0.00, 0.00, 0.00)`) at every cell -- fully liquid water, matching
+/// the brief's instruction not to invent a synthetic material. Shared by both head sources below
+/// so `legacy_head_source` and `new_head_source` see an identical material field.
+fn build_water_cell_props(cell_count: usize) -> Vec<f32> {
+    let mut cell_props = vec![0.0f32; cell_count * 4];
+    for c in 0..cell_count {
+        cell_props[c * 4 + PROP_WETNESS] = 1.0;
+    }
+    cell_props
+}
+
 /// Runs `recompute_column_depth` (production's own function, untouched) over a static scenario:
 /// no ticks, no velocity, no in-flight mass. `external_mass_this_tick` and `edge_vel_v` are zero
 /// throughout, which also means `in_transit_at`'s subtraction never engages here (it reads
 /// `edge_vel_v[c].max(0.0)`, so an all-zero `edge_vel_v` makes it return exactly `0.0` for every
 /// cell) -- this static field measures the RESTING-material term alone, see `spec_free_fall_...`
 /// for why that matters.
-///
-/// `cell_props` is filled with `MaterialMode::Water`'s own preset (`lib.rs`:
-/// `preset_props() => (1.00, 0.00, 0.00, 0.00)`) at every cell -- fully liquid water, matching
-/// the brief's instruction not to invent a synthetic material.
 fn run_column_depth(w: usize, h: usize, mask: &[u8], heights: &[f32]) -> Vec<f32> {
     let cell_count = w * h;
     let zeros = vec![0.0f32; cell_count];
-    let mut cell_props = vec![0.0f32; cell_count * 4];
-    for c in 0..cell_count {
-        cell_props[c * 4 + PROP_WETNESS] = 1.0;
-    }
+    let cell_props = build_water_cell_props(cell_count);
     let mut column_depth = vec![0.0f32; cell_count];
     recompute_column_depth(
         w,
@@ -110,6 +115,40 @@ fn run_column_depth(w: usize, h: usize, mask: &[u8], heights: &[f32]) -> Vec<f32
         &mut column_depth,
     );
     column_depth
+}
+
+// ---------------------------------------------------------------------------------------------
+// Head sources -- every spec below runs against BOTH, so the scoreboard shows exactly what the
+// new field changes and nothing about today's (legacy) behaviour is silently lost.
+// ---------------------------------------------------------------------------------------------
+
+/// A function computing per-cell hydraulic head (same reference-row units as `head_at`) from a
+/// static mask + heightmap scenario. Both sources below have this shape.
+type HeadSource = fn(w: usize, h: usize, mask: &[u8], heights: &[f32]) -> Vec<f32>;
+
+/// Today's shipped field: `column_depth` (via `recompute_column_depth`, untouched) fed through
+/// `head_at`'s formula. This is the ONLY thing every spec measured before this task's step 2.
+fn legacy_head_source(w: usize, h: usize, mask: &[u8], heights: &[f32]) -> Vec<f32> {
+    let cd = run_column_depth(w, h, mask, heights);
+    (0..w * h).map(|idx| head_at(idx, w, heights, &cd)).collect()
+}
+
+/// Task #55 step 2's new field: `task55_head_field::compute_head_field`, a pure Laplace
+/// relaxation with Dirichlet boundary conditions wherever a face is exposed (open top or
+/// unsupported bottom -- see that module's doc comment). Not wired into `settle_tick` or any UI;
+/// this spec harness is its only caller.
+fn new_head_source(w: usize, h: usize, mask: &[u8], heights: &[f32]) -> Vec<f32> {
+    let cell_props = build_water_cell_props(w * h);
+    super::task55_head_field::compute_head_field(w, h, mask, heights, &cell_props)
+}
+
+const HEAD_SOURCES: &[(&str, HeadSource)] =
+    &[("legacy_column_depth", legacy_head_source), ("new_head_field", new_head_source)];
+
+/// `p := head - z`, using `head_at`'s own datum `z(i) = -row(i) * depth_scale` -- the pressure a
+/// head field implies at cell `idx`, independent of which source produced `head`.
+fn pressure_at(idx: usize, w: usize, head: &[f32]) -> f32 {
+    head[idx] + (idx / w) as f32 * depth_scale(w)
 }
 
 const SWEEP_W: [usize; 4] = [64, 128, 256, 512];
@@ -302,22 +341,22 @@ fn build_u_tube_filled(w: usize, h: usize, fill_dy_frac: f32) -> (Vec<u8>, Vec<f
 /// Spec 1: every submerged in-mask cell of a plain resting vessel must have the same head, equal
 /// to the free-surface elevation. *Expected to PASS* -- this is the open-vertical-column case
 /// where `column_depth` and true hydrostatic pressure agree by construction.
-fn spec_uniform_head_in_resting_open_column() -> Result<(), String> {
+fn spec_uniform_head_in_resting_open_column(head_source: HeadSource) -> Result<(), String> {
     let mut table = String::new();
     let mut fail = false;
     for &w in &SWEEP_W {
         let h = w;
         let s = build_open_column(w, h);
-        let cd = run_column_depth(w, h, &s.mask, &s.heights);
+        let head = head_source(w, h, &s.mask, &s.heights);
         let ds = depth_scale(w);
         let tol = identity_tol(w);
-        let reference_head = head_at(s.fill_row * w + s.left, w, &s.heights, &cd);
+        let reference_head = head[s.fill_row * w + s.left];
         let mut max_dev = 0.0f32;
         let mut loc = (s.left, s.fill_row);
         for y in s.fill_row..=s.floor_row {
             for x in s.left..s.right {
                 let idx = y * w + x;
-                let dev = (head_at(idx, w, &s.heights, &cd) - reference_head).abs();
+                let dev = (head[idx] - reference_head).abs();
                 if dev > max_dev {
                     max_dev = dev;
                     loc = (x, y);
@@ -348,13 +387,13 @@ fn spec_uniform_head_in_resting_open_column() -> Result<(), String> {
 /// `depth_scale` per row of full cells (a *scale* check), not because of some compensating
 /// *offset* error that happens to cancel out only in the uniform-head comparison. Asserts the
 /// per-row increment of `p := heights[i] * depth_scale + column_depth[i]` directly.
-fn spec_pressure_is_linear_in_depth() -> Result<(), String> {
+fn spec_pressure_is_linear_in_depth(head_source: HeadSource) -> Result<(), String> {
     let mut table = String::new();
     let mut fail = false;
     for &w in &SWEEP_W {
         let h = w;
         let s = build_open_column(w, h);
-        let cd = run_column_depth(w, h, &s.mask, &s.heights);
+        let head = head_source(w, h, &s.mask, &s.heights);
         let ds = depth_scale(w);
         let tol = identity_tol(w);
         let x = s.left;
@@ -363,8 +402,8 @@ fn spec_pressure_is_linear_in_depth() -> Result<(), String> {
         let mut slope_sum = 0.0f32;
         let mut count = 0usize;
         for y in s.fill_row..s.floor_row {
-            let p_y = s.heights[y * w + x] * ds + cd[y * w + x];
-            let p_y1 = s.heights[(y + 1) * w + x] * ds + cd[(y + 1) * w + x];
+            let p_y = pressure_at(y * w + x, w, &head);
+            let p_y1 = pressure_at((y + 1) * w + x, w, &head);
             let slope = p_y1 - p_y; // expect exactly `ds`: one full row of pressure per row of fill
             slope_sum += slope;
             count += 1;
@@ -413,7 +452,82 @@ fn spec_pressure_is_linear_in_depth() -> Result<(), String> {
 /// subtraction a guaranteed no-op, so what is measured here is the mechanism's floor: how much
 /// pressure a purely-geometric, velocity-blind read of "resting material above" reports for
 /// material with nothing at all beneath it.
-fn spec_free_fall_has_zero_pressure() -> Result<(), String> {
+/// Spec 7: the sibling of `spec_free_fall_has_zero_pressure`, and the reason that one is not
+/// sufficient on its own. That spec reads the slab's BOTTOM cell only. A body in free fall has no
+/// contact forces anywhere in it, so `p` must be zero at EVERY cell of it, not just at the face
+/// where the check happens to be taken — otherwise a solver can satisfy the bottom-face reading
+/// while still carrying an internal pressure profile that will drive spurious flow the moment
+/// transport is wired up (step 3).
+///
+/// This is a genuine gap in the step-2 field rather than a hypothetical. `support_fraction` looks
+/// exactly ONE cell down, so support is not TRANSITIVE: in a falling slab only the bottom row
+/// reads as unsupported, while every cell above it is "resting on" the cell below and reads as
+/// supported. The slab therefore gets pinned at its unsupported bottom (`p = 0`, correct) and at
+/// its exposed top (`p = own weight`, correct for a resting cell and wrong for a falling one),
+/// and the interior relaxes between the two.
+///
+/// Reports the worst `p` anywhere in the slab and where it occurs, so the size of the gap is a
+/// measured number rather than an argument. Note the sign: any residual peaks at the TOP of a
+/// falling body, which is backwards from a resting column, where pressure is greatest at the base.
+fn spec_free_fall_is_pressureless_throughout(head_source: HeadSource) -> Result<(), String> {
+    let mut table = String::new();
+    let mut fail = false;
+    for &w in &SWEEP_W {
+        let h = w;
+        let ds = depth_scale(w);
+        let tol = identity_tol(w);
+
+        let falling = build_floating_blob_variant(w, h, false);
+        let head = head_source(w, h, &falling.mask, &falling.heights);
+
+        // Scan every cell of the slab, not just its bottom row.
+        let mut worst = 0.0f32;
+        let mut worst_at = (0usize, 0usize);
+        for k in 0..falling.slab_cells {
+            let y = falling.blob_row - k;
+            for x in 0..w {
+                let idx = y * w + x;
+                if falling.heights[idx] <= 0.0 || falling.mask[idx] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let p = pressure_at(idx, w, &head).abs();
+                if p > worst {
+                    worst = p;
+                    worst_at = (x, y);
+                }
+            }
+        }
+
+        table.push_str(&format!(
+            "w={w}: slab={} cells | worst |p| anywhere in the falling slab = {:.4} ref-rows \
+             ({:.3} cells) at (x={},y={}) [slab bottom row = {}] | tol={tol:.5}\n",
+            falling.slab_cells,
+            worst,
+            worst / ds,
+            worst_at.0,
+            worst_at.1,
+            falling.blob_row,
+        ));
+
+        if worst > tol {
+            fail = true;
+        }
+    }
+    if fail {
+        return Err(format!(
+            "spec_free_fall_is_pressureless_throughout: a body in free fall still carries nonzero \
+             pressure somewhere inside it. Zero at the bottom face is not enough -- a free-falling \
+             body has no contact force ANYWHERE, so `p` must vanish at every cell of it. The cause \
+             is that support is not TRANSITIVE: `support_fraction` looks one cell down, so only the \
+             slab's bottom row reads as unsupported and every cell above it reads as resting on the \
+             cell below. Fixing this needs support propagated UPWARD through the body (a cell \
+             resting on falling material is itself falling), not a bigger tolerance.\n{table}"
+        ));
+    }
+    Ok(())
+}
+
+fn spec_free_fall_has_zero_pressure(head_source: HeadSource) -> Result<(), String> {
     let mut table = String::new();
     let mut fail = false;
     for &w in &SWEEP_W {
@@ -424,13 +538,13 @@ fn spec_free_fall_has_zero_pressure() -> Result<(), String> {
         // The identical slab, once resting on the floor and once floating over a large gap.
         let falling = build_floating_blob_variant(w, h, false);
         let resting = build_floating_blob_variant(w, h, true);
-        let cd_falling = run_column_depth(w, h, &falling.mask, &falling.heights);
-        let cd_resting = run_column_depth(w, h, &resting.mask, &resting.heights);
+        let head_falling = head_source(w, h, &falling.mask, &falling.heights);
+        let head_resting = head_source(w, h, &resting.mask, &resting.heights);
 
         let idx_f = falling.blob_row * w + falling.blob_x;
         let idx_r = resting.blob_row * w + resting.blob_x;
-        let p_falling = falling.heights[idx_f] * ds + cd_falling[idx_f];
-        let p_resting = resting.heights[idx_r] * ds + cd_resting[idx_r];
+        let p_falling = pressure_at(idx_f, w, &head_falling);
+        let p_resting = pressure_at(idx_r, w, &head_resting);
 
         // Analytic: a resting slab `slab_cells` tall bears its full weight at its bottom face;
         // a free-falling one bears nothing at all.
@@ -476,25 +590,28 @@ fn spec_free_fall_has_zero_pressure() -> Result<(), String> {
 /// straight up, so a cell under a low roof sees none of the water piled up beside it in the
 /// shaft, even though it is the exact same connected body at the exact same elevation. This is
 /// precisely why no siphon or roofed-channel transmission is possible with today's field.
-fn spec_pascal_under_a_roof() -> Result<(), String> {
+fn spec_pascal_under_a_roof(head_source: HeadSource) -> Result<(), String> {
     let mut table = String::new();
     let mut fail = false;
     for &w in &SWEEP_W {
         let h = w;
         let s = build_roof_scenario(w, h);
+        let head = head_source(w, h, &s.mask, &s.heights);
+        // For context only (not part of the assertion): today's `column_depth` at the shaft's own
+        // bottom is exactly the overburden the roofed channel is missing under the legacy field.
         let cd = run_column_depth(w, h, &s.mask, &s.heights);
         let ds = depth_scale(w);
         let tol = identity_tol(w);
         let shaft_idx = s.floor_row * w + s.shaft_x;
         let channel_idx = s.floor_row * w + s.channel_far_x;
-        let head_shaft = head_at(shaft_idx, w, &s.heights, &cd);
-        let head_channel = head_at(channel_idx, w, &s.heights, &cd);
+        let head_shaft = head[shaft_idx];
+        let head_channel = head[channel_idx];
         let dev = (head_shaft - head_channel).abs();
         table.push_str(&format!(
             "w={w}: head_shaft={head_shaft:.3} head_channel_under_roof={head_channel:.3} \
              |Δ|={dev:.3} ref-rows ({:.3} local cells) tol={tol:.4} (shaft overburden at its own \
-             bottom was {:.3} local cells = column_depth[shaft-bottom], i.e. exactly the amount \
-             missing under the roof)\n",
+             bottom was {:.3} local cells = legacy column_depth[shaft-bottom], i.e. exactly the \
+             amount missing under the roof in the legacy field)\n",
             dev / ds,
             cd[shaft_idx] / ds
         ));
@@ -519,7 +636,7 @@ fn spec_pascal_under_a_roof() -> Result<(), String> {
 /// arms, so the whole body is genuinely one connected mass at rest. Asserts `max(head) -
 /// min(head)` over that body is within tolerance; a real hydrostatic field would have exactly
 /// one value.
-fn spec_head_is_single_valued_across_a_connected_body() -> Result<(), String> {
+fn spec_head_is_single_valued_across_a_connected_body(head_source: HeadSource) -> Result<(), String> {
     let fill_dy_frac = 0.10_f32;
     let mut table = String::new();
     let mut fail = false;
@@ -568,7 +685,7 @@ fn spec_head_is_single_valued_across_a_connected_body() -> Result<(), String> {
             ));
         }
 
-        let cd = run_column_depth(w, h, &mask, &heights);
+        let head = head_source(w, h, &mask, &heights);
         let ds = depth_scale(w);
         let tol = identity_tol(w);
         let mut max_head = f32::MIN;
@@ -579,7 +696,7 @@ fn spec_head_is_single_valued_across_a_connected_body() -> Result<(), String> {
             for x in 1..w - 1 {
                 let idx = y * w + x;
                 if wet[idx] {
-                    let hv = head_at(idx, w, &heights, &cd);
+                    let hv = head[idx];
                     if hv > max_head {
                         max_head = hv;
                         max_loc = (x, y);
@@ -619,7 +736,7 @@ fn spec_head_is_single_valued_across_a_connected_body() -> Result<(), String> {
 /// must produce the SAME head value, after `depth_scale` normalisation, at every grid resolution.
 /// There is prior history of resolution bugs in exactly this quantity (see `depth_scale`'s own
 /// doc comment history in `physics.rs`), so this gets its own spec independent of spec 1.
-fn spec_head_field_is_resolution_invariant() -> Result<(), String> {
+fn spec_head_field_is_resolution_invariant(head_source: HeadSource) -> Result<(), String> {
     // The only source of cross-resolution disagreement in an otherwise-exact formula is that
     // `frac_idx` rounds `fill_row`/`floor_row` to the nearest integer independently at each `w`,
     // so the ACTUAL fraction represented differs from the target by up to 0.5 rows at every
@@ -634,8 +751,8 @@ fn spec_head_field_is_resolution_invariant() -> Result<(), String> {
     for &w in &SWEEP_W {
         let h = w;
         let s = build_open_column(w, h);
-        let cd = run_column_depth(w, h, &s.mask, &s.heights);
-        let hv = head_at(s.fill_row * w + s.left, w, &s.heights, &cd);
+        let head = head_source(w, h, &s.mask, &s.heights);
+        let hv = head[s.fill_row * w + s.left];
         table.push_str(&format!("w={w}: head={hv:.4} ref-rows\n"));
         heads.push(hv);
     }
@@ -657,13 +774,16 @@ fn spec_head_field_is_resolution_invariant() -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Ignored per-spec wrappers -- run any one alone with `--ignored`
+// Ignored per-spec wrappers -- run any one alone with `--ignored`. Each checks the NEW field
+// (`task55_head_field::compute_head_field`, task #55 step 2) only -- the scoreboard below is
+// what tracks both sources; these exist so a human can isolate one spec against the field this
+// step actually built.
 // ---------------------------------------------------------------------------------------------
 
 #[test]
 #[ignore = "SPEC for #55: hydraulic head must be uniform through a plain resting open column"]
 fn test_spec_uniform_head_in_resting_open_column() {
-    if let Err(e) = spec_uniform_head_in_resting_open_column() {
+    if let Err(e) = spec_uniform_head_in_resting_open_column(new_head_source) {
         panic!("{e}");
     }
 }
@@ -671,7 +791,7 @@ fn test_spec_uniform_head_in_resting_open_column() {
 #[test]
 #[ignore = "SPEC for #55: pressure must grow by exactly one depth_scale per row of depth"]
 fn test_spec_pressure_is_linear_in_depth() {
-    if let Err(e) = spec_pressure_is_linear_in_depth() {
+    if let Err(e) = spec_pressure_is_linear_in_depth(new_head_source) {
         panic!("{e}");
     }
 }
@@ -679,7 +799,16 @@ fn test_spec_pressure_is_linear_in_depth() {
 #[test]
 #[ignore = "SPEC for #55: an unsupported free-falling blob of water must show zero pressure"]
 fn test_spec_free_fall_has_zero_pressure() {
-    if let Err(e) = spec_free_fall_has_zero_pressure() {
+    if let Err(e) = spec_free_fall_has_zero_pressure(new_head_source) {
+        panic!("{e}");
+    }
+}
+
+#[test]
+#[ignore = "SPEC for #55: a free-falling body must show zero pressure at EVERY cell, not just at \
+            its bottom face -- currently FAILS, support is not transitive"]
+fn test_spec_free_fall_is_pressureless_throughout() {
+    if let Err(e) = spec_free_fall_is_pressureless_throughout(new_head_source) {
         panic!("{e}");
     }
 }
@@ -687,7 +816,7 @@ fn test_spec_free_fall_has_zero_pressure() {
 #[test]
 #[ignore = "SPEC for #55: a roofed channel connected to a tall column must share its head (Pascal)"]
 fn test_spec_pascal_under_a_roof() {
-    if let Err(e) = spec_pascal_under_a_roof() {
+    if let Err(e) = spec_pascal_under_a_roof(new_head_source) {
         panic!("{e}");
     }
 }
@@ -695,7 +824,7 @@ fn test_spec_pascal_under_a_roof() {
 #[test]
 #[ignore = "SPEC for #55: head must be single-valued across a whole connected U-tube body at rest"]
 fn test_spec_head_is_single_valued_across_a_connected_body() {
-    if let Err(e) = spec_head_is_single_valued_across_a_connected_body() {
+    if let Err(e) = spec_head_is_single_valued_across_a_connected_body(new_head_source) {
         panic!("{e}");
     }
 }
@@ -703,23 +832,89 @@ fn test_spec_head_is_single_valued_across_a_connected_body() {
 #[test]
 #[ignore = "SPEC for #55: the head field must be resolution-invariant across w=64/128/256/512"]
 fn test_spec_head_field_is_resolution_invariant() {
-    if let Err(e) = spec_head_field_is_resolution_invariant() {
+    if let Err(e) = spec_head_field_is_resolution_invariant(new_head_source) {
         panic!("{e}");
     }
 }
 
+/// Diagnostic, not a correctness check (no ratchet, nothing here can fail the suite): reports
+/// `compute_head_field`'s own convergence numbers -- sweeps to convergence and final residual --
+/// at every resolution in `SWEEP_W`, on the most demanding scenario in this module (the U-tube,
+/// the only scenario with a bend). Run with
+/// `cargo test -p sandart-sim --lib task55_head_spec -- --ignored --nocapture` to capture it.
+#[test]
+#[ignore = "SPEC for #55: diagnostic -- prints compute_head_field convergence stats, not a check"]
+fn diag_compute_head_field_convergence() {
+    use std::time::Instant;
+    println!("\ncompute_head_field convergence (U-tube scenario, fill_dy_frac=0.10):");
+    for &w in &SWEEP_W {
+        let h = w;
+        let (mask, heights) = build_u_tube_filled(w, h, 0.10);
+        let cell_props = build_water_cell_props(w * h);
+        let start = Instant::now();
+        let (_, sweeps, residual) = super::task55_head_field::compute_head_field_with_stats(
+            w,
+            h,
+            &mask,
+            &heights,
+            &cell_props,
+        );
+        let elapsed = start.elapsed();
+        let ds = depth_scale(w);
+        println!(
+            "  w={w}: sweeps={sweeps} residual={residual:.6} ref-rows ({:.6} depth_scale) \
+             elapsed={elapsed:?}",
+            residual / ds
+        );
+    }
+
+    // The U-tube above is the EASY case for this solver: its only Dirichlet boundary is
+    // single-valued, so the coarse union-find jump (see task55_head_field's own doc comment)
+    // answers it in one sweep flat. The free-fall slab is the HARD case: two DIFFERENT Dirichlet
+    // values (exposed top vs. unsupported bottom) in one component, so no coarse shortcut
+    // applies and the fine SOR sweep has to do genuine work -- this is the number that matters
+    // for "how expensive is a real call."
+    println!("\ncompute_head_field convergence (free-fall slab, the non-uniform-boundary case):");
+    for &w in &SWEEP_W {
+        let h = w;
+        let falling = build_floating_blob_variant(w, h, false);
+        let cell_props = build_water_cell_props(w * h);
+        let start = Instant::now();
+        let (_, sweeps, residual) = super::task55_head_field::compute_head_field_with_stats(
+            w,
+            h,
+            &falling.mask,
+            &falling.heights,
+            &cell_props,
+        );
+        let elapsed = start.elapsed();
+        let ds = depth_scale(w);
+        println!(
+            "  w={w}: sweeps={sweeps} residual={residual:.6} ref-rows ({:.6} depth_scale) \
+             elapsed={elapsed:?}",
+            residual / ds
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
-// The scoreboard -- NOT ignored, runs under plain `cargo test`
+// The scoreboard -- NOT ignored, runs under plain `cargo test`. Each spec runs against BOTH head
+// sources (`HEAD_SOURCES`), so the printed table is a before/after: exactly what task #55 step 2
+// changed, with nothing about the legacy field's behaviour silently dropped.
 // ---------------------------------------------------------------------------------------------
 
 /// See this module's doc comment for the ratchet design. Calling convention: every spec returns
 /// `Result`, so no `catch_unwind` is needed to keep one spec's failure from stopping the others.
 #[test]
 fn test_task55_head_spec_scoreboard() {
-    let specs: &[(&str, fn() -> Result<(), String>)] = &[
+    let specs: &[(&str, fn(HeadSource) -> Result<(), String>)] = &[
         ("spec_uniform_head_in_resting_open_column", spec_uniform_head_in_resting_open_column),
         ("spec_pressure_is_linear_in_depth", spec_pressure_is_linear_in_depth),
         ("spec_free_fall_has_zero_pressure", spec_free_fall_has_zero_pressure),
+        (
+            "spec_free_fall_is_pressureless_throughout",
+            spec_free_fall_is_pressureless_throughout,
+        ),
         ("spec_pascal_under_a_roof", spec_pascal_under_a_roof),
         (
             "spec_head_is_single_valued_across_a_connected_body",
@@ -728,26 +923,40 @@ fn test_task55_head_spec_scoreboard() {
         ("spec_head_field_is_resolution_invariant", spec_head_field_is_resolution_invariant),
     ];
 
-    // Ratchet set: the specs CURRENTLY PASSING against shipped physics, measured directly (see
-    // this task's report for the numbers). When a fix lands and a spec starts passing, move its
-    // name INTO this set -- never remove a name FROM it to make a still-broken spec's failure
-    // go away; that would defeat the entire point of this module.
-    let expected_passing: &[&str] = &[
-        "spec_uniform_head_in_resting_open_column",
-        "spec_pressure_is_linear_in_depth",
-        "spec_head_field_is_resolution_invariant",
+    // Ratchet set: the (spec, head source) PAIRS currently passing, measured directly (see this
+    // task's report for the numbers). UPWARD ONLY: when a fix lands and a pair starts passing,
+    // add it here -- never remove a pair to make a still-broken one's failure go away. The three
+    // `legacy_column_depth` entries are exactly what passed before task #55 step 2 existed, and
+    // must keep passing against that unchanged field forever, regardless of what the new field
+    // does; the new-field entries are what step 2 adds.
+    let expected_passing: &[(&str, &str)] = &[
+        ("spec_uniform_head_in_resting_open_column", "legacy_column_depth"),
+        ("spec_pressure_is_linear_in_depth", "legacy_column_depth"),
+        ("spec_head_field_is_resolution_invariant", "legacy_column_depth"),
+        ("spec_uniform_head_in_resting_open_column", "new_head_field"),
+        ("spec_pressure_is_linear_in_depth", "new_head_field"),
+        ("spec_head_field_is_resolution_invariant", "new_head_field"),
+        ("spec_free_fall_has_zero_pressure", "new_head_field"),
+        ("spec_pascal_under_a_roof", "new_head_field"),
+        ("spec_head_is_single_valued_across_a_connected_body", "new_head_field"),
     ];
 
-    let mut actual_passing: Vec<&str> = Vec::new();
+    let mut actual_passing: Vec<(&str, &str)> = Vec::new();
     let mut report = String::new();
-    for (name, f) in specs {
-        match f() {
-            Ok(()) => {
-                actual_passing.push(name);
-                report.push_str(&format!("PASS  {name}\n"));
-            }
-            Err(e) => {
-                report.push_str(&format!("FAIL  {name}\n      {e}\n\n"));
+    report.push_str(&format!(
+        "\n{:<58} {:<20} {:<6}\n",
+        "spec", "head source", "result"
+    ));
+    for (spec_name, spec_fn) in specs {
+        for &(source_name, source_fn) in HEAD_SOURCES {
+            match spec_fn(source_fn) {
+                Ok(()) => {
+                    actual_passing.push((spec_name, source_name));
+                    report.push_str(&format!("{spec_name:<58} {source_name:<20} PASS\n"));
+                }
+                Err(e) => {
+                    report.push_str(&format!("{spec_name:<58} {source_name:<20} FAIL\n{e}\n\n"));
+                }
             }
         }
     }
@@ -760,8 +969,8 @@ fn test_task55_head_spec_scoreboard() {
         "\nTask #55 head-field spec scoreboard changed.\n\
          Currently passing: {actual_passing:?}\n\
          Expected passing:  {expected_sorted:?}\n\
-         When a spec starts passing, move its name INTO `expected_passing` in this test -- never \
-         remove a name from `expected_passing` to silence a regression the other way.\n\n\
+         When a (spec, source) pair starts passing, add it to `expected_passing` in this test --\
+         never remove a pair to silence a regression the other way.\n\n\
          Full table:\n{report}"
     );
 }

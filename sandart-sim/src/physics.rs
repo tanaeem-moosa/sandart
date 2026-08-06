@@ -17852,6 +17852,16 @@ mod tests {
     }
 }
 
+// Task #55, step 2: the STATIC hydraulic head field itself (see that file's module doc comment
+// for the physics). Declared as a CHILD of `physics`, exactly like `task55_head_spec` below, so
+// it can call `support_fraction` and read `REFERENCE_GRID_HEIGHT` without widening either's
+// visibility. `#[cfg(test)]` because its only caller today is `task55_head_spec` -- step 2 is
+// explicitly static-only, wired into no tick loop and no UI (see the task brief), so outside a
+// test build nothing in the crate references it.
+#[cfg(test)]
+#[path = "task55_head_field.rs"]
+mod task55_head_field;
+
 // Task #55, step 1: an ISOLATION SPEC for the pressure field, kept in its own file (see that
 // file's module doc comment for why). Declared as a CHILD of `physics` (not of the crate root)
 // so `use super::*` there reaches `recompute_column_depth`, `REFERENCE_GRID_HEIGHT`, and every
