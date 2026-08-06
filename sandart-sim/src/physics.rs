@@ -532,6 +532,62 @@ fn cell_capacity_for(wetness: f32) -> f32 {
     1.5 * (1.0 - l) + 1.0 * l
 }
 
+/// Task #47 round 3. Graded support fraction for cell `idx`, in `[0, 1]`: how much of what is
+/// below it can bear its weight. `1.0` = fully supported (resting on the container floor/casing,
+/// or the cell below is at or over its own material capacity, `cell_capacity_for`). `0.0` = fully
+/// unsupported (the cell below is completely empty). Linear in between:
+/// `height_below / capacity_below`.
+///
+/// A STATE predicate, not a velocity or history one: reads only the current heights and the
+/// static per-cell capacity, never `edge_vel_v` and never last tick's values. That is the whole
+/// point relative to `in_transit_at` (the velocity proxy this function replaces for scheduling,
+/// see `fresh_overburden_must_blocks`'s `Unsupported*` variants): a solid-packed body falling as a
+/// unit produces no per-edge velocity signal partway down its own bulk.
+/// `diag_task47_in_transit_underdetection` measured this directly -- `in_transit_at` read exactly
+/// `0.0` for every interior row of a falling, fully-packed DrySand block (only the block's own
+/// leading/trailing edge rows read nonzero), so a velocity-based test only ever "sees" the
+/// outermost cell or two of such a body, and the accumulated `column_depth` built from it climbs
+/// past `FRESH_OVERBURDEN_SKIN_CELLS` after just the ONE topmost row of material -- the rest of an
+/// unambiguously free-falling block reads as if it were fully resting. `support_fraction` has no
+/// such blind spot: every cell in that same falling body reads at or near `0.0`, because the cell
+/// below each of them genuinely is empty, regardless of how fast (or whether) anything is
+/// currently recorded as moving.
+///
+/// REUSE, BY DESIGN: named and placed for what it means, not for its current caller. Task #47
+/// (the "sand-slab" scheduling defect) is the only consumer today, but this is a direct,
+/// physically-motivated answer to "does this material press on what is below it" -- exactly the
+/// question the Janssen/Beverloo-style lateral-pressure term (`LATERAL_PRESSURE_SCALE`'s doc
+/// comment, `column_depth`) is trying to answer with `in_transit_at`'s velocity proxy instead. A
+/// future change could plausibly build `column_depth` from `1.0 - support_fraction` (or some
+/// function of it) rather than `in_transit_at`, which would likely fix the same under-detection
+/// there that this function fixes for scheduling here. That is deliberately NOT done by this
+/// change: it is a separate, contested decision -- see `fresh_pressure_field`'s doc comment for
+/// the confirmed, unexplained standing-arch regression a previous, unrelated attempt at touching
+/// that path caused -- and this function feeds block activation only, today.
+#[inline]
+fn support_fraction(
+    idx: usize,
+    w: usize,
+    h: usize,
+    heightmap_data: &[f32],
+    cell_props: &[f32],
+    shape_mask: &[u8],
+) -> f32 {
+    let cy = idx / w;
+    if cy + 1 >= h {
+        return 1.0; // Off-grid below: resting on the container floor, fully supported.
+    }
+    let below_idx = idx + w;
+    if shape_mask[below_idx] == crate::MASK_OUTSIDE {
+        return 1.0; // Resting on casing, fully supported.
+    }
+    let cap_below = cell_capacity_for(cell_props[below_idx * 4 + PROP_WETNESS]);
+    if cap_below <= 0.0 {
+        return 1.0;
+    }
+    (heightmap_data[below_idx] / cap_below).clamp(0.0, 1.0)
+}
+
 /// Conservative per-edge flux update — the Phase 5 (Option B) replacement for the per-cell
 /// Laplacian wave update.
 ///
@@ -702,6 +758,219 @@ fn recompute_column_depth(
             column_depth[center_idx] = depth_above;
         }
     }
+}
+
+/// Task #47: which population the fresh-overburden predicate promotes. History, corrected across
+/// three rounds and tested empirically each time (`diag_task47_block_fraction_table`,
+/// `diag_task47_variant_divergence_comparison`, `diag_task47_in_transit_underdetection`) rather
+/// than trusted on any one round's story alone:
+///
+/// - Round 1 shipped `OverburdenAndRoom`: material, near-zero `column_depth`, and a lower
+///   neighbour. Measured improvement over doing nothing: only 8.4% cumulative divergence from a
+///   perfect-simulation ground truth.
+/// - Round 2's first diagnosis -- that the conjunction catches "already falling" (in free fall,
+///   `in_transit_at` subtracted, so overburden reads ~0) and misses "about to fall" (still
+///   resting, so overburden reads high even though its support just opened up) -- turned out to
+///   be the wrong mechanism, per the user's own correction: a genuinely free-falling body SHOULD
+///   read near-zero overburden by that same reasoning, so the conjunction ought to work.
+/// - Round 3 found the real mechanism: `in_transit_at` itself under-detects free fall.
+///   `diag_task47_in_transit_underdetection` measured it directly on a falling, fully-packed
+///   DrySand block -- `in_transit_at` read exactly `0.0` for every interior row (only the block's
+///   own leading/trailing edge rows read nonzero), so accumulated `column_depth` crossed the
+///   `FRESH_OVERBURDEN_SKIN_CELLS` bar after just the ONE topmost row of material. The rest of an
+///   unambiguously free-falling body read as if it were fully resting, and the fraction of
+///   perfect-simulation's promoted blocks excluded purely by the overburden clause despite having
+///   somewhere to go grew from 36% at tick 3 to 62% by tick 12.
+///
+/// The fix (`UnsupportedAndRoom`, shipped): `support_fraction`, a STATE predicate (current heights
+/// + static per-cell capacity only, no `edge_vel_v`, no history) swapped in for the overburden
+/// clause -- see its own doc comment for why it has no blind spot for a rigid/packed body falling
+/// as a unit. Measured cumulative-divergence reduction: ~95%, against round 1's 8.4%.
+// Every variant but `UnsupportedAndRoom` is test/diagnostic-only (see `fresh_overburden_gate`'s
+// `#[cfg(not(test))]` twin, which hardcodes the shipped choice) -- `allow(dead_code)` rather than
+// leaving this to warn in every non-test build.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+pub(crate) enum FreshOverburdenVariant {
+    /// The naive, unbounded predicate from round 1's own "measure the cost" section: material
+    /// with near-zero overburden, no room-to-move bound at all. Kept only as the reference point
+    /// for how much `OverburdenAndRoom`'s room clause actually saves.
+    OverburdenOnly,
+    /// Round 1's shipped default: material AND near-zero overburden AND somewhere to go
+    /// (below/left/right, a measurably lower neighbour).
+    OverburdenAndRoom,
+    /// Round 2 variant 2: material AND free capacity directly below -- drops the overburden
+    /// clause entirely. The direct "support is gone or going" condition the coordinator asked
+    /// for: promotes a block purely because the column below it isn't full, independent of how
+    /// much settled material of its own still sits on top of it.
+    CapacityBelowOnly,
+    /// Round 2 variant 3: material AND (near-zero overburden OR free capacity below).
+    OverburdenOrCapacityBelow,
+    /// Round 2 variant 4: material AND somewhere to go (below/left/right) -- drops the overburden
+    /// clause, keeps `OverburdenAndRoom`'s lateral room check that `CapacityBelowOnly` lacks.
+    RoomOnly,
+    /// Round 3: material AND `support_fraction` below `1 - SUPPORT_FRACTION_EPSILON` -- no room
+    /// clause. The formal, reusable primitive superseding `CapacityBelowOnly`'s ad-hoc version of
+    /// the same idea (see `support_fraction`'s doc comment for why this is a STATE predicate,
+    /// unlike `in_transit_at`, and is designed for reuse beyond scheduling).
+    UnsupportedOnly,
+    /// Round 3 (shipped): material AND unsupported (per `support_fraction`) AND somewhere to go.
+    /// Directly replaces round 1's `OverburdenAndRoom` clause-for-clause -- same AND-with-room
+    /// structure, `support_fraction` swapped in for the near-zero-overburden test that
+    /// `diag_task47_in_transit_underdetection` showed almost never fires more than one row into a
+    /// falling body.
+    UnsupportedAndRoom,
+}
+
+/// Task #47 ("sand-slab" scheduling defect): the fresh-overburden MUST-simulate predicate,
+/// factored out to a standalone function so `settle_tick`'s call site and diagnostic/regression
+/// tests can share exactly one implementation rather than a test-only copy silently drifting from
+/// what actually ships. See the predicate's call site in `settle_tick` (just before the MUST/
+/// STALE/REST classification loop) for the full rationale: every other activation signal there is
+/// historical (one tick late); this one is a state predicate on the CURRENT, pre-tick field, so it
+/// wakes a block for what it is doing this tick, before anything moves.
+///
+/// Returns one bool per block (`cols * rows`, row-major): `true` if any cell in that block
+/// satisfies `variant` (see `FreshOverburdenVariant`'s own comments for what each one checks).
+///
+/// `heightmap_data`/`external_mass_this_tick` should be the tick's frozen pre-tick snapshot (the
+/// same once-per-tick placement `recompute_column_depth`'s own doc comment describes for the
+/// `fresh_pressure_field` toggle) — but note this is computed into a throwaway local buffer, never
+/// `column_depth` itself, and is used only to decide which blocks `settle_tick` runs, never as a
+/// physics term.
+#[allow(clippy::too_many_arguments)]
+fn fresh_overburden_must_blocks(
+    w: usize,
+    h: usize,
+    block_size: usize,
+    cols: usize,
+    rows: usize,
+    shape_mask: &[u8],
+    heightmap_data: &[f32],
+    external_mass_this_tick: &[f32],
+    cell_props: &[f32],
+    edge_vel_v: &[f32],
+    variant: FreshOverburdenVariant,
+) -> Vec<bool> {
+    let expected_len = cols * rows;
+    let mut fresh_active = vec![false; expected_len];
+
+    // Only variants that actually consult overburden pay for `recompute_column_depth`'s full-grid
+    // pass; `CapacityBelowOnly` and `RoomOnly` never read `fresh_overburden` at all.
+    let needs_overburden = matches!(
+        variant,
+        FreshOverburdenVariant::OverburdenOnly
+            | FreshOverburdenVariant::OverburdenAndRoom
+            | FreshOverburdenVariant::OverburdenOrCapacityBelow
+    );
+    let mut fresh_overburden = vec![0.0f32; heightmap_data.len()];
+    if needs_overburden {
+        recompute_column_depth(
+            w,
+            h,
+            shape_mask,
+            heightmap_data,
+            heightmap_data,
+            external_mass_this_tick,
+            cell_props,
+            edge_vel_v,
+            &mut fresh_overburden[..],
+        );
+    }
+
+    // Same resolution normalisation `column_depth`'s own accumulation uses (see
+    // `LATERAL_PRESSURE_SCALE`'s doc comment) — keeps `FRESH_OVERBURDEN_SKIN_CELLS` meaning the
+    // same physical skin thickness at every grid size.
+    let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+    let pressure_epsilon = FRESH_OVERBURDEN_SKIN_CELLS * depth_scale;
+
+    // "Somewhere to go": a mask-inside orthogonal neighbour (down, left, or right — this
+    // simulator's grid rows always run physically downward regardless of the apparatus's
+    // simulated `gravity_dir`; see `column_depth`'s own top-to-bottom accumulation) that
+    // currently reads measurably lower. A flat resting bed's neighbours are all level, so it
+    // fails this check; a falling body's landing zone, or a slope, passes it.
+    let has_room_to_move = |idx: usize| -> bool {
+        let cx = idx % w;
+        let cy = idx / w;
+        let h_c = heightmap_data[idx];
+        let lower = |nx: usize, ny: usize| -> bool {
+            let nidx = ny * w + nx;
+            shape_mask[nidx] != crate::MASK_OUTSIDE
+                && heightmap_data[nidx] < h_c - FRESH_OVERBURDEN_ROOM_EPSILON
+        };
+        (cy + 1 < h && lower(cx, cy + 1))
+            || (cx > 0 && lower(cx - 1, cy))
+            || (cx + 1 < w && lower(cx + 1, cy))
+    };
+
+    // "Free capacity below": the cell directly below is not full to its own material capacity
+    // (`cell_capacity_for`, the same per-cell cap the flux solver's donor/acceptor clamps use) --
+    // independent of whether it currently reads lower than this cell. A resting block sitting on
+    // an unfilled column below it is, by this test, unsupported regardless of what sits on top of
+    // the block itself; that is the round-2 "about to fall" signal `has_room_to_move` alone
+    // (round 1) does not carry, since a below-neighbour can be at-or-above this cell's own height
+    // and still be under its own capacity.
+    let has_free_capacity_below = |idx: usize| -> bool {
+        let cy = idx / w;
+        if cy + 1 >= h {
+            return false;
+        }
+        let below_idx = idx + w;
+        if shape_mask[below_idx] == crate::MASK_OUTSIDE {
+            return false;
+        }
+        let cap_below = cell_capacity_for(cell_props[below_idx * 4 + PROP_WETNESS]);
+        cap_below - heightmap_data[below_idx] > FRESH_OVERBURDEN_ROOM_EPSILON
+    };
+
+    // Round 3: the formal, reusable `support_fraction` primitive -- see its own doc comment for
+    // why this is a STATE predicate (current heights + static capacity only) rather than
+    // `in_transit_at`'s velocity proxy, and why that matters for a body falling as a rigid mass.
+    let unsupported_enough = |idx: usize| -> bool {
+        support_fraction(idx, w, h, heightmap_data, cell_props, shape_mask) < 1.0 - SUPPORT_FRACTION_EPSILON
+    };
+
+    for by in 0..rows {
+        let start_y = by * block_size;
+        let end_y = ((by + 1) * block_size).min(h);
+        for bx in 0..cols {
+            let start_x = bx * block_size;
+            let end_x = ((bx + 1) * block_size).min(w);
+            let b = by * cols + bx;
+            'scan: for y in start_y..end_y {
+                let row_offset = y * w;
+                for x in start_x..end_x {
+                    let idx = row_offset + x;
+                    if shape_mask[idx] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    if heightmap_data[idx] <= FRESH_OVERBURDEN_MATERIAL_EPSILON {
+                        continue;
+                    }
+                    let overburden_ok = needs_overburden && fresh_overburden[idx] < pressure_epsilon;
+                    let promote = match variant {
+                        FreshOverburdenVariant::OverburdenOnly => overburden_ok,
+                        FreshOverburdenVariant::OverburdenAndRoom => overburden_ok && has_room_to_move(idx),
+                        FreshOverburdenVariant::CapacityBelowOnly => has_free_capacity_below(idx),
+                        FreshOverburdenVariant::OverburdenOrCapacityBelow => {
+                            overburden_ok || has_free_capacity_below(idx)
+                        }
+                        FreshOverburdenVariant::RoomOnly => has_room_to_move(idx),
+                        FreshOverburdenVariant::UnsupportedOnly => unsupported_enough(idx),
+                        FreshOverburdenVariant::UnsupportedAndRoom => {
+                            unsupported_enough(idx) && has_room_to_move(idx)
+                        }
+                    };
+                    if promote {
+                        fresh_active[b] = true;
+                        break 'scan;
+                    }
+                }
+            }
+        }
+    }
+
+    fresh_active
 }
 
 /// Computes the *candidate* signed flux (positive = `a` -> `b`) for one edge, from a single
@@ -1464,6 +1733,61 @@ mod pressure_gate {
     #[inline(always)]
     pub fn is_disabled() -> bool {
         false
+    }
+}
+
+/// DIAGNOSTIC-ONLY A/B TOGGLE for the fresh-overburden MUST-simulate predicate (task #47, the
+/// "sand-slab" scheduling defect fix -- see the predicate's own comment at its call site in
+/// `settle_tick`, just before the MUST/STALE/REST classification loop). Same pattern and same
+/// rationale as `upstream_wake_gate`/`pressure_gate`: a thread-local so parallel tests don't
+/// interfere, `#[cfg(test)]`-gated so it does not exist in production at all (a non-test build --
+/// including every integration-test binary in `tests/`, which links this crate as an ordinary,
+/// non-`--cfg test` dependency -- always takes the fix; see the `#[cfg(not(test))]` twin below,
+/// which the optimizer folds to a no-op branch). Exists solely so a diagnostic test can measure
+/// the SAME build with the predicate on vs. off -- e.g. the pre-fix-vs-post-fix slab divergence
+/// against a perfect-simulation ground truth -- without a second compile or touching version
+/// control.
+#[cfg(test)]
+pub(crate) mod fresh_overburden_gate {
+    use super::FreshOverburdenVariant;
+    use std::cell::Cell;
+    thread_local! {
+        static DISABLED: Cell<bool> = const { Cell::new(false) };
+        // Defaults to the shipped choice, so any test that never calls `set_variant` measures
+        // exactly what production ships.
+        static VARIANT: Cell<FreshOverburdenVariant> =
+            const { Cell::new(FreshOverburdenVariant::UnsupportedAndRoom) };
+    }
+    pub fn set_disabled(v: bool) {
+        DISABLED.with(|c| c.set(v));
+    }
+    #[inline(always)]
+    pub fn is_disabled() -> bool {
+        DISABLED.with(|c| c.get())
+    }
+    /// Task #47 round 2: lets a diagnostic run `settle_tick` with a specific
+    /// `FreshOverburdenVariant` without a second compile. Reset to the shipped default at the
+    /// start of every comparison loop that uses it (see `diag_task47_variant_divergence_comparison`)
+    /// so an early return/panic in one iteration can't leak a non-default variant into the next
+    /// test that runs on this thread.
+    pub fn set_variant(v: FreshOverburdenVariant) {
+        VARIANT.with(|c| c.set(v));
+    }
+    #[inline(always)]
+    pub fn variant() -> FreshOverburdenVariant {
+        VARIANT.with(|c| c.get())
+    }
+}
+#[cfg(not(test))]
+mod fresh_overburden_gate {
+    use super::FreshOverburdenVariant;
+    #[inline(always)]
+    pub fn is_disabled() -> bool {
+        false
+    }
+    #[inline(always)]
+    pub fn variant() -> FreshOverburdenVariant {
+        FreshOverburdenVariant::UnsupportedAndRoom
     }
 }
 
@@ -2606,6 +2930,42 @@ pub fn eval_sandbox_shape(
 /// parameter that every one of its ~20 test call sites would also have to learn.
 pub(crate) const MUST_SIMULATE_THRESHOLD: f32 = 1e-4;
 
+/// Task #47 ("sand-slab" scheduling defect): fresh-overburden MUST-simulate predicate constants.
+/// See the big comment at this predicate's call site (top of `settle_tick`, just before the MUST/
+/// STALE/REST classification loop) for the mechanism and why every other activation signal in
+/// this scheduler is historical (one tick late) while this one is not.
+///
+/// Material-presence bar: mirrors `PERFECT_SIM_MATERIAL_EPSILON` in `lib.rs` (same value, same
+/// meaning -- "holding material that could move") but declared here rather than reached into from
+/// `lib.rs`, since this module owns the predicate and the two are not required to move together.
+const FRESH_OVERBURDEN_MATERIAL_EPSILON: f32 = 1e-5;
+
+/// Overburden bar, in units of "resting cells directly above" rather than raw `column_depth`
+/// units: multiplied by the same `REFERENCE_GRID_HEIGHT / w` resolution-normalisation
+/// `column_depth`'s own accumulation already applies (see `LATERAL_PRESSURE_SCALE`'s doc comment
+/// for why that normalisation exists), so this bar means the same physical thing -- "about one and
+/// a half full-capacity cells' worth of resting skin" -- at every grid resolution.
+///
+/// Must be comfortably above what a thin skin of newly-settled material on top of an otherwise
+/// free-falling body can accumulate in a single cell (up to ~1.5, `cell_capacity_for`'s max), or
+/// that skin would flip the body's own block back off MUST the instant a single cell of it settles
+/// -- the exact lag this predicate exists to avoid. `0.0` (or "== 0.0") is deliberately not used:
+/// `column_depth` is an accumulated float, not a clean boundary.
+const FRESH_OVERBURDEN_SKIN_CELLS: f32 = 1.5;
+
+/// How much lower a neighbour must read before a cell is judged to have "somewhere to go" —
+/// small enough to catch a genuine slope, comfortably above float noise. Same order of magnitude
+/// as the scheduler's other flow/displacement bars (`MUST_SIMULATE_THRESHOLD`,
+/// `FLOW_INACTIVE_THRESHOLD` in `settle_tick`).
+const FRESH_OVERBURDEN_ROOM_EPSILON: f32 = 1e-3;
+
+/// Task #47 round 3: fraction of a cell's own local capacity (`cell_capacity_for`) that must be
+/// free below it, per `support_fraction`, for it to count as "unsupported enough" to matter for
+/// scheduling -- small enough to catch genuine free space, comfortably above float noise. A
+/// fraction rather than an absolute height (unlike `FRESH_OVERBURDEN_ROOM_EPSILON`) because
+/// `support_fraction` is itself already normalised to `[0, 1]` by the cell-below's own capacity.
+const SUPPORT_FRACTION_EPSILON: f32 = 0.02;
+
 /// Mark a neighbor block as modified (needing redraw/copy-back this frame) and bump its
 /// next-frame displacement estimate, without touching the buffer belonging to the block
 /// currently being simulated (which would corrupt a block that hasn't run yet this frame).
@@ -2980,6 +3340,64 @@ pub fn settle_tick(
         active_blocks.resize(expected_len, crate::BlockActivity::Inactive);
     }
 
+    // --- Fresh-overburden MUST-simulate predicate (task #47: the "sand-slab" scheduling defect)
+    // ---
+    //
+    // Every activation signal in the classification loop below is HISTORICAL: `last_displacements`
+    // records what moved LAST tick, and `next_displacements` (this tick's own record) only becomes
+    // `last_displacements` the tick after, so a block is woken one tick after the evidence a moving
+    // body left behind appears — and falling sand outruns that lag, which is what produces the
+    // large slabs-separated-by-clean-gaps artifact this task fixes ("Perfect simulation" — every
+    // in-mask block holding material simulated every tick — does not show slabs, which is why this
+    // is scheduling, not physics).
+    //
+    // This predicate is a STATE predicate on the CURRENT (pre-tick) field instead: it wakes a
+    // block for what it is doing THIS tick, before anything moves, by checking whether any of its
+    // cells hold material that is (a) unsupported (see `support_fraction`: the cell below it
+    // cannot bear its weight) and (b) has somewhere to go. A naive "material with zero overburden"
+    // test (an earlier attempt, kept as `FreshOverburdenVariant::OverburdenOnly` for comparison)
+    // promotes almost the whole domain — every resting pile's entire free surface has zero
+    // overburden, not just falling material, and surfaces span many blocks — which would bypass
+    // `budget_n` wholesale, exactly what the wake-magnitude MUST bar below was built to avoid.
+    // Requiring somewhere to go is what keeps a flat resting bed (unsupported nowhere, material
+    // present, nothing to do) from qualifying.
+    //
+    // The shipped variant, `UnsupportedAndRoom`, reads `support_fraction` — current heights and
+    // static per-cell capacity only, never `edge_vel_v`, never last tick's values — rather than
+    // `column_depth`'s `in_transit_at`-based overburden estimate. An earlier version of this
+    // predicate used overburden directly; `diag_task47_in_transit_underdetection` showed
+    // `in_transit_at` reads exactly `0.0` for every interior row of a body falling as a solid,
+    // packed mass (only its own leading/trailing edges read nonzero), so that version only ever
+    // caught the outermost row or two of a falling body. `support_fraction` has no such blind spot.
+    //
+    // Deliberately does NOT touch `column_depth` or route through the `fresh_pressure_field`
+    // toggle: `support_fraction` and `fresh_overburden_must_blocks` read only function-local state
+    // and are called by nothing outside this block. `column_depth` itself, and every physics term
+    // the driving head builds from it, is computed exactly as it is today, below, unconditionally
+    // on this predicate. This predicate only ever adds indices to `must_simulate`; it never feeds a
+    // physics quantity. Block activation and the driving head are independent consumers of
+    // "does this material press on what is below it" — see `fresh_pressure_field`'s own doc comment
+    // for the confirmed, unexplained standing-arch regression that toggle causes, which this
+    // predicate must not inherit, and `support_fraction`'s own doc comment for why it is a
+    // plausible candidate to replace `in_transit_at` there too, deliberately not done by this task.
+    let fresh_active = if fresh_overburden_gate::is_disabled() {
+        vec![false; expected_len]
+    } else {
+        fresh_overburden_must_blocks(
+            w,
+            h,
+            block_size,
+            cols,
+            rows,
+            shape_mask,
+            &heightmap.data,
+            &heightmap.external_mass_this_tick,
+            cell_props,
+            edge_vel_v,
+            fresh_overburden_gate::variant(),
+        )
+    };
+
     // Constants from the design doc. `MUST_SIMULATE_THRESHOLD` now lives at module scope (see
     // its doc comment) so `activate_neighbor_upstream` can reuse it by name; kept here too via
     // that same binding rather than a second declaration.
@@ -3025,7 +3443,7 @@ pub fn settle_tick(
             .saturating_sub(last_simulated_ticks[b])
             .min(MAX_STALENESS);
 
-        if displacement >= active_threshold {
+        if displacement >= active_threshold || fresh_active[b] {
             must_simulate.push(b);
         } else if staleness >= MAX_STALENESS {
             stale_simulate.push(b);
@@ -12931,6 +13349,154 @@ mod tests {
         sim.tick_count = 0;
     }
 
+    /// Task #47: mirrors `DrawingSimulation::update`'s "perfect simulation" debug toggle (see its
+    /// own doc comment in `lib.rs`) on the lower-level `TestSim` harness -- force every in-mask,
+    /// material-holding block's recorded displacement to `MUST_SIMULATE_THRESHOLD` before calling
+    /// `tick`, the exact same admission path (and the same `crate::PERFECT_SIM_MATERIAL_EPSILON`
+    /// material bar) the real toggle uses. This is what makes the comparison below "against ground
+    /// truth" rather than "against a second, test-only approximation of ground truth": both this
+    /// function and `DrawingSimulation`'s toggle route through the identical `must_simulate`
+    /// admission `settle_tick` already has, rather than adding a second bypass mechanism.
+    fn perfect_sim_tick(sim: &mut TestSim, mask: &[u8], gravity_dir: glam::Vec2) -> f32 {
+        let w = sim.hm.width;
+        let h = sim.hm.height;
+        let block_size = sim.block_size;
+        let cols = (w + block_size - 1) / block_size;
+        let rows = (h + block_size - 1) / block_size;
+        for by in 0..rows {
+            let start_y = by * block_size;
+            let end_y = ((by + 1) * block_size).min(h);
+            for bx in 0..cols {
+                let start_x = bx * block_size;
+                let end_x = ((bx + 1) * block_size).min(w);
+                let mut has_material = false;
+                'scan: for y in start_y..end_y {
+                    let row_offset = y * w;
+                    for x in start_x..end_x {
+                        let idx = row_offset + x;
+                        if mask[idx] != crate::MASK_OUTSIDE
+                            && sim.hm.data[idx] > crate::PERFECT_SIM_MATERIAL_EPSILON
+                        {
+                            has_material = true;
+                            break 'scan;
+                        }
+                    }
+                }
+                if has_material {
+                    sim.last_displacements[by * cols + bx] = MUST_SIMULATE_THRESHOLD;
+                }
+            }
+        }
+        sim.tick(gravity_dir, usize::MAX)
+    }
+
+    /// Task #47: builds the "resting-then-flipped" scenario shared by the divergence
+    /// regression test and its round-2 variant-comparison diagnostic -- fill roughly the bottom
+    /// 60% of a Circle to h=1.0 (same recipe `diag_flip_release_front_and_block_alignment` uses),
+    /// settle with `perfect_sim_tick` (deterministic and unaffected by `fresh_overburden_gate`,
+    /// since perfect-sim's own force-must already saturates every material-holding block
+    /// regardless), then flip. Calling this repeatedly with the same inputs is how multiple
+    /// independent `TestSim`s get a bit-identical starting point without `TestSim` needing to
+    /// implement `Clone`.
+    fn settled_then_flipped(
+        w: usize,
+        h: usize,
+        mask: &[u8],
+        props: &[f32],
+        block_size: usize,
+        gravity_dir: glam::Vec2,
+    ) -> TestSim {
+        let mut sim = TestSim::new(w, h, props.to_vec(), mask.to_vec(), block_size);
+        let fill_y0 = (0.40 * h as f32) as usize;
+        for y in fill_y0..h {
+            for x in 0..w {
+                let idx = y * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE {
+                    sim.hm.data[idx] = 1.0;
+                }
+            }
+        }
+        let mut quiet_run = 0usize;
+        for _ in 0..4000usize {
+            let flow = perfect_sim_tick(&mut sim, mask, gravity_dir);
+            if flow < 1e-3 {
+                quiet_run += 1;
+                if quiet_run >= 15 {
+                    break;
+                }
+            } else {
+                quiet_run = 0;
+            }
+        }
+        flip_sim(&mut sim);
+        sim
+    }
+
+    /// Task #47: every `FreshOverburdenVariant` a diagnostic can report by name (round 1's
+    /// `OverburdenOnly`/`OverburdenAndRoom`, round 2's `CapacityBelowOnly`/
+    /// `OverburdenOrCapacityBelow`/`RoomOnly`, round 3's `UnsupportedOnly`/`UnsupportedAndRoom`).
+    const ALL_FRESH_OVERBURDEN_VARIANTS: [(FreshOverburdenVariant, &str); 7] = [
+        (FreshOverburdenVariant::OverburdenOnly, "overburden_only"),
+        (FreshOverburdenVariant::OverburdenAndRoom, "overburden_and_room(round1)"),
+        (FreshOverburdenVariant::CapacityBelowOnly, "capacity_below_only"),
+        (FreshOverburdenVariant::OverburdenOrCapacityBelow, "overburden_or_capacity"),
+        (FreshOverburdenVariant::RoomOnly, "room_only"),
+        (FreshOverburdenVariant::UnsupportedOnly, "unsupported_only"),
+        (FreshOverburdenVariant::UnsupportedAndRoom, "unsupported_and_room(shipped)"),
+    ];
+
+    /// Task #47: prints, for one scenario snapshot, the fraction of blocks (of `cols * rows`
+    /// total) each `FreshOverburdenVariant` would promote, alongside perfect simulation's own
+    /// admission rule (every in-mask block holding material -- the same scan `perfect_sim_tick`
+    /// runs) as the 100% reference. Used by `diag_task47_block_fraction_table`.
+    fn report_fresh_overburden_fraction(label: &str, grid: usize, sim: &TestSim, mask: &[u8], block_size: usize) {
+        let w = sim.hm.width;
+        let h = sim.hm.height;
+        let cols = (w + block_size - 1) / block_size;
+        let rows = (h + block_size - 1) / block_size;
+        let total_blocks = cols * rows;
+
+        let mut perfect_n = 0usize;
+        for by in 0..rows {
+            let start_y = by * block_size;
+            let end_y = ((by + 1) * block_size).min(h);
+            for bx in 0..cols {
+                let start_x = bx * block_size;
+                let end_x = ((bx + 1) * block_size).min(w);
+                let mut has_material = false;
+                'scan: for y in start_y..end_y {
+                    let row_offset = y * w;
+                    for x in start_x..end_x {
+                        let idx = row_offset + x;
+                        if mask[idx] != crate::MASK_OUTSIDE
+                            && sim.hm.data[idx] > crate::PERFECT_SIM_MATERIAL_EPSILON
+                        {
+                            has_material = true;
+                            break 'scan;
+                        }
+                    }
+                }
+                if has_material {
+                    perfect_n += 1;
+                }
+            }
+        }
+
+        for (variant, name) in ALL_FRESH_OVERBURDEN_VARIANTS {
+            let promoted = fresh_overburden_must_blocks(
+                w, h, block_size, cols, rows, mask, &sim.hm.data, &sim.hm.external_mass_this_tick,
+                &sim.cell_props, &sim.edge_vel_v, variant,
+            );
+            let n = promoted.iter().filter(|&&x| x).count();
+            println!(
+                "diag_task47_block_fraction_table: {label:<20} grid={grid:>3} variant={name:<30} \
+                 total_blocks={total_blocks:>6} promoted={n:>6} ({:.4}) perfect={perfect_n:>6} ({:.4})",
+                n as f64 / total_blocks as f64,
+                perfect_n as f64 / total_blocks as f64,
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     // DIAGNOSTIC (reproduce-only, no assertions). The user's exact repro: fill a Circle
@@ -13330,5 +13896,448 @@ mod tests {
         // source of nondeterminism in the harness.
         let off2 = branch(false);
         assert_eq!(off, off2, "settle_tick is not deterministic with pressure disabled");
+    }
+
+    /// Task #47 regression test ("sand-slab" scheduling defect). This is the regression test the
+    /// defect never had: divergence from a PERFECT-SIMULATION ground truth (`perfect_sim_tick`,
+    /// correct by construction) over a fresh flip -- the user's own repro -- replacing the void-
+    /// count heuristics used until now, which had no target value.
+    ///
+    /// Three runs from an IDENTICAL, deterministically-reproduced post-flip starting state (built
+    /// by settling with `perfect_sim_tick`, which is unaffected by `fresh_overburden_gate` since
+    /// its own force-must already saturates every material-holding block regardless -- so all
+    /// three branches below start from the same bits):
+    ///   - `sim_perfect`: ticked with `perfect_sim_tick` every tick (ground truth).
+    ///   - `sim_after`: ticked with the ordinary adaptive scheduler, fresh-overburden predicate
+    ///     ENABLED (shipped default).
+    ///   - `sim_before`: the same adaptive scheduler, predicate DISABLED via
+    ///     `fresh_overburden_gate` (pre-fix behaviour, same build, same binary -- not a second
+    ///     compile).
+    ///
+    /// Divergence is the summed per-cell `|height - perfect height|` over every in-mask cell,
+    /// tracked both per-tick peak and cumulative over the run -- "interior void count, or a direct
+    /// buffer diff, over a flip", per the task brief; this is the direct-buffer-diff form.
+    ///
+    /// `budget_n = 256`, matching `DrawingSimulation`'s own shipped starting/floor budget (see
+    /// `lib.rs`'s `budget_n` initialisation) against this harness's `cols * rows = 32 * 32 = 1024`
+    /// blocks (the deliberate 32x32 tiling — see `lib.rs:444-451` — holds at every grid size, so
+    /// this ratio, a quarter of the domain, is representative of the shipped default regardless of
+    /// resolution). MEASURED: at `budget_n = usize::MAX` (never budget-starved) both `sim_before`
+    /// and `sim_after` track `sim_perfect` bit-for-bit over this scenario -- zero divergence either
+    /// way -- because with the budget never binding, every block that receives so much as one
+    /// `activate_neighbor`-style wake ends up simulated anyway; only once the budget is actually
+    /// contested does which blocks *lose* that competition -- and therefore which blocks the
+    /// one-tick-late historical signal costs a tick's worth of lag -- start to matter, which is
+    /// exactly the realistic (budget-constrained) condition this task's fix targets.
+    ///
+    /// The assertion is deliberately relative (`after < before`), not an absolute magic number:
+    /// what this test guards is "the predicate helps", which is stable under retuning the epsilon
+    /// constants, not "divergence measures exactly X today", which would not be.
+    #[test]
+    fn test_fresh_overburden_predicate_reduces_slab_divergence() {
+        let w = 64;
+        let h = 64;
+        let block_size = 2;
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::DrySand, w * h);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+        let post_flip_ticks = 200usize;
+        let budget_n = 256;
+
+        let mut sim_perfect = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
+        let mut sim_after = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
+        let mut sim_before = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
+        assert_eq!(
+            sim_perfect.hm.data, sim_after.hm.data,
+            "Harness sanity check failed: the three deterministically-reproduced post-flip \
+             starting states are not bit-identical, so the divergence measured below would not \
+             isolate the scheduler."
+        );
+        assert_eq!(sim_perfect.hm.data, sim_before.hm.data);
+
+        let mut peak_after = 0.0f64;
+        let mut cumulative_after = 0.0f64;
+        let mut peak_before = 0.0f64;
+        let mut cumulative_before = 0.0f64;
+
+        for _ in 0..post_flip_ticks {
+            perfect_sim_tick(&mut sim_perfect, &mask, gravity_dir);
+
+            fresh_overburden_gate::set_disabled(false);
+            sim_after.tick(gravity_dir, budget_n);
+
+            fresh_overburden_gate::set_disabled(true);
+            sim_before.tick(gravity_dir, budget_n);
+            fresh_overburden_gate::set_disabled(false);
+
+            let mut diff_after = 0.0f64;
+            let mut diff_before = 0.0f64;
+            for i in 0..mask.len() {
+                if mask[i] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                diff_after += (sim_after.hm.data[i] - sim_perfect.hm.data[i]).abs() as f64;
+                diff_before += (sim_before.hm.data[i] - sim_perfect.hm.data[i]).abs() as f64;
+            }
+            cumulative_after += diff_after;
+            cumulative_before += diff_before;
+            peak_after = f64::max(peak_after, diff_after);
+            peak_before = f64::max(peak_before, diff_before);
+        }
+
+        println!(
+            "test_fresh_overburden_predicate_reduces_slab_divergence: peak_before={:.3} \
+             peak_after={:.3} cumulative_before={:.3} cumulative_after={:.3} \
+             (lower is closer to the perfect-simulation ground truth)",
+            peak_before, peak_after, cumulative_before, cumulative_after
+        );
+
+        assert!(
+            cumulative_after < cumulative_before,
+            "Fresh-overburden predicate did not reduce cumulative divergence from the perfect-\
+             simulation ground truth over a fresh flip: cumulative_before={:.3} \
+             cumulative_after={:.3}",
+            cumulative_before, cumulative_after
+        );
+    }
+
+    /// Task #47 round 3. The coordinator's corrected, more specific hypothesis, tested rather
+    /// than trusted: NOT that the overburden clause is conceptually catching the wrong body (round
+    /// 2's story), but that `in_transit_at` under-detects free fall in the first place, so a
+    /// falling body's OWN `resting_above` never actually reaches zero -- it reads roughly
+    /// `h - in_transit`, tens of percent of `h` per row instead of ~0, which accumulates down the
+    /// column and crosses `FRESH_OVERBURDEN_SKIN_CELLS` (1.5, resolution-normalised) after only a
+    /// few rows even though every one of those rows is unambiguously in free fall.
+    ///
+    /// DIAGNOSTIC (reproduce-only, no assertions). For a column inside the falling body in the
+    /// same settled-then-flipped Circle/DrySand scenario the other round-2/3 diagnostics use,
+    /// ticked with the REAL adaptive scheduler at `budget_n = 256` (shipped `OverburdenAndRoom`
+    /// variant, i.e. exactly what ships today), dumps per row `h`, `in_transit_at`,
+    /// `resting_above` (the un-accumulated per-row contribution), and the accumulated
+    /// `fresh_overburden` (the same buffer `fresh_overburden_must_blocks` computes) -- at several
+    /// ticks during the fall, PRE-tick (the same snapshot the classification loop actually reads).
+    /// Reports how many consecutive rows from the top of material in that column stay under the
+    /// effective threshold (`FRESH_OVERBURDEN_SKIN_CELLS * depth_scale`), and separately, the
+    /// fraction of perfect-simulation's promoted blocks that `RoomOnly` (no overburden clause)
+    /// promotes but the shipped `OverburdenAndRoom` does not -- blocks with material and somewhere
+    /// to go, excluded purely by the overburden clause. Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task47_in_transit_underdetection() {
+        let w = 64;
+        let h = 64;
+        let block_size = 2;
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::DrySand, w * h);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let cols = (w + block_size - 1) / block_size;
+        let rows_blk = (h + block_size - 1) / block_size;
+
+        let mut sim = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
+        fresh_overburden_gate::set_disabled(false);
+        fresh_overburden_gate::set_variant(FreshOverburdenVariant::OverburdenAndRoom);
+
+        let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+        let pressure_epsilon = FRESH_OVERBURDEN_SKIN_CELLS * depth_scale;
+        println!(
+            "diag_task47_in_transit_underdetection: grid={w} depth_scale={depth_scale:.3} \
+             effective_threshold={pressure_epsilon:.3} (raw FRESH_OVERBURDEN_SKIN_CELLS={FRESH_OVERBURDEN_SKIN_CELLS})"
+        );
+
+        let probe_col = w / 2;
+        let probe_ticks: [usize; 6] = [1, 2, 3, 5, 8, 12];
+        let mut next_probe = 0usize;
+
+        for t in 0..15usize {
+            if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                next_probe += 1;
+                // PRE-tick snapshot: exactly what `settle_tick`'s classification loop for tick t
+                // would read (frozen `heightmap.data`, `edge_vel_v` as last tick left it).
+                let mut fresh_overburden = vec![0.0f32; w * h];
+                recompute_column_depth(
+                    w, h, &mask, &sim.hm.data, &sim.hm.data, &sim.hm.external_mass_this_tick,
+                    &sim.cell_props, &sim.edge_vel_v, &mut fresh_overburden[..],
+                );
+
+                let mut rows_under_threshold = 0usize;
+                let mut first_material_row: Option<usize> = None;
+                let mut row_lines = Vec::new();
+                for y in 0..h {
+                    let idx = y * w + probe_col;
+                    if mask[idx] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    let hv = sim.hm.data[idx];
+                    if hv <= FRESH_OVERBURDEN_MATERIAL_EPSILON {
+                        continue;
+                    }
+                    if first_material_row.is_none() {
+                        first_material_row = Some(y);
+                    }
+                    let it = in_transit_at(
+                        idx, w, h, &sim.hm.data, &sim.hm.data, &sim.cell_props, &sim.edge_vel_v, &mask,
+                    );
+                    let resting_above_raw = (hv - it - sim.hm.external_mass_this_tick[idx].max(0.0)).max(0.0);
+                    let cd = fresh_overburden[idx];
+                    if cd < pressure_epsilon {
+                        rows_under_threshold += 1;
+                    }
+                    row_lines.push(format!(
+                        "y={y:>3} h={hv:.3} in_transit={it:.3} resting_above_raw={resting_above_raw:.3} \
+                         column_depth={cd:>7.3}{}",
+                        if cd < pressure_epsilon { " [UNDER]" } else { "" }
+                    ));
+                }
+                println!(
+                    "diag_task47_in_transit_underdetection: --- tick={t} probe_col={probe_col} \
+                     first_material_row={first_material_row:?} rows_under_threshold={rows_under_threshold} ---"
+                );
+                for line in &row_lines {
+                    println!("diag_task47_in_transit_underdetection:   {line}");
+                }
+
+                // Exclusion fraction: of perfect-sim's promoted blocks this tick, how many does
+                // RoomOnly promote that OverburdenAndRoom does not.
+                let mut perfect_n = 0usize;
+                for by in 0..rows_blk {
+                    let start_y = by * block_size;
+                    let end_y = ((by + 1) * block_size).min(h);
+                    for bx in 0..cols {
+                        let start_x = bx * block_size;
+                        let end_x = ((bx + 1) * block_size).min(w);
+                        let mut has_material = false;
+                        'scan: for yy in start_y..end_y {
+                            let ro = yy * w;
+                            for xx in start_x..end_x {
+                                let ix = ro + xx;
+                                if mask[ix] != crate::MASK_OUTSIDE
+                                    && sim.hm.data[ix] > crate::PERFECT_SIM_MATERIAL_EPSILON
+                                {
+                                    has_material = true;
+                                    break 'scan;
+                                }
+                            }
+                        }
+                        if has_material {
+                            perfect_n += 1;
+                        }
+                    }
+                }
+                let room_only = fresh_overburden_must_blocks(
+                    w, h, block_size, cols, rows_blk, &mask, &sim.hm.data,
+                    &sim.hm.external_mass_this_tick, &sim.cell_props, &sim.edge_vel_v,
+                    FreshOverburdenVariant::RoomOnly,
+                );
+                let shipped = fresh_overburden_must_blocks(
+                    w, h, block_size, cols, rows_blk, &mask, &sim.hm.data,
+                    &sim.hm.external_mass_this_tick, &sim.cell_props, &sim.edge_vel_v,
+                    FreshOverburdenVariant::OverburdenAndRoom,
+                );
+                let excluded_by_overburden = room_only
+                    .iter()
+                    .zip(shipped.iter())
+                    .filter(|&(&r, &s)| r && !s)
+                    .count();
+                println!(
+                    "diag_task47_in_transit_underdetection: tick={t} perfect_n={perfect_n} \
+                     room_only_n={} shipped_n={} excluded_by_overburden_clause={excluded_by_overburden} \
+                     ({:.4} of perfect_n)",
+                    room_only.iter().filter(|&&x| x).count(),
+                    shipped.iter().filter(|&&x| x).count(),
+                    excluded_by_overburden as f64 / perfect_n.max(1) as f64,
+                );
+            }
+            sim.tick(gravity_dir, 256);
+        }
+    }
+
+    /// Task #47 round 2. The coordinator's diagnosis, tested rather than trusted: round 1's
+    /// shipped predicate (`OverburdenAndRoom`) requires near-zero overburden, and `column_depth`
+    /// has `in_transit` subtracted, so a body already in free fall reads near-zero overburden and
+    /// IS caught -- but a resting block whose support just opened up below it, while it still has
+    /// its OWN material stacked on top, reads a HIGH overburden and is NOT caught. That resting-
+    /// but-about-to-fall block is exactly what produces a slab gap, so the hypothesis is that the
+    /// conjunction catches "already falling" (which needed the least help) and misses "about to
+    /// fall" (the actual defect).
+    ///
+    /// Same harness, same scenario, same `budget_n = 256` as
+    /// `test_fresh_overburden_predicate_reduces_slab_divergence` (round 1 measured `budget_n =
+    /// usize::MAX` shows zero divergence for ANY variant, including "disabled" -- an unbound
+    /// budget masks this defect entirely, so this comparison only runs at the realistic,
+    /// budget-constrained setting where the defect actually shows). One `sim_perfect` ground-truth
+    /// run plus one adaptive run per row below (`disabled` = round-1 "before", plus the five
+    /// `FreshOverburdenVariant`s), all from bit-identical starting states.
+    ///
+    /// DIAGNOSTIC (reproduce-only, no assertions) -- this is the measurement the recommendation in
+    /// the task report is based on, not a permanent regression gate (that remains
+    /// `test_fresh_overburden_predicate_reduces_slab_divergence`, pinned to whichever variant
+    /// `fresh_overburden_gate`'s `#[cfg(not(test))]` twin hardcodes). Run with --ignored
+    /// --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task47_variant_divergence_comparison() {
+        let w = 64;
+        let h = 64;
+        let block_size = 2;
+        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+        let props = get_test_props(MaterialMode::DrySand, w * h);
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let post_flip_ticks = 200usize;
+        let budget_n = 256;
+
+        // (label, None = gate disabled entirely (round-1 "before"), Some(variant) = gate enabled
+        // with that variant).
+        let rows: Vec<(&str, Option<FreshOverburdenVariant>)> = vec![
+            ("disabled (round-1 before)", None),
+            ("overburden_only", Some(FreshOverburdenVariant::OverburdenOnly)),
+            ("overburden_and_room (round1)", Some(FreshOverburdenVariant::OverburdenAndRoom)),
+            ("capacity_below_only", Some(FreshOverburdenVariant::CapacityBelowOnly)),
+            ("overburden_or_capacity", Some(FreshOverburdenVariant::OverburdenOrCapacityBelow)),
+            ("room_only", Some(FreshOverburdenVariant::RoomOnly)),
+            ("unsupported_only", Some(FreshOverburdenVariant::UnsupportedOnly)),
+            ("unsupported_and_room (shipped)", Some(FreshOverburdenVariant::UnsupportedAndRoom)),
+        ];
+
+        let sim_perfect_seed = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
+
+        println!(
+            "diag_task47_variant_divergence_comparison: grid={w} budget_n={budget_n} \
+             post_flip_ticks={post_flip_ticks}"
+        );
+        for (label, variant) in rows {
+            let mut sim_perfect = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
+            let mut sim = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
+            assert_eq!(sim_perfect.hm.data, sim_perfect_seed.hm.data, "harness determinism check");
+            assert_eq!(sim.hm.data, sim_perfect_seed.hm.data, "harness determinism check");
+
+            match variant {
+                None => fresh_overburden_gate::set_disabled(true),
+                Some(v) => {
+                    fresh_overburden_gate::set_disabled(false);
+                    fresh_overburden_gate::set_variant(v);
+                }
+            }
+
+            let mut peak = 0.0f64;
+            let mut cumulative = 0.0f64;
+            for _ in 0..post_flip_ticks {
+                perfect_sim_tick(&mut sim_perfect, &mask, gravity_dir);
+                sim.tick(gravity_dir, budget_n);
+
+                let mut diff = 0.0f64;
+                for i in 0..mask.len() {
+                    if mask[i] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    diff += (sim.hm.data[i] - sim_perfect.hm.data[i]).abs() as f64;
+                }
+                cumulative += diff;
+                peak = f64::max(peak, diff);
+            }
+            fresh_overburden_gate::set_disabled(false);
+            fresh_overburden_gate::set_variant(FreshOverburdenVariant::OverburdenAndRoom);
+
+            println!(
+                "diag_task47_variant_divergence_comparison: {label:<32} peak={peak:>10.3} \
+                 cumulative={cumulative:>12.3}"
+            );
+        }
+    }
+
+    /// Task #47: the block-fraction table the task brief asks for -- "MEASURE THE COST BEFORE
+    /// COMMITTING TO IT" -- for a resting pile, a mid-drain hourglass, and a fresh flip, at grid
+    /// 64 and 512, for every `FreshOverburdenVariant` (round 2: extended from round 1's loose/
+    /// tight-only table). DIAGNOSTIC (reproduce-only, no assertions): prints, per scenario/grid/
+    /// variant, the fraction of blocks it would promote against perfect simulation's own 100%
+    /// reference. Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task47_block_fraction_table() {
+        for grid in [64usize, 512usize] {
+            let w = grid;
+            let h = grid;
+            let block_size = (grid / 32).max(1);
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+
+            // --- Scenario 1: resting pile (settled Circle, DrySand, pre-flip) ---
+            {
+                let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+                let props = get_test_props(MaterialMode::DrySand, w * h);
+                let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
+                let fill_y0 = (0.40 * h as f32) as usize;
+                for y in fill_y0..h {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] != crate::MASK_OUTSIDE {
+                            sim.hm.data[idx] = 1.0;
+                        }
+                    }
+                }
+                let mut quiet_run = 0usize;
+                for _ in 0..4000usize {
+                    let flow = perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                    if flow < 1e-3 {
+                        quiet_run += 1;
+                        if quiet_run >= 15 {
+                            break;
+                        }
+                    } else {
+                        quiet_run = 0;
+                    }
+                }
+                report_fresh_overburden_fraction("resting pile", grid, &sim, &mask, block_size);
+            }
+
+            // --- Scenario 2: mid-drain hourglass ---
+            {
+                let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+                let props = get_test_props(MaterialMode::DrySand, w * h);
+                let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
+                for y in 0..h / 2 {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] != crate::MASK_OUTSIDE {
+                            sim.hm.data[idx] = 1.0;
+                        }
+                    }
+                }
+                let drain_ticks = if grid == 64 { 150 } else { 400 };
+                for _ in 0..drain_ticks {
+                    perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                }
+                report_fresh_overburden_fraction("mid-drain hourglass", grid, &sim, &mask, block_size);
+            }
+
+            // --- Scenario 3: fresh flip (immediately post-flip, before any post-flip tick) ---
+            {
+                let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
+                let props = get_test_props(MaterialMode::DrySand, w * h);
+                let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
+                let fill_y0 = (0.40 * h as f32) as usize;
+                for y in fill_y0..h {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] != crate::MASK_OUTSIDE {
+                            sim.hm.data[idx] = 1.0;
+                        }
+                    }
+                }
+                let mut quiet_run = 0usize;
+                for _ in 0..4000usize {
+                    let flow = perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                    if flow < 1e-3 {
+                        quiet_run += 1;
+                        if quiet_run >= 15 {
+                            break;
+                        }
+                    } else {
+                        quiet_run = 0;
+                    }
+                }
+                flip_sim(&mut sim);
+                report_fresh_overburden_fraction("fresh flip", grid, &sim, &mask, block_size);
+            }
+        }
     }
 }
