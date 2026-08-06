@@ -1445,6 +1445,331 @@ fn clamp_edge_feasible(raw: f32, temp_heights: &[f32], cap_a: f32, cap_b: f32, a
     }
 }
 
+/// TASK #55, second half (propagation), gated (`elliptic_head_gate`, default OFF).
+///
+/// **The defect this closes.** The per-edge lateral solver (`multiplicative_lateral_gate`'s call
+/// site, and the additive form it gates) computes every edge's driving head from that ONE edge's
+/// own two endpoints, read from the tick's frozen snapshot. A disturbance -- a hole opening under
+/// one end of a standing arch, one well of a two-well cave draining -- therefore takes as many
+/// ticks to reach the far side of a connected body as there are cells between them: the surface
+/// gap at the FAR end has no way to learn the near end changed until the change has propagated,
+/// one cell per tick, all the way there. That is confirmed structural, not a scheduling artifact:
+/// ticks-to-halve is nearly identical under the adaptive scheduler and under `perfect_sim_tick`
+/// (every block simulated, no budget starvation possible) -- see this task's report.
+///
+/// **What this solves instead.** A discrete elliptic problem, `div(conveyance * grad(eta)) =
+/// source`, over the WHOLE connected body of (near-)pure liquid in one call, so the whole body's
+/// surface can move in the SAME tick a disturbance reaches any part of it, not one cell further
+/// per tick. Concretely:
+///
+/// - **Domain.** Every interior, in-mask cell whose material is (within `LIQUID_ELLIPTIC_THRESHOLD`
+///   of) fully liquid AND carries at least `ELLIPTIC_WET_EPS` of fill. See "Why liquid-only" below.
+/// - **`eta`, the potential.** `eta[i] = h_ref[i] + column_depth[i] - row(i) * depth_scale`, where
+///   `h_ref` is this cell's own fill lifted into `column_depth`'s reference-row units (exactly
+///   `mult_lateral_conveyance`'s call site's `h_a_ref`/`h_b_ref`, see its own comment for the unit
+///   derivation) and `depth_scale = REFERENCE_GRID_HEIGHT / w`. `h_ref[i] + column_depth[i]` is the
+///   quantity the multiplicative lateral head already uses as `eta_a`/`eta_b` for a SAME-ROW pair,
+///   where the row-index terms that would otherwise appear in an absolute elevation cancel in the
+///   subtraction (see `mult_lateral_conveyance`'s own doc comment). Subtracting `row(i) *
+///   depth_scale` explicitly makes that cancellation hold for ANY pair, not only same-row ones,
+///   which is what lets this solve connect cells across rows (through a submerged basin, say) as
+///   well as across a row (spreading along an arch): for a column resting on a lower-index (higher)
+///   surface than its neighbour, `eta` reads higher there too, by exactly the row difference,
+///   REGARDLESS of which two rows either cell happens to sit at -- see this function's own unit
+///   test, `test_elliptic_eta_is_row_independent`, for the direct check.
+/// - **`conveyance`.** `mult_lateral_conveyance(h_ref[i], column_depth[i], 1.0, 1.0)` -- the SAME
+///   function the multiplicative lateral head uses, evaluated at `k = liq = 1.0` because every node
+///   here already is (within `LIQUID_ELLIPTIC_THRESHOLD` of) pure liquid, so `janssen_effective_depth`
+///   is the identity transform and `k_of_liquidity` is exactly 1 at every node in this domain by
+///   construction -- there is no separate granular-vs-liquid split to make inside this solve, unlike
+///   the general-purpose `mult_lateral_conveyance` call site.
+/// - **The solve.** Gauss-Seidel relaxation of the resulting diffusion problem, alternating sweep
+///   direction each iteration (forward on even iterations, backward on odd) so a change at either
+///   end of the graph reaches the other end within the same handful of iterations rather than only
+///   propagating in one direction per pass -- see `ELLIPTIC_ITERATIONS`'s doc comment for why
+///   Gauss-Seidel is safe here where it was rejected for the liquid WAVE solver (that rejection was
+///   about growing OSCILLATION amplitude in a momentum-carrying equation; this solve carries no
+///   momentum, is a pure relaxation toward equilibrium, and is unconditionally stable under
+///   sequential application). Each edge's step is a real, immediately-applied mass transfer
+///   `clamp_edge_feasible`-clamped against the LIVE `temp_heights` at the moment it runs -- this is
+///   what buys correctness cheaply here in place of `pressure_project`'s fuller Jacobi + node-degree
+///   + arbitration machinery: a sequential, always-feasibility-clamped edge sweep can never ask a
+///   donor for more than it currently holds or an acceptor for more than its current free room,
+///   REGARDLESS of how many other edges already moved mass earlier in the same sweep, so no
+///   parallel-arbitration pass is needed to prevent over-drawing a node with several live edges.
+///   Every single transfer debits exactly what it credits, so the whole pass conserves mass by
+///   construction, exactly like every other edge-based mechanism in this file.
+///
+/// **Why liquid-only (`LIQUID_ELLIPTIC_THRESHOLD = 0.999`), not general.** Measured directly (see
+/// this task's report): forcing `multiplicative_lateral_gate` on for the WHOLE suite turns
+/// `test_dry_sand_has_angle_of_repose` from a permanent 19-degree slope into a flat 0-degree puddle
+/// -- `flux ~ conveyance * grad(surface)` has no yield criterion, so ANY surface gradient drives
+/// flow, and a settled pile's repose slope IS a permanent surface gradient that must produce
+/// EXACTLY zero flow. This solve drives flux from a GLOBALLY solved gradient, which makes that
+/// failure mode worse, not better, if it ran over granular material: a repose slope is global
+/// disequilibrium by a pure free-surface criterion, so a converged elliptic solve would flatten
+/// every sand pile in the domain in a handful of ticks. Rather than invent an ad hoc yield
+/// criterion for a genuinely 2-D elliptic solve (the existing `tau` machinery is written for a
+/// single edge's driving head, not a Poisson equation's right-hand side, and retrofitting a
+/// variational-inequality/obstacle-problem yield constraint into this solve is a materially bigger
+/// piece of work than this task's scope), this solve's domain is restricted to cells that are
+/// already, for practical purposes, PURE liquid -- `liquidity(wetness) >= 0.999` -- so no cell with
+/// any meaningful granular character (hence no cell with any meaningful `tau`) is ever a node or an
+/// edge endpoint. `test_dry_sand_has_angle_of_repose` is run with `elliptic_head_gate` ON as part of
+/// this task's own measurement loop (see the report) specifically to confirm this restriction holds
+/// in practice, not just in theory.
+///
+/// **Not called from the shipped default path in any way that changes it.** `heightmap_data` is
+/// the tick's frozen pre-tick snapshot (never `temp_heights`, which this function mutates) --
+/// `eta`'s `column_depth` term is recomputed once, at the top of this call, from THAT frozen
+/// snapshot via `recompute_column_depth`, into a buffer private to this call (never the shared,
+/// persistent `column_depth` argument `settle_tick` owns) -- so calling this function can never
+/// perturb the existing (order-dependent, in-loop) `column_depth` computation or interact with the
+/// `fresh_pressure_field` toggle, regardless of the gate.
+///
+/// Returns the per-iteration residual (max `|eta_a - eta_b|` over every live graph edge, sampled at
+/// the START of each iteration, before that iteration's own sweep runs) as convergence evidence --
+/// see this task's report for the actual traces. The shipped call site (inside `settle_tick`)
+/// discards this; it exists for diagnostics to read.
+#[allow(clippy::too_many_arguments)]
+fn elliptic_liquid_level_pass(
+    w: usize,
+    h: usize,
+    shape_mask: &[u8],
+    heightmap_data: &[f32],
+    temp_heights: &mut [f32],
+    cell_props: &[f32],
+    edge_vel_v: &[f32],
+    external_mass_this_tick: &[f32],
+) -> (Vec<f32>, Vec<f32>) {
+    let cell_count = w * h;
+    if w < 3 || h < 3 {
+        return (Vec::new(), vec![0.0f32; cell_count]);
+    }
+    let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+
+    // 1. Domain: interior, in-mask, (near-)pure-liquid, wet cells. See "Why liquid-only" above.
+    let mut is_node = vec![false; cell_count];
+    for y in 1..h - 1 {
+        let row = y * w;
+        for x in 1..w - 1 {
+            let idx = row + x;
+            if shape_mask[idx] == crate::MASK_OUTSIDE {
+                continue;
+            }
+            let wetness = cell_props[idx * 4 + PROP_WETNESS];
+            if liquidity(wetness) < LIQUID_ELLIPTIC_THRESHOLD {
+                continue;
+            }
+            if temp_heights[idx] > ELLIPTIC_WET_EPS {
+                is_node[idx] = true;
+            }
+        }
+    }
+
+    // 2. A private, fresh `column_depth` snapshot for this call only -- see the doc comment above
+    // on why this never touches the shared, persistent `column_depth` buffer `settle_tick` owns.
+    let mut cd = vec![0.0f32; cell_count];
+    recompute_column_depth(
+        w,
+        h,
+        shape_mask,
+        heightmap_data,
+        heightmap_data,
+        external_mass_this_tick,
+        cell_props,
+        edge_vel_v,
+        &mut cd[..],
+    );
+
+    // 3. Per-node conveyance and capacity, cached once (both depend only on `wetness` and the
+    // frozen `cd` snapshot, neither of which this pass's own edge sweeps mutate).
+    let mut conv = vec![0.0f32; cell_count];
+    let mut cap = vec![0.0f32; cell_count];
+    for idx in 0..cell_count {
+        if !is_node[idx] {
+            continue;
+        }
+        let h_ref = heightmap_data[idx] * depth_scale;
+        conv[idx] = mult_lateral_conveyance(h_ref, cd[idx], 1.0, 1.0).max(ELLIPTIC_MIN_CONVEYANCE);
+        cap[idx] = cell_capacity_for(cell_props[idx * 4 + PROP_WETNESS]);
+    }
+
+    // 4. Graph edges: every adjacent (right, down) pair of domain nodes. Built once, in fixed
+    // row-major order, and reused every iteration (both the forward and the reversed order below
+    // are permutations of this SAME list, so the two directions are strictly comparable).
+    let mut edges: Vec<(usize, usize, f32)> = Vec::new();
+    for y in 1..h - 1 {
+        let row = y * w;
+        for x in 1..w - 1 {
+            let idx = row + x;
+            if !is_node[idx] {
+                continue;
+            }
+            if x + 1 < w - 1 && is_node[idx + 1] {
+                edges.push((idx, idx + 1, 0.5 * (conv[idx] + conv[idx + 1])));
+            }
+            if y + 1 < h - 1 && is_node[idx + w] {
+                edges.push((idx, idx + w, 0.5 * (conv[idx] + conv[idx + w])));
+            }
+        }
+    }
+
+    let eta_of = |idx: usize, temp_heights: &[f32]| -> f32 {
+        temp_heights[idx] * depth_scale + cd[idx] - (idx / w) as f32 * depth_scale
+    };
+
+    // 5. Gauss-Seidel relaxation -- see the doc comment above for why sequential application (with
+    // every step individually `clamp_edge_feasible`-clamped against the live buffer) is sound here
+    // without a separate arbitration pass, and why alternating sweep direction is worth the
+    // asymmetry it introduces.
+    let mut residuals: Vec<f32> = Vec::with_capacity(ELLIPTIC_ITERATIONS + 1);
+    // Per-cell sum of `|clamped|` over every edge application this cell took part in, as either
+    // endpoint -- the caller's ONLY way to learn which cells this pass actually moved mass through,
+    // since `elliptic_liquid_level_pass` mutates `temp_heights` directly rather than routing
+    // through the `cand_h`/`cand_v` candidate machinery the rest of `settle_tick` uses. The caller
+    // needs this to mark the right blocks `modified` (see the call site's own comment on why: the
+    // tick-end copy-back only writes `heightmap.data` for blocks the scheduler already considers
+    // `modified`, so a cell this pass touches in a block the adaptive scheduler did NOT otherwise
+    // visit this tick would silently be reverted -- `temp_heights.copy_from_slice(&heightmap.data)`
+    // at the top of the NEXT tick would overwrite it right back -- without this).
+    let mut net_activity = vec![0.0f32; cell_count];
+    if edges.is_empty() {
+        return (residuals, net_activity);
+    }
+    for iter in 0..ELLIPTIC_ITERATIONS {
+        let residual = edges
+            .iter()
+            .map(|&(a, b, _)| (eta_of(a, temp_heights) - eta_of(b, temp_heights)).abs())
+            .fold(0.0f32, f32::max);
+        residuals.push(residual);
+        if residual <= ELLIPTIC_CONVERGENCE_EPS {
+            break;
+        }
+        let forward = iter % 2 == 0;
+        let mut apply = |a: usize, b: usize, conv_e: f32, net_activity: &mut [f32]| {
+            let eta_a = eta_of(a, temp_heights);
+            let eta_b = eta_of(b, temp_heights);
+            // Bounded, non-overshooting step: `(eta_a - eta_b) / (2 * depth_scale)` is exactly
+            // the mass transfer that would equalise THIS edge outright (moving it splits the
+            // difference evenly, since donating `d` from `a` to `b` changes `eta_a` by `-d *
+            // depth_scale` and `eta_b` by `+d * depth_scale`), so `ELLIPTIC_EDGE_OMEGA` of that
+            // is a damped step toward equalising, never past it. `weight_e` (see
+            // `ELLIPTIC_CONV_REF`'s own doc comment) folds in `conv_e` as a SATURATING, `< 1`
+            // per-edge rate multiplier -- deeper/thicker material relaxes faster, thin material
+            // slower -- WITHOUT `conv_e`'s own unbounded magnitude (it is not itself a
+            // dimensionless weight; see `ELLIPTIC_CONV_REF`'s doc comment for the overshoot this
+            // fixes, caught by `test_elliptic_residual_falls_monotonically` before this fix
+            // existed).
+            let weight_e = conv_e / (conv_e + ELLIPTIC_CONV_REF);
+            let raw = ELLIPTIC_EDGE_OMEGA * weight_e * (eta_a - eta_b) / (2.0 * depth_scale);
+            let clamped = clamp_edge_feasible(raw, temp_heights, cap[a], cap[b], a, b);
+            temp_heights[a] -= clamped;
+            temp_heights[b] += clamped;
+            net_activity[a] += clamped.abs();
+            net_activity[b] += clamped.abs();
+        };
+        if forward {
+            for &(a, b, conv_e) in edges.iter() {
+                apply(a, b, conv_e, &mut net_activity[..]);
+            }
+        } else {
+            for &(a, b, conv_e) in edges.iter().rev() {
+                apply(a, b, conv_e, &mut net_activity[..]);
+            }
+        }
+    }
+    let final_residual = edges
+        .iter()
+        .map(|&(a, b, _)| (eta_of(a, temp_heights) - eta_of(b, temp_heights)).abs())
+        .fold(0.0f32, f32::max);
+    residuals.push(final_residual);
+    (residuals, net_activity)
+}
+
+/// Threshold on `liquidity(wetness)` for a cell to be eligible as a node in
+/// `elliptic_liquid_level_pass`'s domain. See that function's "Why liquid-only" doc section:
+/// measured directly that running the (structurally similar) multiplicative lateral head over
+/// granular material flattens `test_dry_sand_has_angle_of_repose`'s pile to 0 degrees, because
+/// `flux ~ conveyance * grad(surface)` has no yield criterion. `0.999`, not `1.0`, only to tolerate
+/// float round-trip through `liquidity`'s smoothstep for a material whose `wetness` is nominally
+/// 1.0 (pure Water); anything with genuine granular character reads well under this on the
+/// `liquidity` smoothstep's own steep part (its ramp spans `wetness` in `[0.65, 0.85]`).
+const LIQUID_ELLIPTIC_THRESHOLD: f32 = 0.999;
+
+/// Minimum fill for a cell to be considered "wet" (a candidate node) by `elliptic_liquid_level_pass`.
+/// Purely a numerical floor against solving over float noise; not a physical quantity.
+const ELLIPTIC_WET_EPS: f32 = 1e-4;
+
+/// Floor on `elliptic_liquid_level_pass`'s per-edge conveyance, so a domain edge between two nodes
+/// that both happen to read `mult_lateral_conveyance == 0` (e.g. `column_depth == 0` and `h_ref ==
+/// 0` at both ends -- shouldn't occur given `ELLIPTIC_WET_EPS`, but `h_ref` uses the FROZEN
+/// pre-pass height while `is_node` was built from `temp_heights`, which can differ by whatever an
+/// earlier phase already wrote this tick) never stalls that edge completely for the rest of the
+/// pass. Small enough to be negligible next to any genuinely wet edge's own conveyance.
+const ELLIPTIC_MIN_CONVEYANCE: f32 = 1e-6;
+
+/// Saturation reference for `elliptic_liquid_level_pass`'s per-edge relaxation rate,
+/// `weight_e = conv_e / (conv_e + ELLIPTIC_CONV_REF)`.
+///
+/// **The bug this fixes, caught by `test_elliptic_residual_falls_monotonically`.** An earlier
+/// version used `conv_e` directly as the per-edge transfer coefficient (`raw = OMEGA * conv_e *
+/// (eta_a - eta_b) / depth_scale`). `mult_lateral_conveyance` is NOT a dimensionless rate -- it is
+/// `(local_fill + k * depth).powf(1.5)`, unbounded above, and it was designed to feed
+/// `flux_edge_candidate`'s own separate momentum/damping pipeline (`c_sq`, `damping`, accumulated
+/// `edge_vel`), which is what actually keeps the EXISTING lateral solver's per-tick transfer
+/// bounded there. This pass has no such pipeline -- it applies a transfer directly -- so using
+/// `conv_e` as a raw multiplier let a single edge with merely-moderate depth (measured: `conv_e`
+/// ~36 for a row-material column of `h_ref` ~11 in `depth_scale=12.8` units) compute a `raw` far
+/// larger than the actual imbalance on that edge needed to equalise it, overshooting past
+/// equilibrium into a NEW, larger imbalance elsewhere and producing a persistent non-decaying (in
+/// one measured case, strictly worsening) residual -- exactly the failure this task's own
+/// instruction warns against measuring past.
+///
+/// **The fix.** `weight_e` saturates to `< 1` regardless of how large `conv_e` gets, so the
+/// per-edge step (`ELLIPTIC_EDGE_OMEGA * weight_e * (eta_a - eta_b) / (2 * depth_scale)`, see the
+/// call site's own comment for the `/ 2` term) can never exceed the damped step toward
+/// EQUALISING that one edge -- it can only ever get closer to `ELLIPTIC_EDGE_OMEGA` of that step
+/// as material gets deeper/thicker, never past it. `1.0`: `mult_lateral_conveyance`'s own anchor
+/// case is `local_fill ~ 1, column_depth ~ 0` giving `conveyance ~= 1` (see
+/// `MULT_LATERAL_SCALE`'s doc comment) -- reusing that same reference point means `weight_e = 0.5`
+/// at exactly "one saturated cell's worth of fill, no overburden", the same baseline the rest of
+/// this task's multiplicative-head work anchors against.
+const ELLIPTIC_CONV_REF: f32 = 1.0;
+
+/// Sweep count for `elliptic_liquid_level_pass`'s Gauss-Seidel relaxation. Chosen, not tuned to a
+/// pass/fail window (per this task's own instruction) -- reported against the actual measured
+/// residual-decay traces in this task's report, not reverse-engineered from a target metric. `48`:
+/// large enough that a full forward+backward pair (2 iterations) sweeps a graph of a few hundred
+/// nodes in either direction several times over within the run, small enough that the per-tick cost
+/// (see the report's `bench_sandfall` numbers) stays bounded. Gauss-Seidel is sound here -- unlike
+/// the liquid WAVE solver, which explicitly rejects swept/Gauss-Seidel driving because it turns a
+/// momentum-carrying wave equation into a diverging one (see the "Jacobi driving" comment on the
+/// g=0 liquid branch: measured spectral radius 1.20 swept vs. 0.994 Jacobi) -- because this pass
+/// carries no momentum term at all: it is a pure relaxation toward a diffusion equation's
+/// equilibrium, and sequential (Gauss-Seidel) relaxation of a pure diffusion problem is
+/// unconditionally stable; each step also individually re-derives its own feasibility bound from
+/// the live buffer via `clamp_edge_feasible`, so there is no accumulation path for an unstable
+/// overshoot even in principle.
+const ELLIPTIC_ITERATIONS: usize = 48;
+
+/// Under-relaxation factor for each edge step inside `elliptic_liquid_level_pass`'s Gauss-Seidel
+/// sweep. `0.5`, chosen (not swept) as a conservative starting point -- there is no single spectral
+/// radius to tune against here the way `PRESSURE_OMEGA` was (see that constant's own doc comment
+/// on why `pressure_project`'s stencil shape changes every phase and defeats a one-time tune; this
+/// solve's stencil shape changes every TICK, for the same reason and more so, since which cells
+/// count as "liquid and wet" changes as material moves). Under 1.0 so a single edge's step cannot
+/// itself overshoot past equalising that one edge in one application, leaving convergence to the
+/// iteration count rather than a single aggressive step.
+const ELLIPTIC_EDGE_OMEGA: f32 = 0.5;
+
+/// Early-exit threshold for `elliptic_liquid_level_pass`'s residual (see that function's own
+/// return-value doc comment for what the residual measures: max `|eta_a - eta_b`| over every live
+/// graph edge, in the same reference-row units as `column_depth`). Small relative to a single row
+/// of fill (`depth_scale` units) so the early exit only fires once the graph is genuinely close to
+/// flat, not merely "close enough that a test stops looking".
+const ELLIPTIC_CONVERGENCE_EPS: f32 = 1e-4;
+
 /// **Perf note (task #45, defect 2).** This function, and its call site, used to do two full
 /// extra passes over `touched_h`/`touched_v` beyond what building and solving the Jacobi system
 /// itself needs: a separate "build the node set" pass followed by a separate "initialise `fstar`
@@ -1913,6 +2238,35 @@ pub(crate) mod multiplicative_lateral_gate {
 }
 #[cfg(not(test))]
 mod multiplicative_lateral_gate {
+    #[inline(always)]
+    pub fn is_enabled() -> bool {
+        false
+    }
+}
+
+/// TASK #55, second half (propagation). Same pattern as `multiplicative_lateral_gate`:
+/// `#[cfg(test)]`-gated thread-local so it does not exist in production at all, `#[cfg(not(test))]`
+/// twin hardcodes the shipped choice (off) so a non-test build pays no thread-local read. `false`
+/// by default, matching `multiplicative_lateral_gate`'s polarity convention: this is a live
+/// experiment being measured, not a decided replacement for the one-cell-per-tick edge solver.
+///
+/// Gates `elliptic_liquid_level_pass` (see that function's doc comment for what it does and why).
+#[cfg(test)]
+pub(crate) mod elliptic_head_gate {
+    use std::cell::Cell;
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+    }
+    pub fn set_enabled(v: bool) {
+        ENABLED.with(|c| c.set(v));
+    }
+    #[inline(always)]
+    pub fn is_enabled() -> bool {
+        ENABLED.with(|c| c.get())
+    }
+}
+#[cfg(not(test))]
+mod elliptic_head_gate {
     #[inline(always)]
     pub fn is_enabled() -> bool {
         false
@@ -3679,6 +4033,70 @@ pub fn settle_tick(
     let mut total_flow = 0.0f32;
     let mut next_displacements = vec![0.0f32; expected_len];
     let mut flow_occurred = false;
+
+    // TASK #55, second half (propagation), gated (`elliptic_head_gate`, default OFF -- see that
+    // module's and `elliptic_liquid_level_pass`'s own doc comments). Run once per tick, here,
+    // before the phase loop -- same placement as `fresh_pressure_field`'s
+    // `recompute_column_depth` call above, and for the same reason: it must read `heightmap.data`
+    // as the tick's frozen, not-yet-mutated snapshot. Mutates `temp_heights` directly (a real,
+    // feasibility-clamped mass transfer, not merely a head/driving-term adjustment), so the
+    // phase-0/phase-1 solver that runs afterwards sees an already-partially-levelled starting
+    // state for its own donor/acceptor clamps, while its own driving heads are unaffected (they
+    // read the frozen `heightmap.data`, never `temp_heights`, exactly as before this pass existed)
+    // -- this composes with the existing solver rather than replacing any part of it.
+    //
+    // `net_activity[i]` is nonzero for every cell this pass actually moved mass through this tick.
+    // MEASURED bug, fixed here rather than left for a diagnostic to trip over: without waking the
+    // blocks those cells live in, `diag_task55_elliptic_propagation`'s POCKETS scenario never
+    // equalised at all under the adaptive scheduler (`ticks_to_halve=None` over 300 ticks) despite
+    // converging in 12 under `perfect_sim_tick` -- because the tick-end "Copy back updated blocks"
+    // pass a few hundred lines below only copies `temp_heights` into `heightmap.data` for blocks
+    // already `modified`, and a block the adaptive scheduler did not otherwise touch this tick
+    // stays un-`modified` regardless of what this pass just did to it. Left that way, this pass's
+    // own correction gets silently reverted at the top of the VERY NEXT tick
+    // (`temp_heights.copy_from_slice(&heightmap.data)`), so it would repeat the same no-op
+    // relaxation on a block the scheduler ignores forever. Marking those blocks `modified` (and
+    // waking their neighbours via `activate_neighbor`, the same mechanism the ordinary flux solver
+    // uses a few hundred lines below when IT moves mass) makes this pass's own effect persist, and
+    // gives the adaptive scheduler an honest displacement signal so it keeps prioritising a block
+    // this pass is still actively correcting.
+    if elliptic_head_gate::is_enabled() {
+        let (_, net_activity) = elliptic_liquid_level_pass(
+            w,
+            h,
+            shape_mask,
+            &heightmap.data,
+            &mut temp_heights[..],
+            cell_props,
+            edge_vel_v,
+            &heightmap.external_mass_this_tick,
+        );
+        for (idx, &flow_val) in net_activity.iter().enumerate() {
+            if flow_val <= 0.0 {
+                continue;
+            }
+            flow_occurred = true;
+            total_flow += flow_val;
+            let cx = idx % w;
+            let cy = idx / w;
+            let bx = cx / block_size;
+            let by = cy / block_size;
+            let wake_b = by * cols + bx;
+            activate_neighbor(wake_b, flow_val, &mut modified, &mut next_displacements);
+            if bx > 0 {
+                activate_neighbor(wake_b - 1, flow_val, &mut modified, &mut next_displacements);
+            }
+            if bx + 1 < cols {
+                activate_neighbor(wake_b + 1, flow_val, &mut modified, &mut next_displacements);
+            }
+            if by > 0 {
+                activate_neighbor(wake_b - cols, flow_val, &mut modified, &mut next_displacements);
+            }
+            if by + 1 < rows {
+                activate_neighbor(wake_b + cols, flow_val, &mut modified, &mut next_displacements);
+            }
+        }
+    }
 
     // --- Frozen-Jacobi candidate-flux state (edge-flux solver only; the granular CA's own
     //     `try_move` transfers are untouched and still apply immediately, sequentially) ---
@@ -14850,439 +15268,618 @@ mod tests {
         (y_lo..y_hi).find(|&y| data[y * w + x] > eps)
     }
 
-    /// Task #55, defect 1: "a standing arch of liquid over a void does not collapse... it slowly
-    /// drains instead of flattening fast". The user's acceptance bar (verbatim, from the task
-    /// brief): "arch fixes itself even if there is outflow at the bottom of the arch. not arch
-    /// can't happen" -- so this measures the DECAY RATE of the arch's own unsupported span while
-    /// material is actively falling off it into the void below, not merely whether an arch can
-    /// exist at all.
+    /// TASK #55 RESOLUTION SWEEP helper: the original `diag_task55_*` diagnostics' `probe_ticks`
+    /// arrays were literal tick numbers tuned to one fixed `run_ticks`. Regenerates the same
+    /// RELATIVE sampling (as fractions of `run_ticks`) for whatever per-width `run_ticks` budget a
+    /// given width actually uses, so every width's printed time series samples the same relative
+    /// points in its own run (0%, 0.25%, 0.5%, ... 100%) instead of a table of tick numbers that
+    /// only makes sense for one specific `run_ticks`.
+    fn task55_probe_ticks(run_ticks: usize) -> Vec<usize> {
+        const FRACS: [f64; 20] = [
+            0.0, 0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.0175, 0.02, 0.025, 0.0375, 0.05,
+            0.075, 0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0,
+        ];
+        let mut ticks: Vec<usize> = FRACS
+            .iter()
+            .map(|f| ((f * run_ticks as f64).round() as usize).min(run_ticks))
+            .collect();
+        ticks.dedup();
+        ticks
+    }
+
+    /// TASK #55 RESOLUTION SWEEP geometry for `diag_task55_pocket_equalisation`'s two-well probe.
+    /// `left_x0..left_x1` / `right_x0..right_x1` are INTERSECTED across the whole `[well_top,
+    /// well_bot)` band (see `find_two_well_topology`), so every cell in either rectangle over that
+    /// row range is guaranteed open -- the caller does not need to re-check the mask row by row.
+    struct TwoWellGeometry {
+        left_x0: usize,
+        left_x1: usize,
+        right_x0: usize,
+        right_x1: usize,
+        well_top: usize,
+        well_bot: usize,
+        basin_bot: usize,
+    }
+
+    /// TASK #55 RESOLUTION SWEEP helper for `diag_task55_pocket_equalisation`: locates a "two
+    /// disjoint open wells that only communicate through a single shared basin beneath them"
+    /// topology directly in an arbitrary mask, instead of trusting the hand-found w=128 pixel
+    /// coordinates the original, single-resolution version of this test used
+    /// (`left_x0=55..66`/`right_x0=83..91`/etc, found by dumping that one mask as ASCII) to still
+    /// be there at another width.
     ///
-    /// Hand-built container (no existing `SandboxShape` gives two solid piers with a clean gap --
-    /// see this task's report): an open rectangular box, two solid liquid piers on the left/right
-    /// walls, and a thin liquid slab ("the arch") spanning the gap between them at the same height
-    /// as the piers' own tops. Below the arch, down to the floor, is empty -- the void. As soon as
-    /// the arch is unsupported it starts shedding material into that void (the "outflow" the brief
-    /// asks for: material draining out of the arch's underside), which piles up on the floor --
-    /// but the void is deep enough (58 rows) that this pile cannot climb back up to arch height
-    /// within the run, so "unsupported span shrinking" here can only mean the arch itself is
-    /// spreading/sinking, not that a pile grew up to meet it from below.
+    /// They are not guaranteed to be: `ProceduralFunnel`'s cave-noise terms (`eval_sandbox_shape`,
+    /// e.g. `(dx * 0.14).sin() + (dy * 0.16).cos() + ...`) run on `dx`/`dy` in raw PIXEL units at
+    /// FIXED frequencies -- not frequencies scaled by `w` -- so a wider grid packs strictly more
+    /// noise oscillations across the same physical span of the cave. Measured directly (dump the
+    /// row-by-row open-run count): at w=64 the noise band is too thin to carve anything (max
+    /// run-count briefly touches 2 for a single row and is otherwise 0/1 -- no real well). At
+    /// w=128 it carves a clean two-well split (the original hand-found case). At w=256 and w=512
+    /// it carves MANY separate pockets in the same row -- run-counts of 3 to 9 are typical through
+    /// the noise band -- not a clean two-well split at all. So an early version of this function
+    /// that required "exactly two runs in the row" found nothing at w=64/256/512 and only ever
+    /// worked at the original w=128. That is a real trap-2 finding in its own right (see this
+    /// test's caller for how it is reported), but it need not be a dead end: the physical
+    /// requirement is only "two open columns whose sole connection is a basin beneath them", not
+    /// "the cave has exactly two pockets total". A multi-pocket cave still contains that topology
+    /// as long as some two of its pockets qualify; the other pockets are just inert extra rock
+    /// features this test does not fill.
     ///
-    /// `unsupported_span(t)`: POSITION-INDEPENDENT by construction (see the metric's own inline
-    /// comment for why a "does the original 4-row band still hold material" version is wrong -- a
-    /// completely unsupported slab free-falls as a coherent body and vacates its starting rows in
-    /// 1-2 ticks regardless of whether it is flattening or just falling intact, which a first
-    /// version of this metric measured and reported a meaningless `ticks_to_halve = 1`). Per void
-    /// column, this walks up from the floor while cells are continuously filled to find the
-    /// CURRENT floor-connected pile's own top, then sums material at least 3 rows above that --
-    /// i.e. still genuinely suspended over empty space, wherever it currently is. Reported as an
-    /// absolute time series (in cell-mass units) plus the tick at which it first drops to <= half
-    /// its initial value, for both the shipped adaptive scheduler (`budget_n = 256`, exactly what
-    /// ships) and `perfect_sim_tick` (every block always simulated, `MUST_SIMULATE_THRESHOLD`-
-    /// admitted every tick) -- comparing the two separates "the scheduler isn't waking these
-    /// blocks" from "the physics doesn't level", per the task brief. DIAGNOSTIC (reproduce-only,
-    /// no assertions). Run with --ignored --nocapture.
+    /// So this searches for a band `[y0, y0+bh)` (tried at several candidate heights `bh`, largest
+    /// first, as a fraction of `h`) in which at least two columns are open for the WHOLE band, and
+    /// picks the two WIDEST such column-runs (`min_well_span` wide or more) as the wells --
+    /// whatever else the row contains at that height is ignored. Below the band, the span from the
+    /// left well's start to the right well's end must be fully open for at least
+    /// `min_basin_height` rows (the shared basin). Returns the first (topmost, tallest-band-first)
+    /// qualifying result, or `None` if no such pair exists in this mask at this width at all --
+    /// which is itself a valid, reportable outcome (see the task brief's own instruction: "if it
+    /// does not survive, find the wells per-resolution and say so").
+    fn find_two_well_topology(mask: &[u8], w: usize, h: usize) -> Option<TwoWellGeometry> {
+        let is_open = |x: usize, y: usize| mask[y * w + x] != crate::MASK_OUTSIDE;
+        let margin = ((0.05 * h as f64).round() as usize).max(2);
+        let min_well_span = ((0.02 * w as f64).round() as usize).max(3);
+        let min_basin_height = ((0.02 * h as f64).round() as usize).max(3);
+        // Tried tallest-first: a taller band gives the two fill levels more room to differ, but
+        // is also stricter (every column in the run must stay open for the WHOLE band), so this
+        // falls back to shorter bands only if no tall one works anywhere in the mask.
+        let band_height_fracs = [0.10f64, 0.08, 0.06, 0.045, 0.035];
+
+        let column_open_band = |x: usize, y0: usize, bh: usize| -> bool {
+            (y0..y0 + bh).all(|y| is_open(x, y))
+        };
+
+        let lo = margin;
+        let hi = h.saturating_sub(margin);
+
+        for &frac in &band_height_fracs {
+            let bh = ((frac * h as f64).round() as usize).max(4);
+            if lo + bh >= hi || hi - (lo + bh) < min_basin_height {
+                continue;
+            }
+            let mut y0 = lo;
+            while y0 + bh < hi {
+                let mut segs: Vec<(usize, usize)> = Vec::new();
+                let mut x = 0usize;
+                while x < w {
+                    if column_open_band(x, y0, bh) {
+                        let start = x;
+                        while x < w && column_open_band(x, y0, bh) {
+                            x += 1;
+                        }
+                        if x - start >= min_well_span {
+                            segs.push((start, x));
+                        }
+                    } else {
+                        x += 1;
+                    }
+                }
+                if segs.len() >= 2 {
+                    segs.sort_by_key(|&(s, e)| std::cmp::Reverse(e - s));
+                    let mut top2 = [segs[0], segs[1]];
+                    top2.sort_by_key(|&(s, _)| s);
+                    let (left, right) = (top2[0], top2[1]);
+                    let well_bot = y0 + bh;
+                    let mut basin_end = well_bot;
+                    while basin_end < hi && (left.0..right.1).all(|x| is_open(x, basin_end)) {
+                        basin_end += 1;
+                    }
+                    if basin_end - well_bot >= min_basin_height {
+                        return Some(TwoWellGeometry {
+                            left_x0: left.0,
+                            left_x1: left.1,
+                            right_x0: right.0,
+                            right_x1: right.1,
+                            well_top: y0,
+                            well_bot,
+                            basin_bot: basin_end,
+                        });
+                    }
+                }
+                y0 += 1;
+            }
+        }
+        None
+    }
+
+    /// TASK #55, defect 1, RESOLUTION SWEEP: "a standing arch of liquid over a void does not
+    /// collapse... it slowly drains instead of flattening fast". Same hand-built container and the
+    /// same POSITION-INDEPENDENT `unsupported_span` metric as the original single-resolution
+    /// version of this test (see the metric's own inline comment below for why a "does the
+    /// original 4-row band still hold material" version is wrong), now run at w = 64/128/256/512.
+    ///
+    /// Every hand-built coordinate is derived from ONE isotropic scale factor, `s = w / 64.0`
+    /// (`h` scaled the same way, `h = round(100 * s)`, preserving the original construction's
+    /// h/w = 1.5625 aspect ratio and, with it, every coordinate's fraction of w or h exactly,
+    /// since they all began life as literal pixel numbers at the original w=64). This is also what
+    /// makes the "3 rows above the pile" trap safe: `gap_buffer = round(3 * s)` is exactly 3 at
+    /// w=64 (s=1, the value this test always used) and 24 at w=512 (s=8) -- the SAME 3% of the
+    /// container's height (3/100 = 24/800) at both, rather than a shrinking fraction as w grows if
+    /// left as a literal `3`.
+    ///
+    /// `run_ticks` is allowed to differ ACROSS widths (never between gate-on/off AT a width, which
+    /// stays identical by construction -- both sides of the inner loop share one `run_ticks` for a
+    /// given `w`) purely for wall-clock budget: `perfect_sim_tick` simulates every one of this
+    /// scenario's 1600 blocks (32 cols x 50 rows -- constant across widths, because
+    /// `block_size = w / 32` keeps that ratio fixed) EVERY tick, and per-block cost grows with
+    /// `block_size^2 = (w/32)^2`, so a w=512 pass costs 64x a w=64 pass at the same `run_ticks`.
+    /// Reduced for the two larger widths accordingly; each width's own budget is printed so the
+    /// table can be read honestly rather than assuming one number throughout.
+    ///
+    /// DIAGNOSTIC (reproduce-only, no assertions). Run with --ignored --nocapture.
     #[test]
     #[ignore]
     fn diag_task55_arch_collapse_rate() {
-        let w = 64usize;
-        let h = 100usize;
-        let margin = 2usize;
-        let block_size = 2usize;
-        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
-        for y in margin..h - margin {
-            for x in margin..w - margin {
-                mask[y * w + x] = crate::MASK_INSIDE;
-            }
-        }
-
-        let pillar_w = 12usize;
-        let gap_x0 = margin + pillar_w; // first void column
-        let gap_x1 = w - margin - pillar_w; // one past the last void column
-        let arch_top = 36usize; // top row of both piers and the arch slab
-        let arch_bot = arch_top + 4; // one past the arch slab's 4 rows
-        let floor = h - margin; // first OUTSIDE row
-
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        let props = get_test_props(MaterialMode::Water, w * h);
-
-        let build_sim = || -> TestSim {
-            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
-            for y in arch_top..floor {
-                for x in margin..gap_x0 {
-                    sim.hm.data[y * w + x] = 1.0;
-                }
-                for x in gap_x1..w - margin {
-                    sim.hm.data[y * w + x] = 1.0;
+        for &(w, run_ticks) in &[(64usize, 400usize), (128, 400), (256, 400), (512, 600)] {
+            let s = w as f64 / 64.0;
+            let sc = |base: usize| ((base as f64 * s).round() as usize).max(1);
+            let h = sc(100);
+            let margin = sc(2);
+            let block_size = (w / 32).max(1);
+            let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+            for y in margin..h - margin {
+                for x in margin..w - margin {
+                    mask[y * w + x] = crate::MASK_INSIDE;
                 }
             }
-            for y in arch_top..arch_bot {
+
+            let pillar_w = sc(12);
+            let gap_x0 = margin + pillar_w; // first void column
+            let gap_x1 = w - margin - pillar_w; // one past the last void column
+            let arch_top = sc(36); // top row of both piers and the arch slab
+            let arch_bot = arch_top + sc(4); // one past the arch slab's rows
+            let floor = h - margin; // first OUTSIDE row
+            // Trap: "at least 3 rows above the pile" is a fixed CELL count at the original w=64,
+            // h=100 (3/100 = 3% of the container height). Scaled by `sc` the same way as every
+            // other coordinate here so it stays 3% of the container at every width instead of a
+            // different (shrinking) physical fraction as w grows.
+            let gap_buffer = sc(3);
+
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+            let props = get_test_props(MaterialMode::Water, w * h);
+
+            let build_sim = || -> TestSim {
+                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+                for y in arch_top..floor {
+                    for x in margin..gap_x0 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                    for x in gap_x1..w - margin {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                for y in arch_top..arch_bot {
+                    for x in gap_x0..gap_x1 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                sim
+            };
+
+            // POSITION-INDEPENDENT metric -- deliberately NOT "how much of the original 4 arch
+            // rows still has material in them" (a first version tried that: a completely
+            // unsupported liquid slab free-falls as a coherent body, vacating its ORIGINAL rows
+            // within 1-2 ticks regardless of whether it is flattening or just falling intact, which
+            // reported a meaningless `ticks_to_halve = 1` under both schedulers). This version
+            // tracks, per void column, the CURRENT floor-connected pile (walking up from the floor
+            // while cells are continuously filled) and sums material sitting at least `gap_buffer`
+            // empty rows above that pile's own top -- i.e. still genuinely hanging with real
+            // clearance beneath it, wherever it currently is.
+            let eps = 0.05f32;
+            let unsupported_span = |data: &[f32]| -> f64 {
+                let mut total = 0.0f64;
                 for x in gap_x0..gap_x1 {
-                    sim.hm.data[y * w + x] = 1.0;
+                    let mut pile_top = floor;
+                    while pile_top > arch_top && data[(pile_top - 1) * w + x] > eps {
+                        pile_top -= 1;
+                    }
+                    let hanging_hi = pile_top.saturating_sub(gap_buffer).max(arch_top);
+                    total += diag_task55_region_mass(data, w, x, x + 1, arch_top, hanging_hi);
                 }
-            }
-            sim
-        };
+                total
+            };
 
-        // POSITION-INDEPENDENT metric -- deliberately NOT "how much of the original 4 arch rows
-        // still has material in them". A first version tried that and it is wrong: a completely
-        // unsupported liquid slab free-falls as a coherent body, so it vacates its ORIGINAL rows
-        // within 1-2 ticks regardless of whether it is "flattening" or just falling intact and
-        // landing elsewhere -- that version measured "did the material leave its starting
-        // position", not "is material still suspended over empty space", and reported a
-        // ticks_to_halve of 1 under BOTH adaptive and perfect_sim that turned out to mean nothing
-        // (see this task's report).
-        //
-        // This version tracks, per void column, the CURRENT floor-connected pile (walking up from
-        // the floor while cells are continuously filled) and sums material sitting at least
-        // `gap_buffer` empty rows above that pile's own top -- i.e. still genuinely hanging with
-        // real clearance beneath it, wherever it currently is. This reads 144.0 at t=0 (no pile
-        // exists yet) and can only fall as fast as material actually gains support (whether by
-        // landing on the growing pile or by spreading down the pillars' own sides), not merely by
-        // moving.
-        let eps = 0.05f32;
-        let gap_buffer = 3usize;
-        let unsupported_span = |data: &[f32]| -> f64 {
-            let mut total = 0.0f64;
-            for x in gap_x0..gap_x1 {
-                let mut pile_top = floor;
-                while pile_top > arch_top && data[(pile_top - 1) * w + x] > eps {
-                    pile_top -= 1;
+            let budget_n = 256usize;
+            let probe_ticks = task55_probe_ticks(run_ticks);
+
+            println!(
+                "diag_task55_arch_collapse_rate: w={w:>4} h={h} block_size={block_size} \
+                 budget_n={budget_n} run_ticks={run_ticks} scale={s:.4} gap=[{gap_x0},{gap_x1}) \
+                 arch_rows=[{arch_top},{arch_bot}) gap_buffer={gap_buffer} (3% of h, resolution-\
+                 normalised)"
+            );
+
+            // TASK #55 cross-measurement: defensive reset before this width's own loop runs, in
+            // case a prior test on this same thread panicked mid-toggle (same pattern as
+            // `diag_task47_variant_divergence_comparison`'s use of `fresh_overburden_gate`).
+            multiplicative_lateral_gate::set_enabled(false);
+            for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
+                for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
+                    let mut sim = build_sim();
+                    multiplicative_lateral_gate::set_enabled(mult_enabled);
+                    let initial = unsupported_span(&sim.hm.data);
+                    let target = initial * 0.5;
+                    let mut half_life_tick: Option<usize> = None;
+                    let mut next_probe = 0usize;
+                    println!(
+                        "diag_task55_arch_collapse_rate: w={w:>4} --- {gate_label} / {label} --- \
+                         initial_unsupported={initial:.4}"
+                    );
+                    for t in 0..=run_ticks {
+                        let span = unsupported_span(&sim.hm.data);
+                        if half_life_tick.is_none() && t > 0 && span <= target {
+                            half_life_tick = Some(t);
+                        }
+                        if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                            next_probe += 1;
+                            println!(
+                                "diag_task55_arch_collapse_rate: w={w:>4} {gate_label:<22} \
+                                 {label:<20} tick={t:>4} unsupported_span={span:>10.4} \
+                                 fraction_of_initial={:.4}",
+                                span / initial.max(1e-9)
+                            );
+                        }
+                        if t == run_ticks {
+                            break;
+                        }
+                        if use_perfect {
+                            perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                        } else {
+                            sim.tick(gravity_dir, budget_n);
+                        }
+                    }
+                    multiplicative_lateral_gate::set_enabled(false);
+                    println!(
+                        "diag_task55_arch_collapse_rate: w={w:>4} {gate_label:<22} {label:<20} \
+                         ticks_to_halve={half_life_tick:?} run_ticks_budget={run_ticks} \
+                         (initial={initial:.4}, target<={target:.4})"
+                    );
                 }
-                let hanging_hi = pile_top.saturating_sub(gap_buffer).max(arch_top);
-                total += diag_task55_region_mass(data, w, x, x + 1, arch_top, hanging_hi);
-            }
-            total
-        };
-
-        let budget_n = 256usize;
-        let run_ticks = 400usize;
-        let probe_ticks: [usize; 20] = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 400,
-        ];
-
-        println!(
-            "diag_task55_arch_collapse_rate: w={w} h={h} block_size={block_size} budget_n={budget_n} \
-             gap=[{gap_x0},{gap_x1}) arch_rows=[{arch_top},{arch_bot})"
-        );
-
-        // TASK #55 cross-measurement: defensive reset before this test's own loop runs, in case a
-        // prior test on this same thread panicked mid-toggle (same pattern as
-        // `diag_task47_variant_divergence_comparison`'s use of `fresh_overburden_gate`).
-        multiplicative_lateral_gate::set_enabled(false);
-        for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
-            for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
-                let mut sim = build_sim();
-                multiplicative_lateral_gate::set_enabled(mult_enabled);
-                let initial = unsupported_span(&sim.hm.data);
-                let target = initial * 0.5;
-                let mut half_life_tick: Option<usize> = None;
-                let mut next_probe = 0usize;
-                println!(
-                    "diag_task55_arch_collapse_rate: --- {gate_label} / {label} --- initial_unsupported={initial:.4}"
-                );
-                for t in 0..=run_ticks {
-                    let span = unsupported_span(&sim.hm.data);
-                    if half_life_tick.is_none() && t > 0 && span <= target {
-                        half_life_tick = Some(t);
-                    }
-                    if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                        next_probe += 1;
-                        println!(
-                            "diag_task55_arch_collapse_rate: {gate_label:<22} {label:<20} tick={t:>4} unsupported_span={span:>10.4} \
-                             fraction_of_initial={:.4}",
-                            span / initial.max(1e-9)
-                        );
-                    }
-                    if t == run_ticks {
-                        break;
-                    }
-                    if use_perfect {
-                        perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                    } else {
-                        sim.tick(gravity_dir, budget_n);
-                    }
-                }
-                multiplicative_lateral_gate::set_enabled(false);
-                println!(
-                    "diag_task55_arch_collapse_rate: {gate_label:<22} {label:<20} ticks_to_halve={half_life_tick:?} \
-                     (initial={initial:.4}, target<={target:.4})"
-                );
             }
         }
     }
 
-    /// Task #55, defect 2: "enclosed pockets in a procedural cave do not equalise their surface
-    /// level" -- the user's own suggested reproduction ("I think there is an easy way to reproduce
-    /// this with procedural caves"). Uses the actual procedural-cave shape, `SandboxShape::
-    /// ProceduralFunnel` (`eval_sandbox_shape`'s noise-carved stalactite/stalagmite chamber -- see
-    /// its own match arm's doc comment), at its production default parameters
-    /// (`neck_width=0.005, hourglass_curve=0.6`, `w=h=128`).
+    /// Task #55, defect 2, RESOLUTION SWEEP: "enclosed pockets in a procedural cave do not
+    /// equalise their surface level" -- the user's own suggested reproduction. Uses the actual
+    /// procedural-cave shape, `SandboxShape::ProceduralFunnel`, at its production default
+    /// parameters (`neck_width=0.005, hourglass_curve=0.6`), now at w = h = 64/128/256/512.
     ///
-    /// Geometry (found by dumping this exact mask as ASCII and reading off real coordinates --
-    /// see this task's report for the dump): the noise carving splits the lower half of the cave
-    /// into two separate vertical wells, columns roughly x=[43,70) (left) and x=[72,94) (right),
-    /// spanning rows 93-105, which share a common ceiling opening at row 92 above them AND a
-    /// common basin below them (rows >= 106, single wide open span) -- a genuine two-wells-plus-
-    /// shared-basin ("communicating vessels") topology, not a hand-built one. Filling the shared
-    /// basin solid and each well to a DIFFERENT height (left well surface at row 97, right well at
-    /// row 100 -- both still safely inside their own well, below the row-92 ceiling) gives two
-    /// separate free surfaces connected only through the submerged basin beneath both, i.e.
-    /// exactly the differing-level, passage-connected setup the task brief asks for.
+    /// The original, single-resolution version of this test hand-found its two-well-plus-basin
+    /// coordinates by dumping the w=128 mask as ASCII. Per this test's own doc comment on
+    /// `find_two_well_topology` above, that topology is NOT guaranteed to survive a resolution
+    /// change -- `ProceduralFunnel`'s cave noise runs at fixed pixel-space frequencies, so a wider
+    /// grid carves a genuinely different pattern, not the same pattern at more pixels. This version
+    /// therefore RE-FINDS the two-well+shared-basin structure in each width's own mask via
+    /// `find_two_well_topology` rather than assuming w=128's pixel coordinates scale. If the
+    /// topology is not present at a given width, that width is skipped and reported as absent --
+    /// not fabricated from scaled coordinates that would silently read a wall.
     ///
-    /// `level_diff(t)`: |surface_row(right probe column) - surface_row(left probe column)|, probed
-    /// at x=60 (left well) and x=87 (right well), read from `diag_task55_surface_row` over each
-    /// well's own row range (falling back to the basin's top row, 106, if a well runs dry -- the
-    /// natural "fully equalised" reading). Reported as a time series plus ticks-to-halve, for both
-    /// the shipped adaptive scheduler and `perfect_sim_tick` -- see `diag_task55_arch_collapse_rate`
-    /// for why both are reported. DIAGNOSTIC (reproduce-only, no assertions). Run with --ignored
-    /// --nocapture.
+    /// `level_diff(t)`: `|surface_row(right probe column) - surface_row(left probe column)|`, read
+    /// from `diag_task55_surface_row` over each well's own row range. The two wells are filled to
+    /// FRACTIONS of their own found band height (35% / 65% down from the band's top) rather than a
+    /// fixed row offset, so the initial imbalance is the same relative shape at every width even
+    /// though the band's absolute height differs.
+    ///
+    /// Reported as a time series plus ticks-to-halve, for both the shipped adaptive scheduler and
+    /// `perfect_sim_tick`. `run_ticks` differs across widths for wall-clock budget (see
+    /// `diag_task55_arch_collapse_rate`'s doc comment for why), never between gate-on/off at a
+    /// given width. DIAGNOSTIC (reproduce-only, no assertions). Run with --ignored --nocapture.
     #[test]
     #[ignore]
     fn diag_task55_pocket_equalisation() {
-        let w = 128usize;
-        let h = 128usize;
-        let block_size = 4usize; // grid / 32, per this file's own convention
-        let mask = make_test_mask(w, h, SandboxShape::ProceduralFunnel, 0.005, 0.6);
+        for &(w, run_ticks) in &[(64usize, 300usize), (128, 300), (256, 200), (512, 150)] {
+            let h = w;
+            let block_size = (w / 32).max(1);
+            let mask = make_test_mask(w, h, SandboxShape::ProceduralFunnel, 0.005, 0.6);
 
-        let left_x0 = 55usize;
-        let left_x1 = 66usize; // exclusive
-        let right_x0 = 83usize;
-        let right_x1 = 91usize; // exclusive
-        let well_top = 93usize; // shared ceiling opening is row 92; wells start at 93
-        let well_bot = 106usize; // basin's own top row (first row both wells merge into)
-        let basin_bot = 115usize; // stop just above the funnel's bottom taper wall
-        let left_surface0 = 97usize; // left well filled [97, well_bot) -- taller column
-        let right_surface0 = 100usize; // right well filled [100, well_bot) -- shorter column
-        let left_probe = 60usize;
-        let right_probe = 87usize;
+            let topo = match find_two_well_topology(&mask, w, h) {
+                Some(t) => t,
+                None => {
+                    println!(
+                        "diag_task55_pocket_equalisation: w={w:>4} h={h} -- NO two-well+shared-\
+                         basin topology found in this mask at this width (ProceduralFunnel's cave \
+                         noise uses fixed pixel-space frequencies, so the topology hand-found at \
+                         w=128 is not guaranteed to survive a resolution change -- see \
+                         `find_two_well_topology`'s doc comment). SKIPPING this width; reported as \
+                         absent in the table, not fabricated from scaled coordinates."
+                    );
+                    continue;
+                }
+            };
 
-        // Harness sanity: every cell this test fills must actually be inside the cave. If the
-        // noise carving ever changes, this fails loudly instead of silently reading a wall.
-        for x in left_x0..left_x1 {
-            for y in left_surface0..well_bot {
-                assert_ne!(
-                    mask[y * w + x], crate::MASK_OUTSIDE,
-                    "left well cell (x={x}, y={y}) is outside the cave -- geometry assumption stale"
-                );
+            let band_h = topo.well_bot - topo.well_top;
+            let mut left_surface0 = topo.well_top + ((0.35 * band_h as f64).round() as usize);
+            let mut right_surface0 = topo.well_top + ((0.65 * band_h as f64).round() as usize);
+            left_surface0 = left_surface0.min(topo.well_bot.saturating_sub(1));
+            if right_surface0 <= left_surface0 {
+                right_surface0 = (left_surface0 + 1).min(topo.well_bot.saturating_sub(1));
             }
-        }
-        for x in right_x0..right_x1 {
-            for y in right_surface0..well_bot {
-                assert_ne!(
-                    mask[y * w + x], crate::MASK_OUTSIDE,
-                    "right well cell (x={x}, y={y}) is outside the cave -- geometry assumption stale"
-                );
-            }
-        }
 
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        let props = get_test_props(MaterialMode::Water, w * h);
+            // Bound the basin fill to a fixed fraction of h (matches the original w=128 test's
+            // basin depth of 9/128 = 7.03% of h) rather than filling however far the connected
+            // single-run region happens to extend at this width -- purely a compute-budget bound;
+            // the equalisation mechanism only needs SOME connected basin, not the largest one that
+            // exists.
+            let basin_cap = ((0.09 * h as f64).round() as usize).max(3);
+            let basin_bot = (topo.well_bot + basin_cap).min(topo.basin_bot);
+            let basin_x0 = topo.left_x0.min(topo.right_x0);
+            let basin_x1 = topo.left_x1.max(topo.right_x1);
 
-        let build_sim = || -> TestSim {
-            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
-            for y in 0..h {
-                for x in 0..w {
-                    let idx = y * w + x;
-                    if mask[idx] == crate::MASK_OUTSIDE {
-                        continue;
-                    }
-                    let in_basin = y >= well_bot && y < basin_bot;
-                    let in_left_well = x >= left_x0 && x < left_x1 && y >= left_surface0 && y < well_bot;
-                    let in_right_well =
-                        x >= right_x0 && x < right_x1 && y >= right_surface0 && y < well_bot;
-                    if in_basin || in_left_well || in_right_well {
-                        sim.hm.data[idx] = 1.0;
-                    }
+            let left_probe = (topo.left_x0 + topo.left_x1) / 2;
+            let right_probe = (topo.right_x0 + topo.right_x1) / 2;
+
+            println!(
+                "diag_task55_pocket_equalisation: w={w:>4} h={h} block_size={block_size} \
+                 budget_n=256 run_ticks={run_ticks} left_well=[{},{})x[{},{}) \
+                 right_well=[{},{})x[{},{}) basin=[{},{})x[{},{}) left_probe={left_probe} \
+                 right_probe={right_probe}",
+                topo.left_x0, topo.left_x1, left_surface0, topo.well_bot,
+                topo.right_x0, topo.right_x1, right_surface0, topo.well_bot,
+                basin_x0, basin_x1, topo.well_bot, basin_bot
+            );
+
+            // Harness sanity, same defensive spirit as the original hand-coordinate version:
+            // every cell this test is about to fill must actually be open.
+            // `find_two_well_topology` guarantees this by construction (run bounds are
+            // intersected across the whole band before being returned), but this fails loudly
+            // instead of silently reading a wall if that guarantee is ever violated.
+            for x in topo.left_x0..topo.left_x1 {
+                for y in left_surface0..topo.well_bot {
+                    assert_ne!(
+                        mask[y * w + x], crate::MASK_OUTSIDE,
+                        "w={w}: left well cell (x={x}, y={y}) outside -- geometry search is wrong"
+                    );
                 }
             }
-            sim
-        };
+            for x in topo.right_x0..topo.right_x1 {
+                for y in right_surface0..topo.well_bot {
+                    assert_ne!(
+                        mask[y * w + x], crate::MASK_OUTSIDE,
+                        "w={w}: right well cell (x={x}, y={y}) outside -- geometry search is wrong"
+                    );
+                }
+            }
+            for x in basin_x0..basin_x1 {
+                for y in topo.well_bot..basin_bot {
+                    assert_ne!(
+                        mask[y * w + x], crate::MASK_OUTSIDE,
+                        "w={w}: basin cell (x={x}, y={y}) outside -- geometry search is wrong"
+                    );
+                }
+            }
 
-        let eps = 0.05f32;
-        let level_diff = |data: &[f32]| -> f64 {
-            let left = diag_task55_surface_row(data, w, left_probe, well_top, well_bot, eps)
-                .unwrap_or(well_bot);
-            let right = diag_task55_surface_row(data, w, right_probe, well_top, well_bot, eps)
-                .unwrap_or(well_bot);
-            (right as f64 - left as f64).abs()
-        };
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+            let props = get_test_props(MaterialMode::Water, w * h);
 
-        let budget_n = 256usize;
-        let run_ticks = 300usize;
-        let probe_ticks: [usize; 11] = [0, 2, 5, 10, 20, 30, 50, 75, 100, 150, 300];
-
-        println!(
-            "diag_task55_pocket_equalisation: w={w} h={h} block_size={block_size} budget_n={budget_n} \
-             left_well=[{left_x0},{left_x1})x[{left_surface0},{well_bot}) \
-             right_well=[{right_x0},{right_x1})x[{right_surface0},{well_bot}) basin=[{well_bot},{basin_bot})"
-        );
-
-        // TASK #55 cross-measurement: defensive reset before this test's own loop runs, in case a
-        // prior test on this same thread panicked mid-toggle (same pattern as
-        // `diag_task47_variant_divergence_comparison`'s use of `fresh_overburden_gate`).
-        multiplicative_lateral_gate::set_enabled(false);
-        for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
-            for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
-                let mut sim = build_sim();
-                multiplicative_lateral_gate::set_enabled(mult_enabled);
-                let initial = level_diff(&sim.hm.data);
-                let target = initial * 0.5;
-                let mut half_life_tick: Option<usize> = None;
-                let mut next_probe = 0usize;
-                println!(
-                    "diag_task55_pocket_equalisation: --- {gate_label} / {label} --- initial_level_diff={initial:.4} rows"
-                );
-                for t in 0..=run_ticks {
-                    let diff = level_diff(&sim.hm.data);
-                    if half_life_tick.is_none() && t > 0 && diff <= target {
-                        half_life_tick = Some(t);
-                    }
-                    if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                        next_probe += 1;
-                        let left = diag_task55_surface_row(&sim.hm.data, w, left_probe, well_top, well_bot, eps)
-                            .unwrap_or(well_bot);
-                        let right = diag_task55_surface_row(&sim.hm.data, w, right_probe, well_top, well_bot, eps)
-                            .unwrap_or(well_bot);
-                        println!(
-                            "diag_task55_pocket_equalisation: {gate_label:<22} {label:<20} tick={t:>4} left_surface_row={left:>3} \
-                             right_surface_row={right:>3} level_diff={diff:>7.4} fraction_of_initial={:.4}",
-                            diff / initial.max(1e-9)
-                        );
-                    }
-                    if t == run_ticks {
-                        break;
-                    }
-                    if use_perfect {
-                        perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                    } else {
-                        sim.tick(gravity_dir, budget_n);
+            let build_sim = || -> TestSim {
+                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+                for y in 0..h {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        let in_basin =
+                            y >= topo.well_bot && y < basin_bot && x >= basin_x0 && x < basin_x1;
+                        let in_left_well = x >= topo.left_x0 && x < topo.left_x1
+                            && y >= left_surface0 && y < topo.well_bot;
+                        let in_right_well = x >= topo.right_x0 && x < topo.right_x1
+                            && y >= right_surface0 && y < topo.well_bot;
+                        if in_basin || in_left_well || in_right_well {
+                            sim.hm.data[idx] = 1.0;
+                        }
                     }
                 }
-                multiplicative_lateral_gate::set_enabled(false);
-                println!(
-                    "diag_task55_pocket_equalisation: {gate_label:<22} {label:<20} ticks_to_halve={half_life_tick:?} \
-                     (initial={initial:.4}, target<={target:.4})"
-                );
+                sim
+            };
+
+            let eps = 0.05f32;
+            let level_diff = |data: &[f32]| -> f64 {
+                let left = diag_task55_surface_row(data, w, left_probe, topo.well_top, topo.well_bot, eps)
+                    .unwrap_or(topo.well_bot);
+                let right = diag_task55_surface_row(data, w, right_probe, topo.well_top, topo.well_bot, eps)
+                    .unwrap_or(topo.well_bot);
+                (right as f64 - left as f64).abs()
+            };
+
+            let budget_n = 256usize;
+            let probe_ticks = task55_probe_ticks(run_ticks);
+
+            // TASK #55 cross-measurement: defensive reset before this width's own loop runs (same
+            // pattern as `diag_task47_variant_divergence_comparison`'s `fresh_overburden_gate`).
+            multiplicative_lateral_gate::set_enabled(false);
+            for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
+                for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
+                    let mut sim = build_sim();
+                    multiplicative_lateral_gate::set_enabled(mult_enabled);
+                    let initial = level_diff(&sim.hm.data);
+                    let target = initial * 0.5;
+                    let mut half_life_tick: Option<usize> = None;
+                    let mut next_probe = 0usize;
+                    println!(
+                        "diag_task55_pocket_equalisation: w={w:>4} --- {gate_label} / {label} --- \
+                         initial_level_diff={initial:.4} rows"
+                    );
+                    for t in 0..=run_ticks {
+                        let diff = level_diff(&sim.hm.data);
+                        if half_life_tick.is_none() && t > 0 && diff <= target {
+                            half_life_tick = Some(t);
+                        }
+                        if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                            next_probe += 1;
+                            let left = diag_task55_surface_row(&sim.hm.data, w, left_probe, topo.well_top, topo.well_bot, eps)
+                                .unwrap_or(topo.well_bot);
+                            let right = diag_task55_surface_row(&sim.hm.data, w, right_probe, topo.well_top, topo.well_bot, eps)
+                                .unwrap_or(topo.well_bot);
+                            println!(
+                                "diag_task55_pocket_equalisation: w={w:>4} {gate_label:<22} \
+                                 {label:<20} tick={t:>4} left_surface_row={left:>3} \
+                                 right_surface_row={right:>3} level_diff={diff:>7.4} \
+                                 fraction_of_initial={:.4}",
+                                diff / initial.max(1e-9)
+                            );
+                        }
+                        if t == run_ticks {
+                            break;
+                        }
+                        if use_perfect {
+                            perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                        } else {
+                            sim.tick(gravity_dir, budget_n);
+                        }
+                    }
+                    multiplicative_lateral_gate::set_enabled(false);
+                    println!(
+                        "diag_task55_pocket_equalisation: w={w:>4} {gate_label:<22} {label:<20} \
+                         ticks_to_halve={half_life_tick:?} run_ticks_budget={run_ticks} \
+                         (initial={initial:.4}, target<={target:.4})"
+                    );
+                }
             }
         }
     }
 
-    /// Task #55, defect 3: "a draining lake does not stay level while it drains". Reuses the
-    /// `Hourglass`/mid-drain recipe `diag_task47_block_fraction_table`'s "mid-drain hourglass"
-    /// scenario already exercises (`neck_width=0.15, hourglass_curve=0.6`), but with Water instead
-    /// of DrySand -- defect 3 is specifically about liquid -- and a shallower initial fill so the
-    /// lake has room to visibly drain over the run instead of staying pinned at the chamber's own
-    /// ceiling.
+    /// Task #55, defect 3, RESOLUTION SWEEP: "a draining lake does not stay level while it
+    /// drains". Reuses the `Hourglass` mid-drain recipe (`neck_width=0.15, hourglass_curve=0.6`)
+    /// with Water and a shallow initial fill, now at w = h = 64/128/256/512. Unlike
+    /// `ProceduralFunnel`, `Hourglass`'s own geometry (`eval_sandbox_shape`) is purely parametric
+    /// in `dx / w_f`, `dy / h_f` -- no fixed-pixel-frequency noise term -- so its shape genuinely
+    /// IS the same at every width once expressed as a fraction of w/h, unlike the pocket-
+    /// equalisation cave. `fill_lo` is expressed as that fraction (12/64 = 0.1875 of h, the
+    /// original construction's own ratio) rather than a literal row count.
     ///
-    /// `spread(t)`: max - min of the per-column free-surface row (`diag_task55_surface_row`) over
-    /// every "wetted" column (any column with material above `eps` anywhere in the top chamber) --
-    /// exactly "max-minus-min free surface height across the wetted region" from the task brief.
-    /// Also reports the mean surface row each probe tick, to confirm the lake is actually draining
-    /// (mean row increasing) rather than sitting static -- a flat `spread` on a lake that never
-    /// drains would not be evidence of anything. DIAGNOSTIC (reproduce-only, no assertions,
-    /// reported as a full time series plus the run's peak spread rather than a ticks-to-halve
-    /// number -- the brief does not ask for a decay rate here, and a lake that starts flat by
-    /// construction has nothing to halve from). Run with --ignored --nocapture.
+    /// `spread(t)`: max - min of the per-column free-surface row over every wetted column. Also
+    /// reports the mean surface row each probe tick to confirm the lake is actually draining.
+    /// DIAGNOSTIC (reproduce-only, no assertions, reported as a full time series plus the run's
+    /// peak spread rather than a ticks-to-halve number -- a lake that starts flat by construction
+    /// has nothing to halve from). `run_ticks` differs across widths for wall-clock budget only
+    /// (see `diag_task55_arch_collapse_rate`'s doc comment), never between gate-on/off at a given
+    /// width. Run with --ignored --nocapture.
     #[test]
     #[ignore]
     fn diag_task55_draining_lake_flatness() {
-        let w = 64usize;
-        let h = 64usize;
-        let block_size = 2usize;
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
-        let center_y = h / 2;
-        let fill_lo = 12usize; // top of the initial lake (leaves headroom below the chamber ceiling)
-        let fill_hi = center_y; // bottom of the top chamber, i.e. down to the neck
+        for &(w, run_ticks) in &[(64usize, 400usize), (128, 500), (256, 700), (512, 1300)] {
+            let h = w;
+            let block_size = (w / 32).max(1);
+            let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
+            let center_y = h / 2;
+            // 12/64 = 0.1875 of h at the original w=h=64 construction, expressed here as a
+            // fraction so the same physical fill line (comfortably below the chamber ceiling,
+            // leaving room to visibly drain) is used at every width.
+            let fill_lo = ((0.1875 * h as f64).round() as usize).max(1);
+            let fill_hi = center_y; // bottom of the top chamber, i.e. down to the neck
 
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        let props = get_test_props(MaterialMode::Water, w * h);
+            let gravity_dir = glam::Vec2::new(0.0, 0.04);
+            let props = get_test_props(MaterialMode::Water, w * h);
 
-        let build_sim = || -> TestSim {
-            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
-            for y in fill_lo..fill_hi {
+            let build_sim = || -> TestSim {
+                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+                for y in fill_lo..fill_hi {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] != crate::MASK_OUTSIDE {
+                            sim.hm.data[idx] = 1.0;
+                        }
+                    }
+                }
+                sim
+            };
+
+            let eps = 0.05f32;
+            // (spread, mean_row, wetted_columns) over every column with material anywhere in the
+            // top chamber's row range.
+            let surface_stats = |data: &[f32]| -> (f64, f64, usize) {
+                let mut rows = Vec::new();
                 for x in 0..w {
-                    let idx = y * w + x;
-                    if mask[idx] != crate::MASK_OUTSIDE {
-                        sim.hm.data[idx] = 1.0;
+                    if mask[fill_lo * w + x] == crate::MASK_OUTSIDE
+                        && (fill_lo..center_y).all(|y| mask[y * w + x] == crate::MASK_OUTSIDE)
+                    {
+                        continue;
+                    }
+                    if let Some(r) = diag_task55_surface_row(data, w, x, fill_lo, center_y, eps) {
+                        rows.push(r);
                     }
                 }
-            }
-            sim
-        };
-
-        let eps = 0.05f32;
-        // (spread, mean_row, wetted_columns) over every column with material anywhere in the top
-        // chamber's row range.
-        let surface_stats = |data: &[f32]| -> (f64, f64, usize) {
-            let mut rows = Vec::new();
-            for x in 0..w {
-                if mask[fill_lo * w + x] == crate::MASK_OUTSIDE
-                    && (fill_lo..center_y).all(|y| mask[y * w + x] == crate::MASK_OUTSIDE)
-                {
-                    continue;
+                if rows.is_empty() {
+                    return (0.0, center_y as f64, 0);
                 }
-                if let Some(r) = diag_task55_surface_row(data, w, x, fill_lo, center_y, eps) {
-                    rows.push(r);
+                let min_r = *rows.iter().min().unwrap();
+                let max_r = *rows.iter().max().unwrap();
+                let mean_r = rows.iter().sum::<usize>() as f64 / rows.len() as f64;
+                ((max_r - min_r) as f64, mean_r, rows.len())
+            };
+
+            let budget_n = 256usize;
+            let probe_ticks = task55_probe_ticks(run_ticks);
+
+            println!(
+                "diag_task55_draining_lake_flatness: w={w:>4} h={h} block_size={block_size} \
+                 budget_n={budget_n} run_ticks={run_ticks} fill=[{fill_lo},{fill_hi}) \
+                 neck_width=0.15 hourglass_curve=0.6"
+            );
+
+            // TASK #55 cross-measurement: defensive reset before this width's own loop runs (same
+            // pattern as `diag_task47_variant_divergence_comparison`'s `fresh_overburden_gate`).
+            multiplicative_lateral_gate::set_enabled(false);
+            for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
+                for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
+                    let mut sim = build_sim();
+                    multiplicative_lateral_gate::set_enabled(mult_enabled);
+                    let mut peak_spread = 0.0f64;
+                    let mut peak_spread_tick = 0usize;
+                    let mut next_probe = 0usize;
+                    println!(
+                        "diag_task55_draining_lake_flatness: w={w:>4} --- {gate_label} / {label} ---"
+                    );
+                    for t in 0..=run_ticks {
+                        let (spread, mean_row, wetted) = surface_stats(&sim.hm.data);
+                        if spread > peak_spread {
+                            peak_spread = spread;
+                            peak_spread_tick = t;
+                        }
+                        if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
+                            next_probe += 1;
+                            println!(
+                                "diag_task55_draining_lake_flatness: w={w:>4} {gate_label:<22} \
+                                 {label:<20} tick={t:>4} spread={spread:>7.4} \
+                                 mean_surface_row={mean_row:>7.3} wetted_columns={wetted:>3}"
+                            );
+                        }
+                        if t == run_ticks {
+                            break;
+                        }
+                        if use_perfect {
+                            perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                        } else {
+                            sim.tick(gravity_dir, budget_n);
+                        }
+                    }
+                    multiplicative_lateral_gate::set_enabled(false);
+                    println!(
+                        "diag_task55_draining_lake_flatness: w={w:>4} {gate_label:<22} {label:<20} \
+                         peak_spread={peak_spread:.4} at tick={peak_spread_tick} \
+                         run_ticks_budget={run_ticks}"
+                    );
                 }
-            }
-            if rows.is_empty() {
-                return (0.0, center_y as f64, 0);
-            }
-            let min_r = *rows.iter().min().unwrap();
-            let max_r = *rows.iter().max().unwrap();
-            let mean_r = rows.iter().sum::<usize>() as f64 / rows.len() as f64;
-            ((max_r - min_r) as f64, mean_r, rows.len())
-        };
-
-        let budget_n = 256usize;
-        let run_ticks = 400usize;
-        let probe_ticks: [usize; 13] =
-            [0, 2, 5, 10, 20, 30, 50, 75, 100, 150, 200, 300, 400];
-
-        println!(
-            "diag_task55_draining_lake_flatness: w={w} h={h} block_size={block_size} budget_n={budget_n} \
-             fill=[{fill_lo},{fill_hi}) neck_width=0.15 hourglass_curve=0.6"
-        );
-
-        // TASK #55 cross-measurement: defensive reset before this test's own loop runs, in case a
-        // prior test on this same thread panicked mid-toggle (same pattern as
-        // `diag_task47_variant_divergence_comparison`'s use of `fresh_overburden_gate`).
-        multiplicative_lateral_gate::set_enabled(false);
-        for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
-            for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
-                let mut sim = build_sim();
-                multiplicative_lateral_gate::set_enabled(mult_enabled);
-                let mut peak_spread = 0.0f64;
-                let mut peak_spread_tick = 0usize;
-                let mut next_probe = 0usize;
-                println!("diag_task55_draining_lake_flatness: --- {gate_label} / {label} ---");
-                for t in 0..=run_ticks {
-                    let (spread, mean_row, wetted) = surface_stats(&sim.hm.data);
-                    if spread > peak_spread {
-                        peak_spread = spread;
-                        peak_spread_tick = t;
-                    }
-                    if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                        next_probe += 1;
-                        println!(
-                            "diag_task55_draining_lake_flatness: {gate_label:<22} {label:<20} tick={t:>4} spread={spread:>7.4} \
-                             mean_surface_row={mean_row:>7.3} wetted_columns={wetted:>3}"
-                        );
-                    }
-                    if t == run_ticks {
-                        break;
-                    }
-                    if use_perfect {
-                        perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                    } else {
-                        sim.tick(gravity_dir, budget_n);
-                    }
-                }
-                multiplicative_lateral_gate::set_enabled(false);
-                println!(
-                    "diag_task55_draining_lake_flatness: {gate_label:<22} {label:<20} peak_spread={peak_spread:.4} \
-                     at tick={peak_spread_tick}"
-                );
             }
         }
     }
@@ -15846,5 +16443,513 @@ mod tests {
             );
         }
         } // end SHALLOW/DEEP loop
+    }
+
+    /// TASK #55, second half (propagation). Companion measurement to `diag_task55_arch_collapse_rate`
+    /// / `diag_task55_pocket_equalisation` -- same two scenarios in spirit (a liquid arch over a
+    /// void; two separate liquid pockets connected only through a submerged basin), rebuilt here
+    /// as this function's own private geometry rather than editing those two (a concurrent change
+    /// is making them resolution-parametric), so `elliptic_head_gate` can be measured crossed
+    /// against `multiplicative_lateral_gate`, under both the shipped adaptive scheduler and
+    /// `perfect_sim_tick`. Also runs `test_dry_sand_has_angle_of_repose` with `elliptic_head_gate`
+    /// forced on, as its own non-regression check (see `elliptic_liquid_level_pass`'s "Why
+    /// liquid-only" doc section for why this is expected to pass: the solve's domain excludes any
+    /// cell without near-total liquidity, so granular material never enters it).
+    ///
+    /// DIAGNOSTIC (reproduce-only; the only hard assertion is the repose non-regression, which
+    /// re-runs an already-asserting test under `catch_unwind` and reports pass/fail rather than
+    /// re-deriving its own bound). Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_elliptic_propagation() {
+        // ---- Part 0: repose non-regression under the elliptic gate ----
+        elliptic_head_gate::set_enabled(true);
+        let repose_result = std::panic::catch_unwind(test_dry_sand_has_angle_of_repose);
+        elliptic_head_gate::set_enabled(false);
+        println!(
+            "diag_task55_elliptic_propagation: test_dry_sand_has_angle_of_repose with \
+             elliptic_head_gate=ON: {}",
+            if repose_result.is_ok() { "PASS" } else { "FAIL (see panic above)" }
+        );
+
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        let props = get_test_props(MaterialMode::Water, 0); // resized per-scenario below
+
+        // ---- Part 1: arch over a void (same hand-built shape as diag_task55_arch_collapse_rate,
+        // rebuilt here rather than shared, per this task's "own separate diagnostic" instruction) ----
+        {
+            let w = 64usize;
+            let h = 100usize;
+            let margin = 2usize;
+            let block_size = 2usize;
+            let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+            for y in margin..h - margin {
+                for x in margin..w - margin {
+                    mask[y * w + x] = crate::MASK_INSIDE;
+                }
+            }
+            let pillar_w = 12usize;
+            let gap_x0 = margin + pillar_w;
+            let gap_x1 = w - margin - pillar_w;
+            let arch_top = 36usize;
+            let arch_bot = arch_top + 4;
+            let floor = h - margin;
+            let props = get_test_props(MaterialMode::Water, w * h);
+
+            let build_sim = || -> TestSim {
+                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+                for y in arch_top..floor {
+                    for x in margin..gap_x0 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                    for x in gap_x1..w - margin {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                for y in arch_top..arch_bot {
+                    for x in gap_x0..gap_x1 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                sim
+            };
+
+            let eps = 0.05f32;
+            let gap_buffer = 3usize;
+            let unsupported_span = |data: &[f32]| -> f64 {
+                let mut total = 0.0f64;
+                for x in gap_x0..gap_x1 {
+                    let mut pile_top = floor;
+                    while pile_top > arch_top && data[(pile_top - 1) * w + x] > eps {
+                        pile_top -= 1;
+                    }
+                    let hanging_hi = pile_top.saturating_sub(gap_buffer).max(arch_top);
+                    total += diag_task55_region_mass(data, w, x, x + 1, arch_top, hanging_hi);
+                }
+                total
+            };
+
+            let budget_n = 256usize;
+            let run_ticks = 400usize;
+            multiplicative_lateral_gate::set_enabled(false);
+            elliptic_head_gate::set_enabled(false);
+            println!("diag_task55_elliptic_propagation: === ARCH ===");
+            for (elliptic_label, elliptic_enabled) in [("elliptic=OFF", false), ("elliptic=ON", true)] {
+                for (mult_label, mult_enabled) in [("mult=OFF", false), ("mult=ON", true)] {
+                    for (label, use_perfect) in [("adaptive", false), ("perfect_sim", true)] {
+                        let mut sim = build_sim();
+                        elliptic_head_gate::set_enabled(elliptic_enabled);
+                        multiplicative_lateral_gate::set_enabled(mult_enabled);
+                        let initial = unsupported_span(&sim.hm.data);
+                        let target = initial * 0.5;
+                        let mut half_life_tick: Option<usize> = None;
+                        for t in 0..=run_ticks {
+                            let span = unsupported_span(&sim.hm.data);
+                            if half_life_tick.is_none() && t > 0 && span <= target {
+                                half_life_tick = Some(t);
+                            }
+                            if t == run_ticks {
+                                break;
+                            }
+                            if use_perfect {
+                                perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                            } else {
+                                sim.tick(gravity_dir, budget_n);
+                            }
+                        }
+                        elliptic_head_gate::set_enabled(false);
+                        multiplicative_lateral_gate::set_enabled(false);
+                        println!(
+                            "diag_task55_elliptic_propagation: ARCH {elliptic_label:<12} \
+                             {mult_label:<9} {label:<12} ticks_to_halve={half_life_tick:?} \
+                             (initial={initial:.4})"
+                        );
+                    }
+                }
+            }
+        }
+
+        // ---- Part 2: two liquid pockets connected only through a submerged basin (hand-built,
+        // not `SandboxShape::ProceduralFunnel`, to keep this diagnostic self-contained) ----
+        {
+            let w = 50usize;
+            let h = 50usize;
+            let margin = 2usize;
+            let block_size = 2usize;
+            let wall_x0 = 18usize;
+            let wall_x1 = 32usize;
+            let well_top = 10usize;
+            let well_bot = 25usize;
+            let basin_bot = 40usize;
+            let left_surface0 = 15usize; // taller column
+            let right_surface0 = 20usize; // shorter column
+            let left_probe = 10usize;
+            let right_probe = 40usize;
+
+            let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+            for y in margin..h - margin {
+                for x in margin..w - margin {
+                    mask[y * w + x] = crate::MASK_INSIDE;
+                }
+            }
+            for y in well_top..well_bot {
+                for x in wall_x0..wall_x1 {
+                    mask[y * w + x] = crate::MASK_OUTSIDE;
+                }
+            }
+            let props = get_test_props(MaterialMode::Water, w * h);
+
+            let build_sim = || -> TestSim {
+                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+                for y in 0..h {
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        let in_basin = y >= well_bot && y < basin_bot;
+                        let in_left = x < wall_x0 && y >= left_surface0 && y < well_bot;
+                        let in_right = x >= wall_x1 && y >= right_surface0 && y < well_bot;
+                        if in_basin || in_left || in_right {
+                            sim.hm.data[idx] = 1.0;
+                        }
+                    }
+                }
+                sim
+            };
+
+            let eps = 0.05f32;
+            let level_diff = |data: &[f32]| -> f64 {
+                let left = diag_task55_surface_row(data, w, left_probe, well_top, well_bot, eps)
+                    .unwrap_or(well_bot);
+                let right = diag_task55_surface_row(data, w, right_probe, well_top, well_bot, eps)
+                    .unwrap_or(well_bot);
+                (right as f64 - left as f64).abs()
+            };
+
+            let budget_n = 256usize;
+            let run_ticks = 300usize;
+            multiplicative_lateral_gate::set_enabled(false);
+            elliptic_head_gate::set_enabled(false);
+            println!("diag_task55_elliptic_propagation: === POCKETS ===");
+            for (elliptic_label, elliptic_enabled) in [("elliptic=OFF", false), ("elliptic=ON", true)] {
+                for (mult_label, mult_enabled) in [("mult=OFF", false), ("mult=ON", true)] {
+                    for (label, use_perfect) in [("adaptive", false), ("perfect_sim", true)] {
+                        let mut sim = build_sim();
+                        elliptic_head_gate::set_enabled(elliptic_enabled);
+                        multiplicative_lateral_gate::set_enabled(mult_enabled);
+                        let initial = level_diff(&sim.hm.data);
+                        let target = initial * 0.5;
+                        let mut half_life_tick: Option<usize> = None;
+                        for t in 0..=run_ticks {
+                            let diff = level_diff(&sim.hm.data);
+                            if half_life_tick.is_none() && t > 0 && diff <= target {
+                                half_life_tick = Some(t);
+                            }
+                            if t == run_ticks {
+                                break;
+                            }
+                            if use_perfect {
+                                perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                            } else {
+                                sim.tick(gravity_dir, budget_n);
+                            }
+                        }
+                        elliptic_head_gate::set_enabled(false);
+                        multiplicative_lateral_gate::set_enabled(false);
+                        println!(
+                            "diag_task55_elliptic_propagation: POCKETS {elliptic_label:<12} \
+                             {mult_label:<9} {label:<12} ticks_to_halve={half_life_tick:?} \
+                             (initial={initial:.4})"
+                        );
+                    }
+                }
+            }
+        }
+        let _ = props; // placeholder unused after per-scenario clones above
+    }
+
+    /// TASK #55, second half (propagation). THE SHARPENED ACCEPTANCE BAR: the parallel agent's own
+    /// resolution sweep on `diag_task55_arch_collapse_rate` found `ticks_to_halve` scaling almost
+    /// exactly LINEARLY with grid width `w` (522 ticks at w=512, ~65 once normalised by `w/64`) --
+    /// the signature of a CELL-RATE-LIMITED process, where levelling speed is bounded by how fast a
+    /// disturbance crosses the domain at one cell per tick, not by the driving potential's
+    /// magnitude. That is exactly the constraint this task's own solve exists to remove. So the
+    /// real test of this solve is not "is it faster at one width" -- it is "does `ticks_to_halve`
+    /// STOP scaling linearly with `w`". If it genuinely propagates the whole connected body in one
+    /// tick, the w-NORMALISED column (`ticks_to_halve / (w / 64)`) should flatten or collapse
+    /// toward a constant as `w` grows, rather than tracking `w` the way the shipped one-cell-per-
+    /// tick solver does.
+    ///
+    /// Reuses the SAME isotropic-scaling construction `diag_task55_arch_collapse_rate`'s own
+    /// resolution sweep uses (`s = w / 64`, every hand-built coordinate derived from that one
+    /// factor) rather than editing that function (a concurrent change owns it), so the two are
+    /// directly comparable. Measures at w=128 and w=512 (both widths and both scheduler modes at
+    /// w=128, since it is cheap; ADAPTIVE ONLY at w=512, since `perfect_sim_tick` there simulates
+    /// every one of ~1600 blocks unconditionally every tick and a second full run was not
+    /// affordable in this session's budget alongside everything else this task also needed to
+    /// measure -- flagged here rather than silently only reporting the cheap width). `run_ticks`
+    /// is IDENTICAL between gate-on and gate-off at a given `w` (never compared across widths),
+    /// matching this task's own instruction.
+    ///
+    /// DIAGNOSTIC (reproduce-only, no assertions -- this is exactly the kind of measurement that
+    /// must be reported honestly rather than tuned to a pass bar). Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn diag_task55_elliptic_resolution_scaling() {
+        let gravity_dir = glam::Vec2::new(0.0, 0.04);
+        // (w, run_ticks, run_perfect_sim_too)
+        let widths: [(usize, usize, bool); 2] = [(128, 400), (512, 600)].map(|(w, t)| (w, t, w <= 128));
+
+        multiplicative_lateral_gate::set_enabled(false);
+        elliptic_head_gate::set_enabled(false);
+        println!("diag_task55_elliptic_resolution_scaling: === ARCH, resolution sweep ===");
+        for (w, run_ticks, run_perfect) in widths {
+            let s = w as f64 / 64.0;
+            let sc = |base: usize| ((base as f64 * s).round() as usize).max(1);
+            let h = sc(100);
+            let margin = sc(2);
+            let block_size = (w / 32).max(1);
+            let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+            for y in margin..h - margin {
+                for x in margin..w - margin {
+                    mask[y * w + x] = crate::MASK_INSIDE;
+                }
+            }
+            let pillar_w = sc(12);
+            let gap_x0 = margin + pillar_w;
+            let gap_x1 = w - margin - pillar_w;
+            let arch_top = sc(36);
+            let arch_bot = arch_top + sc(4);
+            let floor = h - margin;
+            let gap_buffer = sc(3);
+            let props = get_test_props(MaterialMode::Water, w * h);
+
+            let build_sim = || -> TestSim {
+                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
+                for y in arch_top..floor {
+                    for x in margin..gap_x0 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                    for x in gap_x1..w - margin {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                for y in arch_top..arch_bot {
+                    for x in gap_x0..gap_x1 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                sim
+            };
+            let eps = 0.05f32;
+            let unsupported_span = |data: &[f32]| -> f64 {
+                let mut total = 0.0f64;
+                for x in gap_x0..gap_x1 {
+                    let mut pile_top = floor;
+                    while pile_top > arch_top && data[(pile_top - 1) * w + x] > eps {
+                        pile_top -= 1;
+                    }
+                    let hanging_hi = pile_top.saturating_sub(gap_buffer).max(arch_top);
+                    total += diag_task55_region_mass(data, w, x, x + 1, arch_top, hanging_hi);
+                }
+                total
+            };
+
+            let budget_n = 256usize;
+            let mut modes: Vec<(&str, bool)> = vec![("adaptive", false)];
+            if run_perfect {
+                modes.push(("perfect_sim", true));
+            }
+            for (label, use_perfect) in modes {
+                for (elliptic_label, elliptic_enabled) in [("elliptic=OFF", false), ("elliptic=ON", true)] {
+                    let mut sim = build_sim();
+                    elliptic_head_gate::set_enabled(elliptic_enabled);
+                    let initial = unsupported_span(&sim.hm.data);
+                    let target = initial * 0.5;
+                    let mut half_life_tick: Option<usize> = None;
+                    for t in 0..=run_ticks {
+                        let span = unsupported_span(&sim.hm.data);
+                        if half_life_tick.is_none() && t > 0 && span <= target {
+                            half_life_tick = Some(t);
+                        }
+                        if t == run_ticks {
+                            break;
+                        }
+                        if use_perfect {
+                            perfect_sim_tick(&mut sim, &mask, gravity_dir);
+                        } else {
+                            sim.tick(gravity_dir, budget_n);
+                        }
+                    }
+                    elliptic_head_gate::set_enabled(false);
+                    let normalised = half_life_tick.map(|t| t as f64 / (w as f64 / 64.0));
+                    println!(
+                        "diag_task55_elliptic_resolution_scaling: ARCH w={w:>4} {label:<12} \
+                         {elliptic_label:<12} run_ticks={run_ticks:>4} ticks_to_halve={half_life_tick:?} \
+                         normalised(/w/64)={normalised:?} (initial={initial:.4})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Direct unit check on `elliptic_liquid_level_pass`'s `eta` definition: `eta[i] = h_ref[i] +
+    /// column_depth[i] - row(i) * depth_scale` must compare correctly ACROSS rows, not only within
+    /// one row -- that row-independence is the whole reason this solve can connect cells through a
+    /// submerged basin at a different row than either well above it (see that function's doc
+    /// comment). Builds two disconnected single-column stacks of different heights resting on a
+    /// floor (so `column_depth` accumulates predictably) and checks that the shorter stack's own
+    /// top cell reads a LOWER `eta` than the taller stack's own top cell, by approximately the
+    /// height difference between them (in `column_depth`'s reference-row units) -- not by whatever
+    /// the two cells' absolute rows happen to be.
+    #[test]
+    fn test_elliptic_eta_is_row_independent() {
+        let w = 20usize;
+        let h = 20usize;
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                mask[y * w + x] = crate::MASK_INSIDE;
+            }
+        }
+        let tall_x = 5usize;
+        let short_x = 14usize;
+        let floor = h - 1; // first OUTSIDE row
+        let tall_top = 5usize; // 12 rows of fill
+        let short_top = 11usize; // 6 rows of fill
+        let mut heights = vec![0.0f32; w * h];
+        for y in tall_top..floor {
+            heights[y * w + tall_x] = 1.0;
+        }
+        for y in short_top..floor {
+            heights[y * w + short_x] = 1.0;
+        }
+        let cell_props = get_test_props(MaterialMode::Water, w * h);
+        let edge_vel_v = vec![0.0f32; w * h];
+        let external_mass_this_tick = vec![0.0f32; w * h];
+        let mut cd = vec![0.0f32; w * h];
+        recompute_column_depth(
+            w, h, &mask, &heights, &heights, &external_mass_this_tick, &cell_props, &edge_vel_v,
+            &mut cd[..],
+        );
+        let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+        let eta_at = |x: usize, y: usize| -> f32 {
+            let idx = y * w + x;
+            heights[idx] * depth_scale + cd[idx] - (y as f32) * depth_scale
+        };
+        // Both stacks' own topmost filled cell -- different absolute rows (5 vs. 11), same
+        // physical situation (a saturated cell at the very top of its own stack).
+        let eta_tall_top = eta_at(tall_x, tall_top);
+        let eta_short_top = eta_at(short_x, short_top);
+        // The taller stack's surface is physically higher (lower row index): its top-of-stack eta
+        // must read higher than the shorter stack's, by approximately the row difference between
+        // the two tops (in depth_scale units) -- NOT be indistinguishable or inverted merely
+        // because the two cells sit at different absolute rows.
+        let expected_gap = (short_top as f32 - tall_top as f32) * depth_scale;
+        let actual_gap = eta_tall_top - eta_short_top;
+        assert!(
+            actual_gap > 0.0,
+            "taller stack's own top must read a strictly higher eta than the shorter stack's own \
+             top: eta_tall_top={eta_tall_top:.4} eta_short_top={eta_short_top:.4}"
+        );
+        assert!(
+            (actual_gap - expected_gap).abs() < 0.5,
+            "eta gap between the two stacks' own tops should track their physical height \
+             difference (expected~={expected_gap:.4}), got {actual_gap:.4} \
+             (eta_tall_top={eta_tall_top:.4}, eta_short_top={eta_short_top:.4})"
+        );
+    }
+
+    /// Convergence evidence for `elliptic_liquid_level_pass`, per this task's own instruction: a
+    /// residual that falls monotonically, not merely a test that happens to pass at whatever
+    /// iteration count was picked. Builds a single row of liquid with a linear fill GRADIENT
+    /// (every cell genuinely below its own capacity, so free capacity -- and hence a feasible
+    /// transfer -- exists at every edge in the direction mass wants to flow; see this test's own
+    /// note below on why a scenario built from cells sitting exactly AT capacity, tried first,
+    /// is degenerate for this specific check) and asserts the function's own returned
+    /// per-iteration residual trace is non-increasing, tick over tick. Also prints the trace so
+    /// it can be eyeballed directly, not just pass/fail.
+    ///
+    /// NOTE on the degenerate case this test deliberately avoids: an EARLIER version of this test
+    /// filled every cell to exactly its own capacity (`h == cap`, matching how
+    /// `diag_task55_elliptic_propagation`'s own hand-built scenarios fill their basins) and found
+    /// `net_activity` came back all-zero -- not a bug, but a genuine structural property of any
+    /// strictly-feasibility-clamped incompressible transfer: `clamp_edge_feasible` requires the
+    /// ACCEPTOR to have room (`cap_b - h_b > 0`), and if literally every cell in the domain sits
+    /// exactly at capacity, no single edge ever has anywhere to put anything, regardless of how
+    /// large the `eta` gradient across the domain is. In the full simulation this is resolved by
+    /// gravity settling (the ordinary phase-0/phase-1 solver) continuously opening small pockets
+    /// of free capacity at a body's true free surface and floor/drain boundary, which is exactly
+    /// what `diag_task55_elliptic_propagation`'s empirical numbers show this pass then propagates
+    /// across the whole connected body in one call rather than one cell per tick -- but a
+    /// standalone call to JUST this function, on a domain with no free capacity anywhere at all,
+    /// legitimately cannot move anything, and correctly reports that (a flat, unmoving residual)
+    /// rather than fabricating motion. That is worth recording plainly rather than papering over
+    /// with a scenario picked to hide it.
+    #[test]
+    fn test_elliptic_residual_falls_monotonically() {
+        let w = 40usize;
+        let h = 10usize;
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                mask[y * w + x] = crate::MASK_INSIDE;
+            }
+        }
+        // A single row, linear fill gradient from 0.85 (left) down to 0.15 (right) -- every cell
+        // strictly below its own capacity (1.0 for Water), so every edge has genuine feasible
+        // room in the direction mass wants to flow (see this test's own doc comment above for why
+        // that matters).
+        let row = 5usize;
+        let mut heights = vec![0.0f32; w * h];
+        for x in 1..w - 1 {
+            let t = (x - 1) as f32 / (w - 3) as f32; // 0.0 at x=1 .. 1.0 at x=w-2
+            heights[row * w + x] = 0.85 - 0.70 * t;
+        }
+        let cell_props = get_test_props(MaterialMode::Water, w * h);
+        let edge_vel_v = vec![0.0f32; w * h];
+        let external_mass_this_tick = vec![0.0f32; w * h];
+        let heightmap_data = heights.clone();
+        let mass_before: f64 = heights.iter().map(|&v| v as f64).sum();
+
+        let (residuals, net_activity) = elliptic_liquid_level_pass(
+            w, h, &mask, &heightmap_data, &mut heights[..], &cell_props, &edge_vel_v,
+            &external_mass_this_tick,
+        );
+
+        println!("test_elliptic_residual_falls_monotonically: residual trace = {residuals:.6?}");
+        assert!(residuals.len() >= 2, "expected more than one iteration's worth of residual");
+        assert!(
+            net_activity.iter().any(|&v| v > 0.0),
+            "this scenario has genuine free capacity everywhere; the pass should have moved mass"
+        );
+        for pair in residuals.windows(2) {
+            assert!(
+                pair[1] <= pair[0] + 1e-6,
+                "residual rose from {:.6} to {:.6} -- convergence must be monotonic \
+                 (full trace: {residuals:.6?})",
+                pair[0],
+                pair[1]
+            );
+        }
+        // The gradient should visibly flatten: the surviving spread across the row should shrink,
+        // not merely shuffle mass around without reducing the max-min spread.
+        let spread = |data: &[f32]| -> f32 {
+            let vals: Vec<f32> = (1..w - 1).map(|x| data[row * w + x]).collect();
+            vals.iter().cloned().fold(f32::MIN, f32::max) - vals.iter().cloned().fold(f32::MAX, f32::min)
+        };
+        let spread_before: f32 = 0.70; // by construction
+        let spread_after = spread(&heights);
+        assert!(
+            spread_after < spread_before * 0.9,
+            "expected the fill gradient to visibly flatten: spread_before={spread_before:.4} \
+             spread_after={spread_after:.4}"
+        );
+        let mass_after: f64 = heights.iter().map(|&v| v as f64).sum();
+        assert!(
+            (mass_after - mass_before).abs() < 1e-3,
+            "mass must be conserved: before={mass_before:.6} after={mass_after:.6}"
+        );
     }
 }
