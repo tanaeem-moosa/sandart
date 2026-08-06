@@ -223,6 +223,18 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_color_mode(this.__wbg_ptr, mode);
     }
     /**
+     * "Fast liquid levelling" debug toggle: forwarded straight to the sim, a plain field write
+     * (same shape as `set_fresh_pressure_field` just above — no reset, no reinitialisation). See
+     * `DrawingSimulation::elliptic_liquid_level`'s doc comment in sandart-sim/src/lib.rs for what
+     * it switches on: a liquid-only multigrid-style relaxation pass that equalises connected
+     * liquid pockets much faster than the default per-edge solver. Expensive by design (~16x
+     * ms/tick at 512, ~18fps) — sluggish but usable, not a bug.
+     * @param {boolean} enabled
+     */
+    set_elliptic_liquid_level(enabled) {
+        wasm.wasmsimulationstate_set_elliptic_liquid_level(this.__wbg_ptr, enabled);
+    }
+    /**
      * "Fresh pressure field" debug toggle: forwarded straight to the sim, a plain field write
      * (same shape as `set_perfect_simulation` just above — no reset, no reinitialisation). See
      * `DrawingSimulation::fresh_pressure_field`'s doc comment in sandart-sim/src/lib.rs for what
