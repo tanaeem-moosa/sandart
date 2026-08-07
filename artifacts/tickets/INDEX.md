@@ -34,6 +34,7 @@ Sorted: in-progress first, then open, then closed.
 - [#67 — 2.44 — The head field pins an entire DRAINING column to zero pressure: transitive support treats extrusion as free fall](67-the-head-field-pins-an-entire-draining-column-to-zero-pressu.md)
 - [#68 — 2.45 — Head-field liquid transport BREAKS the pressure field: horizontal stripes in the U-tube. This is what #65 misattributed to the block heat map](68-head-field-liquid-transport-breaks-the-pressure-field-horizo.md)
 - [#69 — 2.46 — Pressure-sensitive flow badly slows a FED falling stream and makes it spread sideways: the free-fall exemption only covers compact unsupported slabs](69-pressure-sensitive-flow-badly-slows-a-fed-falling-stream-and.md)
+- [#70 — 2.47 — DESIGN DIRECTION: replace the equilibrium head field with per-cell OVERFILL. Pressure becomes stored state, free fall and upward relief stop being special cases](70-design-direction-replace-the-equilibrium-head-field-with-per.md)
 
 ## Closed
 

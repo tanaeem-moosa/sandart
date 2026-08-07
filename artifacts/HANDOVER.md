@@ -169,7 +169,36 @@ re-run with the gate forced on as the non-regression check.
 
 ---
 
-## 4. Where to start, in order
+## 4. Read #70 before deciding what to work on
+
+**There is a strategic decision on the table and it changes what "fixing" the tickets below even
+means.** Ticket #70 proposes replacing the equilibrium head field with per-cell **overfill**: let a
+transfer overshoot capacity (target 1.0, tolerate ~1.2), then redistribute the excess on subsequent
+ticks, rather than rejecting per-edge against a frozen state.
+
+It is the user's design, decided 2026-08-07, and it dissolves several of the tickets below rather
+than solving them:
+
+- The **rigid saturated interior** becomes mobile. Today a full body can only move at its one-cell
+  surface skin, because the acceptor clamp cannot see that the acceptor is about to give the same
+  mass away. That is why a levelling step produced *identical* flow at 10 and 20 cells deep.
+- **Overfill is pressure** — per-cell, local, conserved and accumulating, no propagation sweep.
+- **Free fall stops being a special case.** Nothing beneath you pushing back means no overfill means
+  zero pressure. #67 and #69 are the same support predicate failing in opposite directions; both
+  evaporate if the predicate does not need to exist.
+- It is **compatible with the adaptive block scheduler**, and the head field structurally is not — a
+  partially relaxed overfill field is a valid state, a partially converged equilibrium solve is
+  garbage. That is the #68 argument.
+
+Settled by the user: some slosh is accepted; overfill does **not** render (draw `min(h, cap)`); the
+pressure heat-map shows overfill. The head field is kept as an **oracle** — it computes the correct
+equilibrium answer, so it becomes the acceptance test for whatever replaces it as the driver.
+
+**Cheapest thing that would settle the strategy**, before any of it is built: instrument what
+fraction of wet cells are currently clamped to zero flux by the acceptor test. If it is only the
+surface skin, that number is the hard ceiling on everything pressure work could ever buy.
+
+## 5. Where to start, in order (if continuing head-field repair)
 
 ### #68 first, and it probably unlocks two others
 
@@ -234,7 +263,7 @@ practice; the cost is not in the loop count.
 
 ---
 
-## 5. Structural facts that repeatedly ambush people
+## 6. Structural facts that repeatedly ambush people
 
 **Saturation is upstream of pressure.** `flux_edge_candidate` clamps flux to
 `(cap_b - h_b).max(0.0)`. In a body full to capacity, every interior acceptor is at capacity, so
@@ -275,7 +304,7 @@ cells, or it means a different physical depth at every resolution.
 
 ---
 
-## 6. Working agreements
+## 7. Working agreements
 
 `artifacts/notes/` holds these in full; the load-bearing ones:
 
@@ -290,7 +319,7 @@ cells, or it means a different physical depth at every resolution.
 
 ---
 
-## 7. Session log — 2026-08-07
+## 8. Session log — 2026-08-07
 
 Five commits, `2af44fcc` → `e4f81163`:
 
@@ -315,11 +344,12 @@ shipped, but the user's depth-ordering requirement is blocked on #67.
 
 ---
 
-## 8. Open backlog
+## 9. Open backlog
 
 Full list with measured numbers and ruled-out hypotheses in
-[`tickets/INDEX.md`](tickets/INDEX.md). The head-field cluster is #55, #57, #62, #63, #64, #66,
-#67, #68. Everything else is independent of it and can be picked up in isolation — #27 (water
+[`tickets/INDEX.md`](tickets/INDEX.md). **#70 is the strategic one — read it first.** The
+head-field cluster is #55, #57, #62, #63, #64, #66, #67, #68, #69, and several of them are
+superseded rather than solved if #70 goes ahead. Everything else is independent of it and can be picked up in isolation — #27 (water
 towers and violent splashing), #33 (sideways movement design), #38 (1024 resolution), #44
 (asymmetric drain, with an explicit caution that pressure *masks* it and damping must not be
 mistaken for a fix), #49 (falling acceleration), #50 (LOD degradation), #51 (larger grain material),
