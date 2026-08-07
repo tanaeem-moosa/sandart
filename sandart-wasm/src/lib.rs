@@ -77,6 +77,21 @@ pub struct WasmSimulationState {
     // underlying `sim.column_depth` it displays is always maintained regardless of whether this
     // is on; this field only gates whether `render()` bothers uploading/tinting with it).
     pressure_heatmap_enabled: bool,
+    // Cache key for the per-cell pressure overlay upload below: the `(tick_count, source)` the
+    // currently-uploaded texture was built from, or `None` if nothing has been uploaded yet.
+    //
+    // Exists for the PAUSED case, which is the one this overlay is actually for (see the pause /
+    // step controls in demo.js -- they were added so a pressure distribution could be read while
+    // nothing moves). Pause stops `step()` but deliberately keeps `render()` running every frame,
+    // so without this the new head-field source would recompute a bit-identical field ~60 times a
+    // second at ~11.4ms a call (w=512, release) and make the paused inspection sluggish for no
+    // reason at all. `tick_count` does not advance while paused, so the whole recompute-and-upload
+    // is skipped after the first frame.
+    //
+    // Keyed on the SOURCE as well as the tick so flipping `pressure_heatmap_head_field` while
+    // paused -- exactly the A/B this overlay was built for -- redraws immediately instead of
+    // showing a stale field from the other source.
+    pressure_heat_cache_key: Option<(u32, bool)>,
     // Last dt seen by `step()`, used to make the per-frame easing below frame-rate independent.
     last_dt: f32,
     // Displayed (eased) quantile line positions, plus whether they hold a meaningful previous
@@ -226,6 +241,7 @@ impl WasmSimulationState {
             quantile_mode: QuantileMode::Off,
             heatmap_enabled: false,
             pressure_heatmap_enabled: false,
+            pressure_heat_cache_key: None,
             last_dt: 1.0 / 60.0,
             quantile_eased: [0.0; MAX_QUANTILE_LINES],
             quantile_eased_valid: false,
@@ -347,6 +363,7 @@ impl WasmSimulationState {
         let perfect_simulation = self.sim.perfect_simulation;
         let fresh_pressure_field = self.sim.fresh_pressure_field;
         let elliptic_liquid_level = self.sim.elliptic_liquid_level;
+        let pressure_heatmap_head_field = self.sim.pressure_heatmap_head_field;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -366,6 +383,9 @@ impl WasmSimulationState {
         sim.fresh_pressure_field = fresh_pressure_field;
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.elliptic_liquid_level = elliptic_liquid_level;
+        // Same reasoning again: a UI debug toggle (which pressure heat-map source is selected),
+        // not simulation state -- must survive a resolution rebuild like its siblings above.
+        sim.pressure_heatmap_head_field = pressure_heatmap_head_field;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -715,6 +735,18 @@ impl WasmSimulationState {
         self.sim.elliptic_liquid_level = enabled;
     }
 
+    /// Selects which quantity feeds the pressure heat-map overlay (see
+    /// `set_pressure_heatmap_overlay` for the overlay's own on/off switch): forwarded straight to
+    /// the sim, a plain field write (same shape as `set_elliptic_liquid_level` just above — no
+    /// reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
+    /// `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
+    /// for what it switches between: `false` (default) is today's shipped `column_depth`; `true`
+    /// is task #55 step 2's static hydraulic head field, converted to a pressure-like quantity so
+    /// it renders on the same colour scale.
+    pub fn set_pressure_heatmap_head_field(&mut self, enabled: bool) {
+        self.sim.pressure_heatmap_head_field = enabled;
+    }
+
     /// Block-simulation heat-map debug overlay: purely a render-side toggle (see
     /// `heatmap_enabled`'s field doc comment) — the underlying per-block counter runs
     /// unconditionally in `sim`, this only gates whether `render()` uploads/draws it.
@@ -928,6 +960,15 @@ impl WasmSimulationState {
             self.renderer.update_heightmap(&self.queue, &interleaved);
             self.renderer.update_colormap(&self.queue, &self.sim.cell_colors);
             self.full_upload_needed = false;
+            // Anything that forces a full heightmap re-upload -- reset, resolution change, shape
+            // change, material change -- has also invalidated whatever the pressure overlay last
+            // drew. Hanging the invalidation off this flag rather than off each of those call
+            // sites individually is deliberate: `full_upload_needed` is already set at every one
+            // of them, so a future one gets this for free instead of silently keeping a stale
+            // field. It also covers the case the tick-count key alone cannot -- `sim.reset()`
+            // sets `tick_count` back to 0, which could otherwise collide with a cached key from
+            // an earlier tick 0 and leave the pre-reset image on screen.
+            self.pressure_heat_cache_key = None;
         } else {
             let bounds = self.sim.active_bounds;
             let render_bounds = sandart_render::ActiveBounds {
@@ -1101,8 +1142,16 @@ impl WasmSimulationState {
         // per-cell byte array and uploading it only happens while this overlay is switched on;
         // the shader-side `pressure_heatmap_enabled == 0u` early-out is the other half.
         if self.pressure_heatmap_enabled {
-            let pressure_texels = self.sim.pressure_field_texels();
-            self.renderer.update_pressure_heat(&self.queue, &pressure_texels);
+            // Skip the rebuild entirely when neither the simulation nor the chosen source has
+            // moved since the last upload -- see `pressure_heat_cache_key` for why (the paused
+            // case this overlay exists to serve). The uploaded texture persists on the GPU, so
+            // skipping the upload leaves the correct image on screen rather than a blank one.
+            let cache_key = (self.sim.tick_count, self.sim.pressure_heatmap_head_field);
+            if self.pressure_heat_cache_key != Some(cache_key) {
+                let pressure_texels = self.sim.pressure_field_texels();
+                self.renderer.update_pressure_heat(&self.queue, &pressure_texels);
+                self.pressure_heat_cache_key = Some(cache_key);
+            }
         }
 
         // Calculate view projection matrix

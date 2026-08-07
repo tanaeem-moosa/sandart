@@ -847,6 +847,7 @@ function syncSettings() {
     state.set_heatmap_overlay(document.getElementById('check-heatmap').checked);
     state.set_fresh_pressure_field(document.getElementById('check-fresh-pressure').checked);
     state.set_pressure_heatmap_overlay(document.getElementById('check-pressure-heatmap').checked);
+    state.set_pressure_heatmap_head_field(document.getElementById('check-pressure-heatmap-head-field').checked);
     state.set_elliptic_liquid_level(document.getElementById('check-elliptic-liquid').checked);
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
@@ -1088,6 +1089,7 @@ function setupPanelInput() {
     document.getElementById('check-heatmap').addEventListener('change', syncSettings);
     document.getElementById('check-fresh-pressure').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
+    document.getElementById('check-pressure-heatmap-head-field').addEventListener('change', syncSettings);
     document.getElementById('check-elliptic-liquid').addEventListener('change', syncSettings);
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above

@@ -457,3 +457,46 @@ pub(crate) fn compute_head_field_with_stats(
 
     (head, sweeps, residual)
 }
+
+/// Task #55 step 2, visualisation (2.32): `compute_head_field` converted to a PRESSURE-like
+/// quantity, for the pressure heat-map debug overlay's "new field" source
+/// (`DrawingSimulation::pressure_heatmap_head_field`, in `lib.rs`). `head` is an ELEVATION and is
+/// not comparable on `column_depth`'s scale; `p := head - z` IS, using this module's own `z_elev`
+/// convention (`z(idx) = -row(idx) * depth_scale`) -- exactly `task55_head_spec::pressure_at`'s
+/// definition, applied to this field instead of the legacy one, so the two sources can be pushed
+/// through `pressure_field_texels`'s existing normalisation and colour ramp unchanged and read on
+/// the same scale.
+///
+/// Cells with no material and cells outside the shape mask are forced to `0.0` explicitly --
+/// never left to whatever `compute_head_field` happens to return for a cell it never actually
+/// relaxed (dry/outside cells keep `head == own_elev == z_elev` there since `heights == 0`, which
+/// already nets to `p == 0`, but this makes that guarantee explicit rather than incidental).
+/// This matches `column_depth`'s own convention for the same cells: `recompute_column_depth` only
+/// ever writes an in-mask interior cell, leaving every other slot at its buffer default of `0.0`
+/// -- so the two sources agree outside a filled body, not only inside one.
+///
+/// Moves no mass, does no clamping, touches no simulation state -- same contract as
+/// `compute_head_field` itself; see this file's module doc comment.
+pub(crate) fn compute_head_pressure_field(
+    w: usize,
+    h: usize,
+    shape_mask: &[u8],
+    heights: &[f32],
+    cell_props: &[f32],
+) -> Vec<f32> {
+    let head = compute_head_field(w, h, shape_mask, heights, cell_props);
+    if w == 0 || h == 0 {
+        return head;
+    }
+    let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+    (0..w * h)
+        .map(|idx| {
+            if shape_mask[idx] == crate::MASK_OUTSIDE || heights[idx] <= HEAD_FIELD_WET_EPS {
+                0.0
+            } else {
+                let z = -((idx / w) as f32) * depth_scale;
+                head[idx] - z
+            }
+        })
+        .collect()
+}

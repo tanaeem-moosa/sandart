@@ -441,6 +441,29 @@ pub struct DrawingSimulation {
     /// (about 18fps) -- sluggish but usable, not a bug.
     pub elliptic_liquid_level: bool,
 
+    /// Which quantity feeds the per-cell pressure heat-map overlay (`pressure_field_texels`).
+    /// `false` (default): today's shipped `column_depth`, unchanged. `true`: the STATIC hydraulic
+    /// head field (`physics::task55_head_field::compute_head_field`, task #55 step 2), converted
+    /// to a pressure-like quantity via `physics::task55_head_field::compute_head_pressure_field`
+    /// (`p = head(i) - z(i)`, the same datum `task55_head_spec::head_at`/`pressure_at` use) so it
+    /// lands on the SAME scale `column_depth` already renders through -- see
+    /// `pressure_field_texels` for the shared normalisation both sources go through.
+    ///
+    /// Plumbed exactly like `fresh_pressure_field`/`elliptic_liquid_level` just above: a plain
+    /// UI-facing debug toggle, carried through `set_grid_size`'s sim rebuild rather than reset,
+    /// never read by `settle_tick` or anything else that advances the simulation. This is
+    /// VISUALISATION ONLY -- flipping it changes what `pressure_field_texels` returns and nothing
+    /// about how `heightmap`/`column_depth`/any other simulation state evolves.
+    ///
+    /// COST: `compute_head_field` measured 11.4ms at w=512 in release on the U-tube scenario --
+    /// too expensive to run unconditionally every tick. It is invoked inside
+    /// `pressure_field_texels` ONLY when this flag is true, and that function itself is only ever
+    /// called by the wasm layer while the pressure heat-map overlay is switched on
+    /// (`pressure_heatmap_enabled` in sandart-wasm/src/lib.rs, mirroring the shader-side
+    /// `pressure_heatmap_enabled == 0u` early-out). So with the overlay off, or with this flag
+    /// left at its default, this costs exactly nothing.
+    pub pressure_heatmap_head_field: bool,
+
     /// Per-block "how often was this block actually simulated" heat-map counter for the debug
     /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
     /// (see that constant's doc comment). Length is always `active_blocks.len() *
@@ -631,6 +654,7 @@ impl DrawingSimulation {
             perfect_simulation: false,
             fresh_pressure_field: false,
             elliptic_liquid_level: false,
+            pressure_heatmap_head_field: false,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -923,37 +947,59 @@ impl DrawingSimulation {
 
     /// Row-major per-CELL pressure-field heat-map texels, one byte per grid cell (`grid_size *
     /// grid_size` — NOT the fixed 32x32 block grid `block_heat_texels` above uses), ready for
-    /// direct upload as an R8Unorm GPU texture. Tints `column_depth` directly (see that field's
-    /// doc comment for what it measures — the hydrostatic overburden driving lateral, and now
-    /// vertical, flow), so the overlay tracks whichever pass currently populates it: both the
-    /// default in-loop computation and the `fresh_pressure_field` standalone pass write the same
-    /// `column_depth` array, so flipping that toggle is automatically reflected here with no
-    /// extra plumbing.
+    /// direct upload as an R8Unorm GPU texture. Source quantity depends on
+    /// `pressure_heatmap_head_field`:
     ///
-    /// SCALING (the design decision that makes this overlay legible at all): `column_depth` is
-    /// unbounded and spans orders of magnitude in practice — 0 in voids, through roughly
+    /// - `false` (default): `column_depth` directly (see that field's doc comment for what it
+    ///   measures — the hydrostatic overburden driving lateral, and now vertical, flow), so the
+    ///   overlay tracks whichever pass currently populates it: both the default in-loop
+    ///   computation and the `fresh_pressure_field` standalone pass write the same `column_depth`
+    ///   array, so flipping THAT toggle is automatically reflected here with no extra plumbing.
+    /// - `true`: `physics::task55_head_field::compute_head_pressure_field` — task #55 step 2's
+    ///   STATIC hydraulic head field, converted from an elevation to a pressure-like quantity (`p
+    ///   = head(i) - z(i)`) so it lands on the exact same scale as `column_depth` below. Computed
+    ///   fresh on every call; see `pressure_heatmap_head_field`'s own doc comment for why that is
+    ///   only ever paid for while both this flag AND the overlay itself are switched on.
+    ///
+    /// SCALING (the design decision that makes this overlay legible at all): both sources are
+    /// unbounded and span orders of magnitude in practice — 0 in voids, through roughly
     /// 24/64/104/144 down a resting sand column, to 464 for water 60 rows deep. A naive linear
     /// map against a fixed max would render as a nearly-black screen with a bright sliver at the
     /// very bottom, revealing no structure at all.
     ///
-    /// This instead uses `ln(1 + column_depth) / ln(1 + PRESSURE_HEATMAP_LOG_MAX)`, clamped to
-    /// [0, 1]. Log compression is the right shape here because `column_depth` is the interesting
-    /// quantity precisely where it's LOW (voids, shallow columns, the free surface) — the
-    /// derivative of `ln(1 + x)` is `1 / (1 + x)`, steepest near zero and flattening out at the
-    /// high end, so this gives maximum visual contrast to exactly the low-pressure structure a
-    /// reader is trying to resolve (e.g. the ~55-cell void this overlay was built to diagnose),
-    /// while still spreading the high end (deep water) across a visibly distinct hot range rather
-    /// than clipping it all to one color. See `PRESSURE_HEATMAP_LOG_MAX`'s own doc comment for
-    /// why the denominator is a fixed constant rather than each frame's own max.
+    /// This instead uses `ln(1 + p) / ln(1 + PRESSURE_HEATMAP_LOG_MAX)`, clamped to [0, 1]. Log
+    /// compression is the right shape here because low pressure is the interesting end (voids,
+    /// shallow columns, the free surface, an unsupported free-falling body) — the derivative of
+    /// `ln(1 + x)` is `1 / (1 + x)`, steepest near zero and flattening out at the high end, so
+    /// this gives maximum visual contrast to exactly the low-pressure structure a reader is
+    /// trying to resolve (e.g. the ~55-cell void this overlay was built to diagnose), while still
+    /// spreading the high end (deep water) across a visibly distinct hot range rather than
+    /// clipping it all to one color. Applying the SAME map to both sources (rather than each
+    /// having its own scale) is what makes an A/B between them meaningful: a roofed cave or the
+    /// U-tube's basin should read near-dark under `column_depth` (little material directly
+    /// overhead) and bright under the head field (it knows about the connected column beside it)
+    /// on ONE fixed colour scale, not two incomparable ones. See `PRESSURE_HEATMAP_LOG_MAX`'s own
+    /// doc comment for why the denominator is a fixed constant rather than each frame's own max.
     pub fn pressure_field_texels(&self) -> Vec<u8> {
         let log_max = (1.0 + PRESSURE_HEATMAP_LOG_MAX).ln();
-        self.column_depth
-            .iter()
-            .map(|&depth| {
-                let normalized = (1.0 + depth.max(0.0)).ln() / log_max;
-                (normalized.clamp(0.0, 1.0) * 255.0).round() as u8
-            })
+        let to_byte = |depth: f32| -> u8 {
+            let normalized = (1.0 + depth.max(0.0)).ln() / log_max;
+            (normalized.clamp(0.0, 1.0) * 255.0).round() as u8
+        };
+        if self.pressure_heatmap_head_field {
+            crate::physics::task55_head_field::compute_head_pressure_field(
+                self.heightmap.width,
+                self.heightmap.height,
+                &self.shape_mask,
+                &self.heightmap.data,
+                &self.cell_props,
+            )
+            .into_iter()
+            .map(to_byte)
             .collect()
+        } else {
+            self.column_depth.iter().map(|&d| to_byte(d)).collect()
+        }
     }
 
     /// Full (all `GRID_SIZE` rows) row-mass recompute plus a fresh quantile target computation.
