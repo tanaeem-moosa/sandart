@@ -278,6 +278,20 @@ export class WasmSimulationState {
         }
     }
     /**
+     * "Drive transport from the head field" debug toggle (task #55 step 3): forwarded straight
+     * to the sim, a plain field write (same shape as `set_elliptic_liquid_level` above — no
+     * reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
+     * `DrawingSimulation::head_field_transport`'s doc comment in sandart-sim/src/lib.rs for what
+     * it switches on: `false` (default) is today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`
+     * driving head, bit-identical; `true` makes LIQUID-ONLY lateral and vertical edges use the
+     * unified hydraulic head field instead. Granular material and mixed liquid/granular edges
+     * are unaffected.
+     * @param {boolean} enabled
+     */
+    set_head_field_transport(enabled) {
+        wasm.wasmsimulationstate_set_head_field_transport(this.__wbg_ptr, enabled);
+    }
+    /**
      * Block-simulation heat-map debug overlay: purely a render-side toggle (see
      * `heatmap_enabled`'s field doc comment) — the underlying per-block counter runs
      * unconditionally in `sim`, this only gates whether `render()` uploads/draws it.
@@ -2189,17 +2203,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2113, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2110, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_ca9fd0ef817516ab___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 63, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 63, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue______true__2);
             return ret;
         },
