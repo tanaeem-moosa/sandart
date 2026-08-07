@@ -1644,6 +1644,79 @@ fn diag_task55_u_tube_rise_in_far_arm() {
     }
 }
 
+/// A flat-bottomed open vessel filled level, with a DEEP NARROW VALLEY carved out of the middle of
+/// its free surface. Nothing about this is at equilibrium: the valley floor sits far below the
+/// surrounding surface, so the body's own hydraulic head stands well above the valley's surface
+/// elevation and water must rise to fill it.
+///
+/// This is the user's own observation from the Multi-neck vessel ("the deep valley is a gap that is
+/// not being filled from sideways"), reduced to the simplest geometry that reproduces it.
+fn build_surface_valley(w: usize, h: usize) -> (Vec<u8>, Vec<f32>) {
+    let left = frac_idx(0.15, w);
+    let right = frac_idx(0.85, w);
+    let surface_row = frac_idx(0.40, h);
+    let floor_row = frac_idx(0.90, h);
+    let valley_left = frac_idx(0.45, w);
+    let valley_right = frac_idx(0.55, w);
+    let valley_floor = frac_idx(0.75, h); // deep: most of the way down to the vessel floor
+
+    let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+    for y in frac_idx(0.05, h)..=floor_row {
+        for x in left..right {
+            mask[y * w + x] = crate::MASK_INSIDE;
+        }
+    }
+    let mut heights = vec![0.0f32; w * h];
+    for y in surface_row..=floor_row {
+        for x in left..right {
+            let in_valley = x >= valley_left && x < valley_right && y < valley_floor;
+            if !in_valley {
+                heights[y * w + x] = 1.0;
+            }
+        }
+    }
+    (mask, heights)
+}
+
+/// DIAGNOSTIC: does a deep valley carved into a free surface fill in?
+///
+/// Reports the valley's own surface row over time. If the head field is doing its job the valley
+/// should rise toward the surrounding surface level; if the free surface is pinned to its own
+/// elevation (the defect deleted from `task55_head_field`) the drive across the valley's water/air
+/// interface is identically zero and it stays a hole forever. Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "SPEC for #55: diagnostic -- prints surface-valley fill progress, not a check"]
+fn diag_task55_surface_valley_fills() {
+    println!("\nsurface valley fill (does a notch in a free surface level out?):");
+    for &w in &DYN_SWEEP_W {
+        let h = w;
+        for &transport in &[false, true] {
+            let (mask, heights) = build_surface_valley(w, h);
+            let cell_props = build_water_cell_props(w * h);
+            let mut sim = DynSim::new(w, h, mask.clone(), heights.clone(), cell_props);
+            let probe_x = w / 2;
+            let surface_of = |data: &[f32]| -> Option<usize> {
+                (0..h).find(|&y| data[y * w + probe_x] > 1e-4)
+            };
+            let start = surface_of(&heights);
+            let outside_surface = (0..h).find(|&y| heights[y * w + frac_idx(0.20, w)] > 1e-4);
+            let mut total_flow = 0.0f64;
+            for _ in 0..600 {
+                total_flow += sim.tick(Vec2::new(0.0, DYN_GRAVITY), transport) as f64;
+            }
+            let end = surface_of(&sim.hm.data);
+            println!(
+                "  w={w} transport={transport}: valley surface row {:?} -> {:?} \
+                 (surrounding surface starts at row {:?}) risen={} rows total_flow={total_flow:.1}",
+                start,
+                end,
+                outside_surface,
+                start.unwrap_or(0) as i64 - end.unwrap_or(0) as i64
+            );
+        }
+    }
+}
+
 /// UNPARKED. This scoreboard was `#[ignore]`d as BLOCKED: `compute_head_field` could not converge
 /// on the draining-vessel scenario at w=512 (8256 sweeps, residual 0.0436 against a 0.001
 /// tolerance) and asserted on convergence rather than returning a wrong field, so enabling
