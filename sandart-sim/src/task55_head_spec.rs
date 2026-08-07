@@ -1130,6 +1130,18 @@ impl DynSim {
     /// `settle_tick` itself produces) -- used by the quiescence guards below so a spec cannot pass
     /// vacuously because nothing actually moved.
     fn tick(&mut self, gravity_dir: Vec2, head_field_transport: bool) -> f32 {
+        self.tick_with(gravity_dir, head_field_transport, false)
+    }
+
+    /// `tick` with TASK #63's `pressure_sensitive_flow` also exposed, for the two specs that vary
+    /// it. Kept as a separate entry point so the five existing `tick` call sites -- and every
+    /// scoreboard number they produce -- stay literally unchanged.
+    fn tick_with(
+        &mut self,
+        gravity_dir: Vec2,
+        head_field_transport: bool,
+        pressure_sensitive_flow: bool,
+    ) -> f32 {
         let flow = settle_tick(
             &mut self.hm,
             &mut self.temp_heights,
@@ -1154,6 +1166,7 @@ impl DynSim {
             false,
             head_field_transport,
             false,
+            pressure_sensitive_flow,
         );
         self.tick_count += 1;
         flow
@@ -1926,6 +1939,188 @@ fn diag_task55_u_tube_checkpoint_trend() {
             spread / ds,
             tol / ds,
             start.elapsed()
+        );
+    }
+}
+
+// =================================================================================================
+// TASK #63 -- pressure-sensitive flow rate. Two checks, one per half of the property the user
+// stated: falling water must be untouched, and low-pressure water must move less than
+// well-pressurised water does. Both are TestSim-free (they drive `DynSim` directly) so they read
+// `settle_tick`'s real `pressure_sensitive_flow` parameter rather than any test-only gate.
+// =================================================================================================
+
+/// A one-row-deep puddle occupying the LEFT half of an open flat-bottomed box, with dry floor to
+/// its right to spread into. `fill` is the per-cell fill of that row, which -- because a resting
+/// body's head under max-propagation equals its free-surface elevation -- is also, in cells of
+/// head, exactly what `pressure_rate_factor` will see at every donor in it. So `fill = 1.0` puts
+/// the whole puddle at the rate law's neutral point and `fill = 0.3` puts it at 0.3 of full rate,
+/// by construction rather than by tuning.
+fn build_shallow_puddle(w: usize, h: usize, fill: f32) -> (Vec<u8>, Vec<f32>) {
+    let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+    let margin = frac_idx(0.05, w).max(2);
+    for y in margin..h - margin {
+        for x in margin..w - margin {
+            mask[y * w + x] = crate::MASK_INSIDE;
+        }
+    }
+    let mut heights = vec![0.0f32; w * h];
+    let floor = h - margin - 1;
+    for x in margin..frac_idx(0.5, w) {
+        heights[floor * w + x] = fill;
+    }
+    (mask, heights)
+}
+
+/// How far right the puddle's mass has reached, as a mass-weighted mean x over the floor row --
+/// the "has it spread" metric both halves of the spec below compare.
+fn spread_mean_x(heights: &[f32], w: usize, h: usize) -> f64 {
+    let mut m = 0.0f64;
+    let mut mx = 0.0f64;
+    for y in 0..h {
+        for x in 0..w {
+            let v = heights[y * w + x] as f64;
+            if v > 0.0 {
+                m += v;
+                mx += v * x as f64;
+            }
+        }
+    }
+    if m > 0.0 { mx / m } else { 0.0 }
+}
+
+/// TASK #63, half 1: **free fall must be untouched**, which the user named as the one hard
+/// constraint on this feature. Reuses `build_falling_water` -- the same genuinely-unsupported slab
+/// `spec_falling_water_does_not_drift_sideways` uses -- and asserts the two toggle states produce
+/// BIT-IDENTICAL heightmaps over 40 ticks.
+///
+/// Bit-identical, not "close": the exemption is exact by construction, not approximate.
+/// `advance_head_field` WRITES `head = z` at every cell it pinned as unsupported, so
+/// `cells_of_head_at` returns exactly `0.0` there and `pressure_rate_factor` returns exactly `1.0`,
+/// leaving `c_sq` multiplied by one. Any drift at all would mean the exemption is being reached by
+/// an epsilon comparison somewhere, or that some cell in a falling slab is not being pinned -- both
+/// worth failing on immediately rather than absorbing into a tolerance.
+#[test]
+fn spec_task63_free_fall_is_bit_identical() {
+    for &w in &DYN_SWEEP_W {
+        let h = w * 2;
+        let run = |pressure_sensitive_flow: bool| -> (Vec<f32>, f64) {
+            let (mask, heights) = build_falling_water(w, h);
+            let cell_props = build_water_cell_props(w * h);
+            let mut sim = DynSim::new(w, h, mask, heights, cell_props);
+            let mut total_flow = 0.0f64;
+            for _ in 0..40 {
+                total_flow +=
+                    sim.tick_with(Vec2::new(0.0, DYN_GRAVITY), false, pressure_sensitive_flow) as f64;
+            }
+            (sim.hm.data.clone(), total_flow)
+        };
+        let (off, flow_off) = run(false);
+        let (on, flow_on) = run(true);
+        assert!(
+            flow_off > 1.0,
+            "spec_task63_free_fall_is_bit_identical: w={w}: SCENARIO INVALID -- total_flow \
+             ({flow_off:.4}) says the slab never fell, so bit-identity would be vacuous"
+        );
+        let first_diff = off.iter().zip(on.iter()).position(|(a, b)| a != b);
+        assert!(
+            first_diff.is_none(),
+            "spec_task63_free_fall_is_bit_identical: w={w}: pressure_sensitive_flow changed a \
+             FREE-FALLING slab, first differing cell index {:?} ({} vs {}). Falling material is \
+             pinned to exactly zero head and must therefore take pressure_rate_factor's exact \
+             1.0 branch -- see cells_of_head_at's doc comment. flow off={flow_off:.4} \
+             on={flow_on:.4}",
+            first_diff,
+            first_diff.map(|i| off[i]).unwrap_or(0.0),
+            first_diff.map(|i| on[i]).unwrap_or(0.0),
+        );
+    }
+}
+
+/// TASK #63, half 2: **low-pressure water must move less, and well-pressurised water must not
+/// move differently at all.** A paired comparison over one scenario at two fills, which is what
+/// makes it a statement about pressure rather than about this particular geometry.
+///
+/// Part A and B are measured over EXACTLY ONE TICK, from the constructed initial state, because
+/// that is the only window in which "every donor carries `fill` cells of head" is still true of
+/// the scenario. Part C then checks the cumulative effect over 60 ticks, direction only.
+///
+/// **Why part A is one tick and not sixty.** A puddle of full cells does NOT stay bit-identical
+/// under this toggle over a long run, and that is the feature working rather than a violation: as
+/// it spreads, its leading edge becomes a PARTIALLY filled cell, which carries under one cell of
+/// head and is therefore attenuated -- correctly. Measured, so nobody re-derives it: over 60 ticks
+/// at w=64 the fill=1.0 puddle reaches mean x 27.35152 with the toggle off and 27.34311 with it
+/// on, a 0.03% difference entirely attributable to its own newly-thin leading edge. The claim
+/// worth defending is the one part A makes -- that a donor AT one cell of head is untouched --
+/// because every cell below a free surface carries strictly more than one cell of head, so
+/// neutrality at exactly 1.0 is neutrality for the entire bulk of every body in the simulation.
+#[test]
+fn spec_task63_low_pressure_moves_less_and_full_cells_do_not() {
+    const TICKS: usize = 60;
+    for &w in &DYN_SWEEP_W {
+        let h = w;
+        let run = |fill: f32, pressure_sensitive_flow: bool, ticks: usize| -> (f64, f64, Vec<f32>) {
+            let (mask, heights) = build_shallow_puddle(w, h, fill);
+            let cell_props = build_water_cell_props(w * h);
+            let mut sim = DynSim::new(w, h, mask, heights, cell_props);
+            let mut total_flow = 0.0f64;
+            for _ in 0..ticks {
+                total_flow +=
+                    sim.tick_with(Vec2::new(0.0, DYN_GRAVITY), false, pressure_sensitive_flow) as f64;
+            }
+            (spread_mean_x(&sim.hm.data, w, h), total_flow, sim.hm.data.clone())
+        };
+
+        // --- Part A: NEUTRAL at exactly one cell of head. Every donor in this scenario is a full
+        //     cell on tick 1, so `pressure_rate_factor` must return exactly 1.0 for all of them.
+        let (_, full_flow, full_off) = run(1.0, false, 1);
+        let (_, _, full_on) = run(1.0, true, 1);
+        assert!(
+            full_flow > 1e-6,
+            "spec_task63_low_pressure_moves_less_and_full_cells_do_not: w={w}: SCENARIO INVALID -- \
+             the fill=1.0 puddle moved nothing in its first tick (total_flow={full_flow:.8}), so \
+             the equality below would be vacuous"
+        );
+        let first_diff = full_off.iter().zip(full_on.iter()).position(|(a, b)| a != b);
+        assert!(
+            first_diff.is_none(),
+            "spec_task63_low_pressure_moves_less_and_full_cells_do_not: w={w}: a puddle of FULL \
+             cells -- exactly one cell of head, the rate law's neutral point -- moved differently \
+             in its FIRST tick with the toggle on. First differing cell {:?} ({} vs {}). \
+             pressure_rate_factor must return exactly 1.0 at one cell of head, or the change is \
+             silently retuning every well-pressurised edge in the simulation, not only thin ones.",
+            first_diff,
+            first_diff.map(|i| full_off[i]).unwrap_or(0.0),
+            first_diff.map(|i| full_on[i]).unwrap_or(0.0),
+        );
+
+        // --- Part B: ATTENUATED at 0.3 cells of head, measured over the same single tick, so the
+        //     contrast with part A is a contrast in pressure and nothing else.
+        let (_, thin_flow_1, _) = run(0.3, false, 1);
+        let (_, thin_flow_on_1, _) = run(0.3, true, 1);
+        assert!(
+            thin_flow_1 > 1e-6,
+            "spec_task63_low_pressure_moves_less_and_full_cells_do_not: w={w}: SCENARIO INVALID -- \
+             the fill=0.3 puddle moved nothing in its first tick with the toggle OFF \
+             (total_flow={thin_flow_1:.8}), so 'moves less with it on' would be vacuous"
+        );
+        assert!(
+            thin_flow_on_1 < thin_flow_1,
+            "spec_task63_low_pressure_moves_less_and_full_cells_do_not: w={w}: a puddle carrying \
+             only 0.3 cells of head moved just as much mass in its first tick with the toggle on \
+             ({thin_flow_on_1:.8}) as off ({thin_flow_1:.8}) -- while a full-cell puddle in part A \
+             was correctly untouched. The whole point of the feature is that these two differ."
+        );
+
+        // --- Part C: and the single-tick attenuation compounds into visibly less spreading.
+        let (thin_off, _, _) = run(0.3, false, TICKS);
+        let (thin_on, _, _) = run(0.3, true, TICKS);
+        assert!(
+            thin_on < thin_off,
+            "spec_task63_low_pressure_moves_less_and_full_cells_do_not: w={w}: over {TICKS} ticks \
+             a puddle carrying only 0.3 cells of head spread just as far with the toggle on (mean \
+             x {thin_on:.6}) as off ({thin_off:.6}), even though part B showed its first tick was \
+             attenuated -- so the effect is being undone somewhere over the run."
         );
     }
 }

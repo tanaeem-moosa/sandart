@@ -364,6 +364,7 @@ impl WasmSimulationState {
         let fresh_pressure_field = self.sim.fresh_pressure_field;
         let pressure_heatmap_head_field = self.sim.pressure_heatmap_head_field;
         let head_field_transport = self.sim.head_field_transport;
+        let pressure_sensitive_flow = self.sim.pressure_sensitive_flow;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -386,6 +387,8 @@ impl WasmSimulationState {
         sim.pressure_heatmap_head_field = pressure_heatmap_head_field;
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.head_field_transport = head_field_transport;
+        // Same reasoning again: a UI debug toggle, not simulation state.
+        sim.pressure_sensitive_flow = pressure_sensitive_flow;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -747,6 +750,17 @@ impl WasmSimulationState {
     /// are unaffected.
     pub fn set_head_field_transport(&mut self, enabled: bool) {
         self.sim.head_field_transport = enabled;
+    }
+
+    /// "Pressure-sensitive flow rate" debug toggle (task #63): forwarded straight to the sim, a
+    /// plain field write (same shape as `set_head_field_transport` just above — no reset, no
+    /// reinitialisation, safe to call every frame from `syncSettings()`). See
+    /// `DrawingSimulation::pressure_sensitive_flow`'s doc comment in sandart-sim/src/lib.rs for
+    /// what it switches on: `false` (default) is today's head-independent conveyance rate,
+    /// bit-identical; `true` slows LIQUID-ONLY edges whose donor carries less than one cell of
+    /// hydrostatic head. Free-falling material and granular material are unaffected.
+    pub fn set_pressure_sensitive_flow(&mut self, enabled: bool) {
+        self.sim.pressure_sensitive_flow = enabled;
     }
 
     /// Block-simulation heat-map debug overlay: purely a render-side toggle (see

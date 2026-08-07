@@ -828,7 +828,14 @@
                  through roofed channels/siphons/U-tubes; granular material and mixed edges are
                  untouched. Off by default; moves through the same mass-conserving edge solver as
                  always, so it inherits that solver's own donor/acceptor clamps and velocity bound
-                 rather than moving mass on its own. -->
+                 rather than moving mass on its own. "Pressure-sensitive flow rate" (task #63)
+                 makes water spread and drain at a speed that depends on how much water is pressing
+                 on it: a cell carrying at least one cell's depth of head moves at exactly today's
+                 rate, unchanged, and a thinner surface film moves proportionally slower. It only
+                 ever slows things down, never speeds them up, so no well-pressurised body in the
+                 scene changes at all. Falling water is exempt and keeps falling at full speed, as
+                 is granular material. Independent of "Head-field liquid transport" above -- either
+                 can be used without the other. -->
             <div class="group">
                 <div class="group-title">Debug</div>
                 <label class="checkbox-container">
@@ -869,6 +876,11 @@
                 <label class="checkbox-container">
                     Head-field liquid transport
                     <input type="checkbox" id="check-head-field-transport">
+                    <span class="checkmark"></span>
+                </label>
+                <label class="checkbox-container">
+                    Pressure-sensitive flow rate
+                    <input type="checkbox" id="check-pressure-sensitive-flow">
                     <span class="checkmark"></span>
                 </label>
             </div>

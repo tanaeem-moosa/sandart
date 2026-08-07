@@ -508,6 +508,37 @@ pub struct DrawingSimulation {
     /// while this flag (or the test gate) is on, never otherwise.
     pub head_field_transport: bool,
 
+    /// "Pressure-sensitive flow rate" debug toggle (task #63). Off by default (today's shipped
+    /// conveyance coefficient, independent of how much head a cell carries -- bit-identical).
+    /// When on, a LIQUID-ONLY edge whose DONOR carries less than one cell of hydrostatic head has
+    /// its conveyance coefficient (`physics::flux_edge_candidate`'s `c_sq`) scaled down in
+    /// proportion to the head it does carry, at both the vertical and lateral edge sites. So a
+    /// deep body pushes at the full calibrated rate while a surface film spreads more slowly.
+    ///
+    /// SLOWS THE LOW END, never speeds the high end. The multiplier
+    /// (`physics::pressure_rate_factor`) is capped at exactly `1.0` and is exactly `1.0` at and
+    /// above one cell of head, so no well-pressurised edge in the simulation changes at all and
+    /// nothing can be pushed past the CFL bound `c_sq` was chosen to respect. Whatever this does
+    /// to a scenario, it can only ever be a REDUCTION in flux relative to the toggle being off.
+    ///
+    /// FREE FALL IS EXEMPT, by construction rather than by a special case. Pressure comes from
+    /// the head field, which pins unsupported material to `head = z` and therefore to exactly zero
+    /// head; the rate law returns `1.0` there. A ballistic parcel has no contact pressure for a
+    /// pressure-derived rate to be sensitive to, so it keeps falling at full speed. See
+    /// `physics::task55_head_field::cells_of_head_at` for why the zero/positive separation is
+    /// exact and not an epsilon.
+    ///
+    /// INDEPENDENT OF `head_field_transport` above, deliberately. This reads `head_field` for the
+    /// donor's pressure but does not change which driving head any edge uses, so the two can be
+    /// evaluated separately -- which matters while transport is still blocked on #64. It is a
+    /// third condition (alongside `head_field_transport` and `pressure_heatmap_head_field`) that
+    /// makes `head_field` advance at all this tick, so turning this on alone keeps the field live.
+    ///
+    /// Scope: LIQUID ONLY, same `LIQUID_ELLIPTIC_THRESHOLD` gate on both edge endpoints as
+    /// `head_field_transport`, and for the same reason -- the head field has no yield criterion,
+    /// so it must never reach granular material.
+    pub pressure_sensitive_flow: bool,
+
     /// Per-block "how often was this block actually simulated" heat-map counter for the debug
     /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
     /// (see that constant's doc comment). Length is always `active_blocks.len() *
@@ -701,6 +732,7 @@ impl DrawingSimulation {
             fresh_pressure_field: false,
             pressure_heatmap_head_field: false,
             head_field_transport: false,
+            pressure_sensitive_flow: false,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -1451,6 +1483,7 @@ impl DrawingSimulation {
                     self.fresh_pressure_field,
                     self.head_field_transport,
                     self.pressure_heatmap_head_field,
+                    self.pressure_sensitive_flow,
                 );
             }
         } else {

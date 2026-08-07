@@ -849,6 +849,7 @@ function syncSettings() {
     state.set_pressure_heatmap_overlay(document.getElementById('check-pressure-heatmap').checked);
     state.set_pressure_heatmap_head_field(document.getElementById('check-pressure-heatmap-head-field').checked);
     state.set_head_field_transport(document.getElementById('check-head-field-transport').checked);
+    state.set_pressure_sensitive_flow(document.getElementById('check-pressure-sensitive-flow').checked);
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;

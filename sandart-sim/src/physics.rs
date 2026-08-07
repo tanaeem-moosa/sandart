@@ -2108,6 +2108,47 @@ fn wave_params(wetness: f32) -> (f32, f32) {
     }
 }
 
+/// TASK #63. How much hydrostatic head a donor cell must carry, in CELLS OF HEAD (see
+/// `task55_head_field::cells_of_head_at`), before its edges convey at the solver's full calibrated
+/// rate.
+///
+/// ONE CELL, and that number is derived rather than swept. `wave_params`' `(c_sq, damping)` pairs
+/// were calibrated against edges inside a body of material -- a cell with at least its own
+/// neighbours' worth of fill around it -- so one cell of head is the shallowest state that
+/// calibration ever actually described. Everything above it is inside the calibrated regime and
+/// must not be touched (this task is "slow the low-pressure cases down", NOT "speed the loaded
+/// ones up" -- adding gain at the top would push peak flow past the CFL bound `c_sq` was chosen to
+/// respect and force a compensating clamp). Everything below it is a surface film the calibration
+/// never covered, and is what this attenuates.
+const PRESSURE_RATE_FULL_AT_CELLS_OF_HEAD: f32 = 1.0;
+
+/// TASK #63. Multiplier on a liquid edge's conveyance coefficient (`flux_edge_candidate`'s `c_sq`)
+/// as a function of the DONOR cell's hydrostatic head, in cells of head. Never exceeds `1.0`, so
+/// it can only ever REDUCE a flux the solver would otherwise have produced -- which is what makes
+/// it safe against `spec_transport_speed_is_bounded` by construction rather than by measurement.
+///
+/// **Free fall is exempt, and the exemption is exact, not an epsilon.** `cells_of_head_at` returns
+/// exactly `0.0` for a cell `advance_head_field` classified as unsupported (it WRITES `head = z`
+/// there rather than taking a max), and strictly more than `0.0` for every supported wet cell
+/// however thin -- see that function's own doc comment. So `<= 0.0` reads "outside the pressure
+/// model" and not "very little water", and returning `1.0` there is not a special case bolted on
+/// to protect free fall: a ballistic parcel has no contact pressure to be sensitive TO, so a
+/// pressure-derived rate simply does not apply to it. Attenuating it instead would freeze falling
+/// water in mid-air, which is the one outcome this task must not produce.
+///
+/// Linear below the threshold, not a saturating `p / (p + ref)` curve: a saturating form never
+/// reaches `1.0`, so it would silently retune every well-pressurised edge in the simulation --
+/// exactly the "add gain / lose calibration" failure mode described on
+/// `PRESSURE_RATE_FULL_AT_CELLS_OF_HEAD`. Clamped-linear is EXACTLY neutral at and above one cell.
+#[inline]
+fn pressure_rate_factor(cells_of_head: f32) -> f32 {
+    if cells_of_head <= 0.0 {
+        1.0
+    } else {
+        (cells_of_head / PRESSURE_RATE_FULL_AT_CELLS_OF_HEAD).min(1.0)
+    }
+}
+
 fn get_ca_params(
     wetness: f32,
     threshold_prop: f32,
@@ -3528,6 +3569,20 @@ pub fn settle_tick(
     // `HEAD_FIELD_SWEEPS_PER_TICK` local sweeps (see that constant's own doc comment), so paying it
     // for the overlay alone is cheap and keeps the "both off costs nothing" property intact.
     pressure_heatmap_head_field: bool,
+    // TASK #63: "pressure-sensitive flow rate" debug toggle
+    // (`DrawingSimulation::pressure_sensitive_flow`; see that field's doc comment). `false`
+    // (default): unchanged from the tree before this parameter existed -- bit-identical. `true`:
+    // a LIQUID-ONLY edge whose DONOR carries less than one cell of hydrostatic head has its
+    // conveyance coefficient scaled down in proportion to the head it does carry
+    // (`pressure_rate_factor`, applied to `c_sq` at both the phase-0 vertical and phase-1 lateral
+    // edge sites). Free-falling material is exempt by construction; granular and mixed edges are
+    // untouched.
+    //
+    // DELIBERATELY INDEPENDENT OF `head_field_transport`. This reads `head_field` for the donor's
+    // pressure but does NOT change which driving head the edge uses, so it can be evaluated on its
+    // own while transport stays off (transport is still blocked on #64). It therefore joins
+    // `head_field_needs_advance` below -- turning this on alone is enough to keep the field live.
+    pressure_sensitive_flow: bool,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -3853,7 +3908,11 @@ pub fn settle_tick(
     // a live buffer to read even with transport off (see `pressure_heatmap_head_field` parameter's
     // own doc comment for the defect this fixes).
     let head_field_active = head_field_transport || head_field_gate::is_enabled();
-    let head_field_needs_advance = head_field_active || pressure_heatmap_head_field;
+    // TASK #63 joins this gate but NOT `head_field_active`: `pressure_sensitive_flow` reads the
+    // field for the donor's pressure without changing which driving head any edge uses, so it
+    // needs the field LIVE but must not switch transport on as a side effect.
+    let head_field_needs_advance =
+        head_field_active || pressure_heatmap_head_field || pressure_sensitive_flow;
     if head_field_needs_advance {
         task55_head_field::advance_head_field(
             w,
@@ -4234,6 +4293,34 @@ pub fn settle_tick(
                         let (liquid_c_sq, liquid_damping) = wave_params(wetness);
                         let c_sq = GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity;
                         let damping = GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity;
+                        // TASK #63: pressure-sensitive flow rate. Attenuates `c_sq` -- how fast
+                        // this edge's momentum spins up from its driving head -- when the DONOR
+                        // carries less than one cell of hydrostatic head. It does NOT touch the
+                        // driving head itself, so which branch produced `head_a`/`head_b` above is
+                        // irrelevant here and this composes with `head_field_transport` either way.
+                        //
+                        // DONOR, not the edge average or the higher end: this scales the rate at
+                        // which a cell can PUSH material out, and only the cell material is leaving
+                        // has a say in that. Under gravity `a` is the upper cell of the vertical
+                        // pair and material moves `a -> b`, so `a` is the donor for every edge this
+                        // factor is allowed to reach (the head-field/`edge_sleeps` machinery has
+                        // already discarded the reverse case by this point).
+                        //
+                        // Free fall is untouched: `cells_of_head_at` returns exactly `0.0` for
+                        // material `advance_head_field` pinned as unsupported, and
+                        // `pressure_rate_factor` returns `1.0` there -- see both functions' doc
+                        // comments for why that separation is exact rather than an epsilon. This
+                        // matters most at THIS site, which is the one free fall runs through.
+                        let c_sq = if pressure_sensitive_flow
+                            && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
+                            && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
+                        {
+                            c_sq * pressure_rate_factor(task55_head_field::cells_of_head_at(
+                                center_idx, w, head_field,
+                            ))
+                        } else {
+                            c_sq
+                        };
                         // COLLECT only: compute this edge's candidate flux and record it, plus
                         // this cell's and its neighbour's donor/acceptor limits for arbitration.
                         // Nothing is mutated yet — see this phase's post-collection ARBITRATE +
@@ -4774,6 +4861,29 @@ pub fn settle_tick(
                             }
                         } else {
                             let (c_sq, damping) = wave_params(wetness);
+                            // TASK #63: pressure-sensitive flow rate -- see the phase-0 vertical
+                            // site's own comment for the full reasoning (donor, not average; free
+                            // fall exempt by construction; the driving head untouched). This is the
+                            // site where the effect is meant to be VISIBLE: a deep body pushes
+                            // sideways at the calibrated rate while a surface film spreads in
+                            // proportion to the head it actually carries.
+                            //
+                            // Note the two limiters are independent and both wanted. `avail_a`
+                            // below removes mass that is still in transit downward (a falling
+                            // parcel cannot push sideways at all); this factor instead scales how
+                            // hard RESTING material pushes. A thin resting film is fully available
+                            // as donor mass and was previously spread at the same rate as the floor
+                            // of a deep basin.
+                            let c_sq = if pressure_sensitive_flow
+                                && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
+                                && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
+                            {
+                                c_sq * pressure_rate_factor(task55_head_field::cells_of_head_at(
+                                    center_idx, w, head_field,
+                                ))
+                            } else {
+                                c_sq
+                            };
                             // Mass that arrived from upstream during phase 0 is still falling; it is
                             // unsupported and cannot push sideways (see `flux_edge`'s `avail_*`).
                             // `edge_vel_v[i - w]` is exactly the flux phase 0 realised on the
@@ -5670,6 +5780,11 @@ mod tests {
         /// to exercise the new head-field-driven liquid transport branch on a specific scenario
         /// without touching `tick()`'s signature.
         head_field_transport: bool,
+        /// Mirrors `DrawingSimulation::pressure_sensitive_flow` / `settle_tick`'s parameter of the
+        /// same name (TASK #63). Defaults to `false` in `new()` so every existing `TestSim`-based
+        /// test is unaffected; set directly (`sim.pressure_sensitive_flow = true`) to exercise the
+        /// pressure-attenuated conveyance rate on a specific scenario.
+        pressure_sensitive_flow: bool,
     }
 
     impl TestSim {
@@ -5696,6 +5811,7 @@ mod tests {
                 tick_count: 0,
                 fresh_pressure_field: false,
                 head_field_transport: false,
+                pressure_sensitive_flow: false,
             }
         }
 
@@ -5724,6 +5840,7 @@ mod tests {
                 self.fresh_pressure_field,
                 self.head_field_transport,
                 false,
+                self.pressure_sensitive_flow,
             );
             self.tick_count += 1;
             flow
@@ -6051,7 +6168,7 @@ mod tests {
                 glam::Vec2::ZERO,
                 false,
                 false,
-                false,
+                false, false,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -6122,7 +6239,7 @@ mod tests {
             glam::Vec2::ZERO,
             false,
             false,
-            false,
+            false, false,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -6200,7 +6317,7 @@ mod tests {
                 glam::Vec2::ZERO,
                 false,
                 false,
-                false,
+                false, false,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -6305,7 +6422,7 @@ mod tests {
             glam::Vec2::ZERO,
             false,
             false,
-            false,
+            false, false,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -6614,7 +6731,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -6712,7 +6829,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -6764,7 +6881,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -6837,7 +6954,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -6941,7 +7058,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -10110,7 +10227,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -10225,7 +10342,7 @@ mod tests {
                     12345u32.wrapping_add(i),
                     &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false,
                     false,
-                    false,
+                    false, false,
                 );
             }
 
@@ -10324,7 +10441,7 @@ mod tests {
                 12345u32.wrapping_add(i),
                 &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -10411,7 +10528,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -10497,7 +10614,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -10746,7 +10863,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -10926,7 +11043,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
         }
 
@@ -11068,7 +11185,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             ) as f64;
         }
 
@@ -11311,7 +11428,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false,
+                false, false,
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -11848,7 +11965,7 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, t as u32, gravity_dir, false,
                 false,
-                false,
+                false, false,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();
