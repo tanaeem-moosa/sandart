@@ -1091,6 +1091,12 @@ function setupPanelInput() {
     document.getElementById('check-fresh-pressure').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap-head-field').addEventListener('change', syncSettings);
+    // `check-head-field-transport` shipped without this line and was therefore inert on its own:
+    // syncSettings() reads every checkbox, so the toggle only took effect once some OTHER control
+    // was touched and pushed the whole panel. Anything measured by clicking it alone was measuring
+    // the previous state. `check-pressure-sensitive-flow` is listed here for the same reason.
+    document.getElementById('check-head-field-transport').addEventListener('change', syncSettings);
+    document.getElementById('check-pressure-sensitive-flow').addEventListener('change', syncSettings);
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above
     // tick() for why this never touches syncSettings or wasm).
