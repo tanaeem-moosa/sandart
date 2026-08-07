@@ -25,7 +25,10 @@ so a host-target check compiles an empty crate and passes no matter what you bro
 
 **One test fails on purpose and must keep failing.**
 `physics::tests::test_water_blob_stays_left_right_symmetric_under_gravity` is a deliberate marker
-for a known, unfixed asymmetry (see ticket #56). A run with **only** that failing is GREEN. Never
+for a known, unfixed asymmetry (see ticket #56). A run with **only** that failing is GREEN. Note
+#56 now records that this test's `1.4e-5` signal and the *visible* one-sided pile the user
+photographs are probably **two different bugs**, and that five previous fixes were all aimed at the
+small one. Never
 fix it, weaken it, `#[ignore]` it, retitle it, or change its scan order or tolerances. Its failure
 message contains a long diagnosis that has already been corrected once — read it rather than
 re-deriving it.

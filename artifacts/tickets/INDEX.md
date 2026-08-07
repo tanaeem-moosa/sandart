@@ -25,7 +25,7 @@ Sorted: in-progress first, then open, then closed.
 - [#52 — 2.29 — Material forms straight VERTICAL lines: no lateral mixing in the draining funnel](52-material-forms-straight-vertical-lines-no-lateral-mixing-in.md)
 - [#53 — 2.30 — Pressure projection costs +33% to +53% ms/tick; cost is fixed per-phase, not the Jacobi loop](53-pressure-projection-costs-33-to-53-ms-tick-cost-is-fixed-per.md)
 - [#54 — 2.31 — Make pressure drive EVERY flow: deep material falls faster, and material next to empty space spreads into it](54-make-pressure-drive-every-flow-deep-material-falls-faster-an.md)
-- [#56 — 2.33 — Separate the real symmetry fix from pressure damping: does order-independence or restoring force explain the 4x?](56-separate-the-real-symmetry-fix-from-pressure-damping-does-or.md)
+- [#56 — 2.33 — ASYMMETRY HUB. Check the DISPERSION term first: zero-mean by construction but drawn from a non-uniform hash, added to one edge endpoint only, and scaled by the YIELD THRESHOLD](56-asymmetry-hub-check-the-dispersion-term-first-zero-mean-by-c.md)
 - [#57 — 2.34 — BLOCKS making the fresh pressure field default: arches do not COLLAPSE fast enough. It makes an existing failure worse, not a new one](57-blocks-making-the-fresh-pressure-field-default-arches-do-not.md)
 - [#60 — 2.37 — VERTICAL_PRESSURE_CAP_MULT clamps the vertical head at &lt;1 cell of depth, so #54's "deep material falls faster" is inert](60-vertical-pressure-cap-mult-clamps-the-vertical-head-at-lt-1.md)
 - [#62 — 2.39 — Warm-start the head field with a decay term so switchback geometry does not re-derive from cold every tick](62-warm-start-the-head-field-with-a-decay-term-so-switchback-ge.md)
