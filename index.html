@@ -810,11 +810,18 @@
                  "Fresh pressure field" swaps how the lateral-pressure overburden term is computed
                  each tick (standalone whole-grid pass vs. today's in-loop default) -- experimental,
                  here to A/B live, not a settled improvement. "Pressure field heat-map" tints each
-                 individual grid CELL (not each 32x32 block, like the heat-map above) by its
-                 column_depth value -- the hydrostatic overburden the lateral-pressure term reads --
-                 on a fixed log scale (violet = low/void, magenta = mid, pale yellow = high) so the
-                 same value always reads as the same colour whether "Fresh pressure field" above is
-                 on or off, making the two directly comparable. "Fast liquid levelling" runs an
+                 individual grid CELL (not each 32x32 block, like the heat-map above) by a
+                 pressure-like value -- see "use new head field" below for which one -- on a fixed
+                 log scale (violet = low/void, magenta = mid, pale yellow = high) so the same value
+                 always reads as the same colour whether "Fresh pressure field" above is on or off,
+                 making the two directly comparable. "Pressure heat-map: use new head field" swaps
+                 the QUANTITY that heat-map tints: unchecked (default) is today's shipped
+                 column_depth (only ever sees material directly overhead); checked is task #55's
+                 static hydraulic head field, converted to a pressure so it renders on the same
+                 scale -- it knows about connected material beside a cell too (e.g. under a roof or
+                 in the U-tube's basin), so expect it to read brighter than column_depth there.
+                 Only costs anything while BOTH this and the heat-map above are checked; visualisation
+                 only, moves no material. "Fast liquid levelling" runs an
                  extra, liquid-only equalisation pass each tick that lets connected pools of water
                  find a level much faster than the default solver alone (measured: a two-pocket
                  test case at 512x512 reaches half its initial level difference in 6 ticks with
@@ -840,6 +847,11 @@
                 <label class="checkbox-container">
                     Pressure field heat-map
                     <input type="checkbox" id="check-pressure-heatmap">
+                    <span class="checkmark"></span>
+                </label>
+                <label class="checkbox-container">
+                    Pressure heat-map: use new head field
+                    <input type="checkbox" id="check-pressure-heatmap-head-field">
                     <span class="checkmark"></span>
                 </label>
                 <!-- Pause / step: reading a heat-map that changes every frame is impossible.

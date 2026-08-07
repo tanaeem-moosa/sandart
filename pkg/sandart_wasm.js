@@ -399,6 +399,20 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_perfect_simulation(this.__wbg_ptr, enabled);
     }
     /**
+     * Selects which quantity feeds the pressure heat-map overlay (see
+     * `set_pressure_heatmap_overlay` for the overlay's own on/off switch): forwarded straight to
+     * the sim, a plain field write (same shape as `set_elliptic_liquid_level` just above — no
+     * reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
+     * `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
+     * for what it switches between: `false` (default) is today's shipped `column_depth`; `true`
+     * is task #55 step 2's static hydraulic head field, converted to a pressure-like quantity so
+     * it renders on the same colour scale.
+     * @param {boolean} enabled
+     */
+    set_pressure_heatmap_head_field(enabled) {
+        wasm.wasmsimulationstate_set_pressure_heatmap_head_field(this.__wbg_ptr, enabled);
+    }
+    /**
      * Per-cell pressure-field debug overlay: plumbed exactly like `set_heatmap_overlay` just
      * above -- a plain field write, no reset/reinitialisation path. Purely a render-side toggle
      * (see `pressure_heatmap_enabled`'s field doc comment); the underlying `sim.column_depth`
@@ -2175,17 +2189,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2110, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2113, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue__core_9b3796e30d99ddb7___result__Result_____wasm_bindgen_ca9fd0ef817516ab___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 63, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 63, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_ca9fd0ef817516ab___convert__closures_____invoke___wasm_bindgen_ca9fd0ef817516ab___JsValue______true__2);
             return ret;
         },
