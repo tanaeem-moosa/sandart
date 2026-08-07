@@ -1,6 +1,6 @@
 //! Empirical proof that `DrawingSimulation::pressure_heatmap_head_field` (task 2.32's pressure
 //! heat-map source selector) is a true no-op on the SIMULATION regardless of its value -- unlike
-//! `fresh_pressure_field`/`elliptic_liquid_level` (see `fresh_pressure_field_toggle.rs`, the
+//! `fresh_pressure_field` (see `fresh_pressure_field_toggle.rs`, the
 //! precedent this file's structure was copied from), which really do change `settle_tick`'s
 //! behaviour when enabled, this toggle changes ONLY what `DrawingSimulation::pressure_field_texels`
 //! returns to a caller that asks for it. Nothing in `settle_tick`/`update` ever reads this field,

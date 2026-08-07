@@ -15,7 +15,7 @@
 //! Real hydrostatic pressure is `p = rho*g*(eta - z)`, and hydraulic head `head = z + p/(rho*g)`
 //! is, for a body at rest, just `eta` -- constant throughout a connected body at rest, equal to
 //! its free-surface elevation. Every spec here computes exactly the head expression the shipped
-//! elliptic solve already uses (`physics.rs`, `elliptic_liquid_level_pass`'s own doc comment):
+//! `column_depth`-derived driving head already uses (`physics.rs`):
 //!
 //! ```text
 //! head(i) = heights[i] * depth_scale + column_depth[i] - row(i) * depth_scale
@@ -48,8 +48,8 @@ fn depth_scale(w: usize) -> f32 {
     REFERENCE_GRID_HEIGHT as f32 / w as f32
 }
 
-/// The exact head expression specified by the task brief and already used at
-/// `elliptic_liquid_level_pass`'s call site (`physics.rs:1586`):
+/// The exact head expression specified by the task brief, matching the `column_depth`-derived
+/// driving head the legacy (non-head-field) edge solver computes in `physics.rs`:
 /// `head(i) = heights[i] * depth_scale + column_depth[i] - row(i) * depth_scale`.
 fn head_at(idx: usize, w: usize, heights: &[f32], column_depth: &[f32]) -> f32 {
     let ds = depth_scale(w);
@@ -1048,7 +1048,7 @@ fn test_task55_head_spec_scoreboard() {
 // =================================================================================================
 // TASK #55 STEP 3 -- DYNAMIC specs. Every spec above is a pure function of a STATIC scenario (no
 // ticks, no mass ever moved -- see this file's own module doc comment). These three encode the
-// three photographed defects of the refuted `elliptic_liquid_level_pass` attempt (water moved too
+// three photographed defects of the refuted "fast liquid levelling" attempt, since deleted (water moved too
 // fast, falling water drifted sideways, the surface stayed dead flat across active necks) and so
 // need real transport: they assert something about how `head_field_transport` drives mass over
 // TIME, which does not exist without ticks.
@@ -1151,7 +1151,6 @@ impl DynSim {
             &self.mask,
             self.tick_count,
             gravity_dir,
-            false,
             false,
             head_field_transport,
             false,
@@ -1348,8 +1347,8 @@ fn column_mass(heights: &[f32], w: usize, x: usize, y0: usize, y1: usize) -> f32
 }
 
 /// Spec 9: a vessel actively draining under gravity must NOT show a flat free surface -- it must
-/// dip toward the outlet, exactly what a real fluid does and exactly what the refuted
-/// `elliptic_liquid_level_pass` failed to reproduce (a dead-flat surface measured over three
+/// dip toward the outlet, exactly what a real fluid does and exactly what the refuted "fast
+/// liquid levelling" pass (since deleted) failed to reproduce (a dead-flat surface over three
 /// actively draining necks). Measured as a PAIRED comparison, same reasoning as this file's own
 /// `spec_free_fall_has_zero_pressure`: the column immediately next to the neck (still inside the
 /// basin, not the neck itself) against the column at the basin's far wall, both summed over the

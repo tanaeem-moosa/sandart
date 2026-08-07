@@ -444,21 +444,6 @@ pub struct DrawingSimulation {
     /// scalar — it is experimental, not a settled replacement for the default.
     pub fresh_pressure_field: bool,
 
-    /// "Fast liquid levelling" debug toggle. Off by default (today's shipped one-cell-per-tick
-    /// liquid edge solver, unchanged). When on, `settle_tick` also runs
-    /// `physics::elliptic_liquid_level_pass` once per tick, before the phase loop, over the
-    /// frozen pre-tick heightmap snapshot -- a liquid-only multigrid-style relaxation that
-    /// equalises connected liquid pockets far faster than the incremental per-edge solver alone
-    /// (measured: pocket equalisation at w=512 drops from 29 ticks-to-halve with this off to 6
-    /// with it on). This is `settle_tick`'s `elliptic_liquid_level` parameter, threaded straight
-    /// through, same shape as `fresh_pressure_field` just above. It is plumbed as a real,
-    /// user-facing toggle (this field, not the test-only `physics::elliptic_head_gate` thread-
-    /// local the pass was originally developed behind -- that gate still exists and still drives
-    /// the TASK #55 diagnostics/tests, but is OR'd with this field at the call site so either can
-    /// enable the pass). Expensive by design: roughly 16x the ms/tick of a normal tick at w=512
-    /// (about 18fps) -- sluggish but usable, not a bug.
-    pub elliptic_liquid_level: bool,
-
     /// Which quantity feeds the per-cell pressure heat-map overlay (`pressure_field_texels`).
     /// `false` (default): today's shipped `column_depth`, unchanged. `true`: the PERSISTENT
     /// hydraulic head field (`head_field` below; task #55 step 2, rebuilt as incremental
@@ -468,7 +453,7 @@ pub struct DrawingSimulation {
     /// on the SAME scale `column_depth` already renders through -- see `pressure_field_texels`
     /// for the shared normalisation both sources go through.
     ///
-    /// Plumbed exactly like `fresh_pressure_field`/`elliptic_liquid_level` just above: a plain
+    /// Plumbed exactly like `fresh_pressure_field` just above: a plain
     /// UI-facing debug toggle, carried through `set_grid_size`'s sim rebuild rather than reset,
     /// never read by `settle_tick` or anything else that advances the simulation. This is
     /// VISUALISATION ONLY -- flipping it changes what `pressure_field_texels` returns and nothing
@@ -495,10 +480,9 @@ pub struct DrawingSimulation {
     /// (today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`-derived driving head, unchanged --
     /// bit-identical). When on, `settle_tick`'s lateral and vertical (gravity-aligned) edge
     /// solvers read their driving head from the persistent `head_field` buffer instead, for
-    /// edges where BOTH endpoints are liquid (`liquidity(wetness) >= LIQUID_ELLIPTIC_THRESHOLD`,
-    /// the same domain restriction `elliptic_liquid_level_pass` already uses). This is
-    /// `settle_tick`'s `head_field_transport` parameter, threaded straight through, same shape as
-    /// `fresh_pressure_field`/`elliptic_liquid_level` above. Also (but not EXCLUSIVELY any more --
+    /// edges where BOTH endpoints are liquid (`liquidity(wetness) >= LIQUID_ELLIPTIC_THRESHOLD`).
+    /// This is `settle_tick`'s `head_field_transport` parameter, threaded straight through, same
+    /// shape as `fresh_pressure_field` above. Also (but not EXCLUSIVELY any more --
     /// see `pressure_heatmap_head_field`'s own doc comment) one of the two conditions that makes
     /// `head_field` advance at all this tick (`physics::task55_head_field::advance_head_field`,
     /// called once per tick from inside `settle_tick` when this OR `pressure_heatmap_head_field`
@@ -506,10 +490,10 @@ pub struct DrawingSimulation {
     ///
     /// Scope: LIQUID ONLY, deliberately. The field has no yield criterion yet, so applying it to
     /// granular material would flatten a resting pile's angle of repose (a permanent surface
-    /// gradient that must produce ZERO flow) -- a prior shipped attempt at #55
-    /// (`elliptic_liquid_level_pass`'s original design point) made exactly this mistake in a
-    /// different way (moving HEIGHTS globally instead of driving the existing local flux solver)
-    /// and was visually refuted: water moved too fast, falling water drifted sideways, and the
+    /// gradient that must produce ZERO flow) -- a prior shipped attempt at #55 (the "fast liquid
+    /// levelling" multigrid pass, since deleted) made exactly this mistake in a different way
+    /// (moving HEIGHTS globally instead of driving the existing local flux solver) and was
+    /// visually refuted: water moved too fast, falling water drifted sideways, and the
     /// surface stayed dead flat across actively draining necks. This toggle instead only replaces
     /// the DRIVING HEAD inside the existing, mass-conserving, per-edge flux solver -- the solver's
     /// own donor/acceptor clamps (`clamp_edge_feasible`) and per-edge momentum/damping (the
@@ -715,7 +699,6 @@ impl DrawingSimulation {
             quantile_targets: Vec::new(),
             perfect_simulation: false,
             fresh_pressure_field: false,
-            elliptic_liquid_level: false,
             pressure_heatmap_head_field: false,
             head_field_transport: false,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
@@ -1466,7 +1449,6 @@ impl DrawingSimulation {
                     self.tick_count + iter as u32,
                     self.gravity_dir,
                     self.fresh_pressure_field,
-                    self.elliptic_liquid_level,
                     self.head_field_transport,
                     self.pressure_heatmap_head_field,
                 );

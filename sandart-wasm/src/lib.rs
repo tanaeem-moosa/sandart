@@ -362,7 +362,6 @@ impl WasmSimulationState {
         let multistage_chambers = self.sim.multistage_chambers;
         let perfect_simulation = self.sim.perfect_simulation;
         let fresh_pressure_field = self.sim.fresh_pressure_field;
-        let elliptic_liquid_level = self.sim.elliptic_liquid_level;
         let pressure_heatmap_head_field = self.sim.pressure_heatmap_head_field;
         let head_field_transport = self.sim.head_field_transport;
 
@@ -382,8 +381,6 @@ impl WasmSimulationState {
         // Same reasoning as `perfect_simulation` just above: a UI debug toggle, not simulation
         // state, so it should survive a resolution rebuild rather than silently reset to default.
         sim.fresh_pressure_field = fresh_pressure_field;
-        // Same reasoning again: a UI debug toggle, not simulation state.
-        sim.elliptic_liquid_level = elliptic_liquid_level;
         // Same reasoning again: a UI debug toggle (which pressure heat-map source is selected),
         // not simulation state -- must survive a resolution rebuild like its siblings above.
         sim.pressure_heatmap_head_field = pressure_heatmap_head_field;
@@ -728,19 +725,9 @@ impl WasmSimulationState {
         self.sim.fresh_pressure_field = enabled;
     }
 
-    /// "Fast liquid levelling" debug toggle: forwarded straight to the sim, a plain field write
-    /// (same shape as `set_fresh_pressure_field` just above — no reset, no reinitialisation). See
-    /// `DrawingSimulation::elliptic_liquid_level`'s doc comment in sandart-sim/src/lib.rs for what
-    /// it switches on: a liquid-only multigrid-style relaxation pass that equalises connected
-    /// liquid pockets much faster than the default per-edge solver. Expensive by design (~16x
-    /// ms/tick at 512, ~18fps) — sluggish but usable, not a bug.
-    pub fn set_elliptic_liquid_level(&mut self, enabled: bool) {
-        self.sim.elliptic_liquid_level = enabled;
-    }
-
     /// Selects which quantity feeds the pressure heat-map overlay (see
     /// `set_pressure_heatmap_overlay` for the overlay's own on/off switch): forwarded straight to
-    /// the sim, a plain field write (same shape as `set_elliptic_liquid_level` just above — no
+    /// the sim, a plain field write (same shape as `set_fresh_pressure_field` just above — no
     /// reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
     /// `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
     /// for what it switches between: `false` (default) is today's shipped `column_depth`; `true`
@@ -751,7 +738,7 @@ impl WasmSimulationState {
     }
 
     /// "Drive transport from the head field" debug toggle (task #55 step 3): forwarded straight
-    /// to the sim, a plain field write (same shape as `set_elliptic_liquid_level` above — no
+    /// to the sim, a plain field write (same shape as `set_fresh_pressure_field` above — no
     /// reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
     /// `DrawingSimulation::head_field_transport`'s doc comment in sandart-sim/src/lib.rs for what
     /// it switches on: `false` (default) is today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`
