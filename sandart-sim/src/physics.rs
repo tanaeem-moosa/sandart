@@ -2624,6 +2624,42 @@ mod elliptic_head_gate {
     }
 }
 
+/// TASK #55 step 3. Same pattern as `elliptic_head_gate`/`multiplicative_lateral_gate`:
+/// `#[cfg(test)]`-gated thread-local so it does not exist in production at all, `#[cfg(not(test))]`
+/// twin hardcodes the shipped choice (off) so a non-test build pays no thread-local read. `false`
+/// by default.
+///
+/// Gates the head-field-driven driving head on the liquid-only lateral and vertical edge sites in
+/// `settle_tick` (see `DrawingSimulation::head_field_transport`'s doc comment for what it
+/// switches). NOTE: this thread-local is a TEST-ONLY diagnostics knob, letting a test force the
+/// branch on for a scenario built through `TestSim`/other test helpers that never expose the real
+/// `head_field_transport` parameter directly (e.g. `test_dry_sand_has_angle_of_repose`'s
+/// `ReposeRig`) -- it is not how the branch is reachable from the shipped app. The real,
+/// user-facing route is `settle_tick`'s own `head_field_transport` parameter
+/// (`DrawingSimulation::head_field_transport`), OR'd with `is_enabled()` below at the call site so
+/// both routes keep working without interfering with each other.
+#[cfg(test)]
+pub(crate) mod head_field_gate {
+    use std::cell::Cell;
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+    }
+    pub fn set_enabled(v: bool) {
+        ENABLED.with(|c| c.set(v));
+    }
+    #[inline(always)]
+    pub fn is_enabled() -> bool {
+        ENABLED.with(|c| c.get())
+    }
+}
+#[cfg(not(test))]
+mod head_field_gate {
+    #[inline(always)]
+    pub fn is_enabled() -> bool {
+        false
+    }
+}
+
 /// Under-relaxation factor for the pressure projection's projected-Jacobi solve
 /// (`pressure_project`). The candidate-edge graph it runs on is not a fixed stencil -- its shape
 /// changes every phase (which edges exist depends on which cells the block-LOD scheduler ran this
@@ -4138,6 +4174,15 @@ pub fn settle_tick(
     edge_vel_h: &mut Vec<f32>,
     edge_vel_v: &mut Vec<f32>,
     column_depth: &mut Vec<f32>,
+    // TASK #55 step 2 (rebuilt): the PERSISTENT hydraulic head field (see
+    // `task55_head_field`'s module doc comment for why this is now incremental state rather than
+    // a per-call solve). Owned by the caller (`DrawingSimulation::head_field` in production, a
+    // plain local `Vec` in test/spec harnesses) exactly like `column_depth` just above --
+    // resized/zero-filled at construction, `reset()`, and any grid-size change, never rebuilt
+    // from scratch here. Relaxed one tick further (`task55_head_field::advance_head_field`) only
+    // while `head_field_active` (below) is true; otherwise left untouched, so an unused field
+    // costs nothing beyond the one resize check.
+    head_field: &mut Vec<f32>,
     shape_mask: &[u8],
     tick_count: u32,
     gravity_dir: glam::Vec2,
@@ -4161,6 +4206,31 @@ pub fn settle_tick(
     // the TASK #55 diagnostics/tests toggle directly; this parameter is the real, user-facing
     // route the shipped app uses instead.
     elliptic_liquid_level: bool,
+    // TASK #55 step 3: "drive transport from the head field" debug toggle
+    // (`DrawingSimulation::head_field_transport`; see that field's doc comment). `false`
+    // (default): unchanged from the tree before this parameter existed -- bit-identical. `true`:
+    // the lateral and vertical (gravity-aligned) edge solvers, for LIQUID-ONLY edges (both
+    // endpoints at `liquidity(wetness) >= LIQUID_ELLIPTIC_THRESHOLD`), read their driving head
+    // from `task55_head_field::compute_head_field` (computed once per tick, below, before the
+    // phase loop -- same placement as `fresh_pressure_field`/`elliptic_liquid_level` above) instead
+    // of from `column_depth`/`GRAVITY_HEAD_SCALE`. Granular edges and mixed liquid/granular edges
+    // are entirely unaffected -- see the call sites in phase 0 and phase 1 for the exact gate.
+    head_field_transport: bool,
+    // TASK #55 step 2/3 fix: "show the pressure heat-map's new-field source" debug toggle
+    // (`DrawingSimulation::pressure_heatmap_head_field`). Does NOT gate anything about transport --
+    // `head_field_active` just below (built from `head_field_transport`/`head_field_gate` alone,
+    // unchanged) still owns whether the edge solvers read their driving head from `head_field`, so
+    // this parameter cannot perturb `update`'s simulation output (`heightmap`/`cell_colors`/
+    // `cell_props`), matching `pressure_heatmap_head_field_toggle.rs`'s no-perturbation contract.
+    // Its ONLY effect is on whether `head_field` itself gets this tick's relaxation sweeps
+    // (`head_field_needs_advance` below): previously `head_field` was advanced ONLY while
+    // `head_field_transport` was on, so the pressure heat-map's "new field" source rendered a
+    // buffer that had never been touched since the last reset/resize (all zeros) whenever a user
+    // turned the overlay on without also turning transport on -- exactly the reported "no heatmap
+    // shows for new field" defect. Advancing `head_field` costs nothing beyond
+    // `HEAD_FIELD_SWEEPS_PER_TICK` local sweeps (see that constant's own doc comment), so paying it
+    // for the overlay alone is cheap and keeps the "both off costs nothing" property intact.
+    pressure_heatmap_head_field: bool,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -4189,6 +4259,12 @@ pub fn settle_tick(
     // survive a tick where the block that computed it goes to sleep.
     if column_depth.len() != heightmap.data.len() {
         column_depth.resize(heightmap.data.len(), 0.0);
+    }
+    // Persistent, like `column_depth` just above -- see this parameter's own doc comment and
+    // `task55_head_field`'s module doc comment. Zero-fill on (re)size, matching every other
+    // persistent per-cell buffer's resize-safety fallback in this function.
+    if head_field.len() != heightmap.data.len() {
+        head_field.resize(heightmap.data.len(), 0.0);
     }
     // RE-APPLIED (previously "tried and reverted"; see git history for the original attempt and
     // the task report for the full re-measurement this decision is based on). A one-tick-lagged
@@ -4513,6 +4589,48 @@ pub fn settle_tick(
         }
     }
 
+    // TASK #55 step 2/3 (rebuilt): the PERSISTENT hydraulic head field is advanced by exactly one
+    // tick's worth of local relaxation here -- same placement/reasoning as `fresh_pressure_field`'s
+    // `recompute_column_depth` and `elliptic_liquid_level`'s pass just above: reads
+    // `heightmap.data` as the tick's frozen, not-yet-mutated snapshot, so both phases below see
+    // one consistent field. Moves no mass itself (see `task55_head_field`'s module doc comment)
+    // -- it is read-only input to the phase-0/phase-1 edge solvers' driving head, gated per-edge
+    // on `head_field_transport` and liquid-only endpoints (see those call sites).
+    //
+    // UNLIKE the deleted `compute_head_field`, this does NOT solve to convergence here -- it
+    // mutates the caller-owned persistent `head_field` buffer by exactly
+    // `task55_head_field::HEAD_FIELD_SWEEPS_PER_TICK` local sweeps and returns, carrying whatever
+    // state of relaxation it reaches over to the NEXT tick's call. Cost is therefore
+    // `O(wet_cells)`, fixed and small regardless of grid resolution -- see that constant's own
+    // doc comment for the propagation-speed argument this is sized from. Skipped entirely while
+    // inactive, so an unused field costs nothing beyond the one resize check above.
+    //
+    // OR'd with `head_field_gate::is_enabled()` -- a `#[cfg(test)]`-only thread-local, same
+    // pattern as `elliptic_liquid_level`/`elliptic_head_gate` -- so a test built through
+    // `TestSim`/other helpers that never expose this parameter directly (e.g.
+    // `test_dry_sand_has_angle_of_repose`'s `ReposeRig`) can still force the branch on to check
+    // it against a scenario this parameter has no other route into.
+    //
+    // This is deliberately UNCHANGED from before `pressure_heatmap_head_field` existed, and stays
+    // the only thing gating the phase-0/phase-1 edge solvers' driving-head selection just below --
+    // the overlay toggle must never change what mass moves. `head_field_needs_advance` is the
+    // (strictly wider) condition for whether `head_field` gets THIS tick's relaxation sweeps at
+    // all: also true when only the overlay is on, so the pressure heat-map's new-field source has
+    // a live buffer to read even with transport off (see `pressure_heatmap_head_field` parameter's
+    // own doc comment for the defect this fixes).
+    let head_field_active = head_field_transport || head_field_gate::is_enabled();
+    let head_field_needs_advance = head_field_active || pressure_heatmap_head_field;
+    if head_field_needs_advance {
+        task55_head_field::advance_head_field(
+            w,
+            h,
+            shape_mask,
+            &heightmap.data,
+            cell_props,
+            &mut head_field[..],
+        );
+    }
+
     // --- Frozen-Jacobi candidate-flux state (edge-flux solver only; the granular CA's own
     //     `try_move` transfers are untouched and still apply immediately, sequentially) ---
     //
@@ -4797,8 +4915,58 @@ pub fn settle_tick(
                         } else {
                             0.0
                         };
-                        let head_a = h_a / cap_a + base_head + vertical_bonus;
-                        let head_b = h_b / cap_b;
+                        // TASK #55 step 3, LIQUID ONLY (both endpoints at or above
+                        // `LIQUID_ELLIPTIC_THRESHOLD`, exactly `elliptic_liquid_level_pass`'s own
+                        // domain restriction -- see that constant's doc comment for "why
+                        // liquid-only": the field has no yield criterion, so a granular pile at
+                        // its angle of repose is a permanent surface gradient that must produce
+                        // ZERO flow, and only a hard liquid gate guarantees that).
+                        //
+                        // The field's own `z` term (`-row * depth_scale`, `task55_head_field`'s
+                        // doc comment) already IS the gravitational potential in reference-row
+                        // units, so `head_field[a] - head_field[b]` carries the gravity drive AND
+                        // the pressure difference in one physically consistent number -- that is
+                        // the entire point of a unified head, and `base_head`/`vertical_bonus`
+                        // must NOT be added alongside it (that would double-count exactly what
+                        // the field already supplies).
+                        //
+                        // UNIT CONVERSION (comment which side, per this task's own history of a
+                        // silent-mismatch bug here): `head_field` is in `task55_head_field`'s
+                        // reference-row units (`depth_scale = REFERENCE_GRID_HEIGHT / w`);
+                        // `head_a`/`head_b` must be in the SAME local-cell units `h_a`/`cap_a` and
+                        // `flux_edge_candidate`'s `c_sq`/`tau` are calibrated against, so the
+                        // FIELD SIDE is divided by `depth_scale` to convert reference-row units
+                        // down to local-cell units -- the inverse of `recompute_column_depth`'s
+                        // own local -> reference-row multiplication.
+                        //
+                        // ...AND THEN MULTIPLIED BY `GRAVITY_HEAD_SCALE`, which the first version
+                        // of this branch omitted. Dividing by `depth_scale` alone leaves the field
+                        // in units of CELLS OF ELEVATION -- one row of drop is a driving head of
+                        // exactly `1.0`. The `else` branch below drives that same one-row drop with
+                        // `base_head = gravity_dir.y * GRAVITY_HEAD_SCALE` = `25.0`. So the field
+                        // branch was driving every liquid edge 25x too weakly, which does not read
+                        // as "somewhat slow" -- it lands under the solver's own thresholds and
+                        // reads as a COMPLETELY FROZEN simulation. Measured: with the toggle on,
+                        // `spec_falling_water_does_not_drift_sideways` and
+                        // `spec_draining_vessel_surface_dips` both reported `total_flow = 0.0000`,
+                        // a blob that never fell and a vessel that never drained.
+                        //
+                        // `GRAVITY_HEAD_SCALE` is the existing, already-calibrated conversion from
+                        // "one cell of elevation" to this solver's driving-head units, so this is
+                        // a unit reconciliation, NOT a tuned gain: at one row of free fall the two
+                        // branches now produce the identical number (`25.0`), which is the check
+                        // that says the conversion is right.
+                        let liq_b = liquidity(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        let (head_a, head_b) = if head_field_active
+                            && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
+                            && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
+                        {
+                            let head_scale =
+                                GRAVITY_HEAD_SCALE / (REFERENCE_GRID_HEIGHT as f32 / w as f32);
+                            (head_field[center_idx] * head_scale, head_field[nb_idx] * head_scale)
+                        } else {
+                            (h_a / cap_a + base_head + vertical_bonus, h_b / cap_b)
+                        };
                         // Sleeping edge (see `edge_sleeps`). This is the pass where sleeping pays
                         // most, because it is the one every cell in the domain enters: the
                         // interior of a filled chamber/pile is room-blocked in both directions,
@@ -5216,7 +5384,62 @@ pub fn settle_tick(
                         // read by `edge_sleeps` and `flux_edge_candidate` below is unaffected by
                         // which branch produced it and neither of those two functions needs to
                         // know this gate exists.
-                        let (head_a, head_b_full) = if multiplicative_lateral_gate::is_enabled() {
+                        let (head_a, head_b_full) = if head_field_active
+                            && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
+                            && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
+                        {
+                            // TASK #55 step 3, LIQUID ONLY: the driving head is the unified
+                            // hydraulic head field itself, in place of the local-fill-plus-
+                            // overburden approximation both branches below build by hand
+                            // (`h + k*LATERAL_PRESSURE_SCALE*depth`, additive, or the
+                            // `mult_lateral_conveyance` product, multiplicative) -- the field
+                            // already IS the physically correct unified head (elevation + Pascal-
+                            // transmitted pressure), which is exactly what those two branches were
+                            // each independently approximating. Do NOT also add
+                            // `k_a * LATERAL_PRESSURE_SCALE * depth_a` alongside it -- that is the
+                            // overburden term the field replaces, and adding both would
+                            // double-count it.
+                            //
+                            // Liquid-only, exactly `elliptic_liquid_level_pass`'s own domain
+                            // restriction (`LIQUID_ELLIPTIC_THRESHOLD`): the field has no yield
+                            // criterion, so a granular pile at its angle of repose is a permanent
+                            // surface gradient that must produce ZERO flow -- see
+                            // `test_dry_sand_has_angle_of_repose`, run with this toggle forced ON,
+                            // as this restriction's own non-regression check.
+                            //
+                            // `gravity_dir.x * GRAVITY_HEAD_SCALE` and `dispersion` are kept
+                            // (unlike the overburden term, neither is part of what the field
+                            // models): the field's own `z` term only carries VERTICAL
+                            // (`-row * depth_scale`) gravitational potential, so a lateral gravity
+                            // component -- never exercised by the shipped app today, always
+                            // `gravity_dir.x == 0.0` -- would otherwise silently vanish; dispersion
+                            // is a per-tick stochastic perturbation orthogonal to the physics the
+                            // field computes and both other branches add it in exactly this spot.
+                            //
+                            // UNIT CONVERSION: `head_field` is in `task55_head_field`'s
+                            // reference-row units (`depth_scale = REFERENCE_GRID_HEIGHT / w`);
+                            // `head_a`/`head_b_full` must be in the SAME local-cell units
+                            // `h_a_frozen`/`cell_capacity` and `flux_edge_candidate`'s `c_sq`/`tau`
+                            // are calibrated against, so the FIELD SIDE is divided by `depth_scale`
+                            // to convert reference-row units down to local-cell units -- the
+                            // inverse of `recompute_column_depth`'s own local -> reference-row
+                            // multiplication, and the same conversion the vertical (phase 0) edge
+                            // site performs for the identical reason.
+                            // ...AND MULTIPLIED BY `GRAVITY_HEAD_SCALE` for the same reason the
+                            // vertical (phase 0) site does it: dividing by `depth_scale` alone
+                            // leaves the field in CELLS OF ELEVATION, 25x weaker than the
+                            // `gravity_dir.x * GRAVITY_HEAD_SCALE` term sitting right beside it
+                            // here and than the `else` branches drive the same geometry with. See
+                            // the vertical site's own comment for the measurement (a completely
+                            // frozen simulation, `total_flow = 0.0000`) that exposed the omission.
+                            let head_scale =
+                                GRAVITY_HEAD_SCALE / (REFERENCE_GRID_HEIGHT as f32 / w as f32);
+                            let head_a_field = head_field[center_idx] * head_scale
+                                + gravity_dir.x * GRAVITY_HEAD_SCALE
+                                + dispersion;
+                            let head_b_field = head_field[nb_idx] * head_scale;
+                            (head_a_field, head_b_field)
+                        } else if multiplicative_lateral_gate::is_enabled() {
                             // TASK #55 UNIT FIX: `h_a_frozen`/`h_b_frozen` are a LOCAL cell's own
                             // fill fraction -- unscaled, one cell's worth of physical thickness at
                             // THIS grid's own resolution `w`. `column_depth` is a top-down running
@@ -6196,6 +6419,9 @@ mod tests {
         edge_vel_h: Vec<f32>,
         edge_vel_v: Vec<f32>,
         column_depth: Vec<f32>,
+        /// Mirrors `DrawingSimulation::head_field` -- the persistent hydraulic head buffer (task
+        /// #55 step 2 rebuilt). Owned here exactly like `column_depth` just above.
+        head_field: Vec<f32>,
         mask: Vec<u8>,
         block_size: usize,
         tick_count: u32,
@@ -6210,6 +6436,12 @@ mod tests {
         /// since `settle_tick` OR's the two together); this field exists so a `TestSim`-based test
         /// can also exercise the real, user-facing parameter route if it ever needs to.
         elliptic_liquid_level: bool,
+        /// Mirrors `DrawingSimulation::head_field_transport` / `settle_tick`'s parameter of the
+        /// same name (TASK #55 step 3). Defaults to `false` in `new()` so every existing
+        /// `TestSim`-based test is unaffected; set directly (`sim.head_field_transport = true`)
+        /// to exercise the new head-field-driven liquid transport branch on a specific scenario
+        /// without touching `tick()`'s signature.
+        head_field_transport: bool,
     }
 
     impl TestSim {
@@ -6230,11 +6462,13 @@ mod tests {
                 edge_vel_h: vec![0.0; w * h],
                 edge_vel_v: vec![0.0; w * h],
                 column_depth: vec![0.0; w * h],
+                head_field: vec![0.0; w * h],
                 mask,
                 block_size,
                 tick_count: 0,
                 fresh_pressure_field: false,
                 elliptic_liquid_level: false,
+                head_field_transport: false,
             }
         }
 
@@ -6256,11 +6490,14 @@ mod tests {
                 &mut self.edge_vel_h,
                 &mut self.edge_vel_v,
                 &mut self.column_depth,
+                &mut self.head_field,
                 &self.mask,
                 self.tick_count,
                 gravity_dir,
                 self.fresh_pressure_field,
                 self.elliptic_liquid_level,
+                self.head_field_transport,
+                false,
             );
             self.tick_count += 1;
             flow
@@ -6555,6 +6792,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; 512 * 512];
         let mut edge_vel_v = vec![0.0; 512 * 512];
         let mut column_depth = vec![0.0; 512 * 512];
+        let mut head_field = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = vec![1.0; 256];
         let mut last_simulated_ticks = vec![0; 256];
@@ -6581,9 +6819,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 glam::Vec2::ZERO,
+                false,
+                false,
                 false,
                 false,
             );
@@ -6625,6 +6866,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; 512 * 512];
         let mut edge_vel_v = vec![0.0; 512 * 512];
         let mut column_depth = vec![0.0; 512 * 512];
+        let mut head_field = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = Vec::new();
         let mut last_simulated_ticks = Vec::new();
@@ -6649,9 +6891,12 @@ mod tests {
             &mut edge_vel_h,
             &mut edge_vel_v,
             &mut column_depth,
+            &mut head_field,
             &mask,
             0,
             glam::Vec2::ZERO,
+            false,
+            false,
             false,
             false,
         );
@@ -6702,6 +6947,7 @@ mod tests {
             let mut edge_vel_h = vec![0.0; 64 * 64];
             let mut edge_vel_v = vec![0.0; 64 * 64];
             let mut column_depth = vec![0.0; 64 * 64];
+            let mut head_field = vec![0.0; 64 * 64];
             let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
             let mut last_displacements = vec![1.0; 4];
             let mut last_simulated_ticks = vec![0; 4];
@@ -6724,9 +6970,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 0,
                 glam::Vec2::ZERO,
+                false,
+                false,
                 false,
                 false,
             );
@@ -6803,6 +7052,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; 128 * 128];
         let mut edge_vel_v = vec![0.0; 128 * 128];
         let mut column_depth = vec![0.0; 128 * 128];
+        let mut head_field = vec![0.0; 128 * 128];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = vec![1.0; 16];
         let mut last_simulated_ticks = vec![0; 16];
@@ -6826,9 +7076,12 @@ mod tests {
             &mut edge_vel_h,
             &mut edge_vel_v,
             &mut column_depth,
+            &mut head_field,
             &mask,
             0,
             glam::Vec2::ZERO,
+            false,
+            false,
             false,
             false,
         );
@@ -7103,6 +7356,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; 64 * 64];
             let mut edge_vel_v = vec![0.0; 64 * 64];
             let mut column_depth = vec![0.0; 64 * 64];
+            let mut head_field = vec![0.0; 64 * 64];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -7132,9 +7386,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -7195,6 +7452,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -7227,9 +7485,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -7277,9 +7538,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 (500 + i) as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -7320,6 +7584,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -7347,9 +7612,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -7417,6 +7685,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -7448,9 +7717,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -9971,6 +10243,39 @@ mod tests {
         );
     }
 
+    /// TASK #55 step 3 canary. `test_dry_sand_has_angle_of_repose` re-run with
+    /// `head_field_transport` forced ON via `head_field_gate` (the test-only thread-local; see
+    /// its own doc comment -- `ReposeRig`/`TestSim` never expose the real parameter directly, the
+    /// same reason `diag_task55_elliptic_propagation` forces `elliptic_head_gate` this way rather
+    /// than threading a parameter through, at that diagnostic's own "Part 0").
+    ///
+    /// This is the positive check that the LIQUID-ONLY restriction (`LIQUID_ELLIPTIC_THRESHOLD`
+    /// gate on both edge sites) actually holds: `test_dry_sand_has_angle_of_repose` builds pure
+    /// DrySand piles (wetness 0.00, `liquidity == 0.0`, far below the gate), so if the gate is
+    /// doing its job the head field must never be consulted for a single edge in that test, and
+    /// the whole suite of angle-of-repose assertions -- CASE 1 through 4 and the NON-VACUITY
+    /// ANCHOR -- must still pass exactly as they do with the toggle off (that baseline is
+    /// unconditionally covered by `test_dry_sand_has_angle_of_repose` itself, which this canary
+    /// runs unmodified, just under the gate). Run with `--nocapture` to see the measured angle and
+    /// anchor numbers printed by the inner test. A prior shipped #55 attempt's multiplicative
+    /// lateral head flattened a 19.29 degree slope to 0.41 degrees under an equivalent forced-on
+    /// check, with its own non-vacuity anchor reading 0.00 for both DrySand and Water; this test
+    /// exists so a regression of that shape cannot ship silently again.
+    #[test]
+    fn test_head_field_transport_repose_non_regression() {
+        head_field_gate::set_enabled(true);
+        let result = std::panic::catch_unwind(test_dry_sand_has_angle_of_repose);
+        head_field_gate::set_enabled(false);
+        assert!(
+            result.is_ok(),
+            "test_dry_sand_has_angle_of_repose FAILED with head_field_transport FORCED ON: the \
+             liquid-only gate (LIQUID_ELLIPTIC_THRESHOLD on both edge endpoints) did not keep the \
+             head field out of a pure-DrySand scenario (DrySand has liquidity == 0.0, far below \
+             the gate) -- see the panic output above (re-run with --nocapture to see the printed \
+             CASE/NON-VACUITY-ANCHOR angles) for which assertion tripped."
+        );
+    }
+
     #[test]
     #[ignore = "Phase 3 target: a liquid blob impacting a floor should splash — spreading \
                 laterally beyond its original width AND moving at least 1 row upward against \
@@ -10557,6 +10862,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -10582,9 +10888,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -10684,6 +10993,7 @@ mod tests {
             let mut edge_vel_h = vec![0.0; w * h];
             let mut edge_vel_v = vec![0.0; w * h];
             let mut column_depth = vec![0.0; w * h];
+            let mut head_field = vec![0.0; w * h];
             let block_size = 32;
             let (cols, rows) = (w / block_size, h / block_size);
             let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
@@ -10698,7 +11008,9 @@ mod tests {
                     &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                     &mut last_simulated_ticks, cols * rows, block_size, &[],
                     12345u32.wrapping_add(i),
-                    &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir, false, false,
+                    &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false, false,
+                    false,
+                    false,
                 );
             }
 
@@ -10777,6 +11089,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let block_size = 32;
         let (cols, rows) = (w / block_size, h / block_size);
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
@@ -10794,7 +11107,9 @@ mod tests {
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[],
                 12345u32.wrapping_add(i),
-                &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mask, i, gravity_dir, false, false,
+                &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false, false,
+                false,
+                false,
             );
         }
 
@@ -10847,6 +11162,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -10874,9 +11190,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -10931,6 +11250,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -10957,9 +11277,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -11177,6 +11500,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
         let mut last_displacements = vec![1.0; cols * rows];
         let mut last_simulated_ticks = vec![0; cols * rows];
@@ -11203,9 +11527,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -11276,6 +11603,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0f32; w * h];
         let mut edge_vel_v = vec![0.0f32; w * h];
         let mut column_depth = vec![0.0f32; w * h];
+        let mut head_field = vec![0.0f32; w * h];
 
         let center_x = w as f32 / 2.0;
         let center_y = h as f32 / 2.0;
@@ -11380,9 +11708,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -11492,6 +11823,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0f32; w * h];
         let mut edge_vel_v = vec![0.0f32; w * h];
         let mut column_depth = vec![0.0f32; w * h];
+        let mut head_field = vec![0.0f32; w * h];
         let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
         let n_blocks = (w / 32) * (h / 32);
         let mut active_blocks = vec![crate::BlockActivity::Fast; n_blocks];
@@ -11519,9 +11851,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             ) as f64;
@@ -11699,6 +12034,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let expected_len = (w / 32) * (h / 32);
         let mut active_blocks = vec![crate::BlockActivity::Fast; expected_len];
         let mut last_displacements = vec![1.0; expected_len];
@@ -11759,9 +12095,12 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
+                &mut head_field,
                 &mask,
                 i,
                 gravity_dir,
+                false,
+                false,
                 false,
                 false,
             );
@@ -12284,6 +12623,7 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
+        let mut head_field = vec![0.0; w * h];
         let block_size = 32;
         let (cols, rows) = (w / block_size, h / block_size);
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
@@ -12297,7 +12637,9 @@ mod tests {
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[], t as u32,
                 &mut edge_vel_h,
-                &mut edge_vel_v, &mut column_depth, &mask, t as u32, gravity_dir, false, false,
+                &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, t as u32, gravity_dir, false, false,
+                false,
+                false,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();

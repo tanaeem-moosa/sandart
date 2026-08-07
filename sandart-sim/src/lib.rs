@@ -340,6 +340,24 @@ pub struct DrawingSimulation {
     /// tick-to-tick like `edge_vel_h`/`edge_vel_v` so a column under a sleeping block keeps the
     /// last depth it actually computed.
     pub column_depth: Vec<f32>,
+    /// Task #55 step 2 (rebuilt): the PERSISTENT hydraulic head field
+    /// (`physics::task55_head_field::advance_head_field`). Unlike `column_depth`, this is not
+    /// maintained every tick unconditionally -- `settle_tick` only advances it while EITHER
+    /// `head_field_transport` OR `pressure_heatmap_head_field` is on (see those fields' own doc
+    /// comments), since those are its only two consumers: the former reads it as the edge solvers'
+    /// driving head, the latter reads it (via `head_field_to_pressure`) for the pressure heat-map
+    /// overlay. Advancing it for the overlay alone does NOT make it feed transport -- the edge
+    /// solvers' own gate is unchanged, tied only to `head_field_transport`/`head_field_gate` (see
+    /// `settle_tick`'s `head_field_active` vs. `head_field_needs_advance`) -- so turning the
+    /// overlay on cannot perturb the simulation, only what this buffer itself contains. While BOTH
+    /// are off, this buffer simply holds whatever it was last relaxed to (or its zero-filled
+    /// initial state, if neither has been turned on since the last reset/resize) -- it is never
+    /// rebuilt from scratch on a per-read basis the way the deleted `compute_head_field` was; see
+    /// `physics::task55_head_field`'s module doc comment for why that per-call-solve design was
+    /// replaced. Read by `pressure_field_texels` when `pressure_heatmap_head_field` is set, and
+    /// resized/zero-filled everywhere `column_depth` is (construction, `reset()`,
+    /// `flip_hourglass()`, and any grid-size change via `set_grid_size`'s sim rebuild).
+    pub head_field: Vec<f32>,
     /// Seed for marble movement noise.
     pub seed: u32,
 
@@ -442,12 +460,13 @@ pub struct DrawingSimulation {
     pub elliptic_liquid_level: bool,
 
     /// Which quantity feeds the per-cell pressure heat-map overlay (`pressure_field_texels`).
-    /// `false` (default): today's shipped `column_depth`, unchanged. `true`: the STATIC hydraulic
-    /// head field (`physics::task55_head_field::compute_head_field`, task #55 step 2), converted
-    /// to a pressure-like quantity via `physics::task55_head_field::compute_head_pressure_field`
-    /// (`p = head(i) - z(i)`, the same datum `task55_head_spec::head_at`/`pressure_at` use) so it
-    /// lands on the SAME scale `column_depth` already renders through -- see
-    /// `pressure_field_texels` for the shared normalisation both sources go through.
+    /// `false` (default): today's shipped `column_depth`, unchanged. `true`: the PERSISTENT
+    /// hydraulic head field (`head_field` below; task #55 step 2, rebuilt as incremental
+    /// propagation -- see `physics::task55_head_field`'s module doc comment), converted to a
+    /// pressure-like quantity via `physics::task55_head_field::head_field_to_pressure` (`p =
+    /// head(i) - z(i)`, the same datum `task55_head_spec::head_at`/`pressure_at` use) so it lands
+    /// on the SAME scale `column_depth` already renders through -- see `pressure_field_texels`
+    /// for the shared normalisation both sources go through.
     ///
     /// Plumbed exactly like `fresh_pressure_field`/`elliptic_liquid_level` just above: a plain
     /// UI-facing debug toggle, carried through `set_grid_size`'s sim rebuild rather than reset,
@@ -455,14 +474,55 @@ pub struct DrawingSimulation {
     /// VISUALISATION ONLY -- flipping it changes what `pressure_field_texels` returns and nothing
     /// about how `heightmap`/`column_depth`/any other simulation state evolves.
     ///
-    /// COST: `compute_head_field` measured 11.4ms at w=512 in release on the U-tube scenario --
-    /// too expensive to run unconditionally every tick. It is invoked inside
-    /// `pressure_field_texels` ONLY when this flag is true, and that function itself is only ever
-    /// called by the wasm layer while the pressure heat-map overlay is switched on
-    /// (`pressure_heatmap_enabled` in sandart-wasm/src/lib.rs, mirroring the shader-side
-    /// `pressure_heatmap_enabled == 0u` early-out). So with the overlay off, or with this flag
-    /// left at its default, this costs exactly nothing.
+    /// COST: `head_field_to_pressure` is a pure `O(cells)` read-and-convert over the already-
+    /// maintained `head_field` buffer -- no relaxation happens inside `pressure_field_texels`
+    /// itself any more (unlike the deleted per-call `compute_head_field`, which measured 11.4ms
+    /// at w=512 in release). The relaxation that actually populates `head_field` happens inside
+    /// `settle_tick`, which advances it whenever EITHER `head_field_transport` OR this field is
+    /// set (see `settle_tick`'s own `head_field_needs_advance`) -- so setting THIS field alone,
+    /// with transport left off, is now enough to give the overlay a live, relaxing buffer;
+    /// `head_field_transport` no longer needs to be on for this overlay to show anything
+    /// meaningful. With BOTH left off, `head_field` sits at whatever `reset()`/construction last
+    /// zero-filled it to, and this overlay source reads as uniformly dark for the same reason
+    /// `column_depth` would over an unsimulated sim -- an honest reflection of what the persistent
+    /// buffer currently holds, not a bug -- see `head_field`'s own doc comment. Note this does NOT
+    /// make the two toggles equivalent: setting only THIS field advances `head_field` but never
+    /// routes it into the edge solvers, so `update`'s simulation output stays byte-identical
+    /// regardless of this field's value (`pressure_heatmap_head_field_toggle.rs`).
     pub pressure_heatmap_head_field: bool,
+
+    /// "Drive transport from the head field" debug toggle (task #55 step 3). Off by default
+    /// (today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`-derived driving head, unchanged --
+    /// bit-identical). When on, `settle_tick`'s lateral and vertical (gravity-aligned) edge
+    /// solvers read their driving head from the persistent `head_field` buffer instead, for
+    /// edges where BOTH endpoints are liquid (`liquidity(wetness) >= LIQUID_ELLIPTIC_THRESHOLD`,
+    /// the same domain restriction `elliptic_liquid_level_pass` already uses). This is
+    /// `settle_tick`'s `head_field_transport` parameter, threaded straight through, same shape as
+    /// `fresh_pressure_field`/`elliptic_liquid_level` above. Also (but not EXCLUSIVELY any more --
+    /// see `pressure_heatmap_head_field`'s own doc comment) one of the two conditions that makes
+    /// `head_field` advance at all this tick (`physics::task55_head_field::advance_head_field`,
+    /// called once per tick from inside `settle_tick` when this OR `pressure_heatmap_head_field`
+    /// is on).
+    ///
+    /// Scope: LIQUID ONLY, deliberately. The field has no yield criterion yet, so applying it to
+    /// granular material would flatten a resting pile's angle of repose (a permanent surface
+    /// gradient that must produce ZERO flow) -- a prior shipped attempt at #55
+    /// (`elliptic_liquid_level_pass`'s original design point) made exactly this mistake in a
+    /// different way (moving HEIGHTS globally instead of driving the existing local flux solver)
+    /// and was visually refuted: water moved too fast, falling water drifted sideways, and the
+    /// surface stayed dead flat across actively draining necks. This toggle instead only replaces
+    /// the DRIVING HEAD inside the existing, mass-conserving, per-edge flux solver -- the solver's
+    /// own donor/acceptor clamps (`clamp_edge_feasible`) and per-edge momentum/damping (the
+    /// velocity bound) are inherited unchanged, not reinvented.
+    ///
+    /// COST: `physics::task55_head_field::HEAD_FIELD_SWEEPS_PER_TICK` (2) local relaxation sweeps
+    /// over the wet cells, `O(wet_cells)` and fixed regardless of grid resolution -- see that
+    /// constant's own doc comment. This REPLACES the old design's per-call solve-to-convergence
+    /// (measured 11.4ms at w=512 in release, and which did not actually converge at that scale --
+    /// see `physics::task55_head_field`'s module doc comment), so the ongoing per-tick cost while
+    /// this flag is on is now small and fixed rather than large and unbounded; still paid only
+    /// while this flag (or the test gate) is on, never otherwise.
+    pub head_field_transport: bool,
 
     /// Per-block "how often was this block actually simulated" heat-map counter for the debug
     /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
@@ -582,6 +642,7 @@ impl DrawingSimulation {
         let edge_vel_h = vec![0.0f32; grid_size * grid_size];
         let edge_vel_v = vec![0.0f32; grid_size * grid_size];
         let column_depth = vec![0.0f32; grid_size * grid_size];
+        let head_field = vec![0.0f32; grid_size * grid_size];
         let mut cell_colors = vec![0u8; grid_size * grid_size * 4];
         for chunk in cell_colors.chunks_exact_mut(4) {
             chunk[0] = 210;
@@ -630,6 +691,7 @@ impl DrawingSimulation {
             edge_vel_h,
             edge_vel_v,
             column_depth,
+            head_field,
             seed: 98765u32,
             marble_radius: 0.018,
             material_mode: MaterialMode::default(),
@@ -655,6 +717,7 @@ impl DrawingSimulation {
             fresh_pressure_field: false,
             elliptic_liquid_level: false,
             pressure_heatmap_head_field: false,
+            head_field_transport: false,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -742,6 +805,7 @@ impl DrawingSimulation {
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
         self.column_depth.fill(0.0);
+        self.head_field.fill(0.0);
         // Deliberately does NOT touch `cell_colors`. A reset is a physics-state reset (heights,
         // velocities, bounds) — the color theme the caller pushed via `set_cell_colors` is a
         // separate concern and has no reason to revert to the placeholder tan `new_with_size`
@@ -884,6 +948,7 @@ impl DrawingSimulation {
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
         self.column_depth.fill(0.0);
+        self.head_field.fill(0.0);
 
         // Turn the *structure* over too, not just what is in it. Symmetric shapes are unaffected
         // by construction; the asymmetric ones (StaircaseCascade's alternating shelves, the
@@ -955,11 +1020,13 @@ impl DrawingSimulation {
     ///   overlay tracks whichever pass currently populates it: both the default in-loop
     ///   computation and the `fresh_pressure_field` standalone pass write the same `column_depth`
     ///   array, so flipping THAT toggle is automatically reflected here with no extra plumbing.
-    /// - `true`: `physics::task55_head_field::compute_head_pressure_field` — task #55 step 2's
-    ///   STATIC hydraulic head field, converted from an elevation to a pressure-like quantity (`p
-    ///   = head(i) - z(i)`) so it lands on the exact same scale as `column_depth` below. Computed
-    ///   fresh on every call; see `pressure_heatmap_head_field`'s own doc comment for why that is
-    ///   only ever paid for while both this flag AND the overlay itself are switched on.
+    /// - `true`: `physics::task55_head_field::head_field_to_pressure`, reading the PERSISTENT
+    ///   `head_field` buffer (task #55 step 2, rebuilt as incremental propagation — see
+    ///   `physics::task55_head_field`'s module doc comment) and converting it from an elevation to
+    ///   a pressure-like quantity (`p = head(i) - z(i)`) so it lands on the exact same scale as
+    ///   `column_depth` below. NOT computed fresh here — `head_field` is simulation state
+    ///   maintained by `settle_tick` while `head_field_transport` is on (see that field's own doc
+    ///   comment), so this is a cheap `O(cells)` read-and-convert, not a solve.
     ///
     /// SCALING (the design decision that makes this overlay legible at all): both sources are
     /// unbounded and span orders of magnitude in practice — 0 in voids, through roughly
@@ -987,12 +1054,12 @@ impl DrawingSimulation {
             (normalized.clamp(0.0, 1.0) * 255.0).round() as u8
         };
         if self.pressure_heatmap_head_field {
-            crate::physics::task55_head_field::compute_head_pressure_field(
+            crate::physics::task55_head_field::head_field_to_pressure(
                 self.heightmap.width,
                 self.heightmap.height,
                 &self.shape_mask,
                 &self.heightmap.data,
-                &self.cell_props,
+                &self.head_field,
             )
             .into_iter()
             .map(to_byte)
@@ -1394,11 +1461,14 @@ impl DrawingSimulation {
                     &mut self.edge_vel_h,
                     &mut self.edge_vel_v,
                     &mut self.column_depth,
+                    &mut self.head_field,
                     &self.shape_mask,
                     self.tick_count + iter as u32,
                     self.gravity_dir,
                     self.fresh_pressure_field,
                     self.elliptic_liquid_level,
+                    self.head_field_transport,
+                    self.pressure_heatmap_head_field,
                 );
             }
         } else {

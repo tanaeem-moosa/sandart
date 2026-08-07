@@ -48,12 +48,20 @@ fn parse_material(s: &str) -> MaterialMode {
     }
 }
 
-fn make_sim(material: MaterialMode, shape: SandboxShape, grid_size: usize) -> DrawingSimulation {
+fn make_sim(
+    material: MaterialMode,
+    shape: SandboxShape,
+    grid_size: usize,
+    head_field_transport: bool,
+) -> DrawingSimulation {
     let mut sim = DrawingSimulation::new_with_size(grid_size);
     sim.sandbox_shape = shape;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(material);
     sim.initialize_hourglass();
+    // TASK #55 step 3: `--head-field-transport` A/B's the driving-head replacement on liquid
+    // edges against the shipped default. Off by default, matching the toggle's own default.
+    sim.head_field_transport = head_field_transport;
     sim
 }
 
@@ -106,8 +114,9 @@ fn run_scenario(
     ticks: usize,
     warmup: usize,
     grid_size: usize,
+    head_field_transport: bool,
 ) -> Run {
-    let mut sim = make_sim(material, shape, grid_size);
+    let mut sim = make_sim(material, shape, grid_size, head_field_transport);
     let targets = [None; 5];
     // last_frame_time_ms = 0.0 disables the adaptive budget block in `update()`, pinning
     // budget_n at the value under test for the whole run.
@@ -194,6 +203,8 @@ fn main() {
     // pass e.g. `--grid-size 64` to measure the user-selectable resolutions from the web UI's
     // resolution selector (see sandart-wasm's set_grid_size) against this same scenario.
     let grid_size: usize = get("--grid-size").map(|v| v.parse().unwrap()).unwrap_or(GRID_SIZE);
+    // TASK #55 step 3: off by default (bit-identical to the tree before this flag existed).
+    let head_field_transport = has("--head-field-transport");
 
     println!(
         "Sand-fall benchmark — {}x{} grid, shape {:?}, gravity (0.0, 0.04), {} ticks/scenario ({} warmup)",
@@ -217,7 +228,7 @@ fn main() {
     for _ in 0..reps.saturating_sub(1) {
         for (mi, &m) in materials.iter().enumerate() {
             for (bi, &b) in budgets.iter().enumerate() {
-                let r = run_scenario(m, shape, b, ticks, warmup, grid_size);
+                let r = run_scenario(m, shape, b, ticks, warmup, grid_size, head_field_transport);
                 let e = best.entry((mi, bi)).or_insert(f64::MAX);
                 *e = e.min(r.ms_per_tick);
             }
@@ -227,7 +238,7 @@ fn main() {
     let mut results = Vec::new();
     for (mi, &m) in materials.iter().enumerate() {
         for (bi, &b) in budgets.iter().enumerate() {
-            let mut r = run_scenario(m, shape, b, ticks, warmup, grid_size);
+            let mut r = run_scenario(m, shape, b, ticks, warmup, grid_size, head_field_transport);
             let e = best.entry((mi, bi)).or_insert(f64::MAX);
             *e = e.min(r.ms_per_tick);
             r.ms_per_tick = *e;
@@ -287,7 +298,7 @@ fn main() {
 
     if let Some(out) = get("--flamegraph") {
         let m = materials[0];
-        let mut sim = make_sim(m, shape, grid_size);
+        let mut sim = make_sim(m, shape, grid_size, head_field_transport);
         let targets = [None; 5];
         for _ in 0..warmup {
             sim.budget_n = budgets[0];

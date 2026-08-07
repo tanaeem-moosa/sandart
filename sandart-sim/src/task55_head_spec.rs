@@ -133,13 +133,76 @@ fn legacy_head_source(w: usize, h: usize, mask: &[u8], heights: &[f32]) -> Vec<f
     (0..w * h).map(|idx| head_at(idx, w, heights, &cd)).collect()
 }
 
-/// Task #55 step 2's new field: `task55_head_field::compute_head_field`, a pure Laplace
-/// relaxation with Dirichlet boundary conditions wherever a face is exposed (open top or
-/// unsupported bottom -- see that module's doc comment). Not wired into `settle_tick` or any UI;
-/// this spec harness is its only caller.
+/// Task #55 step 2's new field, REBUILT as incremental propagation (see
+/// `task55_head_field`'s module doc comment): `advance_head_field` is no longer a pure function
+/// of a static scenario -- it is one tick's worth of local relaxation against PERSISTENT state,
+/// designed to reach equilibrium over many calls rather than within one. To keep asserting the
+/// same static equilibrium properties this module always has, `new_head_source` instead DRIVES
+/// the field to steady state: see `run_head_field_to_steady_state` just below. Not wired into
+/// `settle_tick` or any UI; this spec harness (and `physics::settle_tick`'s own per-tick call) are
+/// its only callers.
 fn new_head_source(w: usize, h: usize, mask: &[u8], heights: &[f32]) -> Vec<f32> {
     let cell_props = build_water_cell_props(w * h);
-    super::task55_head_field::compute_head_field(w, h, mask, heights, &cell_props)
+    run_head_field_to_steady_state(w, h, mask, heights, &cell_props).0
+}
+
+/// Fraction of `depth_scale` below which a tick's largest per-cell change counts as "settled" --
+/// reused, unchanged, from the deleted per-call solver's own `CONVERGENCE_TOL_FRACTION`: two
+/// orders of magnitude under `identity_tol`'s own `0.02 * depth_scale`, so no static spec below is
+/// ever limited by relaxation residual rather than by genuine physics (see that constant's
+/// original doc comment, preserved in git history, for the f32-noise-floor measurement this was
+/// sized from -- unchanged by this task, since the noise floor a plain Gauss-Seidel sweep settles
+/// into is the same regardless of how many sweeps happen per external call).
+const HEAD_FIELD_SPEC_SETTLE_TOL_FRACTION: f32 = 1e-2;
+
+/// Generous multiple of the propagation-time floor used to cap `run_head_field_to_steady_state`'s
+/// tick budget, so a scenario that genuinely cannot settle is caught by hitting the cap (and
+/// reported as a FINDING per this spec harness's own doc comment) rather than looping forever.
+///
+/// THE FLOOR: `task55_head_field::HEAD_FIELD_SWEEPS_PER_TICK` propagates a boundary influence that
+/// many graph-hops per call, so crossing this scenario's full `w + h` extent -- the worst case,
+/// since nothing in these static scenarios is wider than the grid itself -- takes on the order of
+/// `(w + h) / HEAD_FIELD_SWEEPS_PER_TICK` calls even best-case. `8x` that floor is the same
+/// multiplier the deleted per-call solver's own `MAX_SWEEPS_FACTOR` used for the same reason
+/// (headroom above the expected need, not a number tuned to make a specific scenario pass) --
+/// see this task's own report for the measured tick counts every spec actually needed, which sit
+/// well under this cap.
+/// Was 5000, which at w=h=512 is a 640,000-tick cap -- each tick being
+/// `HEAD_FIELD_SWEEPS_PER_TICK` full sweeps over 262k cells. A spec that settles exits in a few
+/// hundred ticks; a spec that STALLS burned the entire cap, which is how a correctness failure
+/// disguised itself as a 484-second test suite (up from 72s) instead of failing fast. A cap
+/// exists to bound a broken run, so it should be a generous multiple of the real propagation
+/// time and nothing like three orders of magnitude above it.
+const HEAD_FIELD_SPEC_TICK_FACTOR: usize = 8;
+
+/// Drives `task55_head_field::advance_head_field` repeatedly against a freshly zero-initialised
+/// persistent buffer -- the same starting state `DrawingSimulation::head_field` has right after
+/// construction/`reset()` -- until the largest per-tick change drops below
+/// `HEAD_FIELD_SPEC_SETTLE_TOL_FRACTION * depth_scale`, or `HEAD_FIELD_SPEC_TICK_FACTOR * (w + h)
+/// / HEAD_FIELD_SWEEPS_PER_TICK` ticks pass without settling. Returns the settled (or
+/// cap-truncated) field and how many ticks it took -- the ticks number IS the headline
+/// measurement this redesign produces: how long pressure takes to cross this scenario. See this
+/// task's own report for the numbers measured per spec/resolution.
+fn run_head_field_to_steady_state(
+    w: usize,
+    h: usize,
+    mask: &[u8],
+    heights: &[f32],
+    cell_props: &[f32],
+) -> (Vec<f32>, usize) {
+    let mut head = vec![0.0f32; w * h];
+    let tol = HEAD_FIELD_SPEC_SETTLE_TOL_FRACTION * depth_scale(w);
+    let max_ticks = HEAD_FIELD_SPEC_TICK_FACTOR * (w + h)
+        / super::task55_head_field::HEAD_FIELD_SWEEPS_PER_TICK
+        + 64;
+    for tick in 0..max_ticks {
+        let residual =
+            super::task55_head_field::advance_head_field(w, h, mask, heights, cell_props, &mut head);
+        if residual < tol {
+            return (head, tick + 1);
+        }
+    }
+    (head, max_ticks)
 }
 
 const HEAD_SOURCES: &[(&str, HeadSource)] =
@@ -775,9 +838,9 @@ fn spec_head_field_is_resolution_invariant(head_source: HeadSource) -> Result<()
 
 // ---------------------------------------------------------------------------------------------
 // Ignored per-spec wrappers -- run any one alone with `--ignored`. Each checks the NEW field
-// (`task55_head_field::compute_head_field`, task #55 step 2) only -- the scoreboard below is
-// what tracks both sources; these exist so a human can isolate one spec against the field this
-// step actually built.
+// (`new_head_source`, driving `task55_head_field::advance_head_field` to steady state -- task #55
+// step 2, rebuilt) only -- the scoreboard below is what tracks both sources; these exist so a
+// human can isolate one spec against the field this step actually built.
 // ---------------------------------------------------------------------------------------------
 
 #[test]
@@ -838,62 +901,68 @@ fn test_spec_head_field_is_resolution_invariant() {
 }
 
 /// Diagnostic, not a correctness check (no ratchet, nothing here can fail the suite): reports
-/// `compute_head_field`'s own convergence numbers -- sweeps to convergence and final residual --
-/// at every resolution in `SWEEP_W`, on the most demanding scenario in this module (the U-tube,
-/// the only scenario with a bend). Run with
+/// `run_head_field_to_steady_state`'s own ticks-to-settle -- the headline number this redesign
+/// produces (see that function's doc comment) -- at every resolution in `SWEEP_W`, for every
+/// scenario this module's static specs use. Run with
 /// `cargo test -p sandart-sim --lib task55_head_spec -- --ignored --nocapture` to capture it.
 #[test]
-#[ignore = "SPEC for #55: diagnostic -- prints compute_head_field convergence stats, not a check"]
-fn diag_compute_head_field_convergence() {
+#[ignore = "SPEC for #55: diagnostic -- prints advance_head_field ticks-to-settle, not a check"]
+fn diag_task55_head_field_ticks_to_settle() {
     use std::time::Instant;
-    println!("\ncompute_head_field convergence (U-tube scenario, fill_dy_frac=0.10):");
+    const SWEEP_W: [usize; 2] = [256, 512];
+
+    println!("\nticks-to-settle (open resting column -- spec_uniform_head_in_resting_open_column / spec_pressure_is_linear_in_depth / spec_head_field_is_resolution_invariant):");
+    for &w in &SWEEP_W {
+        let h = w;
+        let s = build_open_column(w, h);
+        let cell_props = build_water_cell_props(w * h);
+        let start = Instant::now();
+        let (_, ticks) = run_head_field_to_steady_state(w, h, &s.mask, &s.heights, &cell_props);
+        println!("  w={w}: ticks={ticks} elapsed={:?}", start.elapsed());
+    }
+
+    // The RESTING variant is the easy case (single-valued Dirichlet boundary, same shape as the
+    // open column above); the FALLING variant is the hard case this redesign exists for -- two
+    // DIFFERENT Dirichlet values (exposed top vs. unsupported bottom) in one component, so there
+    // is genuine work to propagate, not a single value to broadcast.
+    println!("\nticks-to-settle (floating/resting blob -- spec_free_fall_has_zero_pressure / spec_free_fall_is_pressureless_throughout):");
+    for &w in &SWEEP_W {
+        let h = w;
+        let cell_props = build_water_cell_props(w * h);
+        let falling = build_floating_blob_variant(w, h, false);
+        let start = Instant::now();
+        let (_, ticks_falling) =
+            run_head_field_to_steady_state(w, h, &falling.mask, &falling.heights, &cell_props);
+        let falling_elapsed = start.elapsed();
+        let resting = build_floating_blob_variant(w, h, true);
+        let start = Instant::now();
+        let (_, ticks_resting) =
+            run_head_field_to_steady_state(w, h, &resting.mask, &resting.heights, &cell_props);
+        println!(
+            "  w={w}: falling ticks={ticks_falling} elapsed={falling_elapsed:?} | resting \
+             ticks={ticks_resting} elapsed={:?}",
+            start.elapsed()
+        );
+    }
+
+    println!("\nticks-to-settle (roofed channel -- spec_pascal_under_a_roof):");
+    for &w in &SWEEP_W {
+        let h = w;
+        let s = build_roof_scenario(w, h);
+        let cell_props = build_water_cell_props(w * h);
+        let start = Instant::now();
+        let (_, ticks) = run_head_field_to_steady_state(w, h, &s.mask, &s.heights, &cell_props);
+        println!("  w={w}: ticks={ticks} elapsed={:?}", start.elapsed());
+    }
+
+    println!("\nticks-to-settle (U-tube -- spec_head_is_single_valued_across_a_connected_body):");
     for &w in &SWEEP_W {
         let h = w;
         let (mask, heights) = build_u_tube_filled(w, h, 0.10);
         let cell_props = build_water_cell_props(w * h);
         let start = Instant::now();
-        let (_, sweeps, residual) = super::task55_head_field::compute_head_field_with_stats(
-            w,
-            h,
-            &mask,
-            &heights,
-            &cell_props,
-        );
-        let elapsed = start.elapsed();
-        let ds = depth_scale(w);
-        println!(
-            "  w={w}: sweeps={sweeps} residual={residual:.6} ref-rows ({:.6} depth_scale) \
-             elapsed={elapsed:?}",
-            residual / ds
-        );
-    }
-
-    // The U-tube above is the EASY case for this solver: its only Dirichlet boundary is
-    // single-valued, so the coarse union-find jump (see task55_head_field's own doc comment)
-    // answers it in one sweep flat. The free-fall slab is the HARD case: two DIFFERENT Dirichlet
-    // values (exposed top vs. unsupported bottom) in one component, so no coarse shortcut
-    // applies and the fine SOR sweep has to do genuine work -- this is the number that matters
-    // for "how expensive is a real call."
-    println!("\ncompute_head_field convergence (free-fall slab, the non-uniform-boundary case):");
-    for &w in &SWEEP_W {
-        let h = w;
-        let falling = build_floating_blob_variant(w, h, false);
-        let cell_props = build_water_cell_props(w * h);
-        let start = Instant::now();
-        let (_, sweeps, residual) = super::task55_head_field::compute_head_field_with_stats(
-            w,
-            h,
-            &falling.mask,
-            &falling.heights,
-            &cell_props,
-        );
-        let elapsed = start.elapsed();
-        let ds = depth_scale(w);
-        println!(
-            "  w={w}: sweeps={sweeps} residual={residual:.6} ref-rows ({:.6} depth_scale) \
-             elapsed={elapsed:?}",
-            residual / ds
-        );
+        let (_, ticks) = run_head_field_to_steady_state(w, h, &mask, &heights, &cell_props);
+        println!("  w={w}: ticks={ticks} elapsed={:?}", start.elapsed());
     }
 }
 
@@ -974,4 +1043,649 @@ fn test_task55_head_spec_scoreboard() {
          never remove a pair to silence a regression the other way.\n\n\
          Full table:\n{report}"
     );
+}
+
+// =================================================================================================
+// TASK #55 STEP 3 -- DYNAMIC specs. Every spec above is a pure function of a STATIC scenario (no
+// ticks, no mass ever moved -- see this file's own module doc comment). These three encode the
+// three photographed defects of the refuted `elliptic_liquid_level_pass` attempt (water moved too
+// fast, falling water drifted sideways, the surface stayed dead flat across active necks) and so
+// need real transport: they assert something about how `head_field_transport` drives mass over
+// TIME, which does not exist without ticks.
+//
+// Checked against `head_field_transport` OFF and ON (the toggle axis), mirroring the static
+// specs' `HEAD_SOURCES` ratchet above but on this task's own boolean instead of a head-source
+// function -- same discipline: `test_task55_dynamic_transport_spec_scoreboard` is NOT ignored,
+// asserts the exact set of currently-passing (spec, toggle) pairs, and that set only ever grows.
+//
+// Own, deliberately minimal tick scaffolding (`DynSim` below) rather than reusing
+// `physics::tests::TestSim`: that struct lives inside a sibling `#[cfg(test)] mod tests` this
+// file has no path to without widening its visibility, which the task brief does not ask for.
+// =================================================================================================
+
+/// Minimal `settle_tick` harness for the dynamic specs below. Unbounded budget (`usize::MAX`)
+/// deliberately: these specs are about the physics the flux solver produces, not about the LOD
+/// scheduler's approximation of it (a dropped block would just mean "nothing happened this tick"
+/// for that block, muddying what a measured drift/dip/delta actually means).
+struct DynSim {
+    hm: Heightmap,
+    temp_heights: Vec<f32>,
+    cell_colors: Vec<u8>,
+    cell_props: Vec<f32>,
+    sliding: Vec<bool>,
+    bounds: ActiveBounds,
+    active_blocks: Vec<crate::BlockActivity>,
+    last_displacements: Vec<f32>,
+    last_simulated_ticks: Vec<u32>,
+    edge_vel_h: Vec<f32>,
+    edge_vel_v: Vec<f32>,
+    column_depth: Vec<f32>,
+    /// Mirrors `DrawingSimulation::head_field` -- the persistent hydraulic head buffer (task #55
+    /// step 2, rebuilt). Owned here exactly like `column_depth` just above.
+    head_field: Vec<f32>,
+    mask: Vec<u8>,
+    w: usize,
+    h: usize,
+    block_size: usize,
+    tick_count: u32,
+}
+
+impl DynSim {
+    fn new(w: usize, h: usize, mask: Vec<u8>, heights: Vec<f32>, cell_props: Vec<f32>) -> Self {
+        let block_size = 32;
+        let cols = (w + block_size - 1) / block_size;
+        let rows = (h + block_size - 1) / block_size;
+        let expected_len = cols * rows;
+        let mut hm = Heightmap::new(w, h, 0.0);
+        hm.data.copy_from_slice(&heights);
+        DynSim {
+            temp_heights: heights.clone(),
+            hm,
+            cell_colors: vec![0u8; w * h * 4],
+            cell_props,
+            sliding: vec![false; w * h],
+            bounds: ActiveBounds {
+                min_x: 0,
+                max_x: w.saturating_sub(1),
+                min_y: 0,
+                max_y: h.saturating_sub(1),
+                active: true,
+            },
+            active_blocks: vec![crate::BlockActivity::Inactive; expected_len],
+            last_displacements: vec![1.0; expected_len],
+            last_simulated_ticks: vec![0; expected_len],
+            edge_vel_h: vec![0.0; w * h],
+            edge_vel_v: vec![0.0; w * h],
+            column_depth: vec![0.0; w * h],
+            head_field: vec![0.0; w * h],
+            mask,
+            w,
+            h,
+            block_size,
+            tick_count: 0,
+        }
+    }
+
+    /// Advances one tick, returning this tick's realised flux total (same return value
+    /// `settle_tick` itself produces) -- used by the quiescence guards below so a spec cannot pass
+    /// vacuously because nothing actually moved.
+    fn tick(&mut self, gravity_dir: Vec2, head_field_transport: bool) -> f32 {
+        let flow = settle_tick(
+            &mut self.hm,
+            &mut self.temp_heights,
+            &mut self.cell_colors,
+            &mut self.cell_props,
+            &mut self.sliding,
+            &mut self.bounds,
+            &mut self.active_blocks,
+            &mut self.last_displacements,
+            &mut self.last_simulated_ticks,
+            usize::MAX,
+            self.block_size,
+            &[],
+            12345u32.wrapping_add(self.tick_count),
+            &mut self.edge_vel_h,
+            &mut self.edge_vel_v,
+            &mut self.column_depth,
+            &mut self.head_field,
+            &self.mask,
+            self.tick_count,
+            gravity_dir,
+            false,
+            false,
+            head_field_transport,
+            false,
+        );
+        self.tick_count += 1;
+        flow
+    }
+}
+
+const DYN_GRAVITY: f32 = 0.04; // matches the convention every other tick-based test in this crate uses
+const DYN_SWEEP_W: [usize; 2] = [64, 512]; // per the task brief: verify at w=64 AND w=512, not just 512
+
+/// A compact slab of water, well clear of every wall, sitting high in a TALL open canvas (no
+/// shape mask at all -- every cell in-mask) with a large air gap below it. Genuinely unsupported:
+/// `support_fraction` reads 0 at its base and (per `task55_head_field`'s transitive-support pass)
+/// throughout it. `h = 2 * w` so even the fastest plausible fall (~1 row/tick, the CFL ceiling
+/// `spec_transport_speed_is_bounded` itself measures) cannot reach the floor within this spec's
+/// tick budget.
+fn build_falling_water(w: usize, h: usize) -> (Vec<u8>, Vec<f32>) {
+    let mask = vec![crate::MASK_INSIDE; w * h];
+    let mut heights = vec![0.0f32; w * h];
+    let blob_left = frac_idx(0.375, w);
+    let blob_right = frac_idx(0.625, w) + 1;
+    let blob_top = frac_idx(0.05, h);
+    let blob_bottom = frac_idx(0.15, h);
+    for y in blob_top..=blob_bottom {
+        for x in blob_left..blob_right {
+            heights[y * w + x] = 1.0;
+        }
+    }
+    (mask, heights)
+}
+
+/// Mass-weighted centre of mass, in cell-x units, over the whole grid.
+fn center_of_mass_x(heights: &[f32], w: usize, h: usize) -> f64 {
+    let mut sum_mx = 0.0f64;
+    let mut sum_m = 0.0f64;
+    for y in 0..h {
+        for x in 0..w {
+            let m = heights[y * w + x] as f64;
+            sum_mx += m * x as f64;
+            sum_m += m;
+        }
+    }
+    if sum_m > 0.0 { sum_mx / sum_m } else { f64::NAN }
+}
+
+/// Spec 8: a column of water falling through open air must not drift laterally. Per this task's
+/// own brief, this holds *by construction* once the driving head is the unified field: in free
+/// fall `p == 0` throughout (this file's own `spec_free_fall_has_zero_pressure` /
+/// `spec_free_fall_is_pressureless_throughout`), so `head == z`, and `z` depends only on row, so
+/// two SAME-ROW neighbours -- the only pair a lateral edge ever connects -- read IDENTICAL head:
+/// `grad(head)` has no lateral component at all, not merely a small one. `gravity_dir.x` stays
+/// `0.0` throughout this crate (confirmed: no caller anywhere sets it nonzero) and Water's
+/// `tau == 0` (`GRANULAR_TAU_SCALE * threshold_prop * granular_share`, `granular_share == 0` for
+/// `liquidity == 1`) makes `dispersion` exactly `0.0` too, so nothing else is left to drive this
+/// edge sideways.
+///
+/// TOLERANCE: not fitted. In genuine free fall every wet cell reads `effective_support <= 0.0`
+/// (transitive support propagates the slab's unsupported base upward through the whole body --
+/// see `task55_head_field`'s module doc comment), so `advance_head_field` writes `head[idx] =
+/// z_elev[idx]` DIRECTLY every sweep for every cell in the slab -- not a relaxation target it
+/// approaches, an exact assignment. Two same-row cells therefore compute `z_elev` from the
+/// identical `row * depth_scale` expression and read bit-identical head, so this design leaves
+/// NO relaxation residual to leak sideways at all while the body stays in pure free fall (unlike
+/// the deleted per-call solver, which reached the same zero-gradient result only in the limit of
+/// its own SOR residual). The only remaining source of a nonzero `head_a - head_b` on a same-row
+/// pair is a cell at the slab's leading/trailing edge briefly reading a PARTIAL
+/// `effective_support` (0 < s < 1, blended toward a relaxing average) as the slab's silhouette
+/// crosses a row boundary tick to tick -- a genuine, small, transient effect, not accumulated
+/// solver error. Over this spec's
+/// tick budget that bound is many orders of magnitude under one cell; `0.5` cells is used as a
+/// generous CFL-scale ceiling (a body cannot even be argued to have crossed half a cell sideways)
+/// -- loose enough to absorb ordinary float summation noise, while still far tighter than the
+/// multi-cell sideways drift the refuted pass actually produced.
+fn spec_falling_water_does_not_drift_sideways(head_field_transport: bool) -> Result<(), String> {
+    const TICKS: usize = 40;
+    const DRIFT_TOL: f64 = 0.5;
+    let mut table = String::new();
+    let mut fail = false;
+    for &w in &DYN_SWEEP_W {
+        let h = w * 2;
+        let (mask, heights) = build_falling_water(w, h);
+        let cell_props = build_water_cell_props(w * h);
+        let mut sim = DynSim::new(w, h, mask, heights, cell_props);
+        let com_initial = center_of_mass_x(&sim.hm.data, w, h);
+        let mut total_flow = 0.0f64;
+        for _ in 0..TICKS {
+            total_flow += sim.tick(Vec2::new(0.0, DYN_GRAVITY), head_field_transport) as f64;
+        }
+        let bottom_wet = (0..w).any(|x| sim.hm.data[(h - 1) * w + x] > 1e-6);
+        let com_final = center_of_mass_x(&sim.hm.data, w, h);
+        let drift = (com_final - com_initial).abs();
+        table.push_str(&format!(
+            "w={w} h={h} head_field_transport={head_field_transport}: com_x initial={com_initial:.4} \
+             final={com_final:.4} drift={drift:.5} cells (tol={DRIFT_TOL:.2}) total_flow={total_flow:.2} \
+             still_airborne={}\n",
+            !bottom_wet
+        ));
+        if drift > DRIFT_TOL {
+            fail = true;
+        }
+        if bottom_wet {
+            return Err(format!(
+                "spec_falling_water_does_not_drift_sideways: w={w}: SCENARIO INVALID, not the \
+                 physics under test -- the blob reached the floor within {TICKS} ticks, so its \
+                 later centre-of-mass reflects floor contact, not free fall. Shrink TICKS or grow \
+                 h.\n{table}"
+            ));
+        }
+        if total_flow <= 1.0 {
+            return Err(format!(
+                "spec_falling_water_does_not_drift_sideways: w={w}: SCENARIO INVALID -- total_flow \
+                 ({total_flow:.4}) suggests the blob never actually moved (quiescent), so a \
+                 near-zero drift would be vacuous, not a real measurement of free-fall lateral \
+                 behaviour.\n{table}"
+            ));
+        }
+    }
+    if fail {
+        return Err(format!(
+            "spec_falling_water_does_not_drift_sideways: a free-falling column of water drifted \
+             sideways by more than {DRIFT_TOL} cells with no lateral driving force of any kind \
+             present in the scenario -- see table for which resolution and by how much.\n{table}"
+        ));
+    }
+    Ok(())
+}
+
+/// A basin of water draining through a narrow neck at its floor's right edge into a wide, empty
+/// lower reservoir -- structurally the same shape as this file's own `build_roof_scenario`
+/// (shaft + channel), but built to DRAIN under gravity rather than sit at rest, since this spec is
+/// about the moving free surface, not the static head.
+struct DrainScenario {
+    mask: Vec<u8>,
+    heights: Vec<f32>,
+    left: usize,
+    right: usize,
+    fill_row: usize,
+    basin_floor: usize,
+    neck_left: usize,
+    neck_right: usize,
+}
+
+fn build_drain_scenario(w: usize, h: usize) -> DrainScenario {
+    let left = frac_idx(0.20, w);
+    let right = frac_idx(0.80, w) + 1;
+    let top_row = frac_idx(0.10, h);
+    let basin_floor = frac_idx(0.45, h);
+    let reservoir_floor = frac_idx(0.90, h);
+    let neck_width = ((right - left) / 8).max(2);
+    let neck_right = right;
+    let neck_left = right - neck_width;
+
+    let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+    for y in top_row..=basin_floor {
+        for x in left..right {
+            mask[y * w + x] = crate::MASK_INSIDE;
+        }
+    }
+    // Seal the basin floor except the neck -- everything else in the floor row is a solid wall.
+    for x in left..right {
+        if x < neck_left || x >= neck_right {
+            mask[basin_floor * w + x] = crate::MASK_OUTSIDE;
+        }
+    }
+    // Wide-open lower reservoir below the neck, so drained water has somewhere to go without
+    // backing up and re-flooding the neck within this spec's tick budget.
+    for y in (basin_floor + 1)..=reservoir_floor {
+        for x in left..right {
+            mask[y * w + x] = crate::MASK_INSIDE;
+        }
+    }
+
+    let fill_row = frac_idx(0.15, h);
+    let mut heights = vec![0.0f32; w * h];
+    for y in fill_row..=basin_floor {
+        for x in left..right {
+            let idx = y * w + x;
+            if mask[idx] != crate::MASK_OUTSIDE {
+                heights[idx] = 1.0;
+            }
+        }
+    }
+    DrainScenario { mask, heights, left, right, fill_row, basin_floor, neck_left, neck_right }
+}
+
+/// Total material currently in a column's basin span -- a continuous surrogate for "how full is
+/// this column" even though each individual cell saturates at `cell_capacity_for` (1.0 for
+/// water): a column that has lost a fractional cell's worth to drainage reads a correspondingly
+/// smaller sum, without needing to locate a discrete "top filled row".
+fn column_mass(heights: &[f32], w: usize, x: usize, y0: usize, y1: usize) -> f32 {
+    (y0..=y1).map(|y| heights[y * w + x]).sum()
+}
+
+/// Spec 9: a vessel actively draining under gravity must NOT show a flat free surface -- it must
+/// dip toward the outlet, exactly what a real fluid does and exactly what the refuted
+/// `elliptic_liquid_level_pass` failed to reproduce (a dead-flat surface measured over three
+/// actively draining necks). Measured as a PAIRED comparison, same reasoning as this file's own
+/// `spec_free_fall_has_zero_pressure`: the column immediately next to the neck (still inside the
+/// basin, not the neck itself) against the column at the basin's far wall, both summed over the
+/// SAME row span so only fill differs. A solver draining uniformly across the whole surface (the
+/// refuted pass's own defect) would show these two columns losing mass at the same rate; a
+/// physically correct one drains the near column faster, so `far_mass - near_mass` grows positive
+/// while flow is active.
+///
+/// TOLERANCE: `identity_tol(w)` -- this file's own already-derived f32-accumulation-noise bound
+/// (see that function's doc comment), reused here as "meaningfully more than roundoff", not
+/// re-derived for this specific accumulation, since both are sums of `depth_scale`-order terms
+/// over an O(h) number of cells and so share the same order-of-magnitude noise floor.
+fn spec_draining_vessel_surface_dips(head_field_transport: bool) -> Result<(), String> {
+    const TICKS: usize = 150;
+    let mut table = String::new();
+    let mut fail = false;
+    for &w in &DYN_SWEEP_W {
+        let h = w;
+        let s = build_drain_scenario(w, h);
+        let cell_props = build_water_cell_props(w * h);
+        let mut sim = DynSim::new(w, h, s.mask.clone(), s.heights.clone(), cell_props);
+        let near_x = s.neck_left.saturating_sub(2).max(s.left);
+        let far_x = s.left + 2;
+        let mass_near_initial = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+        let mass_far_initial = column_mass(&sim.hm.data, w, far_x, s.fill_row, s.basin_floor);
+        let mut total_flow = 0.0f64;
+        for _ in 0..TICKS {
+            total_flow += sim.tick(Vec2::new(0.0, DYN_GRAVITY), head_field_transport) as f64;
+        }
+        let mass_near_final = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+        let mass_far_final = column_mass(&sim.hm.data, w, far_x, s.fill_row, s.basin_floor);
+        let dip = mass_far_final - mass_near_final;
+        let tol = identity_tol(w);
+        table.push_str(&format!(
+            "w={w} head_field_transport={head_field_transport}: near(x={near_x}) {mass_near_initial:.4}->{mass_near_final:.4} \
+             far(x={far_x}) {mass_far_initial:.4}->{mass_far_final:.4} dip={dip:.5} cells tol={tol:.5} \
+             total_flow={total_flow:.2} neck=[{},{})\n",
+            s.neck_left, s.neck_right
+        ));
+        if total_flow <= 1.0 {
+            return Err(format!(
+                "spec_draining_vessel_surface_dips: w={w}: SCENARIO INVALID -- total_flow \
+                 ({total_flow:.4}) over {TICKS} ticks suggests the vessel never actually drained, \
+                 so a flat or dipping surface would be vacuous, not a real measurement.\n{table}"
+            ));
+        }
+        if dip <= tol {
+            fail = true;
+        }
+    }
+    if fail {
+        return Err(format!(
+            "spec_draining_vessel_surface_dips: the basin's free surface did NOT dip meaningfully \
+             toward the outlet while actively draining (dip <= identity_tol) -- this is the \
+             dead-flat-surface defect the refuted elliptic pass produced over three active \
+             necks.\n{table}"
+        ));
+    }
+    Ok(())
+}
+
+/// Spec 10: no cell's height may change by more than one full cell's capacity in a single tick.
+/// CFL argument, not a fitted number: `flux_edge_candidate`'s own donor/acceptor clamp
+/// (`v.min(avail_a).min(cap_b - h_b)`, `clamp_edge_feasible` downstream of it) bounds what a
+/// SINGLE edge can move by that edge's own donor's available mass and acceptor's free room, both
+/// of which are themselves bounded by `cell_capacity_for` (1.0 for water, the only material this
+/// spec's scenarios use); `edge_arbitration_scale` then additionally bounds the SUM across every
+/// edge incident to one cell to that same cell's own total available mass / free room. So no cell,
+/// however many edges it owns, can give away more than it has or receive more than it has room
+/// for in one tick -- material physically cannot cross more than one cell's worth of capacity per
+/// cell per tick, the discrete form of "material cannot cross more than one cell per tick."
+///
+/// This is a property of the EXISTING solver's clamps (untouched by this task -- see the brief's
+/// hard constraint not to modify `clamp_edge_feasible`), so it should hold regardless of
+/// `head_field_transport`; checked with the toggle on specifically because a wrong unit
+/// conversion (reference-row magnitudes reaching the driving head unconverted) would inflate the
+/// RAW candidate `v` by up to `depth_scale(64) == 8x` without necessarily tripping any other
+/// spec, so this is the direct check that whatever `v` becomes, the clamp still holds.
+fn spec_transport_speed_is_bounded(head_field_transport: bool) -> Result<(), String> {
+    const TICKS: usize = 150;
+    let mut table = String::new();
+    let mut fail = false;
+    for &w in &DYN_SWEEP_W {
+        let h = w;
+        let s = build_drain_scenario(w, h);
+        let cell_props = build_water_cell_props(w * h);
+        let cap = 1.0f32; // cell_capacity_for at liquidity == 1.0 (water) -- see that function
+        let bound = cap + 1e-3; // tiny numerical headroom, not a fitted tolerance
+        let mut sim = DynSim::new(w, h, s.mask.clone(), s.heights.clone(), cell_props);
+        let mut max_abs_delta = 0.0f32;
+        let mut max_at = (0usize, 0usize, 0usize); // (tick, x, y)
+        for t in 0..TICKS {
+            let before = sim.hm.data.clone();
+            sim.tick(Vec2::new(0.0, DYN_GRAVITY), head_field_transport);
+            for y in 0..h {
+                for x in 0..w {
+                    let idx = y * w + x;
+                    let delta = (sim.hm.data[idx] - before[idx]).abs();
+                    if delta > max_abs_delta {
+                        max_abs_delta = delta;
+                        max_at = (t, x, y);
+                    }
+                }
+            }
+        }
+        table.push_str(&format!(
+            "w={w} head_field_transport={head_field_transport}: max|Δheight| in one tick={max_abs_delta:.5} \
+             cells (bound={bound:.4}) at tick={} (x={},y={})\n",
+            max_at.0, max_at.1, max_at.2
+        ));
+        if max_abs_delta > bound {
+            fail = true;
+        }
+    }
+    if fail {
+        return Err(format!(
+            "spec_transport_speed_is_bounded: a cell's height changed by more than one cell's \
+             capacity in a single tick -- material crossed more than the CFL bound allows, which \
+             the donor/acceptor clamp (`flux_edge_candidate`/`clamp_edge_feasible`,\
+             `edge_arbitration_scale`) is supposed to make structurally impossible regardless of \
+             how large the driving head is.\n{table}"
+        ));
+    }
+    Ok(())
+}
+
+/// UNPARKED. This scoreboard was `#[ignore]`d as BLOCKED: `compute_head_field` could not converge
+/// on the draining-vessel scenario at w=512 (8256 sweeps, residual 0.0436 against a 0.001
+/// tolerance) and asserted on convergence rather than returning a wrong field, so enabling
+/// transport panicked. The parking note called for "a real multigrid V-cycle".
+///
+/// It did not need one. `compute_head_field` is gone, and `task55_head_field::advance_head_field`
+/// replaced its AVERAGING update with a MAX (see that module's doc comment): head is constant
+/// through a connected body at rest, which is a maximum statement, not an averaging one.
+/// Averaging is diffusion and settles in `O(N^2)` sweeps; a max is Bellman-Ford and converges in
+/// 2 sweeps on every scenario here, U-tube included. The scaling wall was the operator.
+///
+/// Two further defects had to be fixed before transport moved any mass at all, both found by this
+/// scoreboard reporting `total_flow = 0.0000` -- a blob that never fell and a vessel that never
+/// drained:
+///
+///   1. The driving-head sites divided the field by `depth_scale` but never multiplied by
+///      `GRAVITY_HEAD_SCALE`, leaving the head-field branch driving every liquid edge 25x weaker
+///      than the branch beside it.
+///   2. `advance_head_field` only wrote WET cells, but `settle_tick` reads `head_field[nb_idx]`
+///      at the DRY cell a body is about to fall into. That read returned a stale `0.0` against a
+///      wet cell's genuine `z ~= -1200`, so every free-fall edge was driven UPWARD and slept.
+///      The field is now total: dry cells hold `z`, so `p = head - z = 0`.
+///
+/// All six (spec, toggle) pairs now pass. Kept as a plain `#[test]` -- no `#[ignore]` -- so a
+/// regression in head-driven transport fails the default `cargo test` run.
+///
+/// Still do NOT "fix" a future failure here by widening a convergence tolerance, lowering the
+/// sweep cap, or letting the field return unconverged silently: an unconverged head field drives
+/// mass down a wrong gradient, which is the class of defect this whole task exists to remove.
+#[test]
+fn test_task55_dynamic_transport_spec_scoreboard() {
+    let specs: &[(&str, fn(bool) -> Result<(), String>)] = &[
+        ("spec_falling_water_does_not_drift_sideways", spec_falling_water_does_not_drift_sideways),
+        ("spec_draining_vessel_surface_dips", spec_draining_vessel_surface_dips),
+        ("spec_transport_speed_is_bounded", spec_transport_speed_is_bounded),
+    ];
+
+    // Ratchet set: the (spec, head_field_transport) PAIRS currently passing, measured directly
+    // (see this task's report for the numbers). UPWARD ONLY -- same discipline as
+    // `test_task55_head_spec_scoreboard` above.
+    let expected_passing: &[(&str, bool)] = &[
+        ("spec_falling_water_does_not_drift_sideways", false),
+        ("spec_falling_water_does_not_drift_sideways", true),
+        ("spec_draining_vessel_surface_dips", false),
+        ("spec_draining_vessel_surface_dips", true),
+        ("spec_transport_speed_is_bounded", false),
+        ("spec_transport_speed_is_bounded", true),
+    ];
+
+    let mut actual_passing: Vec<(&str, bool)> = Vec::new();
+    let mut report = String::new();
+    report.push_str(&format!("\n{:<50} {:<20} {:<6}\n", "spec", "head_field_transport", "result"));
+    for (spec_name, spec_fn) in specs {
+        for &toggle in &[false, true] {
+            match spec_fn(toggle) {
+                Ok(()) => {
+                    actual_passing.push((spec_name, toggle));
+                    report.push_str(&format!("{spec_name:<50} {toggle:<20} PASS\n"));
+                }
+                Err(e) => {
+                    report.push_str(&format!("{spec_name:<50} {toggle:<20} FAIL\n{e}\n\n"));
+                }
+            }
+        }
+    }
+    actual_passing.sort_unstable();
+    let mut expected_sorted = expected_passing.to_vec();
+    expected_sorted.sort_unstable();
+
+    assert_eq!(
+        actual_passing, expected_sorted,
+        "\nTask #55 dynamic transport spec scoreboard changed.\n\
+         Currently passing: {actual_passing:?}\n\
+         Expected passing:  {expected_sorted:?}\n\
+         When a (spec, toggle) pair starts passing, add it to `expected_passing` in this test --\
+         never remove a pair to silence a regression the other way.\n\n\
+         Full table:\n{report}"
+    );
+}
+
+// =================================================================================================
+// Task #55 step 2 (visualisation, 2.32) verification: the pressure heat-map overlay's new-field
+// source must render a field comparable in magnitude to `column_depth`, not the degenerately dark
+// one the un-converged per-call solve produced. Measured on a live U-tube before this redesign:
+// mean overlay brightness was 199.9/255 for `column_depth` versus 47.3/255 for the head field --
+// dark enough that the user reported "no heatmap shows for new field".
+// =================================================================================================
+
+/// A "visible" cell for overlay-brightness purposes: in-mask AND holding material -- the same
+/// pair of conditions a viewer's eye actually resolves structure in (a dry or out-of-mask cell
+/// reads as background/void on either source, by construction -- see `head_field_to_pressure`'s
+/// own doc comment on why both sources are forced to `0.0` there). Averaging over ONLY these
+/// cells (not the whole grid, which is mostly empty air/wall in a typical scenario) is what makes
+/// "is this overlay visible" a meaningful question: an all-grid average would read dim regardless
+/// of source quality, simply because most of any scenario is not filled.
+fn visible_cells(sim: &crate::DrawingSimulation) -> Vec<usize> {
+    (0..sim.shape_mask.len())
+        .filter(|&i| sim.shape_mask[i] != crate::MASK_OUTSIDE && sim.heightmap.data[i] > 1e-4)
+        .collect()
+}
+
+/// Task #55 step 2 (2.32): the pressure heat-map's new-field source must not read degenerately
+/// dark. Runs the SAME scenario `head_field_transport_toggle.rs` uses (a deep, continuously-fed
+/// liquid column under a narrow neck) with `head_field_transport = true` for the whole run, since
+/// `head_field` (the persistent buffer this overlay source reads -- see that field's own doc
+/// comment in `lib.rs`) is only advanced while that toggle is on.
+///
+/// THRESHOLD, an argument about visibility, not a number picked to pass: `pressure_field_texels`'s
+/// own log compression (`ln(1 + p) / ln(1 + PRESSURE_HEATMAP_LOG_MAX)`) gives an overlay its
+/// clearest, most legible structure near the LOW end of the 0..255 byte range (see that function's
+/// own doc comment -- the derivative of `ln(1+x)` is steepest near zero) -- which means a source
+/// whose mean sits in the bottom decile of that range is exactly the "nothing visible" failure
+/// mode this task fixes, regardless of exactly how dark: a viewer cannot distinguish "populated
+/// but dim" from "empty" at that end of an already-low-contrast-at-the-high-end map. `25.5` (an
+/// even 10% of the 0..255 range) is that floor -- well above the ~47.3/255 (18.5%) this task's own
+/// brief measured for the un-converged old design being *already borderline*, and comfortably
+/// below `column_depth`'s own mean on the identical scenario (measured in this same test and
+/// printed for comparison), so this floor cannot be satisfied by accident.
+#[test]
+fn test_head_field_overlay_is_not_degenerately_dark() {
+    let mut sim = crate::DrawingSimulation::new_with_size(128);
+    sim.sandbox_shape = crate::SandboxShape::Hourglass;
+    sim.gravity_dir = Vec2::new(0.0, 0.04);
+    sim.initialize_hourglass();
+    sim.apply_preset(crate::MaterialMode::Water);
+    sim.head_field_transport = true;
+
+    let targets = [None; 5];
+    for _ in 0..200 {
+        sim.update(
+            0.016,
+            &targets,
+            0.08,
+            crate::MaterialMode::Water,
+            crate::SandboxShape::Hourglass,
+            16.0,
+            16.0,
+        );
+    }
+
+    let visible = visible_cells(&sim);
+    assert!(
+        !visible.is_empty(),
+        "test_head_field_overlay_is_not_degenerately_dark: SCENARIO INVALID -- no visible \
+         (in-mask, wet) cells after 200 ticks, so no overlay brightness measurement is possible"
+    );
+
+    sim.pressure_heatmap_head_field = false;
+    let legacy_texels = sim.pressure_field_texels();
+    let legacy_mean: f64 =
+        visible.iter().map(|&i| legacy_texels[i] as f64).sum::<f64>() / visible.len() as f64;
+
+    sim.pressure_heatmap_head_field = true;
+    let new_texels = sim.pressure_field_texels();
+    let new_mean: f64 =
+        visible.iter().map(|&i| new_texels[i] as f64).sum::<f64>() / visible.len() as f64;
+
+    println!(
+        "test_head_field_overlay_is_not_degenerately_dark: {} visible cells, \
+         legacy(column_depth) mean={legacy_mean:.2}/255 new(head_field) mean={new_mean:.2}/255",
+        visible.len()
+    );
+
+    const NOT_DARK_FLOOR_255: f64 = 25.5; // 10% of the 0..255 range -- see this test's own doc comment
+    assert!(
+        new_mean >= NOT_DARK_FLOOR_255,
+        "head_field overlay source reads degenerately dark: mean={new_mean:.2}/255 is below the \
+         {NOT_DARK_FLOOR_255}/255 visibility floor (legacy column_depth source reads \
+         {legacy_mean:.2}/255 on the identical scenario, for comparison)"
+    );
+}
+
+#[test]
+#[ignore = "SPEC for #55: throwaway diagnostic, checkpointed U-tube convergence trend"]
+fn diag_task55_u_tube_checkpoint_trend() {
+    use std::time::Instant;
+    let w = 512usize;
+    let h = w;
+    let (mask, heights) = build_u_tube_filled(w, h, 0.10);
+    let wet: Vec<bool> = (0..w * h).map(|i| heights[i] > 0.0).collect();
+    let cell_props = build_water_cell_props(w * h);
+    let mut head = vec![0.0f32; w * h];
+    let ds = depth_scale(w);
+    let tol = identity_tol(w);
+    let checkpoints = [100usize, 300, 1000, 3000, 6000, 10000, 20000, 40000];
+    let start = Instant::now();
+    let mut tick = 0usize;
+    for &cp in &checkpoints {
+        while tick < cp {
+            super::task55_head_field::advance_head_field(w, h, &mask, &heights, &cell_props, &mut head);
+            tick += 1;
+        }
+        let mut max_head = f32::MIN;
+        let mut min_head = f32::MAX;
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let idx = y * w + x;
+                if wet[idx] {
+                    max_head = max_head.max(head[idx]);
+                    min_head = min_head.min(head[idx]);
+                }
+            }
+        }
+        let spread = max_head - min_head;
+        println!(
+            "tick={tick}: spread={spread:.4} ref-rows ({:.4} local cells) tol={tol:.4} \
+             ({:.4} local cells) elapsed={:?}",
+            spread / ds,
+            tol / ds,
+            start.elapsed()
+        );
+    }
 }

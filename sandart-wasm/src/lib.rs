@@ -364,6 +364,7 @@ impl WasmSimulationState {
         let fresh_pressure_field = self.sim.fresh_pressure_field;
         let elliptic_liquid_level = self.sim.elliptic_liquid_level;
         let pressure_heatmap_head_field = self.sim.pressure_heatmap_head_field;
+        let head_field_transport = self.sim.head_field_transport;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -386,6 +387,8 @@ impl WasmSimulationState {
         // Same reasoning again: a UI debug toggle (which pressure heat-map source is selected),
         // not simulation state -- must survive a resolution rebuild like its siblings above.
         sim.pressure_heatmap_head_field = pressure_heatmap_head_field;
+        // Same reasoning again: a UI debug toggle, not simulation state.
+        sim.head_field_transport = head_field_transport;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -745,6 +748,18 @@ impl WasmSimulationState {
     /// it renders on the same colour scale.
     pub fn set_pressure_heatmap_head_field(&mut self, enabled: bool) {
         self.sim.pressure_heatmap_head_field = enabled;
+    }
+
+    /// "Drive transport from the head field" debug toggle (task #55 step 3): forwarded straight
+    /// to the sim, a plain field write (same shape as `set_elliptic_liquid_level` above — no
+    /// reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
+    /// `DrawingSimulation::head_field_transport`'s doc comment in sandart-sim/src/lib.rs for what
+    /// it switches on: `false` (default) is today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`
+    /// driving head, bit-identical; `true` makes LIQUID-ONLY lateral and vertical edges use the
+    /// unified hydraulic head field instead. Granular material and mixed liquid/granular edges
+    /// are unaffected.
+    pub fn set_head_field_transport(&mut self, enabled: bool) {
+        self.sim.head_field_transport = enabled;
     }
 
     /// Block-simulation heat-map debug overlay: purely a render-side toggle (see
