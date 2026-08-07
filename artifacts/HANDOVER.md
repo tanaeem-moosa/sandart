@@ -190,9 +190,23 @@ than solving them:
   partially relaxed overfill field is a valid state, a partially converged equilibrium solve is
   garbage. That is the #68 argument.
 
+It also covers **solids**, which is what makes it a unification rather than a liquid fix: overfill
+is a *stress*, and a stress has a yield criterion where an elevation does not. Mohr-Coulomb becomes
+`redistribute only if Δoverfill > μ·overfill + cohesion`, liquid is the `μ = 0` limit of the same
+model, and the binary free-fall predicate that broke #67 and #69 becomes the continuous question
+"how much load can this cell route to ground". The validation pair to build first is Torricelli
+(liquid discharge *must* depend on depth) against Beverloo (granular *must not* — #59 measured 1.01×
+today): one model, `μ = 0` versus `μ > 0`, reproducing both.
+
+And it makes **siphons** reachable. They cannot work today even with a perfect head field, because a
+full tube is clamped rigid; and a max-propagated field can never represent tension at all
+(`p = head − z ≥ h·ds > 0`), which a real crest above the source surface requires. Signed overfill
+gives tension, and capping the negative side gives cavitation as a natural limit.
+
 Settled by the user: some slosh is accepted; overfill does **not** render (draw `min(h, cap)`); the
 pressure heat-map shows overfill. The head field is kept as an **oracle** — it computes the correct
-equilibrium answer, so it becomes the acceptance test for whatever replaces it as the driver.
+equilibrium answer, so it becomes the acceptance test for whatever replaces it as the driver, for
+the hydrostatic cases at least.
 
 **Cheapest thing that would settle the strategy**, before any of it is built: instrument what
 fraction of wet cells are currently clamped to zero flux by the acceptor test. If it is only the
