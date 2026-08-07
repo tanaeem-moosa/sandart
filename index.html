@@ -821,19 +821,21 @@
                  scale -- it knows about connected material beside a cell too (e.g. under a roof or
                  in the U-tube's basin), so expect it to read brighter than column_depth there.
                  Only costs anything while BOTH this and the heat-map above are checked; visualisation
-                 only, moves no material. "Fast liquid levelling" runs an
-                 extra, liquid-only equalisation pass each tick that lets connected pools of water
-                 find a level much faster than the default solver alone (measured: a two-pocket
-                 test case at 512x512 reaches half its initial level difference in 6 ticks with
-                 this on vs. 29 with it off). It is expensive -- roughly 16x the per-tick cost at
-                 512x512, around 18fps -- sluggish but usable, off by default. "Head-field liquid
+                 only, moves no material. "Head-field liquid
                  transport" (task #55 step 3) makes LIQUID-ONLY edges (both endpoints fully wet)
                  use the static hydraulic head field above as their driving head instead of the
                  local-fill-plus-overburden approximation, so pressure Pascal-transmits correctly
                  through roofed channels/siphons/U-tubes; granular material and mixed edges are
                  untouched. Off by default; moves through the same mass-conserving edge solver as
                  always, so it inherits that solver's own donor/acceptor clamps and velocity bound
-                 rather than moving mass on its own. -->
+                 rather than moving mass on its own. "Pressure-sensitive flow rate" (task #63)
+                 makes water spread and drain at a speed that depends on how much water is pressing
+                 on it: a cell carrying at least one cell's depth of head moves at exactly today's
+                 rate, unchanged, and a thinner surface film moves proportionally slower. It only
+                 ever slows things down, never speeds them up, so no well-pressurised body in the
+                 scene changes at all. Falling water is exempt and keeps falling at full speed, as
+                 is granular material. Independent of "Head-field liquid transport" above -- either
+                 can be used without the other. -->
             <div class="group">
                 <div class="group-title">Debug</div>
                 <label class="checkbox-container">
@@ -872,13 +874,13 @@
                     <button id="btn-step" title="." disabled>Step</button>
                 </div>
                 <label class="checkbox-container">
-                    Fast liquid levelling (slow)
-                    <input type="checkbox" id="check-elliptic-liquid">
+                    Head-field liquid transport
+                    <input type="checkbox" id="check-head-field-transport">
                     <span class="checkmark"></span>
                 </label>
                 <label class="checkbox-container">
-                    Head-field liquid transport
-                    <input type="checkbox" id="check-head-field-transport">
+                    Pressure-sensitive flow rate
+                    <input type="checkbox" id="check-pressure-sensitive-flow">
                     <span class="checkmark"></span>
                 </label>
             </div>

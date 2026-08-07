@@ -848,8 +848,8 @@ function syncSettings() {
     state.set_fresh_pressure_field(document.getElementById('check-fresh-pressure').checked);
     state.set_pressure_heatmap_overlay(document.getElementById('check-pressure-heatmap').checked);
     state.set_pressure_heatmap_head_field(document.getElementById('check-pressure-heatmap-head-field').checked);
-    state.set_elliptic_liquid_level(document.getElementById('check-elliptic-liquid').checked);
     state.set_head_field_transport(document.getElementById('check-head-field-transport').checked);
+    state.set_pressure_sensitive_flow(document.getElementById('check-pressure-sensitive-flow').checked);
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
@@ -1091,7 +1091,12 @@ function setupPanelInput() {
     document.getElementById('check-fresh-pressure').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap-head-field').addEventListener('change', syncSettings);
-    document.getElementById('check-elliptic-liquid').addEventListener('change', syncSettings);
+    // `check-head-field-transport` shipped without this line and was therefore inert on its own:
+    // syncSettings() reads every checkbox, so the toggle only took effect once some OTHER control
+    // was touched and pushed the whole panel. Anything measured by clicking it alone was measuring
+    // the previous state. `check-pressure-sensitive-flow` is listed here for the same reason.
+    document.getElementById('check-head-field-transport').addEventListener('change', syncSettings);
+    document.getElementById('check-pressure-sensitive-flow').addEventListener('change', syncSettings);
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above
     // tick() for why this never touches syncSettings or wasm).
