@@ -285,28 +285,43 @@ pub(crate) fn advance_head_field(
             wet[idx] = true;
             wet_order.push(idx);
 
-            // Exposed top: no cell above at all (the world's own top boundary counts as open
-            // atmosphere), or the cell above is in-mask and empty. A cell capped by a SOLID roof
-            // (`shape_mask[above] == MASK_OUTSIDE`) is excluded on purpose -- it is pressed
-            // against a wall, not free to atmosphere.
-            let exposed_top = if idx < w {
-                true
-            } else {
-                let above = idx - w;
-                is_inside(above) && heights[above] <= HEAD_FIELD_WET_EPS
-            };
-
+            // THERE IS DELIBERATELY NO "EXPOSED TOP" PIN HERE. An earlier version pinned any cell
+            // whose top face was open to air at `own_elev = z + heights * depth_scale`. That pin
+            // was REDUNDANT at equilibrium and ACTIVELY WRONG in transit, and deleting it is what
+            // lets a free surface rise:
+            //
+            //   REDUNDANT, because `own_elev` is already this cell's self-term in the max below,
+            //   and for a column's topmost cell it is the largest `own_elev` in that column --
+            //   i.e. the free-surface elevation. A resting column therefore relaxes to exactly the
+            //   value the pin used to impose, with the pin gone. Every static spec measures an
+            //   equilibrium, which is why all seven passed either way and none of them caught this.
+            //
+            //   WRONG IN TRANSIT, because a Dirichlet pin is WRITTEN rather than maxed, so it also
+            //   PREVENTED a surface cell from ever reading a higher head from the body beneath it.
+            //   For a full cell `own_elev = z + depth_scale`, which is EXACTLY the `z` of the air
+            //   cell directly above (dry cells hold `head = z`, air pressure being zero). So the
+            //   driving head across every water/air interface in the domain was identically
+            //   `z_air - own_elev = 0` -- not small, not resolution-dependent, but structurally
+            //   zero. Material could be pushed UP TO a free surface and never THROUGH it, so no
+            //   siphon could ever climb and no surface could ever rise. Measured on the U-tube at
+            //   w=512: the cell one below the right arm's surface carried the reservoir's head
+            //   (-204, a drive of -236 across the submerged edge), while the surface edge itself
+            //   read exactly 0.00.
+            //
+            // The `p = 0` boundary condition belongs to the ATMOSPHERE, not to the topmost water
+            // cell, and the atmosphere already carries it: a dry cell holds `head = z`, so the
+            // interface now compares the body's head against the air cell's own elevation, which
+            // is the physically meaningful question ("can this body lift water to that height?").
+            //
+            // The FREE-FALL pin below is a different condition and stays. It is about support from
+            // BELOW, not exposure above, and nothing here weakens it.
             let raw_support = effective_support_transitive[idx];
             if raw_support <= 0.0 {
                 // Nothing below at all: zero pressure at THIS cell's own bottom face, regardless
-                // of what sits above it.
+                // of what sits above it. Written, not maxed, so a falling cell cannot inherit head
+                // from a supported column beside it.
                 effective_support[idx] = 0.0;
                 pin_target[idx] = z_elev[idx];
-            } else if exposed_top {
-                // Something genuine below to receive this cell's own weight, and nothing above
-                // adding overburden: `p` at the bottom face is exactly this cell's own weight.
-                effective_support[idx] = 0.0;
-                pin_target[idx] = own_elev[idx];
             } else {
                 effective_support[idx] = raw_support;
                 pin_target[idx] = own_elev[idx]; // unused when raw_support >= 1.0 (pure interior)

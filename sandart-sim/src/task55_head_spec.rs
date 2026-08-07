@@ -1476,6 +1476,174 @@ fn spec_transport_speed_is_bounded(head_field_transport: bool) -> Result<(), Str
     Ok(())
 }
 
+/// A U-tube with its RESERVOIR (left arm) and BASIN (bottom) filled, and its RIGHT ARM left
+/// completely EMPTY. The reservoir's free surface therefore stands well above the basin, and every
+/// basin cell is connected to it, so the basin's head is the reservoir's surface elevation -- much
+/// higher than the elevation of the empty right-arm cells above it.
+///
+/// That is a siphon, and it is the one thing no other dynamic spec in this module tests: FALL,
+/// DRAIN and SPEED-BOUND all measure material moving DOWN or SIDEWAYS. Nothing measures material
+/// moving UP against gravity, which is the whole reason a unified head field is worth having --
+/// `column_depth` structurally cannot produce it, because it only ever sums what is overhead in a
+/// cell's OWN column.
+///
+/// Geometry comes from `U_TUBE_RECTS` (production's own, via `eval_sandbox_shape`) rather than a
+/// hand-built channel, so this measures the shape the app actually ships.
+fn build_u_tube_siphon_primed(w: usize, h: usize) -> (Vec<u8>, Vec<f32>) {
+    let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (inside, _safe) = eval_sandbox_shape(
+                x,
+                y,
+                w,
+                h,
+                crate::SandboxShape::UTubeFlowThrough,
+                0.05,
+                1.0,
+                8,
+                false,
+            );
+            if inside {
+                mask[y * w + x] = crate::MASK_INSIDE;
+            }
+        }
+    }
+    let mut heights = vec![0.0f32; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            if mask[idx] == crate::MASK_OUTSIDE {
+                continue;
+            }
+            let fy = (y as f32 - h as f32 / 2.0) / h as f32;
+            let fx = (x as f32 - w as f32 / 2.0) / w as f32;
+            // Basin (everything at or below the basin's own top edge), plus the reservoir arm
+            // above it. The right arm spans `fy` in `[0.10, 0.36]` and is deliberately untouched.
+            let in_basin = fy >= U_TUBE_BASIN_TOP_FRAC;
+            let in_reservoir =
+                fx <= U_TUBE_RESERVOIR_RIGHT_FRAC && fy >= U_TUBE_RESERVOIR_FILL_TOP_FRAC;
+            if in_basin || in_reservoir {
+                heights[idx] = 1.0;
+            }
+        }
+    }
+    (mask, heights)
+}
+
+/// `U_TUBE_RECTS[1]`'s own top edge -- where the bottom basin begins.
+const U_TUBE_BASIN_TOP_FRAC: f32 = 0.36;
+/// `U_TUBE_RECTS[0]`'s own right edge -- the reservoir arm's inner wall.
+const U_TUBE_RESERVOIR_RIGHT_FRAC: f32 = -0.24;
+/// How high the reservoir is prefilled. Well above the basin so there is a large driving head.
+const U_TUBE_RESERVOIR_FILL_TOP_FRAC: f32 = -0.10;
+/// `U_TUBE_RECTS[2]`'s own x span -- the right (initially empty) arm.
+const U_TUBE_RIGHT_ARM_X: (f32, f32) = (-0.04, 0.02);
+
+/// DIAGNOSTIC, not a check (yet): how far material climbs the U-tube's initially-empty right arm,
+/// with head-field transport off and on. Deliberately reports numbers rather than asserting a
+/// threshold -- the tolerance for a "rise" spec should be chosen from a measurement, not guessed
+/// ahead of one. Run with `--ignored --nocapture`.
+#[test]
+#[ignore = "SPEC for #55: diagnostic -- prints U-tube right-arm rise, not a check"]
+fn diag_task55_u_tube_rise_in_far_arm() {
+    println!("\nU-tube right-arm rise (material climbing AGAINST gravity out of the basin):");
+    for &w in &DYN_SWEEP_W {
+        let h = w;
+        for &transport in &[false, true] {
+            let (mask, heights) = build_u_tube_siphon_primed(w, h);
+            let cell_props = build_water_cell_props(w * h);
+            let mut sim = DynSim::new(w, h, mask.clone(), heights.clone(), cell_props);
+            let basin_top_row = ((U_TUBE_BASIN_TOP_FRAC + 0.5) * h as f32).round() as usize;
+            let (x0, x1) = U_TUBE_RIGHT_ARM_X;
+            let arm_x0 = ((x0 + 0.5) * w as f32).round() as usize;
+            let arm_x1 = ((x1 + 0.5) * w as f32).round() as usize;
+
+            let in_mask = mask.iter().filter(|&&m| m != crate::MASK_OUTSIDE).count();
+            let initial_mass: f32 = heights.iter().sum();
+            let arm_in_mask = (0..basin_top_row)
+                .flat_map(|y| (arm_x0..arm_x1.min(w)).map(move |x| y * w + x))
+                .filter(|&idx| mask[idx] != crate::MASK_OUTSIDE)
+                .count();
+            println!(
+                "    [setup] in_mask={in_mask} initial_mass={initial_mass:.1} \
+                 right_arm_in_mask_cells_above_basin={arm_in_mask}"
+            );
+
+            // Read the field DIRECTLY on the initial scenario, with no solver and no scheduler
+            // involved. This separates "the head field is wrong at the basin/right-arm interface"
+            // from "the edge carrying that head is never evaluated".
+            {
+                let cp = build_water_cell_props(w * h);
+                let mut head = vec![0.0f32; w * h];
+                super::task55_head_field::advance_head_field(w, h, &mask, &heights, &cp, &mut head);
+                let probe_x = (arm_x0 + arm_x1.min(w)) / 2;
+                // Locate the ACTUAL water surface in this column rather than assuming a row: find
+                // the topmost cell that holds material, and probe it against the empty cell above.
+                let surface_row = (0..h).find(|&y| heights[y * w + probe_x] > 1e-4);
+                let ds = depth_scale(w);
+                match surface_row {
+                    Some(sy) if sy > 0 => {
+                        let wet_idx = sy * w + probe_x;
+                        let dry_idx = (sy - 1) * w + probe_x;
+                        // What the reservoir's own free surface stands at, for comparison: the
+                        // highest head anywhere in the field.
+                        let peak = head.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                        if sy + 1 < h {
+                            println!(
+                                "    [field] x={probe_x}: head(one BELOW surface, row {})={:.2} \
+                                 -> drive across the SUBMERGED edge (surface - below) = {:.2}",
+                                sy + 1,
+                                head[(sy + 1) * w + probe_x],
+                                head[sy * w + probe_x] - head[(sy + 1) * w + probe_x]
+                            );
+                        }
+                        println!(
+                            "    [field] x={probe_x}: water surface at row {sy}. \
+                             head(wet {sy})={:.2}  head(dry {})={:.2}  \
+                             driving(above-below)={:.2} ref-rows ({:.1} cells)  \
+                             peak_head_anywhere={peak:.2}  \
+                             [NEGATIVE driving = solver should push UP]",
+                            head[wet_idx],
+                            sy - 1,
+                            head[dry_idx],
+                            head[dry_idx] - head[wet_idx],
+                            (head[dry_idx] - head[wet_idx]) / ds
+                        );
+                    }
+                    _ => println!("    [field] x={probe_x}: NO material in this column at all"),
+                }
+            }
+
+            let mut total_flow = 0.0f64;
+            for _ in 0..400 {
+                total_flow += sim.tick(Vec2::new(0.0, DYN_GRAVITY), transport) as f64;
+            }
+
+            // Topmost row in the right arm's x span that holds material, ABOVE the basin.
+            let mut highest: Option<usize> = None;
+            let mut mass_above_basin = 0.0f32;
+            for y in 0..basin_top_row {
+                for x in arm_x0..arm_x1.min(w) {
+                    let idx = y * w + x;
+                    if mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] > 1e-4 {
+                        mass_above_basin += sim.hm.data[idx];
+                        if highest.is_none() {
+                            highest = Some(y);
+                        }
+                    }
+                }
+            }
+            let rise_cells = highest.map(|y| basin_top_row - y).unwrap_or(0);
+            println!(
+                "  w={w} transport={transport}: rise={rise_cells} cells above basin \
+                 (basin_top_row={basin_top_row}, arm_x=[{arm_x0},{arm_x1})) \
+                 mass_above_basin={mass_above_basin:.3} total_flow={total_flow:.2}"
+            );
+        }
+    }
+}
+
 /// UNPARKED. This scoreboard was `#[ignore]`d as BLOCKED: `compute_head_field` could not converge
 /// on the draining-vessel scenario at w=512 (8256 sweeps, residual 0.0436 against a 0.001
 /// tolerance) and asserted on convergence rather than returning a wrong field, so enabling
