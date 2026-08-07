@@ -1,0 +1,101 @@
+Make liquid level fast with a multigrid elliptic solve, behind a debug toggle
+
+Task #55. Liquid did not level fast enough: a standing arch drained instead of
+collapsing, and enclosed pockets in a cave took ~92 ticks to halve their level
+difference. Confirmed physics rather than scheduling — ticks-to-halve was nearly
+identical under the adaptive scheduler and under perfect simulation.
+
+## The diagnosis
+
+`ticks_to_halve` scaled almost exactly LINEARLY with grid width: 522 ticks at
+w=512, 65 normalised by w/64. Linear scaling in domain width is the signature of
+a CELL-RATE-LIMITED process — levelling speed was bounded by how fast
+information crossed the domain at one cell per tick, not by the magnitude of the
+driving potential.
+
+That ruled out the whole class of fix aimed at the potential. A free-surface
+driving head (`multiplicative_lateral_gate`, previous commits) was built, and at
+w=512 it was 5% slower on arch collapse, 10% slower on pockets, bit-identical on
+the draining lake, and it destroyed the angle of repose (a 19.29 degree dry sand
+slope flattened to 0.41, with the non-vacuity anchor reading DrySand and Water
+both at exactly 0.00). It has no yield criterion, and a granular pile at its
+repose angle is a permanent surface gradient that must produce zero flow. Left
+in place, gated off, as the record of a measured dead end.
+
+## What ships here
+
+`elliptic_liquid_level_pass`, a two-level multigrid relaxation run once per tick
+before the phase loop, reading the tick's frozen `heightmap.data` and mutating
+`temp_heights` so the ordinary solver starts from an already-levelled state.
+
+The coarse level is the whole idea: the equilibrium of this diffusion problem on
+a connected component is provably a single flat `eta` level, so a correction
+toward it propagates globally BY CONSTRUCTION rather than by iteration count. It
+is computed exactly by an O(n log n) breakpoint sweep, with connectivity from
+union-find over the same edge list the fine smoother already builds — so two
+wells joined through a submerged basin are treated as one component by
+construction, not by special-casing. The correction is applied per-node as a
+damped convex interpolation toward each cell's individually capacity-clamped
+target, which is mass- and capacity-exact algebraically. The fine Gauss-Seidel
+post-smoother still routes every edge through `clamp_edge_feasible`, and dropped
+from 48 iterations to 8.
+
+`eta[i] = h_ref[i] + column_depth[i] - row(i) * depth_scale`. The row subtraction
+makes heads comparable ACROSS rows rather than only within one, which is what
+lets a solve connect two wells through a basin at a different row than either;
+`test_elliptic_eta_is_row_independent` guards it.
+
+LIQUID-ONLY, by domain restriction rather than by a yield criterion — nodes are
+interior in-mask cells with liquidity >= 0.999. This is what protects granular
+material, and it is verified rather than assumed: with the pass forced on,
+`test_dry_sand_has_angle_of_repose` still passes bit-identically, 19.29 degrees
+-> 5.07, non-vacuity anchor DrySand 3.73 against Water 0.00.
+
+## Measured
+
+Propagation limit removed — the normalised figure now FALLS as the domain grows,
+which flat smoothing never did:
+
+    w=128  normalised ticks_to_halve:  64.0 off -> 21.5 on
+    w=512  normalised ticks_to_halve: 65.25 off -> 9.875 on
+
+Pocket equalisation at w=512: 29 ticks_to_halve off -> 6 on.
+Arch collapse at w=512: 522 -> 464, with the best peak and ~4x less unsupported
+material remaining at tick 600 than baseline.
+
+Cost: 16.4x ms/tick at w=512 (3.4367 -> 56.27), down from 45x for the flat
+48-iteration version. That is roughly 18fps — sluggish but usable, which is why
+this ships as a default-off toggle rather than as the default. An earlier
+scoping pass that skipped liquid-free work is included and is exact, but did not
+move this number: the cost is the solve itself, not setup overhead.
+
+## Two bugs found on the way, worth recording
+
+1. `mult_lateral_conveyance`'s output is unbounded (~h^1.5) and was written to
+   feed `flux_edge_candidate`'s momentum pipeline, not to be a bare multiplier on
+   a direct mass transfer. Used raw, the residual went 0.24 -> 10.9 -> stuck at
+   12.8. Fixed with a saturating weight so a per-edge step can never exceed a
+   damped step toward equalising that edge.
+   `test_elliptic_residual_falls_monotonically` guards it.
+2. A pass that mutates `temp_heights` is silently reverted next tick unless it
+   wakes the blocks it touched — the tick-end copy-back only writes blocks
+   already marked `modified`. Symptom was `ticks_to_halve=None` under the
+   adaptive scheduler against 12 under perfect simulation on the same scenario.
+
+## The toggle
+
+"Fast liquid levelling (slow)" in the Debug group, default OFF, plumbed exactly
+like `fresh_pressure_field`: a plain field on `DrawingSimulation`, a plain field
+write in the wasm binding with no reset, safe to re-apply on every
+`syncSettings()` (which pushes the whole panel on every control change), and
+carried through `set_grid_size`'s rebuild so it survives a resolution change.
+
+With it off the simulation is bit-identical to before.
+
+Suite: 96 passed / 1 failed / 36 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`. Integration tests,
+`sandart-render`, `cargo check -p sandart-wasm --target wasm32-unknown-unknown`,
+and a full `wasm-pack build` of the deployed artifact all pass.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

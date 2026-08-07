@@ -1,0 +1,70 @@
+WIP: head-driven transport, blocked on field convergence
+
+NOT FOR PUSH. Local checkpoint. The toggle in this commit PANICS when enabled —
+see below. Default off, and with it off the simulation is bit-identical
+(`head_field_transport_left_untouched_matches_explicitly_disabled` passes).
+
+## What this contains
+
+Transport driven by the hydraulic head field, as a third branch inside the
+existing flux-edge solver's driving-head expression rather than a new
+mass-moving pass. That structure is deliberate: the refuted
+`elliptic_liquid_level_pass` made the fast global operation move MASS, and
+reusing the flux solver inherits mass conservation by construction, the
+donor/acceptor clamps, and the per-edge momentum damping that bounds velocity,
+instead of reinventing all three.
+
+Plus three dynamic specs encoding the defects the user photographed: falling
+water must not drift sideways, a draining vessel's surface must dip toward its
+outlet, and per-tick displacement must be bounded.
+
+## THE BLOCKER
+
+`compute_head_field` does not converge on any realistic free surface.
+
+    w=512, draining vessel, 47315 wet cells: 8256 sweeps, residual 0.0436 vs tol 0.001
+    w=128, sim scenario,     2919 wet cells: 2112 sweeps, residual 0.1015 vs tol 0.004
+
+It asserts on convergence rather than returning a wrong field, so it panics. That
+assert is correct and must stay: an unconverged head field drives mass down a
+wrong gradient, which is the exact class of defect this task exists to remove.
+
+This is NOT a w=512 scaling problem — 2919 wet cells at w=128 is a small
+scenario. The variable is not size.
+
+## Why, and it is structural
+
+`compute_head_field`'s fast path is a union-find "coarse jump" that resolves a
+connected component in a single sweep, but only when every Dirichlet pin in that
+component agrees on one value. That is precisely the case whose answer is trivial
+— a body at rest under one flat surface.
+
+A vessel that is actively draining has a surface that DIPS toward its outlet,
+which is the physically correct behaviour this whole task is trying to produce.
+Its pins therefore disagree by construction, the shortcut never fires, and it
+falls back to plain SOR, which needs O(N^2) sweeps.
+
+So the accelerator only accelerates the case that does not need accelerating, and
+every case we actually care about is the slow one. The seven static specs all
+pass because each is either a single-valued-boundary body or a uniformly pinned
+falling slab — the shortcut fires in all of them. They were, without anyone
+noticing, a sample of exactly the easy case.
+
+## What it needs
+
+A real multigrid V-cycle — restrict/prolong over the wet graph — not a one-shot
+component jump. The union-find connectivity is still correct and reusable as its
+coarsest level.
+
+`test_task55_dynamic_transport_spec_scoreboard` is #[ignore]d with the numbers and
+the diagnosis in its doc comment, so the blocker stays discoverable and re-runs
+the moment it is lifted, rather than being deleted and rediscovered later. The
+lib suite is back to its known-good shape: 101 passed / 1 failed / 45 ignored,
+the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`.
+
+Do NOT unblock this by widening the convergence tolerance, lowering the sweep cap,
+or letting `compute_head_field` return an unconverged field silently.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

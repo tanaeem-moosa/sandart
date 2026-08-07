@@ -1,0 +1,19 @@
+diag_task55_elliptic_propagation: test_dry_sand_has_angle_of_repose with elliptic_head_gate=ON: PASS
+diag_task55_elliptic_propagation: === ARCH ===
+diag_task55_elliptic_propagation: ARCH elliptic=OFF mult=OFF  adaptive     ticks_to_halve=Some(71) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=OFF mult=OFF  perfect_sim  ticks_to_halve=Some(65) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=OFF mult=ON   adaptive     ticks_to_halve=Some(73) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=OFF mult=ON   perfect_sim  ticks_to_halve=Some(65) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=ON  mult=OFF  adaptive     ticks_to_halve=Some(44) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=ON  mult=OFF  perfect_sim  ticks_to_halve=Some(47) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=ON  mult=ON   adaptive     ticks_to_halve=Some(40) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=ON  mult=ON   perfect_sim  ticks_to_halve=Some(38) (initial=144.0000)
+diag_task55_elliptic_propagation: === POCKETS ===
+diag_task55_elliptic_propagation: POCKETS elliptic=OFF mult=OFF  adaptive     ticks_to_halve=Some(45) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=OFF mult=OFF  perfect_sim  ticks_to_halve=Some(45) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=OFF mult=ON   adaptive     ticks_to_halve=Some(34) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=OFF mult=ON   perfect_sim  ticks_to_halve=Some(34) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=ON  mult=OFF  adaptive     ticks_to_halve=Some(14) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=ON  mult=OFF  perfect_sim  ticks_to_halve=Some(14) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=ON  mult=ON   adaptive     ticks_to_halve=Some(14) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=ON  mult=ON   perfect_sim  ticks_to_halve=Some(14) (initial=5.0000)

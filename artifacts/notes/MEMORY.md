@@ -1,0 +1,8 @@
+- [Delegate to Sonnet by default](delegate-to-sonnet-by-default.md) — hand implementation to Sonnet subagents; keep verification in the main thread
+- [User tests via the GitHub Pages deployment](user-tests-via-github-pages-deployment.md) — nothing is verifiable until pushed to main; check origin before assuming local main is current
+- [No working browser driver in this environment](no-working-browser-driver-in-this-environment.md) — never claim an agent screenshotted the app; flatpak Chrome lies about it
+- [User reports mechanisms, not symptoms](user-reports-mechanisms-not-symptoms.md) — their wording is literal; when it disagrees with a green test, suspect the test
+- [Ask what visual quality words mean](ask-what-visual-quality-words-mean.md) — "grainy"/"randomness" cost three wrong implementations; name the quantity before building
+- [Get a picture before building metrics](get-a-picture-before-building-metrics.md) — one photo killed three hypotheses a careful diagnostic had missed
+- [Be concise; user will ask for more](be-concise-user-will-ask-for-more.md) — detail goes in the ticket, not the reply
+- [A still photo can't prove a screen artifact](still-photo-cannot-prove-screen-artifact.md) — "does it move?" beats anything readable in a crop

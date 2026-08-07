@@ -1,0 +1,117 @@
+Add task #55 levelling diagnostics and a gated multiplicative lateral head
+
+Checkpoint commit. The gate is OFF by default and the suite is bit-identical
+with it off, so this changes no shipped behaviour. It is committed to protect
+the measuring instrument, which everything after this gets judged against.
+
+## The diagnostics
+
+`diag_task55_arch_collapse_rate`, `diag_task55_pocket_equalisation`,
+`diag_task55_draining_lake_flatness` measure how fast material levels, each as a
+per-tick time series with a `ticks_to_halve`, run under both the adaptive
+scheduler and perfect simulation.
+
+They establish that task #47's scheduling fix explains none of the slow
+levelling. Ticks-to-halve, adaptive vs perfect: arch 71 vs 65, pockets 92 vs 92,
+draining lake peak spread 15.0 vs 14.0. These are physics-level defects.
+
+The arch metric is deliberately position-independent — material still suspended
+at least a fixed physical height above the floor-connected pile's own top,
+wherever it has moved to. A first version measured "did material leave its
+starting rows" and reported a meaningless 1 tick, because a fully unsupported
+slab free-falls intact.
+
+`diag_task55_pocket_equalisation` uses the procedural cave shape and a genuine
+communicating-vessels topology: two wells sharing a submerged basin, filled to
+different levels.
+
+## The gated multiplicative head
+
+`multiplicative_lateral_gate` replaces the additive driving head
+
+    driving = (h_a - h_b) + k * LATERAL_PRESSURE_SCALE * (depth_a - depth_b)
+
+with a free-surface form, `flux ~ conveyance(depth) * grad(eta)`. The additive
+form loses all lateral driving exactly where overburden correctly goes to zero,
+which is the thin moving surface layer -- the one place levelling must happen.
+
+`eta` uses raw height (geometry: how tall is the pile). `conveyance` uses
+`janssen_effective_depth` and the earth-pressure coefficient K (how much of that
+depth carries lateral flow), and folds in bare `h` so a shallow puddle with zero
+overburden still has nonzero conveyance -- without that, every surface cell of
+every pile would have zero conveyance and all surface levelling would die
+silently. `column_depth` is read once per endpoint, into conveyance only, so the
+Janssen saturation is not applied twice.
+
+Conveyance exponent 1.5, the broad-crested weir form, chosen over Manning's 5/3
+because this solver has no hydraulic-radius or wetted-perimeter geometry to
+justify Manning's extra 1/6 power. Unswept first choice, as is
+`MULT_LATERAL_SCALE = 1.0`.
+
+## The unit bug, found and fixed
+
+`eta = h + column_depth` mixed two unit systems. `column_depth` is pre-scaled by
+`depth_scale = REFERENCE_GRID_HEIGHT / w` to be resolution-independent; `h` is a
+fraction of one local cell's capacity and is never scaled. Identical physical
+geometry measured at two widths:
+
+    w= 64  depth_scale=8.0  column_depth=40.0  eta=40.4  h is 0.99% of eta
+    w=128  depth_scale=4.0  column_depth=20.0  eta=20.4  h is 1.96% of eta
+
+`eta` differed 2x by grid width alone, and the free-surface term contributed
+under 2%, so `grad(eta)` was measuring a nearly pure `column_depth` gradient
+rather than a surface gradient. Invisible at production w=512 where
+`depth_scale == 1`; every task-55 diagnostic runs at 64 or 128.
+
+Fixed by lifting `h` into reference-row units (`h * depth_scale`) in both `eta`
+and `conveyance`. That direction and not the other: `column_depth / depth_scale`
+is a local row count that scales linearly with `w`, so conveyance would scale as
+`w^1.5` and `MULT_LATERAL_SCALE` would need re-deriving per resolution. Capacity
+needs no correction -- it depends on wetness, never on `w`, so it cannot
+introduce a resolution-dependent error.
+
+`diag_task55_eta_depth_scale_consistency` proves the result: the driving term now
+deviates 0.00% across w = 64/128/256/512 on fixed physical geometry, against up
+to 2.12% before.
+
+`test_mult_lateral_flat_surface_same_eta_different_depth_no_flux` had encoded the
+old formula's flat-eta condition in its construction; under the corrected formula
+that construction is no longer flat. Its construction was updated to solve the
+corrected condition. The assertion -- zero lateral drift across a flat surface --
+is unchanged.
+
+## Where this leaves the approach: unproven, not validated
+
+At production w=512 the multiplicative form gives 17-24% fewer voids on
+`diag_mult_lateral_void_count_gate_on_vs_off` (19290/16701/30.39M against
+additive's 23202/20791/37.78M). This is the first measurement at the resolution
+where the unit bug was always a no-op.
+
+At w=64/128 it is mixed: pocket equalisation improves 92 -> 10 ticks_to_halve,
+but arch collapse slips 71 -> 73 and the w=64 void count is clearly worse.
+
+The three levelling diagnostics hardcode hand-built pixel coordinates and have
+never run at w=512. So there is production-resolution evidence for the void
+proxy only, and low-resolution evidence for levelling, which is the actual
+target. Closing that gap needs the diagnostics made resolution-parametric, with
+care: the arch metric's "3 rows" is a fixed cell count meaning a different
+physical height at each width, the procedural cave's topology is not guaranteed
+to survive a resolution change, and `ticks_to_halve` counts ticks.
+
+The known weakness in the form itself: `conveyance ~ depth^1.5` suppresses
+shallow material super-linearly (depth 0.1 gives a 3x penalty against linear,
+0.01 a 10x penalty), and thin films dominate the settling endgame. Measured
+mean conveyance falls from 158 in a deep draining pool to 3.8-9.9 in the endgame
+window. It gets slow, not dead. Note also that endgame void counts are noisy for
+both forms -- additive sits at a local trough exactly at tick 160 while
+multiplicative reaches comparable values by 164 -- so single-tick void
+comparisons are unreliable and the trajectory diagnostics should be preferred.
+
+This is the potential half of #55. The elliptic head solve, which supplies
+propagation, is not built. Neither half is expected to be sufficient alone.
+
+Suite: 94 passed / 1 failed / 32 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

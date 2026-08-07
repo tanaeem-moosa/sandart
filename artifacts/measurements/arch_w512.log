@@ -1,0 +1,107 @@
+warning: function `wave_amplitude_in_band` is never used
+    --> sandart-sim/src/physics.rs:8460:8
+     |
+8460 |     fn wave_amplitude_in_band(sim: &TestSim, w: usize, h: usize, rest: f32, x0: usize, x1: usize) -> f32 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandart-sim` (lib test) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.16s
+     Running unittests src/lib.rs (target/release/deps/sandart_sim-959f5a4094b1a3f3)
+
+running 1 test
+diag_task55_composition_arch_w512: w=512 h=800 block_size=16 budget_n=256 run_ticks=600 gap=[112,400) arch_rows=[288,320) gap_buffer=24
+diag_task55_composition_arch_w512: --- fresh_pressure=OFF / elliptic=OFF --- initial_unsupported=9216.0000
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=   0 unsupported_span= 9216.0000 fraction_of_initial=1.0000
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=   2 unsupported_span= 9414.9560 fraction_of_initial=1.0216
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=   3 unsupported_span= 9514.7026 fraction_of_initial=1.0324
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=   5 unsupported_span= 9958.1375 fraction_of_initial=1.0805
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=   6 unsupported_span= 9929.1836 fraction_of_initial=1.0774
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=   8 unsupported_span=10109.7742 fraction_of_initial=1.0970
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=   9 unsupported_span=10373.9696 fraction_of_initial=1.1256
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=  11 unsupported_span=10889.1686 fraction_of_initial=1.1816
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=  12 unsupported_span=10872.1991 fraction_of_initial=1.1797
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=  15 unsupported_span=10744.3002 fraction_of_initial=1.1658
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=  23 unsupported_span=11729.9933 fraction_of_initial=1.2728
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=  30 unsupported_span=12205.4506 fraction_of_initial=1.3244
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=  45 unsupported_span=12646.2594 fraction_of_initial=1.3722
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick=  75 unsupported_span=12676.6689 fraction_of_initial=1.3755
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick= 113 unsupported_span=13875.7008 fraction_of_initial=1.5056
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick= 150 unsupported_span=14017.2438 fraction_of_initial=1.5210
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick= 225 unsupported_span=14436.1826 fraction_of_initial=1.5664
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick= 300 unsupported_span=14358.8745 fraction_of_initial=1.5580
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick= 450 unsupported_span=10954.5771 fraction_of_initial=1.1886
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF tick= 600 unsupported_span= 3273.2222 fraction_of_initial=0.3552
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=OFF ticks_to_halve=Some(522) run_ticks_budget=600 (initial=9216.0000, target<=4608.0000)
+diag_task55_composition_arch_w512: --- fresh_pressure=OFF / elliptic=ON --- initial_unsupported=9216.0000
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=   0 unsupported_span= 9216.0000 fraction_of_initial=1.0000
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=   2 unsupported_span= 9419.0878 fraction_of_initial=1.0220
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=   3 unsupported_span= 9752.2340 fraction_of_initial=1.0582
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=   5 unsupported_span=10419.2642 fraction_of_initial=1.1306
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=   6 unsupported_span=10530.7679 fraction_of_initial=1.1427
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=   8 unsupported_span=10944.0414 fraction_of_initial=1.1875
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=   9 unsupported_span=11188.3279 fraction_of_initial=1.2140
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=  11 unsupported_span=11319.6402 fraction_of_initial=1.2283
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=  12 unsupported_span=11442.8928 fraction_of_initial=1.2416
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=  15 unsupported_span=11571.8237 fraction_of_initial=1.2556
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=  23 unsupported_span=12267.1874 fraction_of_initial=1.3311
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=  30 unsupported_span=12455.7643 fraction_of_initial=1.3515
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=  45 unsupported_span=13163.9268 fraction_of_initial=1.4284
+test physics::tests::diag_task55_composition_arch_w512 has been running for over 60 seconds
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick=  75 unsupported_span=13916.6483 fraction_of_initial=1.5101
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick= 113 unsupported_span=14478.0436 fraction_of_initial=1.5710
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick= 150 unsupported_span=14701.1293 fraction_of_initial=1.5952
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick= 225 unsupported_span=13365.1748 fraction_of_initial=1.4502
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick= 300 unsupported_span=11456.4647 fraction_of_initial=1.2431
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick= 450 unsupported_span= 6744.6916 fraction_of_initial=0.7318
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  tick= 600 unsupported_span= 1154.4869 fraction_of_initial=0.1253
+diag_task55_composition_arch_w512: fresh_pressure=OFF elliptic=ON  ticks_to_halve=Some(466) run_ticks_budget=600 (initial=9216.0000, target<=4608.0000)
+diag_task55_composition_arch_w512: --- fresh_pressure=ON / elliptic=OFF --- initial_unsupported=9216.0000
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=   0 unsupported_span= 9216.0000 fraction_of_initial=1.0000
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=   2 unsupported_span= 9153.8894 fraction_of_initial=0.9933
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=   3 unsupported_span= 9380.5891 fraction_of_initial=1.0179
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=   5 unsupported_span= 9495.8648 fraction_of_initial=1.0304
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=   6 unsupported_span= 9389.2223 fraction_of_initial=1.0188
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=   8 unsupported_span= 9216.7616 fraction_of_initial=1.0001
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=   9 unsupported_span= 9385.4843 fraction_of_initial=1.0184
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=  11 unsupported_span= 9451.0450 fraction_of_initial=1.0255
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=  12 unsupported_span= 9108.4589 fraction_of_initial=0.9883
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=  15 unsupported_span= 9893.4250 fraction_of_initial=1.0735
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=  23 unsupported_span=10049.1590 fraction_of_initial=1.0904
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=  30 unsupported_span=10900.1100 fraction_of_initial=1.1827
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=  45 unsupported_span=12243.7433 fraction_of_initial=1.3285
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick=  75 unsupported_span=12800.4171 fraction_of_initial=1.3889
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick= 113 unsupported_span=13888.0560 fraction_of_initial=1.5070
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick= 150 unsupported_span=14499.9543 fraction_of_initial=1.5733
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick= 225 unsupported_span=15121.9156 fraction_of_initial=1.6408
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick= 300 unsupported_span=15228.0795 fraction_of_initial=1.6524
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick= 450 unsupported_span=12608.6531 fraction_of_initial=1.3681
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF tick= 600 unsupported_span= 3231.8058 fraction_of_initial=0.3507
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=OFF ticks_to_halve=Some(545) run_ticks_budget=600 (initial=9216.0000, target<=4608.0000)
+diag_task55_composition_arch_w512: --- fresh_pressure=ON / elliptic=ON --- initial_unsupported=9216.0000
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=   0 unsupported_span= 9216.0000 fraction_of_initial=1.0000
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=   2 unsupported_span= 9157.3131 fraction_of_initial=0.9936
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=   3 unsupported_span= 9418.7912 fraction_of_initial=1.0220
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=   5 unsupported_span= 9821.2738 fraction_of_initial=1.0657
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=   6 unsupported_span=10120.6609 fraction_of_initial=1.0982
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=   8 unsupported_span=10304.1986 fraction_of_initial=1.1181
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=   9 unsupported_span=10104.1325 fraction_of_initial=1.0964
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=  11 unsupported_span=10487.8381 fraction_of_initial=1.1380
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=  12 unsupported_span=11037.3581 fraction_of_initial=1.1976
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=  15 unsupported_span=11227.9643 fraction_of_initial=1.2183
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=  23 unsupported_span=11477.8173 fraction_of_initial=1.2454
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=  30 unsupported_span=11755.3521 fraction_of_initial=1.2755
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=  45 unsupported_span=12544.0997 fraction_of_initial=1.3611
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick=  75 unsupported_span=13275.0716 fraction_of_initial=1.4404
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick= 113 unsupported_span=13476.1062 fraction_of_initial=1.4623
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick= 150 unsupported_span=13479.8356 fraction_of_initial=1.4627
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick= 225 unsupported_span=13716.3358 fraction_of_initial=1.4883
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick= 300 unsupported_span=11837.9111 fraction_of_initial=1.2845
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick= 450 unsupported_span= 6658.6608 fraction_of_initial=0.7225
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  tick= 600 unsupported_span=  776.3301 fraction_of_initial=0.0842
+diag_task55_composition_arch_w512: fresh_pressure=ON elliptic=ON  ticks_to_halve=Some(464) run_ticks_budget=600 (initial=9216.0000, target<=4608.0000)
+test physics::tests::diag_task55_composition_arch_w512 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 566.26s
+

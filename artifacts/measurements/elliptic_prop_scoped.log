@@ -1,0 +1,41 @@
+warning: function `wave_amplitude_in_band` is never used
+    --> sandart-sim/src/physics.rs:8460:8
+     |
+8460 |     fn wave_amplitude_in_band(sim: &TestSim, w: usize, h: usize, rest: f32, x0: usize, x1: usize) -> f32 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandart-sim` (lib test) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running unittests src/lib.rs (target/release/deps/sandart_sim-959f5a4094b1a3f3)
+
+running 1 test
+test_dry_sand_has_angle_of_repose CASE 1 (steep): initial=0.3500 (19.29 deg) final=0.0886 (5.07 deg) total_flow=412.70
+test_dry_sand_has_angle_of_repose NON-VACUITY ANCHOR @450 ticks: DrySand=0.0652 (3.73 deg) Water=-0.0000 (-0.00 deg)
+test_dry_sand_has_angle_of_repose CASE 3 (at angle): initial=0.0886 final=0.0760 (4.34 deg)
+test_dry_sand_has_angle_of_repose CASE 2 (shallow): initial=0.0532 final=0.0534 (3.06 deg) s_measured=0.0886 (5.07 deg)
+test_dry_sand_has_angle_of_repose CASE 4 (deposit on peak): mass_before_deposit=1036.079 mass_after_deposit=1042.079 mass_after_resettle=1042.079 peak_after_deposit=2.9241 peak_after_resettle=1.2334 h_peak=1.2334 h_mid_flank(dx=3)=0.9860 flank_slope=0.0972 (5.55 deg) total_flow=74.00
+diag_task55_elliptic_propagation: test_dry_sand_has_angle_of_repose with elliptic_head_gate=ON: PASS
+diag_task55_elliptic_propagation: === ARCH ===
+diag_task55_elliptic_propagation: ARCH elliptic=OFF mult=OFF  adaptive     ticks_to_halve=Some(71) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=OFF mult=OFF  perfect_sim  ticks_to_halve=Some(65) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=OFF mult=ON   adaptive     ticks_to_halve=Some(73) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=OFF mult=ON   perfect_sim  ticks_to_halve=Some(65) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=ON  mult=OFF  adaptive     ticks_to_halve=Some(44) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=ON  mult=OFF  perfect_sim  ticks_to_halve=Some(47) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=ON  mult=ON   adaptive     ticks_to_halve=Some(40) (initial=144.0000)
+diag_task55_elliptic_propagation: ARCH elliptic=ON  mult=ON   perfect_sim  ticks_to_halve=Some(38) (initial=144.0000)
+diag_task55_elliptic_propagation: === POCKETS ===
+diag_task55_elliptic_propagation: POCKETS elliptic=OFF mult=OFF  adaptive     ticks_to_halve=Some(45) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=OFF mult=OFF  perfect_sim  ticks_to_halve=Some(45) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=OFF mult=ON   adaptive     ticks_to_halve=Some(34) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=OFF mult=ON   perfect_sim  ticks_to_halve=Some(34) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=ON  mult=OFF  adaptive     ticks_to_halve=Some(14) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=ON  mult=OFF  perfect_sim  ticks_to_halve=Some(14) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=ON  mult=ON   adaptive     ticks_to_halve=Some(14) (initial=5.0000)
+diag_task55_elliptic_propagation: POCKETS elliptic=ON  mult=ON   perfect_sim  ticks_to_halve=Some(14) (initial=5.0000)
+test physics::tests::diag_task55_elliptic_propagation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 132 filtered out; finished in 12.46s
+

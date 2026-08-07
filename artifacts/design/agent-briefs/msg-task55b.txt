@@ -1,0 +1,122 @@
+Add the elliptic propagation solve and resolution-parametric levelling diagnostics
+
+Second checkpoint for task #55. Both new gates are OFF by default and the suite
+is bit-identical with them off, so nothing shipped changes. Committed to protect
+the work and the measuring instruments.
+
+## The finding that reframes task #55
+
+`ticks_to_halve` scales almost exactly LINEARLY with grid width: 522 ticks at
+w=512, 65 when normalised by w/64. Linear scaling in domain width is the
+signature of a CELL-RATE-LIMITED process — levelling speed is bounded by how
+fast information crosses the domain at one cell per tick, not by the magnitude
+of the driving potential.
+
+So propagation is the binding constraint and the potential is not. This is why
+the free-surface form (`multiplicative_lateral_gate`, previous commit) was a null
+at production resolution:
+
+    arch collapse, adaptive:  522 -> 548 ticks  (+5.0% slower)
+    arch collapse, perfect:   517 -> 541 ticks  (+4.6% slower)
+    pocket equalisation:       29 -> 32 ticks   (~10% slower)
+    draining lake peak spread: 159.0 -> 159.0   (bit-identical)
+
+Its earlier 17-24% void-count win at w=512 was isolated to that proxy and does
+not appear in any direct levelling measurement.
+
+## The elliptic solve
+
+`elliptic_liquid_level_pass`, gated by `elliptic_head_gate`. Runs once per tick
+before the phase loop, reads the tick's frozen `heightmap.data`, and mutates
+`temp_heights` directly so the ordinary solver starts from an already-partially
+levelled state. Gauss-Seidel rather than Jacobi, every edge step individually
+clamped by `clamp_edge_feasible`, sweep direction alternating each iteration.
+Gauss-Seidel is sound here — unlike in the wave solver — because this pass
+carries no momentum term; it is pure relaxation toward a diffusion equilibrium.
+
+`eta[i] = h_ref[i] + column_depth[i] - row(i) * depth_scale`. The row subtraction
+is what makes heads comparable ACROSS rows rather than only within one row, which
+is what lets the solve connect two wells through a basin at a different row than
+either well. Proven by `test_elliptic_eta_is_row_independent`.
+
+LIQUID-ONLY, by domain restriction rather than by a yield criterion: nodes are
+interior in-mask cells with `liquidity >= 0.999`. This is what protects granular
+material — `mult_lateral_conveyance` has no yield criterion, so run over sand it
+would flatten every settled pile. Verified rather than assumed: with the gate
+forced ON, `test_dry_sand_has_angle_of_repose` still passes, 19.29 deg -> 5.07
+deg with the non-vacuity anchor at DrySand 3.73 deg against Water 0.00 deg.
+
+## It does NOT remove the propagation limit
+
+| w   | mode        | gate | ticks_to_halve | normalised |
+|-----|-------------|------|---------------:|-----------:|
+| 128 | adaptive    | OFF  |            128 |       64.0 |
+| 128 | adaptive    | ON   |            115 |       57.5 |
+| 128 | perfect_sim | OFF  |            136 |       68.0 |
+| 128 | perfect_sim | ON   |            112 |       56.0 |
+| 512 | adaptive    | OFF  |            522 |      65.25 |
+| 512 | adaptive    | ON   |            466 |      58.25 |
+
+The normalised value drops from ~64-68 to ~56-58 at both widths — real and
+reproducible — but does not collapse toward a small constant as w grows, which
+is what genuine one-tick propagation would look like. Raw ticks still roughly
+quadruple from w=128 to w=512, exactly as with the gate off.
+
+Mechanically: `ELLIPTIC_ITERATIONS = 48` is a fixed per-tick budget independent
+of w, and a damped Gauss-Seidel sweep reaches on the order of one cell per
+iteration. So the pass extends one-cell-per-tick reach to a few-dozen-cells-per-
+tick reach: a better constant, not an asymptotic fix. At w=512 the arch gap is
+~320 cells and 48 damped iterations cannot span it. Genuine width-independence
+needs a multigrid V-cycle (O(log N)) or iterations scaled to the component
+diameter.
+
+At small hand-built scale the same mechanism looks like a real fix — arch 71 ->
+44 ticks, pockets 45 -> 14 — which is consistent with the diagnosis: fixed reach
+covers a small domain and is swamped by a large one.
+
+## Cost: NOT MEASURED, and that is itself a finding
+
+`bench_sandfall` with the gate forced on ran past 12 minutes of wall clock at 96%
+CPU without finishing, against a sub-one-minute expectation. No ms/tick number is
+recorded here rather than a fabricated one. The pass runs unconditionally over
+the whole grid every tick with a 48-iteration inner sweep regardless of whether
+any liquid body is out of equilibrium; scoping it to actual disequilibrium, the
+way `pressure_project` scopes to touched edges, is a prerequisite to shipping.
+
+## Two bugs found and fixed, worth recording
+
+1. `mult_lateral_conveyance`'s output is unbounded (~h_ref^1.5) and was designed
+   to feed `flux_edge_candidate`'s own momentum pipeline, not to be a bare
+   multiplier on a direct mass transfer. Used raw, the residual went 0.24 -> 10.9
+   -> stuck at 12.8. Fixed with a saturating `weight_e = conv_e / (conv_e +
+   ELLIPTIC_CONV_REF)` so a per-edge step can never exceed a damped step toward
+   equalising that edge. `test_elliptic_residual_falls_monotonically` guards it.
+2. A pass that mutates `temp_heights` is silently reverted next tick unless it
+   wakes the blocks it touched: the tick-end copy-back only writes blocks already
+   marked `modified`. Symptom was `ticks_to_halve=None` under the adaptive
+   scheduler against 12 ticks under perfect simulation on the identical scenario.
+   Fixed by walking the pass's own `net_activity` and calling `activate_neighbor`
+   on each touched block and its four neighbours. Afterwards adaptive and perfect
+   track each other closely, which is independent confirmation that what remains
+   is physics rather than scheduling.
+
+## Resolution-parametric diagnostics
+
+The three levelling diagnostics now scale every coordinate from one isotropic
+factor and run at w=64/128/256/512 with identical tick budgets per width. Three
+traps handled explicitly:
+
+- The arch metric's "3 rows above the pile top" is a fixed CELL count and so a
+  different physical height at each width; it now scales with the grid.
+- `ProceduralFunnel`'s noise is fixed-PIXEL-frequency, so the clean two-well
+  topology exists only at w=128 and fragments into 3-9 pockets at w=256/512.
+  `find_two_well_topology` now locates two qualifying wells sharing a basin from
+  the mask at each width, verified rather than assumed.
+- `ticks_to_halve` counts ticks and scales with w, so a normalised column is
+  reported alongside the raw one.
+
+Suite: 96 passed / 1 failed / 34 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

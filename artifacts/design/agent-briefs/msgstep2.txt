@@ -1,0 +1,86 @@
+Add a static hydraulic head field that satisfies the Pascal specs
+
+Task #55, step 2. `task55_head_field::compute_head_field` — a pure function over a
+static mask + heightmap. It is not wired into the tick loop, `settle_tick`,
+`update`, or any UI, and no existing physics function was modified. Step 3 is
+transport; this is the field alone.
+
+## The formulation
+
+Hydraulic head is a Laplace problem on the wet graph with Dirichlet conditions
+wherever pressure is known to be zero:
+
+- A cell with an exposed top face has `p = 0` there.
+- A cell with nothing supporting it from below is in free fall, so `p = 0` there.
+- Every other wet cell relaxes toward the average of its connected wet
+  neighbours.
+
+Those first two are the same structural condition — pressure at an exposed face
+is zero — which is what lets one branch cover both. They pin to different
+numeric targets, though, and getting that wrong is easy: `p` is measured at a
+cell's own BOTTOM face, so an exposed top pins to `z + h*depth_scale` (its own
+weight still reaches its base) while an unsupported cell pins to `z` alone
+(nothing below to receive anything). Pinning both to the same target leaks
+exactly one cell of weight through and gives the free-fall spec a ratio of
+`1/slab_cells` instead of zero.
+
+Equilibrium on a connected body whose pins agree on one elevation is a single
+uniform head equal to that elevation. Pascal's principle falls out of the
+construction rather than being special-cased, which is the whole point: a siphon
+needs no code.
+
+Support comes from `support_fraction` (#58), read-only. Connectivity reuses the
+existing union-find; none of the mass-moving parts of the elliptic pass come with
+it. Nothing is clamped and no material moves — this is a scalar relaxation, which
+is the architectural correction this task exists for.
+
+## Measured
+
+Every spec now runs against BOTH head sources, so the scoreboard is a before/after
+and nothing about today's behaviour is silently lost.
+
+                                        legacy   new
+  uniform head, resting open column       PASS   PASS
+  pressure linear in depth                PASS   PASS
+  head field resolution-invariant         PASS   PASS
+  free fall has zero pressure             FAIL   PASS
+  Pascal under a roof                     FAIL   PASS
+  head single-valued across a body        FAIL   PASS
+
+Residuals on the three that flipped, all previously whole units of depth_scale:
+Pascal 281 reference-rows -> 0; U-tube spread 136 -> 0; falling/resting pressure
+ratio 1.000 -> exactly 0.
+
+Convergence: a component with a single-valued boundary is resolved in ONE sweep by
+the union-find jump, at every resolution. The two-valued case (a falling slab,
+pinned differently at top and bottom) has no such shortcut and takes 44/102/278/848
+sweeps at w=64/128/256/512, plateauing at the f32 noise floor. Cost at w=512,
+debug build: ~11-22ms for the U-tube case, ~115-165ms worst case. Recorded as a
+starting point, not optimised — step 3's problem.
+
+## One gap found and left open, with a spec
+
+`spec_free_fall_has_zero_pressure` reads the slab's BOTTOM cell only, and passing
+it is not the same as being right. A body in free fall has no contact force
+anywhere in it, so `p` must vanish at every cell.
+
+New spec `spec_free_fall_is_pressureless_throughout` scans the whole slab.
+Measured worst residual: exactly 1.000 cells of pressure, at the slab's TOP row,
+at every resolution — bounded, but real, and backwards-signed (a resting column
+has its maximum at the base, not the crown).
+
+The cause is that support is not TRANSITIVE. `support_fraction` looks one cell
+down, so in a falling slab only the bottom row reads as unsupported; every cell
+above it is "resting on" the cell below. The slab gets pinned correctly at its
+unsupported base and incorrectly at its exposed top, and the interior relaxes
+between them. The fix is to propagate support UPWARD — a cell resting on falling
+material is itself falling — not to widen a tolerance. Left failing and recorded
+in the scoreboard rather than papered over, because this is exactly the mechanism
+behind "falling water moves sideways" and it will matter the moment transport is
+wired up.
+
+Suite: 100 passed / 1 failed / 44 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

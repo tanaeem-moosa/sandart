@@ -1,0 +1,66 @@
+Let a free surface rise by deleting the exposed-top pin
+
+Task #55. The head field pinned any cell whose top face was open to air at
+`own_elev = z + heights * depth_scale`. That pin made it impossible for any
+free surface in the domain to ever advance upward.
+
+For a full cell `own_elev = z + depth_scale`, which is EXACTLY the `z` of
+the air cell directly above it — dry cells hold `head = z`, air pressure
+being zero. A Dirichlet pin is WRITTEN rather than maxed, so the surface
+cell could never read a higher head from the body beneath it either. The
+driving head across every water/air interface was therefore identically
+
+    z_air - own_elev = 0
+
+Not small, not resolution-dependent: structurally zero, everywhere, always.
+Material could be pushed UP TO a free surface and never THROUGH it. No
+siphon could climb and no surface could rise.
+
+## The pin was redundant anyway
+
+`own_elev` is already the cell's self-term in the max update, and for a
+column's topmost cell it is the largest `own_elev` in that column — that
+is, the free-surface elevation. So a resting column relaxes to precisely
+the value the pin used to impose, with the pin gone. The pin only ever
+differed from the max in TRANSIT, which is where it did the damage.
+
+This is why all seven static specs passed either way and none caught it:
+every one of them measures an EQUILIBRIUM, and at equilibrium the free
+surface elevation and the body head coincide by definition. The defect
+lives exactly where the specs do not look.
+
+The `p = 0` boundary condition belongs to the ATMOSPHERE, not to the
+topmost water cell, and the atmosphere already carries it — a dry cell
+holds `head = z`. The interface now compares the body's head against the
+air cell's own elevation, which is the physically meaningful question:
+can this body lift water to that height?
+
+The FREE-FALL pin is a different condition (support from BELOW, not
+exposure above) and is untouched.
+
+## Measured, U-tube at w=512, reservoir primed and right arm empty
+
+    head at surface cell        -440.00  ->  -204.00   (now the body head)
+    drive across air interface     0.00  ->  -236.00   (now lifts)
+    right-arm rise, 400 ticks    0 cells ->  1 cell
+    total_flow                      0.00 ->  7034.79
+
+At w=64: 0 cells / 0.00 flow -> 2 cells / 792.81 flow.
+
+The reservoir's head (-204, its own surface elevation) was already reaching
+the cell one below the right arm's surface before this change — a drive of
+-236 across the submerged edge. Max-propagation had delivered the siphon
+head correctly all along; the surface pin was the only thing stopping it
+from doing anything.
+
+Adds `diag_task55_u_tube_rise_in_far_arm`, the diagnostic that found this.
+The dynamic suite had no test that anything ever moves UPWARD — fall,
+drain-dip and speed-bound all measure downward or sideways motion — which
+is the other reason this survived.
+
+All 7 static specs still pass at w=64/128/256/512, both scoreboards are
+green, lib suite 103 passed / 1 failed / 46 ignored in 60.4s, the failure
+being the intentional test_water_blob_stays_left_right_symmetric_under_gravity.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

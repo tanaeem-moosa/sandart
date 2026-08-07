@@ -1,0 +1,26 @@
+   Compiling sandart-sim v0.1.0 (/home/deck/projects/sandart/sandart-sim)
+warning: function `wave_amplitude_in_band` is never used
+    --> sandart-sim/src/physics.rs:8328:8
+     |
+8328 |     fn wave_amplitude_in_band(sim: &TestSim, w: usize, h: usize, rest: f32, x0: usize, x1: usize) -> f32 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandart-sim` (lib test) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 24.33s
+     Running unittests src/lib.rs (target/release/deps/sandart_sim-959f5a4094b1a3f3)
+
+running 1 test
+diag_task55_elliptic_resolution_scaling: === ARCH, resolution sweep ===
+diag_task55_elliptic_resolution_scaling: ARCH w= 128 adaptive     elliptic=OFF run_ticks= 400 ticks_to_halve=Some(128) normalised(/w/64)=Some(64.0) (initial=576.0000)
+diag_task55_elliptic_resolution_scaling: ARCH w= 128 adaptive     elliptic=ON  run_ticks= 400 ticks_to_halve=Some(115) normalised(/w/64)=Some(57.5) (initial=576.0000)
+diag_task55_elliptic_resolution_scaling: ARCH w= 128 perfect_sim  elliptic=OFF run_ticks= 400 ticks_to_halve=Some(136) normalised(/w/64)=Some(68.0) (initial=576.0000)
+diag_task55_elliptic_resolution_scaling: ARCH w= 128 perfect_sim  elliptic=ON  run_ticks= 400 ticks_to_halve=Some(112) normalised(/w/64)=Some(56.0) (initial=576.0000)
+test physics::tests::diag_task55_elliptic_resolution_scaling has been running for over 60 seconds
+diag_task55_elliptic_resolution_scaling: ARCH w= 512 adaptive     elliptic=OFF run_ticks= 600 ticks_to_halve=Some(522) normalised(/w/64)=Some(65.25) (initial=9216.0000)
+diag_task55_elliptic_resolution_scaling: ARCH w= 512 adaptive     elliptic=ON  run_ticks= 600 ticks_to_halve=Some(466) normalised(/w/64)=Some(58.25) (initial=9216.0000)
+test physics::tests::diag_task55_elliptic_resolution_scaling ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 130 filtered out; finished in 307.32s
+

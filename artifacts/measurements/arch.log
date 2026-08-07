@@ -1,0 +1,378 @@
+warning: function `wave_amplitude_in_band` is never used
+    --> sandart-sim/src/physics.rs:8288:8
+     |
+8288 |     fn wave_amplitude_in_band(sim: &TestSim, w: usize, h: usize, rest: f32, x0: usize, x1: usize) -> f32 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandart-sim` (lib test) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.15s
+     Running unittests src/lib.rs (target/release/deps/sandart_sim-959f5a4094b1a3f3)
+
+running 1 test
+diag_task55_arch_collapse_rate: w=  64 h=100 block_size=2 budget_n=256 run_ticks=400 scale=1.0000 gap=[14,50) arch_rows=[36,40) gap_buffer=3 (3% of h, resolution-normalised)
+diag_task55_arch_collapse_rate: w=  64 --- additive(shipped) / adaptive(shipped) --- initial_unsupported=144.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   0 unsupported_span=  144.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   1 unsupported_span=  167.0000 fraction_of_initial=1.1597
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   2 unsupported_span=  168.3307 fraction_of_initial=1.1690
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   3 unsupported_span=  176.0832 fraction_of_initial=1.2228
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   4 unsupported_span=  206.0623 fraction_of_initial=1.4310
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   5 unsupported_span=  188.0489 fraction_of_initial=1.3059
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   6 unsupported_span=  194.7842 fraction_of_initial=1.3527
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   7 unsupported_span=  195.6593 fraction_of_initial=1.3587
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=   8 unsupported_span=  205.9148 fraction_of_initial=1.4300
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=  10 unsupported_span=  222.1052 fraction_of_initial=1.5424
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=  15 unsupported_span=  246.6602 fraction_of_initial=1.7129
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=  20 unsupported_span=  248.6069 fraction_of_initial=1.7264
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=  30 unsupported_span=  247.6584 fraction_of_initial=1.7199
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=  50 unsupported_span=  248.2184 fraction_of_initial=1.7237
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick=  75 unsupported_span=   52.2123 fraction_of_initial=0.3626
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick= 100 unsupported_span=   19.5247 fraction_of_initial=0.1356
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick= 150 unsupported_span=    2.6205 fraction_of_initial=0.0182
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick= 200 unsupported_span=    0.0476 fraction_of_initial=0.0003
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick= 300 unsupported_span=   -0.0000 fraction_of_initial=-0.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    tick= 400 unsupported_span=   -0.0000 fraction_of_initial=-0.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      adaptive(shipped)    ticks_to_halve=Some(71) run_ticks_budget=400 (initial=144.0000, target<=72.0000)
+diag_task55_arch_collapse_rate: w=  64 --- additive(shipped) / perfect_sim --- initial_unsupported=144.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   0 unsupported_span=  144.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   1 unsupported_span=  167.0000 fraction_of_initial=1.1597
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   2 unsupported_span=  168.3307 fraction_of_initial=1.1690
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   3 unsupported_span=  176.0832 fraction_of_initial=1.2228
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   4 unsupported_span=  206.0623 fraction_of_initial=1.4310
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   5 unsupported_span=  183.1029 fraction_of_initial=1.2715
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   6 unsupported_span=  205.6877 fraction_of_initial=1.4284
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   7 unsupported_span=  181.9717 fraction_of_initial=1.2637
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=   8 unsupported_span=  218.4107 fraction_of_initial=1.5167
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=  10 unsupported_span=  245.8438 fraction_of_initial=1.7072
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=  15 unsupported_span=  298.5335 fraction_of_initial=2.0731
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=  20 unsupported_span=  245.3747 fraction_of_initial=1.7040
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=  30 unsupported_span=  295.4710 fraction_of_initial=2.0519
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=  50 unsupported_span=  210.1569 fraction_of_initial=1.4594
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick=  75 unsupported_span=   71.2448 fraction_of_initial=0.4948
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick= 100 unsupported_span=    4.9520 fraction_of_initial=0.0344
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick= 150 unsupported_span=    0.3382 fraction_of_initial=0.0023
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick= 200 unsupported_span=    0.0000 fraction_of_initial=0.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick= 300 unsupported_span=    0.0000 fraction_of_initial=0.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          tick= 400 unsupported_span=    0.0000 fraction_of_initial=0.0000
+diag_task55_arch_collapse_rate: w=  64 additive(shipped)      perfect_sim          ticks_to_halve=Some(65) run_ticks_budget=400 (initial=144.0000, target<=72.0000)
+diag_task55_arch_collapse_rate: w=  64 --- multiplicative(gated) / adaptive(shipped) --- initial_unsupported=144.0000
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   0 unsupported_span=  144.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   1 unsupported_span=  167.0000 fraction_of_initial=1.1597
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   2 unsupported_span=  168.3240 fraction_of_initial=1.1689
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   3 unsupported_span=  166.1172 fraction_of_initial=1.1536
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   4 unsupported_span=  149.8878 fraction_of_initial=1.0409
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   5 unsupported_span=  170.6982 fraction_of_initial=1.1854
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   6 unsupported_span=  216.3105 fraction_of_initial=1.5022
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   7 unsupported_span=  139.7575 fraction_of_initial=0.9705
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   8 unsupported_span=  177.5690 fraction_of_initial=1.2331
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  10 unsupported_span=  151.0547 fraction_of_initial=1.0490
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  15 unsupported_span=  191.1130 fraction_of_initial=1.3272
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  20 unsupported_span=  177.2205 fraction_of_initial=1.2307
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  30 unsupported_span=  205.4071 fraction_of_initial=1.4264
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  50 unsupported_span=  240.8336 fraction_of_initial=1.6725
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  75 unsupported_span=   50.4489 fraction_of_initial=0.3503
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 100 unsupported_span=   18.9330 fraction_of_initial=0.1315
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 150 unsupported_span=    1.0631 fraction_of_initial=0.0074
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 200 unsupported_span=    0.0596 fraction_of_initial=0.0004
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 300 unsupported_span=    0.0000 fraction_of_initial=0.0000
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 400 unsupported_span=    0.0000 fraction_of_initial=0.0000
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  adaptive(shipped)    ticks_to_halve=Some(73) run_ticks_budget=400 (initial=144.0000, target<=72.0000)
+diag_task55_arch_collapse_rate: w=  64 --- multiplicative(gated) / perfect_sim --- initial_unsupported=144.0000
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   0 unsupported_span=  144.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   1 unsupported_span=  167.0000 fraction_of_initial=1.1597
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   2 unsupported_span=  168.3240 fraction_of_initial=1.1689
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   3 unsupported_span=  166.1172 fraction_of_initial=1.1536
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   4 unsupported_span=  149.8878 fraction_of_initial=1.0409
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   5 unsupported_span=  129.8402 fraction_of_initial=0.9017
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   6 unsupported_span=  148.9457 fraction_of_initial=1.0343
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   7 unsupported_span=  143.7541 fraction_of_initial=0.9983
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=   8 unsupported_span=  160.7535 fraction_of_initial=1.1163
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=  10 unsupported_span=  156.1534 fraction_of_initial=1.0844
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=  15 unsupported_span=  173.9771 fraction_of_initial=1.2082
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=  20 unsupported_span=  216.5141 fraction_of_initial=1.5036
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=  30 unsupported_span=  226.3224 fraction_of_initial=1.5717
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=  50 unsupported_span=  182.7545 fraction_of_initial=1.2691
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick=  75 unsupported_span=   58.7771 fraction_of_initial=0.4082
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick= 100 unsupported_span=   10.2344 fraction_of_initial=0.0711
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick= 150 unsupported_span=    1.5961 fraction_of_initial=0.0111
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick= 200 unsupported_span=    0.1183 fraction_of_initial=0.0008
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick= 300 unsupported_span=   -0.0000 fraction_of_initial=-0.0000
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          tick= 400 unsupported_span=   -0.0000 fraction_of_initial=-0.0000
+diag_task55_arch_collapse_rate: w=  64 multiplicative(gated)  perfect_sim          ticks_to_halve=Some(65) run_ticks_budget=400 (initial=144.0000, target<=72.0000)
+diag_task55_arch_collapse_rate: w= 128 h=200 block_size=4 budget_n=256 run_ticks=400 scale=2.0000 gap=[28,100) arch_rows=[72,80) gap_buffer=6 (3% of h, resolution-normalised)
+diag_task55_arch_collapse_rate: w= 128 --- additive(shipped) / adaptive(shipped) --- initial_unsupported=576.0000
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   0 unsupported_span=  576.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   1 unsupported_span=  622.0000 fraction_of_initial=1.0799
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   2 unsupported_span=  624.9416 fraction_of_initial=1.0850
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   3 unsupported_span=  645.8181 fraction_of_initial=1.1212
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   4 unsupported_span=  669.1593 fraction_of_initial=1.1617
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   5 unsupported_span=  702.4682 fraction_of_initial=1.2196
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   6 unsupported_span=  787.5163 fraction_of_initial=1.3672
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   7 unsupported_span=  767.1239 fraction_of_initial=1.3318
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=   8 unsupported_span=  751.0341 fraction_of_initial=1.3039
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=  10 unsupported_span=  764.6960 fraction_of_initial=1.3276
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=  15 unsupported_span=  770.5480 fraction_of_initial=1.3378
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=  20 unsupported_span=  879.6778 fraction_of_initial=1.5272
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=  30 unsupported_span=  942.2575 fraction_of_initial=1.6359
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=  50 unsupported_span=  994.5611 fraction_of_initial=1.7267
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick=  75 unsupported_span= 1025.6288 fraction_of_initial=1.7806
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick= 100 unsupported_span=  977.4078 fraction_of_initial=1.6969
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick= 150 unsupported_span=  253.9979 fraction_of_initial=0.4410
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick= 200 unsupported_span=   51.9780 fraction_of_initial=0.0902
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick= 300 unsupported_span=    7.6224 fraction_of_initial=0.0132
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    tick= 400 unsupported_span=    0.6419 fraction_of_initial=0.0011
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      adaptive(shipped)    ticks_to_halve=Some(128) run_ticks_budget=400 (initial=576.0000, target<=288.0000)
+diag_task55_arch_collapse_rate: w= 128 --- additive(shipped) / perfect_sim --- initial_unsupported=576.0000
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   0 unsupported_span=  576.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   1 unsupported_span=  622.0000 fraction_of_initial=1.0799
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   2 unsupported_span=  624.9416 fraction_of_initial=1.0850
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   3 unsupported_span=  645.8181 fraction_of_initial=1.1212
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   4 unsupported_span=  669.1593 fraction_of_initial=1.1617
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   5 unsupported_span=  702.4682 fraction_of_initial=1.2196
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   6 unsupported_span=  787.5163 fraction_of_initial=1.3672
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   7 unsupported_span=  770.1559 fraction_of_initial=1.3371
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=   8 unsupported_span=  746.7187 fraction_of_initial=1.2964
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=  10 unsupported_span=  838.3165 fraction_of_initial=1.4554
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=  15 unsupported_span=  889.6679 fraction_of_initial=1.5446
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=  20 unsupported_span=  917.1343 fraction_of_initial=1.5922
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=  30 unsupported_span=  827.4872 fraction_of_initial=1.4366
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=  50 unsupported_span= 1000.9307 fraction_of_initial=1.7377
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick=  75 unsupported_span=  994.9489 fraction_of_initial=1.7273
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick= 100 unsupported_span=  898.5442 fraction_of_initial=1.5600
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick= 150 unsupported_span=  192.5086 fraction_of_initial=0.3342
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick= 200 unsupported_span=   53.8646 fraction_of_initial=0.0935
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick= 300 unsupported_span=    9.2615 fraction_of_initial=0.0161
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          tick= 400 unsupported_span=    0.6912 fraction_of_initial=0.0012
+diag_task55_arch_collapse_rate: w= 128 additive(shipped)      perfect_sim          ticks_to_halve=Some(136) run_ticks_budget=400 (initial=576.0000, target<=288.0000)
+diag_task55_arch_collapse_rate: w= 128 --- multiplicative(gated) / adaptive(shipped) --- initial_unsupported=576.0000
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   0 unsupported_span=  576.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   1 unsupported_span=  622.0000 fraction_of_initial=1.0799
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   2 unsupported_span=  624.8536 fraction_of_initial=1.0848
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   3 unsupported_span=  631.4114 fraction_of_initial=1.0962
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   4 unsupported_span=  616.4480 fraction_of_initial=1.0702
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   5 unsupported_span=  587.3473 fraction_of_initial=1.0197
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   6 unsupported_span=  671.3777 fraction_of_initial=1.1656
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   7 unsupported_span=  713.1363 fraction_of_initial=1.2381
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   8 unsupported_span=  736.3165 fraction_of_initial=1.2783
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  10 unsupported_span=  801.7001 fraction_of_initial=1.3918
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  15 unsupported_span=  727.7025 fraction_of_initial=1.2634
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  20 unsupported_span=  882.6440 fraction_of_initial=1.5324
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  30 unsupported_span=  916.2403 fraction_of_initial=1.5907
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  50 unsupported_span= 1023.7773 fraction_of_initial=1.7774
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  75 unsupported_span= 1050.5745 fraction_of_initial=1.8239
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 100 unsupported_span=  906.5480 fraction_of_initial=1.5739
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 150 unsupported_span=  177.2580 fraction_of_initial=0.3077
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 200 unsupported_span=  100.8170 fraction_of_initial=0.1750
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 300 unsupported_span=   10.0883 fraction_of_initial=0.0175
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 400 unsupported_span=    0.2143 fraction_of_initial=0.0004
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  adaptive(shipped)    ticks_to_halve=Some(137) run_ticks_budget=400 (initial=576.0000, target<=288.0000)
+diag_task55_arch_collapse_rate: w= 128 --- multiplicative(gated) / perfect_sim --- initial_unsupported=576.0000
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   0 unsupported_span=  576.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   1 unsupported_span=  622.0000 fraction_of_initial=1.0799
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   2 unsupported_span=  624.8536 fraction_of_initial=1.0848
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   3 unsupported_span=  631.4114 fraction_of_initial=1.0962
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   4 unsupported_span=  616.4480 fraction_of_initial=1.0702
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   5 unsupported_span=  587.4083 fraction_of_initial=1.0198
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   6 unsupported_span=  671.3777 fraction_of_initial=1.1656
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   7 unsupported_span=  714.9044 fraction_of_initial=1.2412
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=   8 unsupported_span=  734.9594 fraction_of_initial=1.2760
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=  10 unsupported_span=  821.8893 fraction_of_initial=1.4269
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=  15 unsupported_span=  774.8216 fraction_of_initial=1.3452
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=  20 unsupported_span= 1047.8974 fraction_of_initial=1.8193
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=  30 unsupported_span=  928.5646 fraction_of_initial=1.6121
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=  50 unsupported_span=  960.7316 fraction_of_initial=1.6679
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick=  75 unsupported_span= 1040.8450 fraction_of_initial=1.8070
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick= 100 unsupported_span=  903.2790 fraction_of_initial=1.5682
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick= 150 unsupported_span=  390.9641 fraction_of_initial=0.6788
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick= 200 unsupported_span=   91.1919 fraction_of_initial=0.1583
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick= 300 unsupported_span=    6.1765 fraction_of_initial=0.0107
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          tick= 400 unsupported_span=    0.0000 fraction_of_initial=0.0000
+diag_task55_arch_collapse_rate: w= 128 multiplicative(gated)  perfect_sim          ticks_to_halve=Some(138) run_ticks_budget=400 (initial=576.0000, target<=288.0000)
+diag_task55_arch_collapse_rate: w= 256 h=400 block_size=8 budget_n=256 run_ticks=400 scale=4.0000 gap=[56,200) arch_rows=[144,160) gap_buffer=12 (3% of h, resolution-normalised)
+diag_task55_arch_collapse_rate: w= 256 --- additive(shipped) / adaptive(shipped) --- initial_unsupported=2304.0000
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   0 unsupported_span= 2304.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   1 unsupported_span= 2396.0000 fraction_of_initial=1.0399
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   2 unsupported_span= 2402.9416 fraction_of_initial=1.0429
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   3 unsupported_span= 2449.2050 fraction_of_initial=1.0630
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   4 unsupported_span= 2519.2122 fraction_of_initial=1.0934
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   5 unsupported_span= 2663.5847 fraction_of_initial=1.1561
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   6 unsupported_span= 2717.4999 fraction_of_initial=1.1795
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   7 unsupported_span= 2797.1759 fraction_of_initial=1.2141
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=   8 unsupported_span= 2719.1721 fraction_of_initial=1.1802
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=  10 unsupported_span= 2900.4303 fraction_of_initial=1.2589
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=  15 unsupported_span= 3142.9178 fraction_of_initial=1.3641
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=  20 unsupported_span= 3054.0855 fraction_of_initial=1.3256
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=  30 unsupported_span= 3415.6151 fraction_of_initial=1.4825
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=  50 unsupported_span= 3795.5481 fraction_of_initial=1.6474
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick=  75 unsupported_span= 3897.7303 fraction_of_initial=1.6917
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick= 100 unsupported_span= 4095.5597 fraction_of_initial=1.7776
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick= 150 unsupported_span= 3739.4565 fraction_of_initial=1.6230
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick= 200 unsupported_span= 3375.1539 fraction_of_initial=1.4649
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick= 300 unsupported_span=  877.4983 fraction_of_initial=0.3809
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    tick= 400 unsupported_span=  187.3208 fraction_of_initial=0.0813
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      adaptive(shipped)    ticks_to_halve=Some(261) run_ticks_budget=400 (initial=2304.0000, target<=1152.0000)
+diag_task55_arch_collapse_rate: w= 256 --- additive(shipped) / perfect_sim --- initial_unsupported=2304.0000
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   0 unsupported_span= 2304.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   1 unsupported_span= 2396.0000 fraction_of_initial=1.0399
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   2 unsupported_span= 2402.9416 fraction_of_initial=1.0429
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   3 unsupported_span= 2449.2050 fraction_of_initial=1.0630
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   4 unsupported_span= 2519.2122 fraction_of_initial=1.0934
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   5 unsupported_span= 2663.5847 fraction_of_initial=1.1561
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   6 unsupported_span= 2717.4999 fraction_of_initial=1.1795
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   7 unsupported_span= 2797.1759 fraction_of_initial=1.2141
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=   8 unsupported_span= 2719.1721 fraction_of_initial=1.1802
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=  10 unsupported_span= 2900.4303 fraction_of_initial=1.2589
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=  15 unsupported_span= 3143.8928 fraction_of_initial=1.3645
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=  20 unsupported_span= 3082.6106 fraction_of_initial=1.3379
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=  30 unsupported_span= 3542.9036 fraction_of_initial=1.5377
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=  50 unsupported_span= 3827.0802 fraction_of_initial=1.6611
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick=  75 unsupported_span= 3791.6441 fraction_of_initial=1.6457
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick= 100 unsupported_span= 3930.9848 fraction_of_initial=1.7062
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick= 150 unsupported_span= 3939.1275 fraction_of_initial=1.7097
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick= 200 unsupported_span= 3308.1832 fraction_of_initial=1.4358
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick= 300 unsupported_span=  971.7449 fraction_of_initial=0.4218
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          tick= 400 unsupported_span=  237.2533 fraction_of_initial=0.1030
+diag_task55_arch_collapse_rate: w= 256 additive(shipped)      perfect_sim          ticks_to_halve=Some(262) run_ticks_budget=400 (initial=2304.0000, target<=1152.0000)
+diag_task55_arch_collapse_rate: w= 256 --- multiplicative(gated) / adaptive(shipped) --- initial_unsupported=2304.0000
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   0 unsupported_span= 2304.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   1 unsupported_span= 2396.0000 fraction_of_initial=1.0399
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   2 unsupported_span= 2402.8536 fraction_of_initial=1.0429
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   3 unsupported_span= 2420.3491 fraction_of_initial=1.0505
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   4 unsupported_span= 2398.6467 fraction_of_initial=1.0411
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   5 unsupported_span= 2443.7384 fraction_of_initial=1.0607
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   6 unsupported_span= 2608.9373 fraction_of_initial=1.1324
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   7 unsupported_span= 2643.9158 fraction_of_initial=1.1475
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   8 unsupported_span= 2706.5104 fraction_of_initial=1.1747
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  10 unsupported_span= 2650.7196 fraction_of_initial=1.1505
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  15 unsupported_span= 3065.5385 fraction_of_initial=1.3305
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  20 unsupported_span= 3275.8535 fraction_of_initial=1.4218
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  30 unsupported_span= 3530.3113 fraction_of_initial=1.5323
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  50 unsupported_span= 3799.3637 fraction_of_initial=1.6490
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  75 unsupported_span= 3843.7712 fraction_of_initial=1.6683
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 100 unsupported_span= 3776.2294 fraction_of_initial=1.6390
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 150 unsupported_span= 3709.0694 fraction_of_initial=1.6098
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 200 unsupported_span= 3580.7777 fraction_of_initial=1.5542
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 300 unsupported_span=  754.2610 fraction_of_initial=0.3274
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 400 unsupported_span=  162.1302 fraction_of_initial=0.0704
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  adaptive(shipped)    ticks_to_halve=Some(264) run_ticks_budget=400 (initial=2304.0000, target<=1152.0000)
+diag_task55_arch_collapse_rate: w= 256 --- multiplicative(gated) / perfect_sim --- initial_unsupported=2304.0000
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   0 unsupported_span= 2304.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   1 unsupported_span= 2396.0000 fraction_of_initial=1.0399
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   2 unsupported_span= 2402.8536 fraction_of_initial=1.0429
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   3 unsupported_span= 2420.3491 fraction_of_initial=1.0505
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   4 unsupported_span= 2398.6467 fraction_of_initial=1.0411
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   5 unsupported_span= 2443.7384 fraction_of_initial=1.0607
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   6 unsupported_span= 2608.9373 fraction_of_initial=1.1324
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   7 unsupported_span= 2643.9158 fraction_of_initial=1.1475
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=   8 unsupported_span= 2706.5104 fraction_of_initial=1.1747
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=  10 unsupported_span= 2650.7196 fraction_of_initial=1.1505
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=  15 unsupported_span= 3066.2146 fraction_of_initial=1.3308
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=  20 unsupported_span= 3278.3328 fraction_of_initial=1.4229
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=  30 unsupported_span= 3516.2644 fraction_of_initial=1.5262
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=  50 unsupported_span= 3732.0156 fraction_of_initial=1.6198
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick=  75 unsupported_span= 3900.0785 fraction_of_initial=1.6927
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick= 100 unsupported_span= 3955.9006 fraction_of_initial=1.7170
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick= 150 unsupported_span= 3773.2860 fraction_of_initial=1.6377
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick= 200 unsupported_span= 3429.9742 fraction_of_initial=1.4887
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick= 300 unsupported_span=  862.4405 fraction_of_initial=0.3743
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          tick= 400 unsupported_span=  143.7193 fraction_of_initial=0.0624
+diag_task55_arch_collapse_rate: w= 256 multiplicative(gated)  perfect_sim          ticks_to_halve=Some(260) run_ticks_budget=400 (initial=2304.0000, target<=1152.0000)
+diag_task55_arch_collapse_rate: w= 512 h=800 block_size=16 budget_n=256 run_ticks=600 scale=8.0000 gap=[112,400) arch_rows=[288,320) gap_buffer=24 (3% of h, resolution-normalised)
+diag_task55_arch_collapse_rate: w= 512 --- additive(shipped) / adaptive(shipped) --- initial_unsupported=9216.0000
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=   0 unsupported_span= 9216.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=   2 unsupported_span= 9414.9560 fraction_of_initial=1.0216
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=   3 unsupported_span= 9514.7026 fraction_of_initial=1.0324
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=   5 unsupported_span= 9958.1375 fraction_of_initial=1.0805
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=   6 unsupported_span= 9929.1836 fraction_of_initial=1.0774
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=   8 unsupported_span=10109.7742 fraction_of_initial=1.0970
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=   9 unsupported_span=10373.9696 fraction_of_initial=1.1256
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=  11 unsupported_span=10889.1686 fraction_of_initial=1.1816
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=  12 unsupported_span=10872.1991 fraction_of_initial=1.1797
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=  15 unsupported_span=10744.3002 fraction_of_initial=1.1658
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=  23 unsupported_span=11729.9933 fraction_of_initial=1.2728
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=  30 unsupported_span=12205.4506 fraction_of_initial=1.3244
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=  45 unsupported_span=12646.2594 fraction_of_initial=1.3722
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick=  75 unsupported_span=12676.6689 fraction_of_initial=1.3755
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick= 113 unsupported_span=13875.7008 fraction_of_initial=1.5056
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick= 150 unsupported_span=14017.2438 fraction_of_initial=1.5210
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick= 225 unsupported_span=14436.1826 fraction_of_initial=1.5664
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick= 300 unsupported_span=14358.8745 fraction_of_initial=1.5580
+test physics::tests::diag_task55_arch_collapse_rate has been running for over 60 seconds
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick= 450 unsupported_span=10954.5771 fraction_of_initial=1.1886
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    tick= 600 unsupported_span= 3273.2222 fraction_of_initial=0.3552
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      adaptive(shipped)    ticks_to_halve=Some(522) run_ticks_budget=600 (initial=9216.0000, target<=4608.0000)
+diag_task55_arch_collapse_rate: w= 512 --- additive(shipped) / perfect_sim --- initial_unsupported=9216.0000
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=   0 unsupported_span= 9216.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=   2 unsupported_span= 9414.9560 fraction_of_initial=1.0216
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=   3 unsupported_span= 9514.7026 fraction_of_initial=1.0324
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=   5 unsupported_span= 9958.1375 fraction_of_initial=1.0805
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=   6 unsupported_span= 9929.1836 fraction_of_initial=1.0774
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=   8 unsupported_span=10109.7742 fraction_of_initial=1.0970
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=   9 unsupported_span=10373.9696 fraction_of_initial=1.1256
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=  11 unsupported_span=10889.1686 fraction_of_initial=1.1816
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=  12 unsupported_span=10872.1991 fraction_of_initial=1.1797
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=  15 unsupported_span=10744.3002 fraction_of_initial=1.1658
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=  23 unsupported_span=11729.9933 fraction_of_initial=1.2728
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=  30 unsupported_span=12205.4506 fraction_of_initial=1.3244
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=  45 unsupported_span=12646.6336 fraction_of_initial=1.3722
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick=  75 unsupported_span=12706.1415 fraction_of_initial=1.3787
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick= 113 unsupported_span=13719.8615 fraction_of_initial=1.4887
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick= 150 unsupported_span=14153.8681 fraction_of_initial=1.5358
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick= 225 unsupported_span=15170.9937 fraction_of_initial=1.6462
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick= 300 unsupported_span=14891.4579 fraction_of_initial=1.6158
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick= 450 unsupported_span=12010.6579 fraction_of_initial=1.3032
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          tick= 600 unsupported_span= 2974.9110 fraction_of_initial=0.3228
+diag_task55_arch_collapse_rate: w= 512 additive(shipped)      perfect_sim          ticks_to_halve=Some(517) run_ticks_budget=600 (initial=9216.0000, target<=4608.0000)
+diag_task55_arch_collapse_rate: w= 512 --- multiplicative(gated) / adaptive(shipped) --- initial_unsupported=9216.0000
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   0 unsupported_span= 9216.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   2 unsupported_span= 9414.8536 fraction_of_initial=1.0216
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   3 unsupported_span= 9453.6825 fraction_of_initial=1.0258
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   5 unsupported_span= 9313.3211 fraction_of_initial=1.0106
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   6 unsupported_span=10210.3186 fraction_of_initial=1.1079
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   8 unsupported_span=10035.4133 fraction_of_initial=1.0889
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   9 unsupported_span=10215.5348 fraction_of_initial=1.1085
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  11 unsupported_span=10458.9218 fraction_of_initial=1.1349
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  12 unsupported_span=10457.4340 fraction_of_initial=1.1347
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  15 unsupported_span=10860.2489 fraction_of_initial=1.1784
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  23 unsupported_span=11878.4565 fraction_of_initial=1.2889
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  30 unsupported_span=12147.4377 fraction_of_initial=1.3181
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  45 unsupported_span=12151.5606 fraction_of_initial=1.3185
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  75 unsupported_span=13109.2632 fraction_of_initial=1.4224
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 113 unsupported_span=13463.7061 fraction_of_initial=1.4609
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 150 unsupported_span=12912.0296 fraction_of_initial=1.4010
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 225 unsupported_span=14619.1376 fraction_of_initial=1.5863
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 300 unsupported_span=14861.6399 fraction_of_initial=1.6126
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 450 unsupported_span=12538.1192 fraction_of_initial=1.3605
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 600 unsupported_span= 3451.2595 fraction_of_initial=0.3745
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  adaptive(shipped)    ticks_to_halve=Some(548) run_ticks_budget=600 (initial=9216.0000, target<=4608.0000)
+diag_task55_arch_collapse_rate: w= 512 --- multiplicative(gated) / perfect_sim --- initial_unsupported=9216.0000
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=   0 unsupported_span= 9216.0000 fraction_of_initial=1.0000
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=   2 unsupported_span= 9414.8536 fraction_of_initial=1.0216
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=   3 unsupported_span= 9453.6825 fraction_of_initial=1.0258
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=   5 unsupported_span= 9313.3211 fraction_of_initial=1.0106
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=   6 unsupported_span=10210.3186 fraction_of_initial=1.1079
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=   8 unsupported_span=10035.4133 fraction_of_initial=1.0889
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=   9 unsupported_span=10215.5348 fraction_of_initial=1.1085
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=  11 unsupported_span=10458.9218 fraction_of_initial=1.1349
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=  12 unsupported_span=10457.4340 fraction_of_initial=1.1347
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=  15 unsupported_span=10860.2489 fraction_of_initial=1.1784
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=  23 unsupported_span=11878.4565 fraction_of_initial=1.2889
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=  30 unsupported_span=12147.4377 fraction_of_initial=1.3181
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=  45 unsupported_span=12149.5453 fraction_of_initial=1.3183
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick=  75 unsupported_span=13010.5672 fraction_of_initial=1.4117
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick= 113 unsupported_span=13743.8781 fraction_of_initial=1.4913
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick= 150 unsupported_span=14538.0878 fraction_of_initial=1.5775
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick= 225 unsupported_span=14525.1826 fraction_of_initial=1.5761
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick= 300 unsupported_span=15289.0182 fraction_of_initial=1.6590
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick= 450 unsupported_span=11735.4329 fraction_of_initial=1.2734
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          tick= 600 unsupported_span= 3510.6860 fraction_of_initial=0.3809
+diag_task55_arch_collapse_rate: w= 512 multiplicative(gated)  perfect_sim          ticks_to_halve=Some(541) run_ticks_budget=600 (initial=9216.0000, target<=4608.0000)
+test physics::tests::diag_task55_arch_collapse_rate ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out; finished in 218.60s
+
+
+real	3m38.784s
+user	2m56.298s
+sys	0m40.058s

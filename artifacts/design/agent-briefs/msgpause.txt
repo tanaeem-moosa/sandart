@@ -1,0 +1,40 @@
+Add pause and single-step controls to the web UI
+
+Task #55, step 1. The pressure heat-map overlay has been unreadable in practice:
+it tints every cell by its `column_depth`, and while material is moving that
+whole field changes each frame. You cannot read a distribution that never holds
+still. Pause is what turns an existing overlay into an instrument.
+
+`tick()` already called `state.step(...)` and `state.render()` as two separate
+calls, so this needed no simulation change at all: skip the step, keep rendering
+every frame. The canvas, the HUD and every overlay stay live while the physics is
+frozen. Pure JS loop state — it never reaches wasm, so it cannot be clobbered by
+`syncSettings()` (which pushes the entire panel down on every control change) and
+cannot perturb the simulation.
+
+Single-step matters as much as pause: a frozen field answers "what is the
+distribution", but the questions in #55 are about propagation — how far does a
+change travel per tick, and does it travel at all. That needs tick-at-a-time
+advance, so Step queues exactly one.
+
+Both are in the Debug group directly under the pressure heat-map checkbox, since
+that is what they exist to serve. Space toggles pause and "." steps, from
+anywhere except a form control — the keydown handler bails on INPUT / SELECT /
+TEXTAREA / contenteditable, so typing a space in a field cannot freeze the
+simulation, and Space calls preventDefault so the panel does not scroll. This is
+the app's first keyboard handler; there was nothing to collide with.
+
+Step is disabled unless paused, which needed a `button:disabled` rule — the
+stylesheet had none, so a disabled button kept the full hover treatment and the
+pointer cursor, saying "clickable" about a control that does nothing.
+
+Reset while paused deliberately leaves the pause in place: resetting and then
+stepping from tick 0 is exactly how you watch a field establish itself.
+
+Unverified: there is no browser driver in this environment, so the freeze/step/
+resume behaviour is confirmed by code inspection only, not by running the page.
+`node --check` passes and `wasm-pack build sandart-wasm --target web` still
+builds. No Rust changed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

@@ -1,0 +1,75 @@
+Make support transitive in the static head field
+
+Task #55, step 2b. `support_fraction` (#58) looks exactly one cell down, so
+support was not transitive: in a slab of water falling through air, only the
+BOTTOM row read as unsupported. Every cell above it was "resting on" a cell that
+was itself full of material, so it read as fully supported. The slab got pinned
+correctly at its unsupported base and incorrectly at its exposed top, and the
+interior relaxed between the two.
+
+`spec_free_fall_is_pressureless_throughout` measured that at exactly 1.000 cells
+of residual pressure at the slab's TOP row, at every resolution. Small, but
+backwards-signed — a resting body's pressure maximum is at its base, not its
+crown — and it is the mechanism behind "falling water moves sideways", so it had
+to go before transport is wired up.
+
+The fix is a bottom-up per-column pass, so that a cell resting on falling
+material is itself falling:
+
+    effective_support[i] = min(support_fraction(i), effective_support[below])
+
+with a plain `support_fraction(i)` where below is out of mask. `support_fraction`
+already returns 1.0 for off-grid-below, casing-below and degenerate-capacity, so
+all three collapse into one read of it and nothing duplicates its branching. It is
+read, never modified.
+
+MIN, not a product. Every link of a resting column reads 1.0, so `min` carries
+1.0 to the top, which is what `spec_uniform_head_in_resting_open_column`
+requires. A product of N terms at or near 1.0 decays through a tall resting
+column by nothing but repeated multiplication and would report its upper cells as
+unsupported — a column standing on solid ground is not less supported the taller
+it is. Commented in place so it does not get "simplified" later.
+
+## Measured
+
+`spec_free_fall_is_pressureless_throughout` FAIL -> PASS, residual 1.000 cells ->
+exactly 0: every cell of a transitively-unsupported slab now pins directly rather
+than landing under a tolerance. All six previously-passing specs still pass
+against both head sources; no regressions.
+
+Sweeps to convergence on the falling slab, the case that had no union-find
+shortcut because its boundary carried two different Dirichlet values:
+
+    w= 64   44 -> 2
+    w=128  102 -> 2
+    w=256  278 -> 2
+    w=512  848 -> 2
+
+Pinning the whole slab uniformly removes the two-valued boundary entirely, so the
+coarse pass jumps it in one shot and the fine sweep only settles numerically. The
+U-tube case was already 1 sweep and is unchanged. Correctness and cost moved the
+same direction here, which is worth noting because the previous three attempts at
+this task traded one against the other.
+
+## Two limits recorded in the code, not glossed
+
+This is a per-COLUMN propagation. It captures no LATERAL support: material on a
+ledge, or held in an arch, is supported by something not directly beneath it and
+this pass is blind to it. That is force-chain mechanics and belongs to the solids
+half of #55.
+
+It also deliberately duplicates something the LOD scheduler already does. That
+question is different — `fresh_overburden_must_blocks` asks "might anything in
+this 32x32 block move?", a boolean, `unsupported AND has_room_to_move` — and it
+gets transitivity for free over TIME via `activate_neighbor_upstream`, which
+wakes the block one step upstream each tick. A one-tick lag is harmless for
+scheduling and fatal for a field that must be correct within the tick it is read.
+Hence a separate synchronous whole-column pass rather than reuse.
+
+Still static-only: nothing wired into `settle_tick`, `update` or any UI.
+
+Suite: 100 passed / 1 failed / 44 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

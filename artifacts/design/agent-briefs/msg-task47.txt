@@ -1,0 +1,69 @@
+Fix the sand-slab scheduling defect with a support-based MUST-simulate predicate
+
+Falling sand broke into large slabs separated by clean gaps. Perfect simulation
+(every in-mask block holding material, every tick) shows no slabs, so this is
+scheduling, not physics: every activation signal in the MUST/STALE/REST loop is
+HISTORICAL — `last_displacements` records what moved LAST tick — and falling
+material outruns that one-tick lag.
+
+`fresh_overburden_must_blocks` adds a STATE predicate on the current, pre-tick
+field: a block is promoted when it holds material that is unsupported AND has
+somewhere to go. It only ever adds indices to `must_simulate`; it never feeds a
+physics term, and it does not touch `column_depth` or route through the
+`fresh_pressure_field` toggle, so it cannot inherit that toggle's confirmed,
+unexplained standing-arch regression.
+
+Round 1 tested "material with near-zero overburden AND somewhere to go" and cut
+cumulative divergence from perfect simulation by only 8.4%. The reason is that
+`in_transit_at` under-detects free fall, measured directly by
+`diag_task47_in_transit_underdetection` on a falling, fully-packed DrySand block:
+every interior row reads `in_transit=0.000` against `resting_above_raw=1.500`
+(only the body's own leading/trailing edge rows read nonzero), so accumulated
+`column_depth` crosses the skin threshold after just the ONE topmost row. By
+tick 12, 62% of the blocks perfect simulation promotes were excluded by that
+clause alone despite having somewhere to go.
+
+`support_fraction` replaces it: a graded [0,1] state predicate reading only
+current heights and static per-cell capacity — no `edge_vel_v`, no history — so
+a body falling as a rigid mass reads ~0 at every cell, not just at its edges.
+Named and placed for reuse (task #58): it is a direct answer to "does this
+material press on what is below it", the same question `column_depth`'s
+`in_transit_at` proxy is trying to answer. Deliberately not wired into the
+pressure path here; that is a separate, contested decision.
+
+Measured, cumulative / peak divergence from perfect simulation at budget 256:
+
+    disabled (before)                106221 / 1890
+    overburden_and_room (round 1)     97251 / 1629
+    unsupported_and_room (shipped)     4570 /  182
+    room_only                          3714 /  167
+
+-95.7% cumulative, -90.4% peak, against round 1's -8.4%.
+
+`room_only` scores 19% better on divergence, and `capacity_below_only` lands
+within 0.001% of the shipped variant, so `support_fraction` is not measurably
+better than an ad-hoc capacity check on this metric alone. What justifies the
+shipped conjunction is cost: at mid-drain it promotes 38 of 1024 blocks at grid
+64 where `room_only` promotes 70, and 163 vs 178 at grid 512. It buys 96% of the
+available divergence reduction while waking roughly half as many blocks at low
+resolution.
+
+The predicate is not quietly reinventing "simulate everything": perfect
+simulation promotes 20-33% of blocks across the three scenarios, the shipped
+predicate 2.5-16%.
+
+Cost, `bench_sandfall` 512x512 Hourglass, 600 ticks, back-to-back against a
+stash of this diff: Water +13% to +19% ms/tick across all three budgets
+(mean MUST blocks/tick 119.7 -> 129.5); DrySand -2% to -3%, slightly cheaper,
+with marginally fewer MUST blocks.
+
+`test_fresh_overburden_predicate_reduces_slab_divergence` guards the result.
+The six non-shipped variants and the `fresh_overburden_gate` override exist for
+the diagnostics only — the `cfg(not(test))` twin hardcodes the shipped choice, so
+production carries no thread-local read.
+
+Suite: 93 passed / 1 failed / 23 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

@@ -1,0 +1,88 @@
+Drive liquid transport from a max-propagated hydraulic head field
+
+Task #55. Replaces the head field's averaging update with a max, and wires
+the result into the flux solver's driving head for liquid edges.
+
+## The field: max, not averaging
+
+The previous field settled far too slowly to be usable. At w=512 the
+textbook base case — one flat pin over a free resting column — was still
+47.9 reference-rows off after the spec harness's whole tick budget, and the
+pressure heat-map drew it at 47.3/255 mean brightness against
+column_depth's 199.9. That is the "new-field heat-map does nothing"
+symptom.
+
+The cause was the OPERATOR, not the solver. Averaging is diffusion: a
+Gauss-Seidel/SOR sweep drives the field by the discrete Laplacian, whose
+SETTLING time over an N-cell chain is O(N^2) sweeps — not the O(N)
+wavefront-arrival time the sweep budget was sized from. Conflating those
+two is what made 8 sweeps/tick look sufficient; at N=512 they differ by a
+factor of 512. An earlier attempt at a union-find "coarse jump" only ever
+fired when every Dirichlet pin in a component agreed, i.e. exactly the
+trivial case, so it accelerated only what did not need accelerating.
+
+But head does not obey a Laplace equation on the wet graph. At rest it is
+CONSTANT through a connected body, equal to that body's free-surface
+elevation — a maximum statement, not an averaging one. So the update
+collapses to one rule:
+
+    head[i] = max(own_local_hydrostatic[i], max over wet neighbours head[j])
+
+That is Bellman-Ford rather than Jacobi, and a Gauss-Seidel-ordered max
+sweep carries a value arbitrarily far ALONG the sweep direction in a single
+pass (the two-pass chamfer distance transform mechanism). The cost is the
+number of direction REVERSALS in a connectivity path, not its length.
+
+No +/-1 for vertical neighbours: head carries elevation, so "rises going
+down" and "falls going up" are the same statement, head[below] ==
+head[above]. The per-row increment reappears only on read-back as pressure.
+No omega: extrapolating past a max yields a value no neighbour holds.
+
+The self-term is the cell's LOCAL hydrostatic head, never its own previous
+value. max is monotone, so reading history would let the field only ratchet
+upward and never fall when a reservoir drains. The field is therefore a
+pure function of mask + heightmap + material: no hysteresis, and in
+particular no dependence on material FLOW.
+
+Dirichlet pins are still WRITTEN, not maxed — what keeps free fall
+pressureless, and what leaves any gradient at all for transport to read.
+
+MEASURED: all 7 static specs pass at w=64/128/256/512, so the static
+scoreboard's full expected_passing set is green for the first time.
+Convergence takes 2 sweeps for every scenario including the U-tube; 1 sweep
+converges nothing (139s of cap-burning), the negative control that makes
+the 2 meaningful. HEAD_FIELD_SWEEPS_PER_TICK becomes a 32-sweep safety CAP
+on an early-exiting loop rather than a fixed budget. Heat-map brightness is
+now 165.08/255 against column_depth's 162.36.
+
+## Transport: two defects, both found as a frozen simulation
+
+Unparking the dynamic scoreboard showed total_flow = 0.0000 with the
+toggle on — a blob that never fell, a vessel that never drained.
+
+1. UNITS. The driving-head sites divided the field by depth_scale but never
+   multiplied by GRAVITY_HEAD_SCALE, leaving the field branch driving every
+   liquid edge 25x weaker than the branch beside it. At one row of free
+   fall both branches now produce the identical 25.0, which is the check
+   that says the conversion is right rather than tuned.
+
+2. THE FIELD WAS NOT TOTAL. advance_head_field wrote only WET cells, but
+   settle_tick reads head_field[nb_idx] at the DRY cell a body is about to
+   fall into. That read returned a stale 0.0 against a wet cell's genuine
+   z ~= -1200, so head_a - head_b came out large and NEGATIVE: every
+   free-fall edge was driven UPWARD and slept. Dry cells now hold z, so
+   p = head - z = 0, agreeing with head_field_to_pressure by construction
+   instead of by a second special case.
+
+All six (spec, toggle) pairs in the dynamic scoreboard now pass, and it is
+no longer #[ignore]d, so a regression in head-driven transport fails a
+default cargo test run.
+
+Transport remains DEFAULT OFF (head_field_transport), and with it off the
+simulation is bit-identical — head_field_transport_toggle covers that.
+
+Lib suite 103 passed / 1 failed / 45 ignored in 59.9s, the failure being
+the intentional test_water_blob_stays_left_right_symmetric_under_gravity.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

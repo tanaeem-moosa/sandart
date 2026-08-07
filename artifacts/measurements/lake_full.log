@@ -1,0 +1,322 @@
+
+running 1 test
+diag_task55_draining_lake_flatness: w=  64 h=64 block_size=2 budget_n=256 run_ticks=400 fill=[12,32) neck_width=0.15 hourglass_curve=0.6
+diag_task55_draining_lake_flatness: w=  64 --- additive(shipped) / adaptive(shipped) ---
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   0 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   1 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   2 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   3 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   4 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   5 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   6 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   7 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=   8 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=  10 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=  15 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=  20 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=  30 spread= 3.0000 mean_surface_row= 13.122 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=  50 spread= 7.0000 mean_surface_row= 16.550 wetted_columns= 40
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick=  75 spread=13.0000 mean_surface_row= 22.541 wetted_columns= 37
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick= 100 spread= 8.0000 mean_surface_row= 26.682 wetted_columns= 22
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick= 150 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick= 200 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick= 300 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    tick= 400 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      adaptive(shipped)    peak_spread=15.0000 at tick=64 run_ticks_budget=400
+diag_task55_draining_lake_flatness: w=  64 --- additive(shipped) / perfect_sim ---
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   0 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   1 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   2 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   3 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   4 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   5 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   6 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   7 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=   8 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=  10 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=  15 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=  20 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=  30 spread= 3.0000 mean_surface_row= 13.073 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=  50 spread= 8.0000 mean_surface_row= 16.718 wetted_columns= 39
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick=  75 spread=13.0000 mean_surface_row= 22.806 wetted_columns= 36
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick= 100 spread= 9.0000 mean_surface_row= 26.409 wetted_columns= 22
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick= 150 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick= 200 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick= 300 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          tick= 400 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 additive(shipped)      perfect_sim          peak_spread=14.0000 at tick=70 run_ticks_budget=400
+diag_task55_draining_lake_flatness: w=  64 --- multiplicative(gated) / adaptive(shipped) ---
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   0 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   1 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   2 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   3 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   4 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   5 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   6 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   7 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   8 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  10 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  15 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  20 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  30 spread= 5.0000 mean_surface_row= 13.366 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  50 spread= 6.0000 mean_surface_row= 15.244 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  75 spread=16.0000 mean_surface_row= 20.410 wetted_columns= 39
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 100 spread=10.0000 mean_surface_row= 24.939 wetted_columns= 33
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 150 spread= 2.0000 mean_surface_row= 30.000 wetted_columns=  5
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 200 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 300 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 400 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  adaptive(shipped)    peak_spread=18.0000 at tick=71 run_ticks_budget=400
+diag_task55_draining_lake_flatness: w=  64 --- multiplicative(gated) / perfect_sim ---
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   0 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   1 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   2 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   3 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   4 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   5 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   6 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   7 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=   8 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=  10 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=  15 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=  20 spread= 0.0000 mean_surface_row= 12.000 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=  30 spread= 5.0000 mean_surface_row= 13.341 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=  50 spread= 6.0000 mean_surface_row= 15.024 wetted_columns= 41
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick=  75 spread= 9.0000 mean_surface_row= 20.237 wetted_columns= 38
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick= 100 spread=10.0000 mean_surface_row= 25.909 wetted_columns= 33
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick= 150 spread= 0.0000 mean_surface_row= 31.000 wetted_columns=  1
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick= 200 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick= 300 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          tick= 400 spread= 0.0000 mean_surface_row= 32.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w=  64 multiplicative(gated)  perfect_sim          peak_spread=14.0000 at tick=74 run_ticks_budget=400
+diag_task55_draining_lake_flatness: w= 128 h=128 block_size=4 budget_n=256 run_ticks=400 fill=[24,64) neck_width=0.15 hourglass_curve=0.6
+diag_task55_draining_lake_flatness: w= 128 --- additive(shipped) / adaptive(shipped) ---
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   0 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   1 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   2 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   3 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   4 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   5 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   6 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   7 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=   8 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=  10 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=  15 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=  20 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=  30 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=  50 spread= 3.0000 mean_surface_row= 24.867 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick=  75 spread= 9.0000 mean_surface_row= 28.585 wetted_columns= 82
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick= 100 spread=28.0000 mean_surface_row= 35.380 wetted_columns= 79
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick= 150 spread=31.0000 mean_surface_row= 41.623 wetted_columns= 61
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick= 200 spread=24.0000 mean_surface_row= 46.696 wetted_columns= 46
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick= 300 spread= 7.0000 mean_surface_row= 58.071 wetted_columns= 14
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    tick= 400 spread= 0.0000 mean_surface_row= 64.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      adaptive(shipped)    peak_spread=37.0000 at tick=110 run_ticks_budget=400
+diag_task55_draining_lake_flatness: w= 128 --- additive(shipped) / perfect_sim ---
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   0 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   1 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   2 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   3 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   4 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   5 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   6 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   7 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=   8 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=  10 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=  15 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=  20 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=  30 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=  50 spread= 3.0000 mean_surface_row= 24.867 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick=  75 spread= 9.0000 mean_surface_row= 28.573 wetted_columns= 82
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick= 100 spread=29.0000 mean_surface_row= 35.450 wetted_columns= 80
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick= 150 spread=34.0000 mean_surface_row= 41.559 wetted_columns= 59
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick= 200 spread=25.0000 mean_surface_row= 46.766 wetted_columns= 47
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick= 300 spread= 5.0000 mean_surface_row= 57.167 wetted_columns= 12
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          tick= 400 spread= 0.0000 mean_surface_row= 64.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w= 128 additive(shipped)      perfect_sim          peak_spread=37.0000 at tick=109 run_ticks_budget=400
+diag_task55_draining_lake_flatness: w= 128 --- multiplicative(gated) / adaptive(shipped) ---
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   0 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   1 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   2 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   3 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   4 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   5 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   6 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   7 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   8 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  10 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  15 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  20 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  30 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  50 spread= 6.0000 mean_surface_row= 24.819 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  75 spread= 8.0000 mean_surface_row= 26.537 wetted_columns= 82
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 100 spread=24.0000 mean_surface_row= 32.463 wetted_columns= 82
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 150 spread=33.0000 mean_surface_row= 42.526 wetted_columns= 76
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 200 spread=26.0000 mean_surface_row= 49.254 wetted_columns= 59
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 300 spread= 9.0000 mean_surface_row= 55.500 wetted_columns= 14
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 400 spread= 0.0000 mean_surface_row= 64.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  adaptive(shipped)    peak_spread=39.0000 at tick=117 run_ticks_budget=400
+diag_task55_draining_lake_flatness: w= 128 --- multiplicative(gated) / perfect_sim ---
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   0 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   1 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   2 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   3 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   4 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   5 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   6 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   7 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=   8 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=  10 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=  15 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=  20 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=  30 spread= 0.0000 mean_surface_row= 24.000 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=  50 spread= 6.0000 mean_surface_row= 24.819 wetted_columns= 83
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick=  75 spread= 8.0000 mean_surface_row= 26.524 wetted_columns= 82
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick= 100 spread=23.0000 mean_surface_row= 32.568 wetted_columns= 81
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick= 150 spread=32.0000 mean_surface_row= 42.176 wetted_columns= 74
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick= 200 spread=26.0000 mean_surface_row= 49.169 wetted_columns= 59
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick= 300 spread= 7.0000 mean_surface_row= 56.000 wetted_columns= 13
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          tick= 400 spread= 0.0000 mean_surface_row= 64.000 wetted_columns=  0
+diag_task55_draining_lake_flatness: w= 128 multiplicative(gated)  perfect_sim          peak_spread=37.0000 at tick=116 run_ticks_budget=400
+diag_task55_draining_lake_flatness: w= 256 h=256 block_size=8 budget_n=256 run_ticks=200 fill=[48,128) neck_width=0.15 hourglass_curve=0.6
+diag_task55_draining_lake_flatness: w= 256 --- additive(shipped) / adaptive(shipped) ---
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=   0 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=   1 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=   2 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=   3 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=   4 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=   5 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=   8 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=  10 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=  15 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=  25 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=  38 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=  50 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick=  75 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick= 100 spread= 4.0000 mean_surface_row= 49.830 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick= 150 spread=23.0000 mean_surface_row= 57.384 wetted_columns=164
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    tick= 200 spread=68.0000 mean_surface_row= 72.636 wetted_columns=162
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      adaptive(shipped)    peak_spread=68.0000 at tick=200 run_ticks_budget=200
+diag_task55_draining_lake_flatness: w= 256 --- additive(shipped) / perfect_sim ---
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=   0 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=   1 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=   2 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=   3 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=   4 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=   5 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=   8 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=  10 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=  15 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=  25 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=  38 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=  50 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick=  75 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick= 100 spread= 4.0000 mean_surface_row= 49.830 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick= 150 spread=23.0000 mean_surface_row= 57.384 wetted_columns=164
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          tick= 200 spread=71.0000 mean_surface_row= 72.377 wetted_columns=162
+diag_task55_draining_lake_flatness: w= 256 additive(shipped)      perfect_sim          peak_spread=71.0000 at tick=200 run_ticks_budget=200
+diag_task55_draining_lake_flatness: w= 256 --- multiplicative(gated) / adaptive(shipped) ---
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   0 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   1 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   2 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   3 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   4 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   5 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   8 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  10 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  15 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  25 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  38 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  50 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  75 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 100 spread= 5.0000 mean_surface_row= 50.073 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 150 spread=26.0000 mean_surface_row= 57.461 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 200 spread=72.0000 mean_surface_row= 71.407 wetted_columns=162
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  adaptive(shipped)    peak_spread=72.0000 at tick=200 run_ticks_budget=200
+diag_task55_draining_lake_flatness: w= 256 --- multiplicative(gated) / perfect_sim ---
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=   0 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=   1 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=   2 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=   3 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=   4 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=   5 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=   8 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=  10 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=  15 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=  25 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=  38 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=  50 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick=  75 spread= 0.0000 mean_surface_row= 48.000 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick= 100 spread= 5.0000 mean_surface_row= 50.073 wetted_columns=165
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick= 150 spread=26.0000 mean_surface_row= 57.537 wetted_columns=164
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          tick= 200 spread=72.0000 mean_surface_row= 71.753 wetted_columns=162
+diag_task55_draining_lake_flatness: w= 256 multiplicative(gated)  perfect_sim          peak_spread=72.0000 at tick=200 run_ticks_budget=200
+diag_task55_draining_lake_flatness: w= 512 h=512 block_size=16 budget_n=256 run_ticks=100 fill=[96,256) neck_width=0.15 hourglass_curve=0.6
+diag_task55_draining_lake_flatness: w= 512 --- additive(shipped) / adaptive(shipped) ---
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=   0 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=   1 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=   2 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=   3 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=   4 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=   5 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=   8 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=  13 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=  19 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=  25 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=  38 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=  50 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick=  75 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    tick= 100 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      adaptive(shipped)    peak_spread=0.0000 at tick=0 run_ticks_budget=100
+diag_task55_draining_lake_flatness: w= 512 --- additive(shipped) / perfect_sim ---
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=   0 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=   1 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=   2 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=   3 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=   4 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=   5 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=   8 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=  13 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=  19 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=  25 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=  38 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=  50 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick=  75 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          tick= 100 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 additive(shipped)      perfect_sim          peak_spread=0.0000 at tick=0 run_ticks_budget=100
+diag_task55_draining_lake_flatness: w= 512 --- multiplicative(gated) / adaptive(shipped) ---
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   0 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   1 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   2 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   3 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   4 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   5 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   8 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  13 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  19 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  25 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  38 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  50 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  75 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 100 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  adaptive(shipped)    peak_spread=0.0000 at tick=0 run_ticks_budget=100
+diag_task55_draining_lake_flatness: w= 512 --- multiplicative(gated) / perfect_sim ---
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=   0 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=   1 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=   2 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=   3 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=   4 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=   5 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=   8 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=  13 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=  19 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=  25 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=  38 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=  50 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick=  75 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          tick= 100 spread= 0.0000 mean_surface_row= 96.000 wetted_columns=331
+diag_task55_draining_lake_flatness: w= 512 multiplicative(gated)  perfect_sim          peak_spread=0.0000 at tick=0 run_ticks_budget=100
+test physics::tests::diag_task55_draining_lake_flatness ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out; finished in 16.23s
+

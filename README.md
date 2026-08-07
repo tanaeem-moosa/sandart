@@ -130,6 +130,14 @@ The project is built in incremental, testable blocks:
 
 ---
 
+## Project notes, backlog and handover
+
+Design docs, the full ticket backlog and a handover written for whoever picks this up next live
+in [`artifacts/`](artifacts/). Start with [`artifacts/HANDOVER.md`](artifacts/HANDOVER.md) — it
+covers the build/test loop (there is no linker on the dev host; everything compiles inside
+`distrobox enter sandart-dev`), the one test that is *meant* to fail, and the state of the
+in-flight hydraulic-head-field work.
+
 ## License & Disclaimers
 
 ### Disclaimer

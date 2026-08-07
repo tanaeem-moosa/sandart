@@ -1,0 +1,63 @@
+Let the pressure heat-map draw the new hydraulic head field
+
+Task #55. Pause shipped so a pressure distribution could be read while nothing
+moves — but the heat-map it was built to serve still drew `column_depth`, the
+quantity the isolation specs have since proven wrong in three separate ways. The
+instrument was half-built, and the new field had never been seen on real
+geometry, only on synthetic test scenarios.
+
+This adds a SOURCE switch to the existing overlay rather than a second overlay:
+two overlays drawing at once would fight, and an A/B is what makes this useful.
+Flip the source while paused and the difference on screen is the defect.
+
+## Same scale, deliberately
+
+The new source renders `p = head(i) - z(i)`, not raw head. Head is an elevation;
+rendering it would need its own normalisation and the two would be incomparable
+by eye. Converting to a pressure-like quantity lets both go through the exact
+same `ln(1 + p) / ln(1 + PRESSURE_HEATMAP_LOG_MAX)` map that `column_depth`
+already uses. One fixed colour scale, two quantities.
+
+What that should show, on the same shape and the same scale: under a cave roof or
+in the U-tube's roofed basin, `column_depth` reads near-dark because little
+material sits directly overhead, while the head field reads bright because it
+knows about the connected column beside it. In a free-falling body the head field
+reads zero throughout and `column_depth` does not.
+
+## Cost
+
+`compute_head_field` measured 11.4ms at w=512 in release, so it runs only when
+the overlay is on AND the new source is selected — the same "costs nothing when
+disabled" contract the block heat-map already follows. Default off; with it off
+the simulation is bit-identical and no extra work is done.
+
+The paused case needed one more thing. Pause stops `step()` but deliberately
+keeps `render()` running, so the field would have been recomputed identically
+~60 times a second at 11.4ms a call — sluggish exactly when someone is trying to
+read it. The upload is now keyed on `(tick_count, source)`, so a paused frame
+skips the whole rebuild; the texture already on the GPU stays correct. Keyed on
+the source too, so flipping the A/B while paused redraws immediately instead of
+showing a stale field from the other source.
+
+Invalidation hangs off `full_upload_needed` rather than off each reset site.
+Every reset, resolution change, shape change and material change already sets
+that flag, so a future one gets invalidation for free instead of silently keeping
+a stale field. It also covers what the tick key alone cannot: `sim.reset()` sets
+`tick_count` back to 0, which could otherwise collide with a cached key from an
+earlier tick 0 and leave the pre-reset image on screen.
+
+## Not physics
+
+`compute_head_field` was promoted out of `#[cfg(test)]` so shipping code can
+reach it, but nothing reads it inside `settle_tick` or `update`. Transport is the
+next step and is not in this commit. A new integration test asserts the stronger
+property that follows: true, false, and never-touched all produce byte-identical
+200-tick checksums, because this field is never consulted by anything that
+advances the simulation.
+
+Suite: 100 passed / 1 failed / 44 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`. Integration tests,
+both checks, `wasm-pack build` and `node --check` all pass.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

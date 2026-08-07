@@ -1,0 +1,79 @@
+Add a static isolation spec for the pressure field
+
+Task #55, step 1. Every attempt at this task so far was measured through
+end-to-end levelling metrics — "how many ticks to halve a level difference" —
+which conflate the pressure FIELD with the transport that consumes it. We never
+once asserted "given this static configuration, the field should be THIS". Three
+defects shipped that a static test would have caught before they reached the
+browser.
+
+This is that missing spec. It simulates nothing: it builds a mask and a
+heightmap, calls production's own `recompute_column_depth`, and reads the head.
+
+## What it measures
+
+Hydraulic head, `head(i) = heights[i] * depth_scale + column_depth[i] - row(i) *
+depth_scale` — deliberately the exact expression the shipped elliptic solve
+already uses for `eta`, so these specs test production rather than a parallel
+invention. For a body at rest, head is constant throughout and equals the free
+surface elevation. That one sentence is most of what is asserted here.
+
+Every scenario is built from fractions of w/h and swept at w = 64/128/256/512.
+
+## Scoreboard: 3 pass, 3 fail
+
+PASS — uniform head down a resting open column; pressure linear in depth at
+exactly one depth_scale per row; the head field resolution-invariant across all
+four widths.
+
+That the first three pass matters as much as the failures: the open vertical
+column is the one case where `column_depth` and true pressure agree, and it
+agrees exactly. The field is not noisy or mis-scaled. It is structurally missing
+two things.
+
+FAIL — Pascal under a roof. A tall water column connected at its base to a
+roofed horizontal channel: the channel must read the column's head. It reads 281
+reference-rows lower at w=512, and the deficit equals the shaft's ENTIRE
+overburden to the row — `column_depth` at the shaft's own bottom, exactly. Not
+approximately: the missing quantity is precisely the amount that never propagated
+sideways. Resolution-invariant at 280/284/282/281 for w=64/128/256/512. This is
+why no siphon is possible.
+
+FAIL — head single-valued across a connected body. The general form of the above,
+on the real `UTubeFlowThrough` vessel (#61). Head spans 133 reference-rows across
+one connected body at rest, a quarter of the domain, max in the reservoir and min
+in the roofed basin strip. Same defect, on geometry that ships in the UI.
+
+FAIL — free fall has zero pressure. Measured as a paired comparison rather than
+an absolute, because the absolute number is contestable and the ratio is not: the
+same 51-cell slab, once resting on the floor and once floating over a large gap,
+reports **identical** pressure at its bottom face. Ratio exactly 1.000. The field
+never asks whether anything supports a cell from below, so resting and falling
+material of identical local geometry are indistinguishable to it. `edge_vel_v` is
+zero throughout, so the `in_transit_at` subtraction is a guaranteed no-op and
+cannot be blamed. `support_fraction` (#58, shipped) already answers exactly the
+question this field never asks.
+
+The first draft of that spec used a one-cell blob and reported "1 cell of
+pressure", which invites the reply that `h[i] * depth_scale + column_depth[i]`
+means "including this cell's own material", so of course it reads one cell. The
+paired multi-cell form removes the escape.
+
+## How it is wired
+
+Each spec returns `Result<(), String>` with the measured numbers in the Err, so
+the deviation is the output rather than a stack trace. One `#[ignore]`d test
+wrapper each, runnable alone with `--ignored`, plus one NON-ignored scoreboard
+test asserting the exact set of currently-passing specs. So `cargo test` stays
+green today while every deviation stays visible, and a spec that starts passing
+forces the expected set to be updated — upward only. Ratchet, not a snapshot.
+
+No physics changed. No visibility widened: the module is declared as a child of
+`physics` via `#[path]`, so `use super::*` reaches `recompute_column_depth`
+without making anything more public.
+
+Suite: 100 passed / 1 failed / 42 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry

@@ -1,0 +1,53 @@
+warning: function `wave_amplitude_in_band` is never used
+    --> sandart-sim/src/physics.rs:8760:8
+     |
+8760 |     fn wave_amplitude_in_band(sim: &TestSim, w: usize, h: usize, rest: f32, x0: usize, x1: usize) -> f32 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandart-sim` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running unittests src/lib.rs (target/debug/deps/sandart_sim-7e4828b42bf9c7df)
+
+running 1 test
+
+spec                                                       head source          result
+spec_uniform_head_in_resting_open_column                   legacy_column_depth  PASS
+spec_uniform_head_in_resting_open_column                   new_head_field       PASS
+spec_pressure_is_linear_in_depth                           legacy_column_depth  PASS
+spec_pressure_is_linear_in_depth                           new_head_field       PASS
+spec_free_fall_has_zero_pressure                           legacy_column_depth  FAIL
+spec_free_fall_has_zero_pressure: a genuinely unsupported slab of water -- nothing whatever between it and a floor far below -- reports the SAME pressure at its bottom face as the identical slab resting on that floor. Not a one-cell bookkeeping offset: the ratio is 1.000, and the magnitude is the slab's full weight, so it grows with the slab. `recompute_column_depth` only ever looks UPWARD -- 'what rests above a cell' -- and never asks whether anything supports the cell from below, so resting and falling material of identical local geometry are indistinguishable to this field. `edge_vel_v` is all-zero in this static spec, so the `in_transit_at` subtraction this function performs is a guaranteed no-op; what is measured here is the mechanism's own floor, not something that subtraction is failing to mask. `support_fraction` (#58, shipped) already answers exactly the question this field never asks.
+w=64: slab=6 cells | FALLING p=48.0000 ref-rows (6.000 cells, want 0) | RESTING p=48.0000 (6.000 cells, want 6.000) | falling/resting ratio=1.0000 | tol=0.16000
+w=128: slab=13 cells | FALLING p=52.0000 ref-rows (13.000 cells, want 0) | RESTING p=52.0000 (13.000 cells, want 13.000) | falling/resting ratio=1.0000 | tol=0.08000
+w=256: slab=26 cells | FALLING p=52.0000 ref-rows (26.000 cells, want 0) | RESTING p=52.0000 (26.000 cells, want 26.000) | falling/resting ratio=1.0000 | tol=0.04000
+w=512: slab=51 cells | FALLING p=51.0000 ref-rows (51.000 cells, want 0) | RESTING p=51.0000 (51.000 cells, want 51.000) | falling/resting ratio=1.0000 | tol=0.02000
+
+
+spec_free_fall_has_zero_pressure                           new_head_field       PASS
+spec_pascal_under_a_roof                                   legacy_column_depth  FAIL
+spec_pascal_under_a_roof: head under the roof does NOT equal the tall column's free-surface head. This is the missing-Pascal defect: `column_depth` counts only material directly above a cell, so a roofed channel gets none of the overburden of a column standing beside it, even at rest, even though they are one connected body at the same elevation.
+w=64: head_shaft=-144.000 head_channel_under_roof=-424.000 |Δ|=280.000 ref-rows (35.000 local cells) tol=0.1600 (shaft overburden at its own bottom was 35.000 local cells = legacy column_depth[shaft-bottom], i.e. exactly the amount missing under the roof in the legacy field)
+w=128: head_shaft=-148.000 head_channel_under_roof=-432.000 |Δ|=284.000 ref-rows (71.000 local cells) tol=0.0800 (shaft overburden at its own bottom was 71.000 local cells = legacy column_depth[shaft-bottom], i.e. exactly the amount missing under the roof in the legacy field)
+w=256: head_shaft=-152.000 head_channel_under_roof=-434.000 |Δ|=282.000 ref-rows (141.000 local cells) tol=0.0400 (shaft overburden at its own bottom was 141.000 local cells = legacy column_depth[shaft-bottom], i.e. exactly the amount missing under the roof in the legacy field)
+w=512: head_shaft=-153.000 head_channel_under_roof=-434.000 |Δ|=281.000 ref-rows (281.000 local cells) tol=0.0200 (shaft overburden at its own bottom was 281.000 local cells = legacy column_depth[shaft-bottom], i.e. exactly the amount missing under the roof in the legacy field)
+
+
+spec_pascal_under_a_roof                                   new_head_field       PASS
+spec_head_is_single_valued_across_a_connected_body         legacy_column_depth  FAIL
+spec_head_is_single_valued_across_a_connected_body: head is NOT single-valued across the connected U-tube body (Pascal's principle violated) -- the general form of spec_pascal_under_a_roof, on the real UTubeFlowThrough vessel.
+w=64: spread=136.000 ref-rows (17.000 local cells) tol=0.1600; max_head=-304.000 at (x=6,y=39); min_head=-440.000 at (x=17,y=56)
+w=128: spread=136.000 ref-rows (34.000 local cells) tol=0.0800; max_head=-304.000 at (x=11,y=77); min_head=-440.000 at (x=34,y=111)
+w=256: spread=134.000 ref-rows (67.000 local cells) tol=0.0400; max_head=-306.000 at (x=21,y=154); min_head=-440.000 at (x=67,y=221)
+w=512: spread=133.000 ref-rows (133.000 local cells) tol=0.0200; max_head=-307.000 at (x=41,y=308); min_head=-440.000 at (x=134,y=441)
+
+
+spec_head_is_single_valued_across_a_connected_body         new_head_field       PASS
+spec_head_field_is_resolution_invariant                    legacy_column_depth  PASS
+spec_head_field_is_resolution_invariant                    new_head_field       PASS
+
+test physics::task55_head_spec::test_task55_head_spec_scoreboard ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 143 filtered out; finished in 0.35s
+

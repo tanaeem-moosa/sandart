@@ -1,0 +1,325 @@
+warning: function `wave_amplitude_in_band` is never used
+    --> sandart-sim/src/physics.rs:8288:8
+     |
+8288 |     fn wave_amplitude_in_band(sim: &TestSim, w: usize, h: usize, rest: f32, x0: usize, x1: usize) -> f32 {
+     |        ^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `sandart-sim` (lib test) generated 1 warning
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running unittests src/lib.rs (target/release/deps/sandart_sim-959f5a4094b1a3f3)
+
+running 1 test
+diag_task55_pocket_equalisation: w=  64 h=64 block_size=2 budget_n=256 run_ticks=300 left_well=[21,24)x[42,46) right_well=[25,39)x[44,46) basin=[21,39)x[46,52) left_probe=22 right_probe=32
+diag_task55_pocket_equalisation: w=  64 --- additive(shipped) / adaptive(shipped) --- initial_level_diff=2.0000 rows
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=   0 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=   1 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=   2 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=   3 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=   4 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=   5 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=   6 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=   8 left_surface_row= 44 right_surface_row= 44 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=  11 left_surface_row= 45 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=  15 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=  23 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=  38 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=  56 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick=  75 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick= 113 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick= 150 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick= 225 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    tick= 300 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      adaptive(shipped)    ticks_to_halve=Some(3) run_ticks_budget=300 (initial=2.0000, target<=1.0000)
+diag_task55_pocket_equalisation: w=  64 --- additive(shipped) / perfect_sim --- initial_level_diff=2.0000 rows
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=   0 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=   1 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=   2 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=   3 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=   4 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=   5 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=   6 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=   8 left_surface_row= 44 right_surface_row= 44 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=  11 left_surface_row= 45 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=  15 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=  23 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=  38 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=  56 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick=  75 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick= 113 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick= 150 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick= 225 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          tick= 300 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 additive(shipped)      perfect_sim          ticks_to_halve=Some(3) run_ticks_budget=300 (initial=2.0000, target<=1.0000)
+diag_task55_pocket_equalisation: w=  64 --- multiplicative(gated) / adaptive(shipped) --- initial_level_diff=2.0000 rows
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   0 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   1 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   2 left_surface_row= 45 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   3 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   4 left_surface_row= 45 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   5 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   6 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=   8 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  11 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  15 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  23 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  38 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  56 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick=  75 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 113 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 150 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 225 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    tick= 300 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  adaptive(shipped)    ticks_to_halve=Some(2) run_ticks_budget=300 (initial=2.0000, target<=1.0000)
+diag_task55_pocket_equalisation: w=  64 --- multiplicative(gated) / perfect_sim --- initial_level_diff=2.0000 rows
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=   0 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=   1 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=   2 left_surface_row= 45 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=   3 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=   4 left_surface_row= 45 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=   5 left_surface_row= 42 right_surface_row= 44 level_diff= 2.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=   6 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=   8 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=  11 left_surface_row= 43 right_surface_row= 44 level_diff= 1.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=  15 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=  23 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=  38 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=  56 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick=  75 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick= 113 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick= 150 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick= 225 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          tick= 300 left_surface_row= 46 right_surface_row= 46 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w=  64 multiplicative(gated)  perfect_sim          ticks_to_halve=Some(2) run_ticks_budget=300 (initial=2.0000, target<=1.0000)
+diag_task55_pocket_equalisation: w= 128 h=128 block_size=4 budget_n=256 run_ticks=300 left_well=[50,55)x[76,84) right_well=[57,71)x[79,84) basin=[50,71)x[84,88) left_probe=52 right_probe=64
+diag_task55_pocket_equalisation: w= 128 --- additive(shipped) / adaptive(shipped) --- initial_level_diff=3.0000 rows
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=   0 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=   1 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=   2 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=   3 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=   4 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=   5 left_surface_row= 77 right_surface_row= 79 level_diff= 2.0000 fraction_of_initial=0.6667
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=   6 left_surface_row= 78 right_surface_row= 79 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=   8 left_surface_row= 78 right_surface_row= 79 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=  11 left_surface_row= 80 right_surface_row= 80 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=  15 left_surface_row= 82 right_surface_row= 83 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=  23 left_surface_row= 83 right_surface_row= 84 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=  38 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=  56 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick=  75 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick= 113 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick= 150 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick= 225 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    tick= 300 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      adaptive(shipped)    ticks_to_halve=Some(6) run_ticks_budget=300 (initial=3.0000, target<=1.5000)
+diag_task55_pocket_equalisation: w= 128 --- additive(shipped) / perfect_sim --- initial_level_diff=3.0000 rows
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=   0 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=   1 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=   2 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=   3 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=   4 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=   5 left_surface_row= 77 right_surface_row= 79 level_diff= 2.0000 fraction_of_initial=0.6667
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=   6 left_surface_row= 78 right_surface_row= 79 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=   8 left_surface_row= 78 right_surface_row= 79 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=  11 left_surface_row= 80 right_surface_row= 80 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=  15 left_surface_row= 82 right_surface_row= 83 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=  23 left_surface_row= 83 right_surface_row= 84 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=  38 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=  56 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick=  75 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick= 113 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick= 150 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick= 225 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          tick= 300 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 additive(shipped)      perfect_sim          ticks_to_halve=Some(6) run_ticks_budget=300 (initial=3.0000, target<=1.5000)
+diag_task55_pocket_equalisation: w= 128 --- multiplicative(gated) / adaptive(shipped) --- initial_level_diff=3.0000 rows
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   0 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   1 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   2 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   3 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   4 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   5 left_surface_row= 77 right_surface_row= 79 level_diff= 2.0000 fraction_of_initial=0.6667
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   6 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=   8 left_surface_row= 78 right_surface_row= 79 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  11 left_surface_row= 81 right_surface_row= 79 level_diff= 2.0000 fraction_of_initial=0.6667
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  15 left_surface_row= 78 right_surface_row= 81 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  23 left_surface_row= 82 right_surface_row= 84 level_diff= 2.0000 fraction_of_initial=0.6667
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  38 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  56 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick=  75 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 113 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 150 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 225 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    tick= 300 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  adaptive(shipped)    ticks_to_halve=Some(8) run_ticks_budget=300 (initial=3.0000, target<=1.5000)
+diag_task55_pocket_equalisation: w= 128 --- multiplicative(gated) / perfect_sim --- initial_level_diff=3.0000 rows
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=   0 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=   1 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=   2 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=   3 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=   4 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=   5 left_surface_row= 77 right_surface_row= 79 level_diff= 2.0000 fraction_of_initial=0.6667
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=   6 left_surface_row= 76 right_surface_row= 79 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=   8 left_surface_row= 78 right_surface_row= 79 level_diff= 1.0000 fraction_of_initial=0.3333
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=  11 left_surface_row= 81 right_surface_row= 79 level_diff= 2.0000 fraction_of_initial=0.6667
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=  15 left_surface_row= 78 right_surface_row= 81 level_diff= 3.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=  23 left_surface_row= 82 right_surface_row= 84 level_diff= 2.0000 fraction_of_initial=0.6667
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=  38 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=  56 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick=  75 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick= 113 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick= 150 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick= 225 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          tick= 300 left_surface_row= 84 right_surface_row= 84 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 128 multiplicative(gated)  perfect_sim          ticks_to_halve=Some(8) run_ticks_budget=300 (initial=3.0000, target<=1.5000)
+diag_task55_pocket_equalisation: w= 256 h=256 block_size=8 budget_n=256 run_ticks=200 left_well=[115,120)x[145,162) right_well=[121,135)x[153,162) basin=[115,135)x[162,168) left_probe=117 right_probe=128
+diag_task55_pocket_equalisation: w= 256 --- additive(shipped) / adaptive(shipped) --- initial_level_diff=8.0000 rows
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=   0 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=   1 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=   2 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=   3 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=   4 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=   5 left_surface_row=146 right_surface_row=153 level_diff= 7.0000 fraction_of_initial=0.8750
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=   8 left_surface_row=147 right_surface_row=153 level_diff= 6.0000 fraction_of_initial=0.7500
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=  10 left_surface_row=147 right_surface_row=153 level_diff= 6.0000 fraction_of_initial=0.7500
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=  15 left_surface_row=150 right_surface_row=153 level_diff= 3.0000 fraction_of_initial=0.3750
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=  25 left_surface_row=152 right_surface_row=156 level_diff= 4.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=  38 left_surface_row=161 right_surface_row=162 level_diff= 1.0000 fraction_of_initial=0.1250
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=  50 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick=  75 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick= 100 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick= 150 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    tick= 200 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      adaptive(shipped)    ticks_to_halve=Some(11) run_ticks_budget=200 (initial=8.0000, target<=4.0000)
+diag_task55_pocket_equalisation: w= 256 --- additive(shipped) / perfect_sim --- initial_level_diff=8.0000 rows
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=   0 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=   1 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=   2 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=   3 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=   4 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=   5 left_surface_row=146 right_surface_row=153 level_diff= 7.0000 fraction_of_initial=0.8750
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=   8 left_surface_row=147 right_surface_row=153 level_diff= 6.0000 fraction_of_initial=0.7500
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=  10 left_surface_row=147 right_surface_row=153 level_diff= 6.0000 fraction_of_initial=0.7500
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=  15 left_surface_row=150 right_surface_row=153 level_diff= 3.0000 fraction_of_initial=0.3750
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=  25 left_surface_row=152 right_surface_row=156 level_diff= 4.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=  38 left_surface_row=161 right_surface_row=162 level_diff= 1.0000 fraction_of_initial=0.1250
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=  50 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick=  75 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick= 100 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick= 150 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          tick= 200 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 additive(shipped)      perfect_sim          ticks_to_halve=Some(11) run_ticks_budget=200 (initial=8.0000, target<=4.0000)
+diag_task55_pocket_equalisation: w= 256 --- multiplicative(gated) / adaptive(shipped) --- initial_level_diff=8.0000 rows
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   0 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   1 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   2 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   3 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   4 left_surface_row=146 right_surface_row=153 level_diff= 7.0000 fraction_of_initial=0.8750
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   5 left_surface_row=146 right_surface_row=153 level_diff= 7.0000 fraction_of_initial=0.8750
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=   8 left_surface_row=148 right_surface_row=153 level_diff= 5.0000 fraction_of_initial=0.6250
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  10 left_surface_row=149 right_surface_row=153 level_diff= 4.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  15 left_surface_row=148 right_surface_row=153 level_diff= 5.0000 fraction_of_initial=0.6250
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  25 left_surface_row=153 right_surface_row=156 level_diff= 3.0000 fraction_of_initial=0.3750
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  38 left_surface_row=161 right_surface_row=162 level_diff= 1.0000 fraction_of_initial=0.1250
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  50 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick=  75 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 100 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 150 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    tick= 200 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  adaptive(shipped)    ticks_to_halve=Some(10) run_ticks_budget=200 (initial=8.0000, target<=4.0000)
+diag_task55_pocket_equalisation: w= 256 --- multiplicative(gated) / perfect_sim --- initial_level_diff=8.0000 rows
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=   0 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=   1 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=   2 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=   3 left_surface_row=145 right_surface_row=153 level_diff= 8.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=   4 left_surface_row=146 right_surface_row=153 level_diff= 7.0000 fraction_of_initial=0.8750
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=   5 left_surface_row=146 right_surface_row=153 level_diff= 7.0000 fraction_of_initial=0.8750
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=   8 left_surface_row=148 right_surface_row=153 level_diff= 5.0000 fraction_of_initial=0.6250
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=  10 left_surface_row=149 right_surface_row=153 level_diff= 4.0000 fraction_of_initial=0.5000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=  15 left_surface_row=148 right_surface_row=153 level_diff= 5.0000 fraction_of_initial=0.6250
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=  25 left_surface_row=153 right_surface_row=156 level_diff= 3.0000 fraction_of_initial=0.3750
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=  38 left_surface_row=161 right_surface_row=162 level_diff= 1.0000 fraction_of_initial=0.1250
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=  50 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick=  75 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick= 100 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick= 150 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          tick= 200 left_surface_row=162 right_surface_row=162 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 256 multiplicative(gated)  perfect_sim          ticks_to_halve=Some(10) run_ticks_budget=200 (initial=8.0000, target<=4.0000)
+diag_task55_pocket_equalisation: w= 512 h=512 block_size=16 budget_n=256 run_ticks=150 left_well=[140,150)x[415,442) right_well=[250,263)x[428,442) basin=[140,263)x[442,461) left_probe=145 right_probe=256
+diag_task55_pocket_equalisation: w= 512 --- additive(shipped) / adaptive(shipped) --- initial_level_diff=13.0000 rows
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=   0 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=   1 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=   2 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=   3 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=   4 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=   6 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=   8 left_surface_row=416 right_surface_row=428 level_diff=12.0000 fraction_of_initial=0.9231
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=  11 left_surface_row=417 right_surface_row=429 level_diff=12.0000 fraction_of_initial=0.9231
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=  19 left_surface_row=419 right_surface_row=432 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=  28 left_surface_row=428 right_surface_row=435 level_diff= 7.0000 fraction_of_initial=0.5385
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=  38 left_surface_row=433 right_surface_row=437 level_diff= 4.0000 fraction_of_initial=0.3077
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=  56 left_surface_row=437 right_surface_row=440 level_diff= 3.0000 fraction_of_initial=0.2308
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick=  75 left_surface_row=439 right_surface_row=441 level_diff= 2.0000 fraction_of_initial=0.1538
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick= 113 left_surface_row=441 right_surface_row=442 level_diff= 1.0000 fraction_of_initial=0.0769
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    tick= 150 left_surface_row=442 right_surface_row=442 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      adaptive(shipped)    ticks_to_halve=Some(29) run_ticks_budget=150 (initial=13.0000, target<=6.5000)
+diag_task55_pocket_equalisation: w= 512 --- additive(shipped) / perfect_sim --- initial_level_diff=13.0000 rows
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=   0 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=   1 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=   2 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=   3 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=   4 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=   6 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=   8 left_surface_row=416 right_surface_row=428 level_diff=12.0000 fraction_of_initial=0.9231
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=  11 left_surface_row=417 right_surface_row=429 level_diff=12.0000 fraction_of_initial=0.9231
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=  19 left_surface_row=419 right_surface_row=432 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=  28 left_surface_row=428 right_surface_row=435 level_diff= 7.0000 fraction_of_initial=0.5385
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=  38 left_surface_row=433 right_surface_row=437 level_diff= 4.0000 fraction_of_initial=0.3077
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=  56 left_surface_row=437 right_surface_row=440 level_diff= 3.0000 fraction_of_initial=0.2308
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick=  75 left_surface_row=439 right_surface_row=441 level_diff= 2.0000 fraction_of_initial=0.1538
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick= 113 left_surface_row=441 right_surface_row=442 level_diff= 1.0000 fraction_of_initial=0.0769
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          tick= 150 left_surface_row=442 right_surface_row=442 level_diff= 0.0000 fraction_of_initial=0.0000
+diag_task55_pocket_equalisation: w= 512 additive(shipped)      perfect_sim          ticks_to_halve=Some(29) run_ticks_budget=150 (initial=13.0000, target<=6.5000)
+diag_task55_pocket_equalisation: w= 512 --- multiplicative(gated) / adaptive(shipped) --- initial_level_diff=13.0000 rows
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   0 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   1 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   2 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   3 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   4 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   6 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=   8 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  11 left_surface_row=416 right_surface_row=430 level_diff=14.0000 fraction_of_initial=1.0769
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  19 left_surface_row=419 right_surface_row=432 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  28 left_surface_row=428 right_surface_row=435 level_diff= 7.0000 fraction_of_initial=0.5385
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  38 left_surface_row=432 right_surface_row=438 level_diff= 6.0000 fraction_of_initial=0.4615
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  56 left_surface_row=436 right_surface_row=441 level_diff= 5.0000 fraction_of_initial=0.3846
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick=  75 left_surface_row=438 right_surface_row=441 level_diff= 3.0000 fraction_of_initial=0.2308
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 113 left_surface_row=440 right_surface_row=442 level_diff= 2.0000 fraction_of_initial=0.1538
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    tick= 150 left_surface_row=441 right_surface_row=442 level_diff= 1.0000 fraction_of_initial=0.0769
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  adaptive(shipped)    ticks_to_halve=Some(32) run_ticks_budget=150 (initial=13.0000, target<=6.5000)
+diag_task55_pocket_equalisation: w= 512 --- multiplicative(gated) / perfect_sim --- initial_level_diff=13.0000 rows
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=   0 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=   1 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=   2 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=   3 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=   4 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=   6 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=   8 left_surface_row=415 right_surface_row=428 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=  11 left_surface_row=416 right_surface_row=430 level_diff=14.0000 fraction_of_initial=1.0769
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=  19 left_surface_row=419 right_surface_row=432 level_diff=13.0000 fraction_of_initial=1.0000
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=  28 left_surface_row=428 right_surface_row=435 level_diff= 7.0000 fraction_of_initial=0.5385
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=  38 left_surface_row=432 right_surface_row=438 level_diff= 6.0000 fraction_of_initial=0.4615
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=  56 left_surface_row=436 right_surface_row=441 level_diff= 5.0000 fraction_of_initial=0.3846
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick=  75 left_surface_row=438 right_surface_row=441 level_diff= 3.0000 fraction_of_initial=0.2308
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick= 113 left_surface_row=440 right_surface_row=442 level_diff= 2.0000 fraction_of_initial=0.1538
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          tick= 150 left_surface_row=441 right_surface_row=442 level_diff= 1.0000 fraction_of_initial=0.0769
+diag_task55_pocket_equalisation: w= 512 multiplicative(gated)  perfect_sim          ticks_to_halve=Some(32) run_ticks_budget=150 (initial=13.0000, target<=6.5000)
+test physics::tests::diag_task55_pocket_equalisation ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 129 filtered out; finished in 7.55s
+
+
+real	0m7.710s
+user	0m2.959s
+sys	0m4.659s

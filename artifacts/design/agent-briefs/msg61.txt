@@ -1,0 +1,73 @@
+Add a U-tube flow-through vessel container shape
+
+Task #61. A U-shaped vessel rather than another funnel: a tall prefilled
+reservoir arm on the left, a bottom basin connecting across, a shorter right arm
+whose rim is an overflow lip, a spout off that lip, and a catch well on the far
+right. Water should run down the left arm, through the basin, CLIMB the right
+arm, spill over the lip and fall into the well, coming to rest with both arms
+standing at the lip height.
+
+It exists as an apparatus for the #55 hydraulic-head rewrite, and it earns that
+on its first run — see below.
+
+## Geometry
+
+A union of five axis-aligned rects, `physics::U_TUBE_RECTS`, as fractions of
+(w, h) so the shape is resolution-invariant. `neck_width` and `hourglass_curve`
+are deliberately unused: there is no neck to narrow and no chamber to bend.
+
+The strip of basin between the two arms has no rect above it, so it rasterises
+as a ROOFED channel. That is the point, not an artifact: a cell under that roof
+has almost no material directly overhead while being connected to an 85-row
+column of water sideways of it. `column_depth`, a top-down sum of overhead mass,
+says one thing there; Pascal says another. This shape puts the disagreement on
+screen without any instrumentation.
+
+The single-source-of-truth const is read by both `eval_sandbox_shape` and
+`initialize_hourglass` — the latter cannot use the scalar `dy < fill_threshold`
+cutoff every other shape takes, because the right arm and catch well overlap the
+reservoir's dy range, so any threshold that fills the reservoir fills them too.
+It fills the reservoir rect directly instead.
+
+## What it shows today
+
+Water, 128 grid, perfect simulation, 4000 ticks:
+
+- The reservoir drains 17 rows down the left arm and fills the basin to the brim.
+  Mass conserved to +0.000%.
+- The right arm never rises. Not slowly — at all. Zero material enters it across
+  4000 ticks, and zero reaches the catch well.
+- It is stable and static, not oscillating or exploding.
+
+An 85-row water column stands on a full basin whose only remaining outlet is
+upward, and nothing goes up. That is #55's core defect stated as a picture: the
+field has no mechanism to carry a free-surface elevation laterally, so a cell
+under the roof never learns there is water above and to the left of it. It is
+also why no siphon is possible. Expect this shape to look inert until the
+hydraulic-head field lands, and to be the first thing worth re-running after.
+
+## Coverage
+
+Extending `SANDFALL_FUNNEL_SHAPES` to seven wires this shape into the existing
+geometry and mass-conservation suites for free. Three new tests:
+
+- `test_u_tube_is_one_connected_region` — flood-fill from the reservoir reaches
+  every non-OUTSIDE cell, at 64/128/256/512, so a rasterisation pinch-off at one
+  resolution cannot hide behind another.
+- `test_u_tube_basin_has_a_roof` — the roofed strip still exists. If it ever
+  vanishes the apparatus is worthless and this is the only thing that would say
+  so.
+- `test_u_tube_reservoir_overflows_the_lip` — pure geometry, computed from the
+  rects, not hard-coded: reservoir volume above the lip (0.09) exceeds downstream
+  capacity below it (0.042), so it genuinely spills rather than merely filling,
+  and the catch well (0.083) cannot overflow the 0.048 that spills.
+
+Suite: 99 passed / 1 failed / 36 ignored, the failure being the intentional
+`test_water_blob_stays_left_right_symmetric_under_gravity`. Integration tests,
+`sandart-render`, `sandart`, `cargo check -p sandart-wasm --target
+wasm32-unknown-unknown --release` and a full `wasm-pack build` all pass.
+
+No physics changed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VcD31vN52YFMpHVV99cyry
