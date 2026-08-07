@@ -2108,26 +2108,45 @@ fn wave_params(wetness: f32) -> (f32, f32) {
     }
 }
 
-/// TASK #63. How much hydrostatic head a donor cell must carry, in CELLS OF HEAD (see
-/// `task55_head_field::cells_of_head_at`), before its edges convey at the solver's full calibrated
-/// rate.
+/// TASK #63. The depth, in REFERENCE ROWS of head (see `task55_head_field::rows_of_head_at`), at
+/// and beyond which a donor conveys at the solver's full shipped rate.
 ///
-/// ONE CELL, and that number is derived rather than swept. `wave_params`' `(c_sq, damping)` pairs
-/// were calibrated against edges inside a body of material -- a cell with at least its own
-/// neighbours' worth of fill around it -- so one cell of head is the shallowest state that
-/// calibration ever actually described. Everything above it is inside the calibrated regime and
-/// must not be touched (this task is "slow the low-pressure cases down", NOT "speed the loaded
-/// ones up" -- adding gain at the top would push peak flow past the CFL bound `c_sq` was chosen to
-/// respect and force a compensating clamp). Everything below it is a surface film the calibration
-/// never covered, and is what this attenuates.
-const PRESSURE_RATE_FULL_AT_CELLS_OF_HEAD: f32 = 1.0;
+/// TWENTY ROWS, and this one IS a stated design choice rather than a derived quantity -- unlike
+/// the `sqrt` in `pressure_rate_factor` below, which is not. What forces a choice here is that the
+/// top of the range cannot move: `wave_params`' `(c_sq, damping)` already sit at the CFL bound, so
+/// no depth can be made to convey FASTER than today. A depth-ordered rate therefore has to be
+/// produced by slowing everything shallower than some reference depth, and this constant names
+/// that depth -- "the shipped rate is taken to be correct at 20 reference rows of head".
+///
+/// USER-SPECIFIED, 2026-08-07: "I want 20 depth to have higher flow than 10 but it doesn't have to
+/// be linear." 20 rows is that request read literally -- the grading has to still be climbing at
+/// 20 for a 20-deep body to beat a 10-deep one, so the neutral point cannot be below it. Raising
+/// it grades a deeper range and slows more of the simulation; lowering it flattens the ordering
+/// the user asked for. Both are real trades, neither is a bug to be tuned away.
+///
+/// In REFERENCE rows, so this is one physical depth at every resolution: 20 local cells at w=512,
+/// 2.5 at w=64. See `rows_of_head_at` for why the unit has to be reference rows and not cells.
+const PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD: f32 = 20.0;
 
 /// TASK #63. Multiplier on a liquid edge's conveyance coefficient (`flux_edge_candidate`'s `c_sq`)
-/// as a function of the DONOR cell's hydrostatic head, in cells of head. Never exceeds `1.0`, so
+/// as a function of the DONOR cell's hydrostatic head, in reference rows. Never exceeds `1.0`, so
 /// it can only ever REDUCE a flux the solver would otherwise have produced -- which is what makes
 /// it safe against `spec_transport_speed_is_bounded` by construction rather than by measurement.
 ///
-/// **Free fall is exempt, and the exemption is exact, not an epsilon.** `cells_of_head_at` returns
+/// **SQUARE ROOT, and that is Torricelli, not a curve picked to look right.** Efflux velocity
+/// under a head `h` is `v = sqrt(2*g*h)`, so flow rate scales as the SQUARE ROOT of depth. The
+/// shipped solver's rate is independent of depth given the same driving head, so the correction
+/// that restores the physical law is exactly `sqrt(h / h_ref)`, clamped at 1 because the top of
+/// the range is already at the CFL bound and cannot be raised.
+///
+/// The concavity is also what makes the feature affordable. The user's requirement is an ordering
+/// out at 10-vs-20 rows of head, and a LINEAR ramp to 20 would deliver that only by running a
+/// 1-row film at 5% of rate and a 5-row puddle at 25% -- a near-freeze of every free surface in
+/// the scene. `sqrt` gives the same ordering at the top (0.71 at 10 rows against 1.00 at 20, a
+/// 1.41x spread) while leaving the shallow end far more alive: 0.22 at one row, 0.50 at five.
+/// Diminishing returns with depth is both the physically correct shape and the affordable one.
+///
+/// **Free fall is exempt, and the exemption is exact, not an epsilon.** `rows_of_head_at` returns
 /// exactly `0.0` for a cell `advance_head_field` classified as unsupported (it WRITES `head = z`
 /// there rather than taking a max), and strictly more than `0.0` for every supported wet cell
 /// however thin -- see that function's own doc comment. So `<= 0.0` reads "outside the pressure
@@ -2136,16 +2155,16 @@ const PRESSURE_RATE_FULL_AT_CELLS_OF_HEAD: f32 = 1.0;
 /// pressure-derived rate simply does not apply to it. Attenuating it instead would freeze falling
 /// water in mid-air, which is the one outcome this task must not produce.
 ///
-/// Linear below the threshold, not a saturating `p / (p + ref)` curve: a saturating form never
-/// reaches `1.0`, so it would silently retune every well-pressurised edge in the simulation --
-/// exactly the "add gain / lose calibration" failure mode described on
-/// `PRESSURE_RATE_FULL_AT_CELLS_OF_HEAD`. Clamped-linear is EXACTLY neutral at and above one cell.
+/// NOT a saturating `p / (p + ref)` form, which was considered and rejected: it never reaches
+/// `1.0`, so it would slow the deepest water in the scene too and silently retune every edge in
+/// the simulation rather than only the graded range. Clamped-`sqrt` is EXACTLY neutral at and
+/// above `PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD`.
 #[inline]
-fn pressure_rate_factor(cells_of_head: f32) -> f32 {
-    if cells_of_head <= 0.0 {
+fn pressure_rate_factor(rows_of_head: f32) -> f32 {
+    if rows_of_head <= 0.0 {
         1.0
     } else {
-        (cells_of_head / PRESSURE_RATE_FULL_AT_CELLS_OF_HEAD).min(1.0)
+        (rows_of_head / PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD).sqrt().min(1.0)
     }
 }
 
@@ -3572,8 +3591,9 @@ pub fn settle_tick(
     // TASK #63: "pressure-sensitive flow rate" debug toggle
     // (`DrawingSimulation::pressure_sensitive_flow`; see that field's doc comment). `false`
     // (default): unchanged from the tree before this parameter existed -- bit-identical. `true`:
-    // a LIQUID-ONLY edge whose DONOR carries less than one cell of hydrostatic head has its
-    // conveyance coefficient scaled down in proportion to the head it does carry
+    // a LIQUID-ONLY edge whose DONOR carries less than `PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD`
+    // reference rows of hydrostatic head has its conveyance coefficient scaled by the square root
+    // of the fraction it does carry
     // (`pressure_rate_factor`, applied to `c_sq` at both the phase-0 vertical and phase-1 lateral
     // edge sites). Free-falling material is exempt by construction; granular and mixed edges are
     // untouched.
@@ -4293,33 +4313,45 @@ pub fn settle_tick(
                         let (liquid_c_sq, liquid_damping) = wave_params(wetness);
                         let c_sq = GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity;
                         let damping = GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity;
-                        // TASK #63: pressure-sensitive flow rate. Attenuates `c_sq` -- how fast
-                        // this edge's momentum spins up from its driving head -- when the DONOR
-                        // carries less than one cell of hydrostatic head. It does NOT touch the
-                        // driving head itself, so which branch produced `head_a`/`head_b` above is
-                        // irrelevant here and this composes with `head_field_transport` either way.
+                        // TASK #63: pressure-sensitive flow rate. Scales this edge's FLUX -- via
+                        // `flux_edge_candidate`'s own `weight` parameter, which exists to do
+                        // exactly this -- by how much hydrostatic head the DONOR carries. It does
+                        // NOT touch the driving head, so which branch produced `head_a`/`head_b`
+                        // above is irrelevant here and this composes with `head_field_transport`
+                        // either way.
+                        //
+                        // THE FLUX, NOT `c_sq`, and the distinction is load-bearing. A first
+                        // version attenuated `c_sq` -- how fast the edge's momentum spins up --
+                        // which is the more obvious reading of "flow rate". MEASURED, and it
+                        // cannot produce a depth ordering: at any edge with real room to move
+                        // into, the driving head is large enough that `v` reaches the
+                        // donor-mass/acceptor-room clamp within a tick or two whatever `c_sq` is,
+                        // so the realised flux is MASS-limited and `c_sq` drops out entirely. A
+                        // draining vessel measured 127.1 (10 deep) against 124.5 (20 deep) -- no
+                        // ordering at all. `c_sq` only matters where flow is velocity-limited,
+                        // i.e. the low-gradient case, which is not where depth lives. Scaling the
+                        // realised flux is also the more faithful reading of the law being
+                        // implemented: Torricelli's `Q = C_d * A * sqrt(2*g*h)` puts the head
+                        // dependence in a DISCHARGE COEFFICIENT on the flux, which is what this
+                        // now is.
                         //
                         // DONOR, not the edge average or the higher end: this scales the rate at
-                        // which a cell can PUSH material out, and only the cell material is leaving
-                        // has a say in that. Under gravity `a` is the upper cell of the vertical
-                        // pair and material moves `a -> b`, so `a` is the donor for every edge this
-                        // factor is allowed to reach (the head-field/`edge_sleeps` machinery has
-                        // already discarded the reverse case by this point).
+                        // which a cell can PUSH material out, and only the cell material is
+                        // leaving has a say in that.
                         //
-                        // Free fall is untouched: `cells_of_head_at` returns exactly `0.0` for
+                        // Free fall is untouched: `rows_of_head_at` returns exactly `0.0` for
                         // material `advance_head_field` pinned as unsupported, and
                         // `pressure_rate_factor` returns `1.0` there -- see both functions' doc
-                        // comments for why that separation is exact rather than an epsilon. This
-                        // matters most at THIS site, which is the one free fall runs through.
-                        let c_sq = if pressure_sensitive_flow
+                        // comments for why that separation is exact rather than an epsilon.
+                        let pressure_weight = if pressure_sensitive_flow
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
                         {
-                            c_sq * pressure_rate_factor(task55_head_field::cells_of_head_at(
+                            pressure_rate_factor(task55_head_field::rows_of_head_at(
                                 center_idx, w, head_field,
                             ))
                         } else {
-                            c_sq
+                            1.0
                         };
                         // COLLECT only: compute this edge's candidate flux and record it, plus
                         // this cell's and its neighbour's donor/acceptor limits for arbitration.
@@ -4335,7 +4367,7 @@ pub fn settle_tick(
                             cap_a, cap_b,
                             h_a, h_b,
                             h_a, h_b,
-                            1.0,
+                            pressure_weight,
                             edge_vel_v[center_idx],
                         );
                         cand_v[center_idx] = candidate;
@@ -4862,27 +4894,23 @@ pub fn settle_tick(
                         } else {
                             let (c_sq, damping) = wave_params(wetness);
                             // TASK #63: pressure-sensitive flow rate -- see the phase-0 vertical
-                            // site's own comment for the full reasoning (donor, not average; free
-                            // fall exempt by construction; the driving head untouched). This is the
-                            // site where the effect is meant to be VISIBLE: a deep body pushes
-                            // sideways at the calibrated rate while a surface film spreads in
-                            // proportion to the head it actually carries.
+                            // site's own comment for the full reasoning (the flux and not `c_sq`;
+                            // donor and not average; free fall exempt by construction; the driving
+                            // head untouched).
                             //
-                            // Note the two limiters are independent and both wanted. `avail_a`
-                            // below removes mass that is still in transit downward (a falling
-                            // parcel cannot push sideways at all); this factor instead scales how
-                            // hard RESTING material pushes. A thin resting film is fully available
-                            // as donor mass and was previously spread at the same rate as the floor
-                            // of a deep basin.
-                            let c_sq = if pressure_sensitive_flow
+                            // Note this limiter and `avail_a` below are independent and both
+                            // wanted. `avail_a` removes mass that is still in transit downward (a
+                            // falling parcel cannot push sideways at all); this scales how hard
+                            // RESTING material pushes, by the head it carries.
+                            let pressure_weight = if pressure_sensitive_flow
                                 && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                                 && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
                             {
-                                c_sq * pressure_rate_factor(task55_head_field::cells_of_head_at(
+                                pressure_rate_factor(task55_head_field::rows_of_head_at(
                                     center_idx, w, head_field,
                                 ))
                             } else {
-                                c_sq
+                                1.0
                             };
                             // Mass that arrived from upstream during phase 0 is still falling; it is
                             // unsupported and cannot push sideways (see `flux_edge`'s `avail_*`).
@@ -4956,7 +4984,7 @@ pub fn settle_tick(
                                 cell_capacity, cap_b,
                                 avail_a, avail_b,
                                 h_a, h_b,
-                                1.0,
+                                pressure_weight,
                                 edge_vel_h[center_idx],
                             );
                             cand_h[center_idx] = candidate;

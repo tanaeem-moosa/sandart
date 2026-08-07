@@ -510,22 +510,28 @@ pub struct DrawingSimulation {
 
     /// "Pressure-sensitive flow rate" debug toggle (task #63). Off by default (today's shipped
     /// conveyance coefficient, independent of how much head a cell carries -- bit-identical).
-    /// When on, a LIQUID-ONLY edge whose DONOR carries less than one cell of hydrostatic head has
-    /// its conveyance coefficient (`physics::flux_edge_candidate`'s `c_sq`) scaled down in
-    /// proportion to the head it does carry, at both the vertical and lateral edge sites. So a
-    /// deep body pushes at the full calibrated rate while a surface film spreads more slowly.
+    /// When on, a LIQUID-ONLY edge's conveyance coefficient (`physics::flux_edge_candidate`'s
+    /// `c_sq`) is scaled by `sqrt(donor head / PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD)`, clamped at
+    /// `1.0`, at both the vertical and lateral edge sites. So water 20 reference rows deep pushes
+    /// at the full shipped rate, water 10 rows deep at 0.71 of it, and a one-row surface film at
+    /// 0.22 -- a depth ORDERING, not just a thin-film cutoff.
+    ///
+    /// The square root is Torricelli (`v = sqrt(2*g*h)`), not a fitted curve; the reference depth
+    /// is a stated design choice, because the top of the range is already at the CFL bound and so
+    /// a depth ordering can only be produced by slowing the shallow end. See both constants' doc
+    /// comments in `physics.rs`.
     ///
     /// SLOWS THE LOW END, never speeds the high end. The multiplier
     /// (`physics::pressure_rate_factor`) is capped at exactly `1.0` and is exactly `1.0` at and
-    /// above one cell of head, so no well-pressurised edge in the simulation changes at all and
-    /// nothing can be pushed past the CFL bound `c_sq` was chosen to respect. Whatever this does
-    /// to a scenario, it can only ever be a REDUCTION in flux relative to the toggle being off.
+    /// above the reference depth, so the deepest water in a scene is untouched and nothing can be
+    /// pushed past the CFL bound `c_sq` was chosen to respect. Whatever this does to a scenario,
+    /// it can only ever be a REDUCTION in flux relative to the toggle being off.
     ///
     /// FREE FALL IS EXEMPT, by construction rather than by a special case. Pressure comes from
     /// the head field, which pins unsupported material to `head = z` and therefore to exactly zero
     /// head; the rate law returns `1.0` there. A ballistic parcel has no contact pressure for a
     /// pressure-derived rate to be sensitive to, so it keeps falling at full speed. See
-    /// `physics::task55_head_field::cells_of_head_at` for why the zero/positive separation is
+    /// `physics::task55_head_field::rows_of_head_at` for why the zero/positive separation is
     /// exact and not an epsilon.
     ///
     /// INDEPENDENT OF `head_field_transport` above, deliberately. This reads `head_field` for the

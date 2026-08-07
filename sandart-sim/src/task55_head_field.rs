@@ -457,29 +457,36 @@ pub(crate) fn advance_head_field(
     residual
 }
 
-/// TASK #63. Hydrostatic head carried by one cell, expressed in CELLS OF HEAD -- i.e. `p / ds`
-/// where `p = head - z` is the same pressure `head_field_to_pressure` computes and
-/// `ds = depth_scale` is one grid cell's worth of elevation. A return of `3.0` means "this cell
-/// bears three cells' depth of water"; the value is therefore resolution-independent by
-/// construction, which is why the rate law built on it (`pressure_rate_factor` in `physics.rs`)
-/// needs no per-resolution constant.
+/// TASK #63. Hydrostatic head carried by one cell, expressed in REFERENCE ROWS of head -- i.e.
+/// exactly `p = head - z`, the same pressure `head_field_to_pressure` computes, just for one cell
+/// and without allocating. A return of `20.0` means "this cell bears twenty reference rows' depth
+/// of water above it".
+///
+/// **REFERENCE rows, not local cells, and that is the whole point of the unit.** A local cell is
+/// `depth_scale = REFERENCE_GRID_HEIGHT / w` reference rows tall, so one full cell is 1 row of head
+/// at w=512 and 8 rows at w=64. Measuring in local cells would make a rate law built on this mean a
+/// different PHYSICAL depth at every resolution -- "20 cells deep" is a third of the vessel at
+/// w=64 and a twentieth of it at w=512. In reference rows the same body of water reads the same
+/// number at every resolution, which is what lets `pressure_rate_factor` in `physics.rs` carry a
+/// single threshold constant instead of a per-resolution table. Same convention `column_depth`,
+/// `head_field_to_pressure` and `task55_head_spec::pressure_at` all already use.
 ///
 /// **`0.0` means UNSUPPORTED, not "almost no water".** Reading this as a continuum bottoming out
 /// at zero is the one way to misuse it. `advance_head_field` WRITES (never maxes) `head = z` at
 /// every cell it classified as free-falling, so an unsupported cell returns exactly `0.0`. Every
 /// SUPPORTED wet cell instead takes at least its own local hydrostatic term
-/// `own_elev = z + height * ds` into the max, so it returns at least `height > 0` cells of head --
-/// strictly positive, however thin the film. The two states are therefore cleanly separated at
-/// zero, and a caller that wants to exempt free fall can test `<= 0.0` exactly rather than
-/// carrying a second support mask alongside the field. Dry cells also read `0.0` (they hold
-/// `head = z` too), which is harmless for that use: a dry cell has no mass to donate.
+/// `own_elev = z + height * ds` into the max, so it returns at least `height * ds > 0` -- strictly
+/// positive, however thin the film. The two states are therefore cleanly separated at zero, and a
+/// caller that wants to exempt free fall can test `<= 0.0` exactly rather than carrying a second
+/// support mask alongside the field. Dry cells also read `0.0` (they hold `head = z` too), which is
+/// harmless for that use: a dry cell has no mass to donate.
 ///
-/// Cheap by construction -- `head[idx] / ds + row` -- so it is safe to call per edge inside the
-/// solver's hot loop, unlike `head_field_to_pressure`, which allocates a whole-grid `Vec`.
+/// Cheap by construction -- one multiply-add -- so it is safe to call per edge inside the solver's
+/// hot loop, unlike `head_field_to_pressure`, which allocates a whole-grid `Vec`.
 #[inline]
-pub(crate) fn cells_of_head_at(idx: usize, w: usize, head: &[f32]) -> f32 {
+pub(crate) fn rows_of_head_at(idx: usize, w: usize, head: &[f32]) -> f32 {
     let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-    head[idx] / depth_scale + (idx / w) as f32
+    head[idx] + (idx / w) as f32 * depth_scale
 }
 
 /// Task #55 step 2, visualisation (2.32): converts an ALREADY-COMPUTED head field (the persistent
