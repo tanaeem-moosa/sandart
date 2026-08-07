@@ -937,6 +937,7 @@ fn test_task55_head_spec_scoreboard() {
         ("spec_pressure_is_linear_in_depth", "new_head_field"),
         ("spec_head_field_is_resolution_invariant", "new_head_field"),
         ("spec_free_fall_has_zero_pressure", "new_head_field"),
+        ("spec_free_fall_is_pressureless_throughout", "new_head_field"),
         ("spec_pascal_under_a_roof", "new_head_field"),
         ("spec_head_is_single_valued_across_a_connected_body", "new_head_field"),
     ];

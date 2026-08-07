@@ -141,6 +141,68 @@ pub(crate) fn compute_head_field_with_stats(
     // correct Dirichlet target for an EXPOSED TOP: nothing above means zero overburden, but this
     // cell's own weight still bears on its own bottom face, so `p` there is exactly one cell's
     // worth, not zero.
+    // --- Transitive support (Task #55 step 2b). `support_fraction` (#58, shipped, unmodified --
+    // read here, never re-derived) looks exactly ONE cell down, so it is not transitive: in a
+    // slab of water falling through air, only the BOTTOM row reads as unsupported, because every
+    // cell above it is "resting on" a cell below that is itself full of material. That is exactly
+    // the gap `spec_free_fall_is_pressureless_throughout` measures (1.000 cells of residual
+    // pressure at the slab's TOP row -- backwards-signed for a resting body, whose pressure
+    // maximum sits at its base, not its crown). Fix: propagate support UPWARD through each
+    // column, bottom-up, so "a cell resting on falling material is itself falling":
+    //
+    //   effective_support_transitive[idx] =
+    //       support_fraction(idx)                                       , below is out of mask
+    //       min(support_fraction(idx), effective_support_transitive[below])   , otherwise
+    //
+    // `support_fraction` already returns `1.0` for BOTH "out of mask below" cases -- off-grid
+    // below (the world's own floor) and `MASK_OUTSIDE` below (casing/walls) -- so both collapse
+    // into one plain read of it; no separate mask check duplicates its own branching, and its
+    // third internal fallback branch (degenerate zero capacity below) is left alone too: it
+    // already returns `1.0`, which composes correctly through the `min` below with no special
+    // case needed here.
+    //
+    // MIN, not a product. The chain is only as strong as its weakest link: a resting column N
+    // cells tall has `support_fraction == 1.0` at every link (each cell sits on a fully-packed
+    // cell below), so `min` carries `1.0` all the way to its top -- required by
+    // `spec_uniform_head_in_resting_open_column`. A PRODUCT of N terms at or near `1.0` would
+    // decay through a tall resting column via nothing but repeated multiplication and wrongly
+    // report cells near its top as unsupported, breaking that spec for no physical reason: a
+    // column standing on solid ground is not "less supported" the taller it is. Do not
+    // "simplify" this to a product.
+    //
+    // SCOPE LIMIT: this is a per-COLUMN upward propagation -- correct for the free-fall case this
+    // task fixes, but NOT a general support model. It captures no LATERAL support: material
+    // resting on a ledge to its side, or held up in an arch, is supported by something that is
+    // not directly beneath it, and this pass is blind to that entirely. That is a
+    // granular-mechanics concern (force chains, arching) belonging to the solids half of task
+    // #55, not this liquid head field.
+    //
+    // DUPLICATION, noted deliberately: the LOD scheduler's `fresh_overburden_must_blocks`
+    // (physics.rs:1001) answers a related but different question -- "might anything in this
+    // 32x32 block move?", a boolean (`unsupported AND has_room_to_move`) -- and gets transitivity
+    // for free over TIME via `activate_neighbor_upstream` (physics.rs:3896), which wakes the
+    // block one step upstream each tick. A one-tick lag there is harmless for scheduling (the
+    // block simply wakes up next tick regardless); it would be fatal here, where the field must
+    // be correct WITHIN the tick it is read. Hence this separate, synchronous, whole-column pass
+    // rather than reusing that mechanism.
+    let mut effective_support_transitive = vec![1.0f32; cell_count];
+    for y in (0..h).rev() {
+        let row = y * w;
+        for x in 0..w {
+            let idx = row + x;
+            if !is_inside(idx) {
+                continue; // never read: `wet[idx]` requires `is_inside(idx)` too.
+            }
+            let raw = support_fraction(idx, w, h, heights, cell_props, shape_mask);
+            let below_out_of_mask = y + 1 >= h || shape_mask[idx + w] == crate::MASK_OUTSIDE;
+            effective_support_transitive[idx] = if below_out_of_mask {
+                raw
+            } else {
+                raw.min(effective_support_transitive[idx + w])
+            };
+        }
+    }
+
     let mut z_elev = vec![0.0f32; cell_count];
     let mut own_elev = vec![0.0f32; cell_count];
     for y in 0..h {
@@ -198,7 +260,10 @@ pub(crate) fn compute_head_field_with_stats(
                 is_inside(above) && heights[above] <= HEAD_FIELD_WET_EPS
             };
 
-            let raw_support = support_fraction(idx, w, h, heights, cell_props, shape_mask);
+            // `effective_support_transitive[idx]`, not a fresh one-cell `support_fraction` call:
+            // see that array's own computation above for why the raw one-cell lookback is not
+            // enough on its own (support is not transitive without it).
+            let raw_support = effective_support_transitive[idx];
             if raw_support <= 0.0 {
                 // Nothing below at all: zero pressure at THIS cell's own bottom face, regardless
                 // of what sits above it.
