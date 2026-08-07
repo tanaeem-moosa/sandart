@@ -149,7 +149,7 @@ Consequences worth stating because each was a bug at some point:
 |---|---|---|
 | Pressure heat-map: use new head field | off | Works. Visualisation only, provably cannot perturb the sim. |
 | Head-field liquid transport | off | **Broken — see #68.** Regresses the walls test 6 → 157 voids (#64). |
-| Pressure-sensitive flow rate | off | Works. Depth ordering blocked by #67. |
+| Pressure-sensitive flow rate | off | **Broken — see #69.** Badly slows a fed falling stream. Depth ordering separately blocked by #67. |
 | Fresh pressure field | off | Blocked by #57 — fails the walls test at 66 voids against a bound of 20. |
 
 The refuted "fast liquid levelling" multigrid pass was **deleted** on 2026-08-07 (~1570 lines).
@@ -188,7 +188,24 @@ Two candidate causes are written up in #68. The second one — that transport mo
 changes the support classification next tick, which changes the field, a feedback loop the
 overlay-only path does not have — matches the symptom pattern exactly and is cheap to test.
 
-### #67 next
+### #69 and #67 are one problem — fix them together
+
+**#69 first, because it also demonstrates how the test suite can mislead you here.** The user
+reported that the pressure-sensitive flow toggle badly slows falling water and makes it spread
+sideways. `spec_task63_free_fall_is_bit_identical` **passes** — at both resolutions — asserting the
+exact opposite. The spec is not lying about what it measures; it measures the wrong scenario. It
+releases a compact slab into empty space with no source above and nothing below, so every cell is
+genuinely unsupported, gets pinned to `head = z`, and takes the exemption's exact `1.0` branch. A
+real stream is fed from above and lands on standing material, so its cells read as *supported*, get
+a real (tiny) head, and are attenuated ~8× — `sqrt(0.3/20) = 0.12` for a typical 0.3-filled stream
+cell. Slowed descent backs the stream up, and backed-up material at capacity pushes laterally.
+
+**This is the same defect as #67 with the sign flipped.** #67: a column being extruded through an
+orifice is classified as free-falling when it is bearing load. #69: a stream in flight is classified
+as supported when it is ballistic. One predicate — "is this material bearing load right now" — wrong
+on both sides. Two independent patches will fight each other; find the predicate once.
+
+### #67 in detail
 
 `advance_head_field` pins an **entire column above an orifice** to zero head. Measured directly:
 centre column reads `0.00` at the orifice, at the cell above it, and at the column *top*, while an

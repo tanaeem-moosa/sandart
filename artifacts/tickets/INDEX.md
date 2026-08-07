@@ -7,7 +7,7 @@ Sorted: in-progress first, then open, then closed.
 
 ## In progress
 
-- [#55 — 2.32 — REWRITE: unified hydraulic-head field for liquid AND solids. Shipped multigrid pass is visually refuted (see artifacts/design/TASK55-BRIEF.md)](55-rewrite-unified-hydraulic-head-field-for-liquid-and-solids-s.md)
+- [#55 — 2.32 — REWRITE: unified hydraulic-head field for liquid AND solids. Shipped multigrid pass is visually refuted (see scratchpad/TASK55-BRIEF.md)](55-rewrite-unified-hydraulic-head-field-for-liquid-and-solids-s.md)
 - [#63 — 2.40 — Make material flow rate sensitive to pressure: slow down at LOW pressure rather than speed up at high](63-make-material-flow-rate-sensitive-to-pressure-slow-down-at-l.md)
 
 ## Open
@@ -33,6 +33,7 @@ Sorted: in-progress first, then open, then closed.
 - [#66 — 2.43 — Advancing the head field costs +219% ms/tick at w=512; it allocates six whole-grid Vecs every tick](66-advancing-the-head-field-costs-219-ms-tick-at-w-512-it-alloc.md)
 - [#67 — 2.44 — The head field pins an entire DRAINING column to zero pressure: transitive support treats extrusion as free fall](67-the-head-field-pins-an-entire-draining-column-to-zero-pressu.md)
 - [#68 — 2.45 — Head-field liquid transport BREAKS the pressure field: horizontal stripes in the U-tube. This is what #65 misattributed to the block heat map](68-head-field-liquid-transport-breaks-the-pressure-field-horizo.md)
+- [#69 — 2.46 — Pressure-sensitive flow badly slows a FED falling stream and makes it spread sideways: the free-fall exemption only covers compact unsupported slabs](69-pressure-sensitive-flow-badly-slows-a-fed-falling-stream-and.md)
 
 ## Closed
 
