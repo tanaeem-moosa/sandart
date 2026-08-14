@@ -5018,18 +5018,10 @@ pub fn settle_tick(
                         // The driving term passed here must be `head_a - head_b_full` — the exact
                         // quantity `flux_edge` will compute internally below — or branch 2 could
                         // sleep an edge the depth-pressure/dispersion terms would in fact have moved.
-                        let edge_is_asleep = if overfill_active
-                            && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
-                            && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
-                        {
-                            h_a <= 0.01 && h_b <= 0.01
-                        } else {
-                            edge_sleeps(
-                                head_a - head_b_full, tau_eff, edge_vel_h[center_idx],
-                                h_a, h_b, cap_a_eff - h_a, cap_b_eff - h_b,
-                            )
-                        };
-                        if locked || edge_is_asleep {
+                        if locked || edge_sleeps(
+                            head_a - head_b_full, tau_eff, edge_vel_h[center_idx],
+                            h_a, h_b, cap_a_eff - h_a, cap_b_eff - h_b,
+                        ) {
                             if edge_vel_h[center_idx] != 0.0 {
                                 edge_vel_h[center_idx] = 0.0;
                             }
