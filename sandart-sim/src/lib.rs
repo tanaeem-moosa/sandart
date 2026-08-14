@@ -550,6 +550,9 @@ pub struct DrawingSimulation {
     /// overburden and transmit hydrostatic/Mohr-Coulomb pressure through stiffness gradient.
     pub overfill_pressure: bool,
 
+    /// Maximum cell overfill capacity multiplier (e.g. 1.50 for 1.50x nominal capacity).
+    pub overfill_capacity: f32,
+
     /// Per-block "how often was this block actually simulated" heat-map counter for the debug
     /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
     /// (see that constant's doc comment). Length is always `active_blocks.len() *
@@ -745,6 +748,7 @@ impl DrawingSimulation {
             head_field_transport: false,
             pressure_sensitive_flow: false,
             overfill_pressure: false,
+            overfill_capacity: 1.50,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -1510,6 +1514,7 @@ impl DrawingSimulation {
                     self.pressure_heatmap_head_field,
                     self.pressure_sensitive_flow,
                     self.overfill_pressure,
+                    (self.overfill_capacity - 1.0).max(0.0),
                 );
             }
         } else {

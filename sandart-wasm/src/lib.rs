@@ -366,6 +366,7 @@ impl WasmSimulationState {
         let head_field_transport = self.sim.head_field_transport;
         let pressure_sensitive_flow = self.sim.pressure_sensitive_flow;
         let overfill_pressure = self.sim.overfill_pressure;
+        let overfill_capacity = self.sim.overfill_capacity;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -392,6 +393,7 @@ impl WasmSimulationState {
         sim.pressure_sensitive_flow = pressure_sensitive_flow;
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.overfill_pressure = overfill_pressure;
+        sim.overfill_capacity = overfill_capacity;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -769,6 +771,15 @@ impl WasmSimulationState {
     /// "Per-cell overfill pressure simulation" toggle (task #70): forwarded straight to the sim.
     pub fn set_overfill_pressure(&mut self, enabled: bool) {
         self.sim.overfill_pressure = enabled;
+    }
+
+    /// "Overfill capacity multiplier" (task #70): 1.00..=1.50, forwarded straight to the sim.
+    pub fn set_overfill_capacity(&mut self, capacity: f32) {
+        self.sim.overfill_capacity = capacity;
+    }
+
+    pub fn get_overfill_capacity(&self) -> f32 {
+        self.sim.overfill_capacity
     }
 
     /// Block-simulation heat-map debug overlay: purely a render-side toggle (see

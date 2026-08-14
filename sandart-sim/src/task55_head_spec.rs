@@ -1168,6 +1168,7 @@ impl DynSim {
             false,
             pressure_sensitive_flow,
             false,
+            0.50,
         );
         self.tick_count += 1;
         flow

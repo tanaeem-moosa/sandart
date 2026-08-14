@@ -851,6 +851,13 @@ function syncSettings() {
     state.set_head_field_transport(document.getElementById('check-head-field-transport').checked);
     state.set_pressure_sensitive_flow(document.getElementById('check-pressure-sensitive-flow').checked);
     state.set_overfill_pressure(document.getElementById('check-overfill-pressure').checked);
+    const overfillSlider = document.getElementById('overfill-capacity-slider');
+    if (overfillSlider) {
+        const overfillCap = parseFloat(overfillSlider.value);
+        const overfillCapVal = document.getElementById('overfill-capacity-val');
+        if (overfillCapVal) overfillCapVal.innerText = `${overfillCap.toFixed(2)}×`;
+        state.set_overfill_capacity(overfillCap);
+    }
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
@@ -1099,6 +1106,11 @@ function setupPanelInput() {
     document.getElementById('check-head-field-transport').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-sensitive-flow').addEventListener('change', syncSettings);
     document.getElementById('check-overfill-pressure').addEventListener('change', syncSettings);
+    const overfillCapSlider = document.getElementById('overfill-capacity-slider');
+    if (overfillCapSlider) {
+        overfillCapSlider.addEventListener('input', syncSettings);
+        overfillCapSlider.addEventListener('change', syncSettings);
+    }
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above
     // tick() for why this never touches syncSettings or wasm).

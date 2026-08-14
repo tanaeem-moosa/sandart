@@ -152,8 +152,6 @@ fn overfill_pressure_u_tube_communicating_vessels_equilibrates() {
     let mass_err = (final_mass - initial_mass).abs() / initial_mass;
     assert!(mass_err < 1e-4, "U-tube mass not conserved: mass_err={:.8}", mass_err);
 
-    // Water must have flowed from the tall left column through the bottom conduit into the right column,
-    // causing the right column to rise against gravity.
     assert!(
         final_right_arm_mass > initial_right_arm_mass + 5.0,
         "Water did not rise in right arm of U-tube! init_right={:.2}, final_right={:.2}",
@@ -203,5 +201,36 @@ fn overfill_pressure_granular_preserves_angle_of_repose() {
         peak_height_col > edge_height_col + 5.0,
         "Dry sand flattened out into puddle under overfill_pressure! peak={:.2}, edge={:.2}",
         peak_height_col, edge_height_col
+    );
+}
+
+#[test]
+fn overfill_pressure_u_tube_flow_through_conduction_and_rise() {
+    let w = 128;
+    let _h = 128;
+    let mut sim = DrawingSimulation::new_with_size(w);
+    sim.sandbox_shape = SandboxShape::UTubeFlowThrough;
+    sim.gravity_dir = Vec2::new(0.0, 0.04);
+    sim.apply_preset(MaterialMode::Water);
+    sim.overfill_pressure = true;
+    sim.initialize_hourglass();
+
+    let initial_mass: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
+    let targets = [None; 5];
+    for _ in 0..1000 {
+        sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::UTubeFlowThrough, 16.0, 16.0);
+    }
+
+    let final_mass: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
+    let mass_err = (final_mass - initial_mass).abs() / initial_mass;
+    assert!(mass_err < 1e-4, "Mass not conserved in UTubeFlowThrough: mass_err={:.8}", mass_err);
+
+    // Water must have traversed the horizontal conduit from the reservoir (left arm)
+    let bottom_mass: f32 = (115..118).map(|y| {
+        (0..w).map(|x| sim.heightmap.data[y * w + x]).sum::<f32>()
+    }).sum();
+    assert!(
+        bottom_mass > 100.0,
+        "Water did not fill bottom conduit! bottom_mass={:.2}", bottom_mass
     );
 }

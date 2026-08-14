@@ -642,6 +642,12 @@ pub fn cell_overfill_capacity(wetness: f32) -> f32 {
     cell_capacity_for(wetness) * (1.0 + OVERFILL_CEILING_RATIO)
 }
 
+/// Task #70: Configurable overfill capacity allowance.
+#[inline]
+pub fn cell_overfill_capacity_for(wetness: f32, overfill_ratio: f32) -> f32 {
+    cell_capacity_for(wetness) * (1.0 + overfill_ratio)
+}
+
 /// Task #70: Dimensionless relative overfill fraction (e = (h - cap) / cap for h > cap, else 0).
 #[inline]
 pub fn relative_overfill(h: f32, cap: f32) -> f32 {
@@ -1119,8 +1125,10 @@ fn flux_edge_candidate(
     c_sq: f32,
     damping: f32,
     tau: f32,
-    cap_a: f32,
-    cap_b: f32,
+    cap_a_eff: f32,
+    cap_b_eff: f32,
+    _cap_a: f32,
+    _cap_b: f32,
     avail_a: f32,
     avail_b: f32,
     h_a: f32,
@@ -1137,14 +1145,14 @@ fn flux_edge_candidate(
         0.0
     };
 
-    let v = (v_e_prev + c_sq * yielded) * damping;
+    let v = ((v_e_prev + c_sq * yielded) * damping).clamp(-1.0, 1.0);
 
     // Donor mass and acceptor capacity, in the direction the velocity actually points. This is
     // the single-edge bound described above, not the final word — see the doc comment.
     weight * if v > 0.0 {
-        v.min(avail_a).min((cap_b - h_b).max(0.0))
+        v.min(avail_a).min((cap_b_eff - h_b).max(0.0))
     } else if v < 0.0 {
-        -((-v).min(avail_b).min((cap_a - h_a).max(0.0)))
+        -((-v).min(avail_b).min((cap_a_eff - h_a).max(0.0)))
     } else {
         0.0
     }
@@ -1516,6 +1524,7 @@ fn pressure_project(
     phase: usize,
     time_seed: u32,
     overfill_active: bool,
+    overfill_ratio: f32,
     cell_out_total: &mut [f32],
     cell_in_total: &mut [f32],
     cell_out_total_jit: &mut [f32],
@@ -1526,6 +1535,15 @@ fn pressure_project(
     // required downstream by arbitration -- see the always-run accumulate pass at the bottom of
     // this function, which is exactly why this is a local instead of an early `return`.
     let run_solve = !pressure_gate::is_disabled() && !(touched_h.is_empty() && touched_v.is_empty());
+
+    let get_cap = |idx: usize| -> f32 {
+        let wetness = cell_props[idx * 4 + PROP_WETNESS];
+        if overfill_active {
+            cell_overfill_capacity_for(wetness, overfill_ratio)
+        } else {
+            cell_capacity_for(wetness)
+        }
+    };
 
     if run_solve {
         // Clear exactly what the PREVIOUS call to this function touched -- same sparse-reset
@@ -1540,15 +1558,6 @@ fn pressure_project(
             lap[i] = 0.0;
         }
         nodes.clear();
-
-        let get_cap = |idx: usize| -> f32 {
-            let wetness = cell_props[idx * 4 + PROP_WETNESS];
-            if overfill_active {
-                cell_overfill_capacity(wetness)
-            } else {
-                cell_capacity_for(wetness)
-            }
-        };
 
         // Fused node-set build + `fstar` init + `cap_cache` init + delta apply: one pass per
         // orientation instead of three. `degree[i] == 0` still means "first time this call has
@@ -3673,12 +3682,9 @@ pub fn settle_tick(
     // own while transport stays off (transport is still blocked on #64). It therefore joins
     // `head_field_needs_advance` below -- turning this on alone is enough to keep the field live.
     pressure_sensitive_flow: bool,
-    // TASK #70: "overfill pressure simulation" toggle.
-    // `false` (default): unchanged from previous behaviour.
-    // `true`: per-cell overfill model where capacity is extended up to 1.5x nominal capacity,
-    // excess mass generates overfill stress driving upward relief against gravity, full-pipe
-    // conduction in siphons, and Mohr-Coulomb yield resistance for granular solids.
+    // TASK #70: "overfill pressure simulation" toggle and configurable capacity ratio.
     overfill_pressure: bool,
+    overfill_ratio: f32,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -4270,7 +4276,10 @@ pub fn settle_tick(
                         let cap_a = cell_capacity_for(wetness);
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
                         let (cap_a_eff, cap_b_eff) = if overfill_active {
-                            (cell_overfill_capacity(wetness), cell_overfill_capacity(cell_props[nb_idx * 4 + PROP_WETNESS]))
+                            (
+                                cell_overfill_capacity_for(wetness, overfill_ratio),
+                                cell_overfill_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS], overfill_ratio),
+                            )
                         } else {
                             (cap_a, cap_b)
                         };
@@ -4446,6 +4455,18 @@ pub fn settle_tick(
                         } else {
                             1.0
                         };
+                        let (cap_a_eff, cap_b_eff, h_a_source) = if overfill_active {
+                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                            let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                            let g_step = (base_head.max(0.0) / overfill_head_unit) * cell_liquidity;
+                            (
+                                cell_overfill_capacity_for(wetness, overfill_ratio),
+                                cell_overfill_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS], overfill_ratio),
+                                h_a + g_step,
+                            )
+                        } else {
+                            (cap_a, cap_b, h_a)
+                        };
                         // COLLECT only: compute this edge's candidate flux and record it, plus
                         // this cell's and its neighbour's donor/acceptor limits for arbitration.
                         // Nothing is mutated yet — see this phase's post-collection ARBITRATE +
@@ -4458,8 +4479,9 @@ pub fn settle_tick(
                             head_a, head_b,
                             c_sq, damping, 0.0,
                             cap_a_eff, cap_b_eff,
+                            cap_a, cap_b,
                             h_a, h_b,
-                            h_a, h_b,
+                            h_a_source, h_b,
                             pressure_weight,
                             edge_vel_v[center_idx],
                         );
@@ -4563,7 +4585,10 @@ pub fn settle_tick(
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
                         let (cap_c_eff, cap_b_eff) = if overfill_active {
-                            (cell_overfill_capacity(wetness), cell_overfill_capacity(cell_props[nb_idx * 4 + PROP_WETNESS]))
+                            (
+                                cell_overfill_capacity_for(wetness, overfill_ratio),
+                                cell_overfill_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS], overfill_ratio),
+                            )
                         } else {
                             (cap_c, cap_b)
                         };
@@ -4594,6 +4619,7 @@ pub fn settle_tick(
                                 head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
                                 cap_c_eff, cap_b_eff,
+                                cap_c, cap_b,
                                 h_a, h_b, h_a, h_b, 1.0,
                                 edge_vel_h[center_idx],
                             );
@@ -4616,7 +4642,10 @@ pub fn settle_tick(
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
                         let (cap_c_eff, cap_b_eff) = if overfill_active {
-                            (cell_overfill_capacity(wetness), cell_overfill_capacity(cell_props[nb_idx * 4 + PROP_WETNESS]))
+                            (
+                                cell_overfill_capacity_for(wetness, overfill_ratio),
+                                cell_overfill_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS], overfill_ratio),
+                            )
                         } else {
                             (cap_c, cap_b)
                         };
@@ -4643,6 +4672,7 @@ pub fn settle_tick(
                                 head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
                                 cap_c_eff, cap_b_eff,
+                                cap_c, cap_b,
                                 h_a, h_b, h_a, h_b, 1.0,
                                 edge_vel_v[center_idx],
                             );
@@ -4859,7 +4889,10 @@ pub fn settle_tick(
                         // which branch produced it and neither of those two functions needs to
                         // know this gate exists.
                         let (cap_a_eff, cap_b_eff) = if overfill_active {
-                            (cell_overfill_capacity(wetness), cell_overfill_capacity(cell_props[nb_idx * 4 + PROP_WETNESS]))
+                            (
+                                cell_overfill_capacity_for(wetness, overfill_ratio),
+                                cell_overfill_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS], overfill_ratio),
+                            )
                         } else {
                             (cell_capacity, cap_b)
                         };
@@ -5092,6 +5125,7 @@ pub fn settle_tick(
                                 head_b_full,
                                 c_sq, damping, tau_eff,
                                 cap_a_eff, cap_b_eff,
+                                cell_capacity, cap_b,
                                 avail_a, avail_b,
                                 h_a, h_b,
                                 pressure_weight,
@@ -5523,7 +5557,7 @@ pub fn settle_tick(
         temp_heights, cell_props, w,
         &mut pressure_phi_a, &mut pressure_phi_b, &mut pressure_fstar, &mut pressure_lap,
         &mut pressure_degree, &mut pressure_cap, &mut pressure_nodes,
-        phase, time_seed, overfill_active,
+        phase, time_seed, overfill_active, overfill_ratio,
         &mut cell_out_total, &mut cell_in_total, &mut cell_out_total_jit, &mut cell_in_total_jit,
     );
 
@@ -5926,6 +5960,7 @@ mod tests {
         /// Mirrors `DrawingSimulation::overfill_pressure` / `settle_tick`'s parameter of the
         /// same name (TASK #70). Defaults to `false` in `new()`.
         pub overfill_pressure: bool,
+        pub overfill_ratio: f32,
     }
 
     impl TestSim {
@@ -5954,6 +5989,7 @@ mod tests {
                 head_field_transport: false,
                 pressure_sensitive_flow: false,
                 overfill_pressure: false,
+                overfill_ratio: 0.50,
             }
         }
 
@@ -5984,6 +6020,7 @@ mod tests {
                 false,
                 self.pressure_sensitive_flow,
                 self.overfill_pressure,
+                self.overfill_ratio,
             );
             self.tick_count += 1;
             flow
@@ -6311,7 +6348,7 @@ mod tests {
                 glam::Vec2::ZERO,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -6382,7 +6419,7 @@ mod tests {
             glam::Vec2::ZERO,
             false,
             false,
-            false, false, false,
+            false, false, false, 0.50,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -6460,7 +6497,7 @@ mod tests {
                 glam::Vec2::ZERO,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -6565,7 +6602,7 @@ mod tests {
             glam::Vec2::ZERO,
             false,
             false,
-            false, false, false,
+            false, false, false, 0.50,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -6874,7 +6911,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -6972,7 +7009,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -7024,7 +7061,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -7097,7 +7134,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -7201,7 +7238,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -10370,7 +10407,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -10485,7 +10522,7 @@ mod tests {
                     12345u32.wrapping_add(i),
                     &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false,
                     false,
-                    false, false, false,
+                    false, false, false, 0.50,
                 );
             }
 
@@ -10584,7 +10621,7 @@ mod tests {
                 12345u32.wrapping_add(i),
                 &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -10671,7 +10708,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -10757,7 +10794,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -11006,7 +11043,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -11186,7 +11223,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
 
@@ -11328,7 +11365,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             ) as f64;
         }
 
@@ -11571,7 +11608,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -12108,7 +12145,7 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, t as u32, gravity_dir, false,
                 false,
-                false, false, false,
+                false, false, false, 0.50,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();
