@@ -1087,13 +1087,16 @@ impl DrawingSimulation {
         if self.overfill_pressure {
             let w = self.heightmap.width;
             let h = self.heightmap.height;
+            let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / w as f32;
+            let overfill_head_unit = (physics::GRAVITY_HEAD_SCALE / depth_scale) * physics::OVERFILL_STIFFNESS_K;
+            let base_head = physics::GRAVITY_HEAD_SCALE;
             (0..w * h)
                 .map(|idx| {
                     let wetness = self.cell_props[idx * 4 + PROP_WETNESS];
                     let cap = physics::cell_capacity_for(wetness);
                     let h_val = self.heightmap.data[idx];
                     let overfill = physics::relative_overfill(h_val, cap);
-                    let depth = overfill * physics::OVERFILL_STIFFNESS_K;
+                    let depth = overfill * (overfill_head_unit / base_head);
                     to_byte(depth)
                 })
                 .collect()

@@ -227,7 +227,7 @@ fn liquidity(wetness: f32) -> f32 {
 /// proportional to `|g|`, the gravity slider moves behaviour continuously between the Sandbox
 /// (`Phi == 0`, pure free-surface wave) and Sand-fall regimes instead of flipping between two
 /// solvers (defect C6).
-const GRAVITY_HEAD_SCALE: f32 = 25.0;
+pub const GRAVITY_HEAD_SCALE: f32 = 25.0;
 
 /// Weight on the depth-integrated lateral pressure term (see `column_depth` in `settle_tick`'s
 /// cross-gravity liquid branch): how many head units one cell of *stacked, resting* liquid above
@@ -617,7 +617,7 @@ const GRAVITY_LOCK_CHANCE: f32 = 0.05;
 /// `test_liquid_stream_stays_coherent`'s 64-wide box. Reusing that same number as the reference
 /// resolution is what makes `LATERAL_PRESSURE_SCALE = 5.0` continue to mean exactly what it was
 /// swept against, rather than silently changing its meaning a second time.
-const REFERENCE_GRID_HEIGHT: usize = 512;
+pub const REFERENCE_GRID_HEIGHT: usize = 512;
 
 pub fn cell_capacity_for(wetness: f32) -> f32 {
     let l = liquidity(wetness);
@@ -1125,14 +1125,10 @@ fn flux_edge_candidate(
     c_sq: f32,
     damping: f32,
     tau: f32,
-    cap_a_eff: f32,
-    cap_b_eff: f32,
-    _cap_a: f32,
-    _cap_b: f32,
     avail_a: f32,
     avail_b: f32,
-    h_a: f32,
-    h_b: f32,
+    max_accept_fwd: f32,
+    max_accept_bwd: f32,
     weight: f32,
     v_e_prev: f32,
 ) -> f32 {
@@ -1147,12 +1143,10 @@ fn flux_edge_candidate(
 
     let v = ((v_e_prev + c_sq * yielded) * damping).clamp(-1.0, 1.0);
 
-    // Donor mass and acceptor capacity, in the direction the velocity actually points. This is
-    // the single-edge bound described above, not the final word — see the doc comment.
     weight * if v > 0.0 {
-        v.min(avail_a).min((cap_b_eff - h_b).max(0.0))
+        v.min(avail_a).min(max_accept_fwd)
     } else if v < 0.0 {
-        -((-v).min(avail_b).min((cap_a_eff - h_a).max(0.0)))
+        -((-v).min(avail_b).min(max_accept_bwd))
     } else {
         0.0
     }
@@ -4455,17 +4449,17 @@ pub fn settle_tick(
                         } else {
                             1.0
                         };
-                        let (cap_a_eff, cap_b_eff, h_a_source) = if overfill_active {
+                        let (cap_a_eff, cap_b_eff, g_step) = if overfill_active {
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                             let g_step = (base_head.max(0.0) / overfill_head_unit) * cell_liquidity;
                             (
                                 cell_overfill_capacity_for(wetness, overfill_ratio),
                                 cell_overfill_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS], overfill_ratio),
-                                h_a + g_step,
+                                g_step,
                             )
                         } else {
-                            (cap_a, cap_b, h_a)
+                            (cap_a, cap_b, 0.0)
                         };
                         // COLLECT only: compute this edge's candidate flux and record it, plus
                         // this cell's and its neighbour's donor/acceptor limits for arbitration.
@@ -4475,13 +4469,23 @@ pub fn settle_tick(
                         // owns exactly one vertical edge as donor and one as acceptor here) but is
                         // still routed through the same general machinery rather than
                         // special-cased.
+                        let (max_accept_fwd, max_accept_bwd) = if overfill_active {
+                            let nom_b = (cap_b - h_b).max(0.0);
+                            let comp_b = (h_a + g_step - h_b.max(cap_b)).max(0.0);
+                            let fwd = (nom_b + comp_b).min((cap_b_eff - h_b).max(0.0));
+
+                            let nom_a = (cap_a - h_a).max(0.0);
+                            let comp_a = 0.5 * (h_b - h_a.max(cap_a)).max(0.0);
+                            let bwd = (nom_a + comp_a).min((cap_a_eff - h_a).max(0.0));
+                            (fwd, bwd)
+                        } else {
+                            ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
+                        };
                         let candidate = flux_edge_candidate(
                             head_a, head_b,
                             c_sq, damping, 0.0,
-                            cap_a_eff, cap_b_eff,
-                            cap_a, cap_b,
                             h_a, h_b,
-                            h_a_source, h_b,
+                            max_accept_fwd, max_accept_bwd,
                             pressure_weight,
                             edge_vel_v[center_idx],
                         );
@@ -4613,14 +4617,24 @@ pub fn settle_tick(
                             // COLLECT only — see the phase-loop buffer comment and
                             // `flux_edge_candidate`'s doc comment. This cell also owns the y-edge
                             // below (next block), so — unlike phase 0 — this cell can be a donor
-                            // (or acceptor) on *two* owned edges at once this phase, which is
-                            // exactly the multi-edge case arbitration exists for.
+                            let (max_accept_fwd, max_accept_bwd) = if overfill_active {
+                                let nom_b = (cap_b - h_b).max(0.0);
+                                let eq_b = 0.5 * (h_a - h_b.max(cap_b)).max(0.0);
+                                let fwd = (nom_b + eq_b).min((cap_b_eff - h_b).max(0.0));
+
+                                let nom_a = (cap_c - h_a).max(0.0);
+                                let eq_a = 0.5 * (h_b - h_a.max(cap_c)).max(0.0);
+                                let bwd = (nom_a + eq_a).min((cap_c_eff - h_a).max(0.0));
+                                (fwd, bwd)
+                            } else {
+                                ((cap_b - h_b).max(0.0), (cap_c - h_a).max(0.0))
+                            };
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
-                                cap_c_eff, cap_b_eff,
-                                cap_c, cap_b,
-                                h_a, h_b, h_a, h_b, 1.0,
+                                h_a, h_b,
+                                max_accept_fwd, max_accept_bwd,
+                                1.0,
                                 edge_vel_h[center_idx],
                             );
                             cand_h[center_idx] = candidate;
@@ -4668,12 +4682,24 @@ pub fn settle_tick(
                             }
                         } else {
                             // COLLECT only — see the comment on the x-edge above.
+                            let (max_accept_fwd, max_accept_bwd) = if overfill_active {
+                                let nom_b = (cap_b - h_b).max(0.0);
+                                let eq_b = 0.5 * (h_a - h_b.max(cap_b)).max(0.0);
+                                let fwd = (nom_b + eq_b).min((cap_b_eff - h_b).max(0.0));
+
+                                let nom_a = (cap_c - h_a).max(0.0);
+                                let eq_a = 0.5 * (h_b - h_a.max(cap_c)).max(0.0);
+                                let bwd = (nom_a + eq_a).min((cap_c_eff - h_a).max(0.0));
+                                (fwd, bwd)
+                            } else {
+                                ((cap_b - h_b).max(0.0), (cap_c - h_a).max(0.0))
+                            };
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
-                                cap_c_eff, cap_b_eff,
-                                cap_c, cap_b,
-                                h_a, h_b, h_a, h_b, 1.0,
+                                h_a, h_b,
+                                max_accept_fwd, max_accept_bwd,
+                                1.0,
                                 edge_vel_v[center_idx],
                             );
                             cand_v[center_idx] = candidate;
@@ -5120,14 +5146,24 @@ pub fn settle_tick(
                             // of up to two live edges this phase — its own, run in reverse (if the
                             // neighbour is higher), and its left neighbour's owned edge — which is
                             // exactly the multi-edge case arbitration exists for.
+                            let (max_accept_fwd, max_accept_bwd) = if overfill_active {
+                                let nom_b = (cap_b - h_b).max(0.0);
+                                let eq_b = 0.5 * (h_a - h_b.max(cap_b)).max(0.0);
+                                let fwd = (nom_b + eq_b).min((cap_b_eff - h_b).max(0.0));
+
+                                let nom_a = (cell_capacity - h_a).max(0.0);
+                                let eq_a = 0.5 * (h_b - h_a.max(cell_capacity)).max(0.0);
+                                let bwd = (nom_a + eq_a).min((cap_a_eff - h_a).max(0.0));
+                                (fwd, bwd)
+                            } else {
+                                ((cap_b - h_b).max(0.0), (cell_capacity - h_a).max(0.0))
+                            };
                             let candidate = flux_edge_candidate(
                                 head_a,
                                 head_b_full,
                                 c_sq, damping, tau_eff,
-                                cap_a_eff, cap_b_eff,
-                                cell_capacity, cap_b,
                                 avail_a, avail_b,
-                                h_a, h_b,
+                                max_accept_fwd, max_accept_bwd,
                                 pressure_weight,
                                 edge_vel_h[center_idx],
                             );
