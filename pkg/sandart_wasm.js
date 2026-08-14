@@ -388,7 +388,7 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_neck_width(this.__wbg_ptr, width);
     }
     /**
-     * "Overfill capacity multiplier" (task #70): 1.00..=1.50, forwarded straight to the sim.
+     * "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.
      * @param {number} capacity
      */
     set_overfill_capacity(capacity) {
