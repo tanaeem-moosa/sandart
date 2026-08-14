@@ -4893,12 +4893,14 @@ pub fn settle_tick(
                         let (head_a, head_b_full, tau_eff) = if overfill_active {
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                            let p_a = overfill_pressure_val(h_a_frozen, cell_capacity, overfill_ratio, overfill_head_unit);
-                            let p_b = overfill_pressure_val(h_b_frozen, cap_b, overfill_ratio, overfill_head_unit);
+                            let h_a_live = temp_heights[center_idx];
+                            let h_b_live = temp_heights[nb_idx];
+                            let p_a = overfill_pressure_val(h_a_live, cell_capacity, overfill_ratio, overfill_head_unit);
+                            let p_b = overfill_pressure_val(h_b_live, cap_b, overfill_ratio, overfill_head_unit);
                             let k_lat_a = k_of_liquidity(cell_liquidity);
                             let k_lat_b = k_of_liquidity(liq_b);
-                            let driving_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE + k_lat_a * p_a + dispersion;
-                            let driving_b = h_b_frozen + k_lat_b * p_b;
+                            let driving_a = h_a_live + gravity_dir.x * GRAVITY_HEAD_SCALE + k_lat_a * p_a + dispersion;
+                            let driving_b = h_b_live + k_lat_b * p_b;
 
                             // Mohr-Coulomb yield stress for granular material:
                             // Yield stress tau increases with local confining pressure (normal stress P_bar).
@@ -5043,7 +5045,7 @@ pub fn settle_tick(
                                 if overfill_active {
                                     let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                                     let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                                    let p_a = overfill_pressure_val(h_a_frozen, cell_capacity, overfill_ratio, overfill_head_unit);
+                                    let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit);
                                     let depth_equivalent = p_a / GRAVITY_HEAD_SCALE;
                                     pressure_rate_factor(depth_equivalent)
                                 } else {
