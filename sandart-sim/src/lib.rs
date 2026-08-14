@@ -545,6 +545,11 @@ pub struct DrawingSimulation {
     /// so it must never reach granular material.
     pub pressure_sensitive_flow: bool,
 
+    /// "Per-cell overfill pressure simulation" toggle (task #70).
+    /// When on, cells can take on a small overfill (up to 1.50x nominal capacity) under
+    /// overburden and transmit hydrostatic/Mohr-Coulomb pressure through stiffness gradient.
+    pub overfill_pressure: bool,
+
     /// Per-block "how often was this block actually simulated" heat-map counter for the debug
     /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
     /// (see that constant's doc comment). Length is always `active_blocks.len() *
@@ -739,6 +744,7 @@ impl DrawingSimulation {
             pressure_heatmap_head_field: false,
             head_field_transport: false,
             pressure_sensitive_flow: false,
+            overfill_pressure: false,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -1074,7 +1080,20 @@ impl DrawingSimulation {
             let normalized = (1.0 + depth.max(0.0)).ln() / log_max;
             (normalized.clamp(0.0, 1.0) * 255.0).round() as u8
         };
-        if self.pressure_heatmap_head_field {
+        if self.overfill_pressure {
+            let w = self.heightmap.width;
+            let h = self.heightmap.height;
+            (0..w * h)
+                .map(|idx| {
+                    let wetness = self.cell_props[idx * 4 + PROP_WETNESS];
+                    let cap = physics::cell_capacity_for(wetness);
+                    let h_val = self.heightmap.data[idx];
+                    let overfill = physics::relative_overfill(h_val, cap);
+                    let depth = overfill * physics::OVERFILL_STIFFNESS_K;
+                    to_byte(depth)
+                })
+                .collect()
+        } else if self.pressure_heatmap_head_field {
             crate::physics::task55_head_field::head_field_to_pressure(
                 self.heightmap.width,
                 self.heightmap.height,
@@ -1490,6 +1509,7 @@ impl DrawingSimulation {
                     self.head_field_transport,
                     self.pressure_heatmap_head_field,
                     self.pressure_sensitive_flow,
+                    self.overfill_pressure,
                 );
             }
         } else {

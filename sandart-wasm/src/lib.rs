@@ -365,6 +365,7 @@ impl WasmSimulationState {
         let pressure_heatmap_head_field = self.sim.pressure_heatmap_head_field;
         let head_field_transport = self.sim.head_field_transport;
         let pressure_sensitive_flow = self.sim.pressure_sensitive_flow;
+        let overfill_pressure = self.sim.overfill_pressure;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -389,6 +390,8 @@ impl WasmSimulationState {
         sim.head_field_transport = head_field_transport;
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.pressure_sensitive_flow = pressure_sensitive_flow;
+        // Same reasoning again: a UI debug toggle, not simulation state.
+        sim.overfill_pressure = overfill_pressure;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -763,6 +766,11 @@ impl WasmSimulationState {
         self.sim.pressure_sensitive_flow = enabled;
     }
 
+    /// "Per-cell overfill pressure simulation" toggle (task #70): forwarded straight to the sim.
+    pub fn set_overfill_pressure(&mut self, enabled: bool) {
+        self.sim.overfill_pressure = enabled;
+    }
+
     /// Block-simulation heat-map debug overlay: purely a render-side toggle (see
     /// `heatmap_enabled`'s field doc comment) — the underlying per-block counter runs
     /// unconditionally in `sim`, this only gates whether `render()` uploads/draws it.
@@ -968,8 +976,10 @@ impl WasmSimulationState {
         if self.full_upload_needed {
             let mut interleaved = vec![0.0f32; grid_size * grid_size * 4];
             for i in 0..grid_size * grid_size {
-                interleaved[i * 4 + 0] = self.sim.heightmap.data[i];
-                interleaved[i * 4 + 1] = self.sim.cell_props[i * 4 + sandart_sim::PROP_WETNESS];
+                let wetness = self.sim.cell_props[i * 4 + sandart_sim::PROP_WETNESS];
+                let cap = sandart_sim::physics::cell_capacity_for(wetness);
+                interleaved[i * 4 + 0] = self.sim.heightmap.data[i].min(cap);
+                interleaved[i * 4 + 1] = wetness;
                 interleaved[i * 4 + 2] = self.sim.cell_props[i * 4 + sandart_sim::PROP_GRAIN_SIZE];
                 interleaved[i * 4 + 3] = 1.0;
             }
@@ -1005,8 +1015,10 @@ impl WasmSimulationState {
                     for x in bounds.min_x..=bounds.max_x {
                         let src_idx = src_row_offset + x;
                         let dest_idx = dest_row_offset + (x - bounds.min_x);
-                        interleaved[dest_idx * 4 + 0] = self.sim.heightmap.data[src_idx];
-                        interleaved[dest_idx * 4 + 1] = self.sim.cell_props[src_idx * 4 + sandart_sim::PROP_WETNESS];
+                        let wetness = self.sim.cell_props[src_idx * 4 + sandart_sim::PROP_WETNESS];
+                        let cap = sandart_sim::physics::cell_capacity_for(wetness);
+                        interleaved[dest_idx * 4 + 0] = self.sim.heightmap.data[src_idx].min(cap);
+                        interleaved[dest_idx * 4 + 1] = wetness;
                         interleaved[dest_idx * 4 + 2] = self.sim.cell_props[src_idx * 4 + sandart_sim::PROP_GRAIN_SIZE];
                         interleaved[dest_idx * 4 + 3] = 1.0;
                     }

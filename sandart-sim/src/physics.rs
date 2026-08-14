@@ -619,9 +619,37 @@ const GRAVITY_LOCK_CHANCE: f32 = 0.05;
 /// swept against, rather than silently changing its meaning a second time.
 const REFERENCE_GRID_HEIGHT: usize = 512;
 
-fn cell_capacity_for(wetness: f32) -> f32 {
+pub fn cell_capacity_for(wetness: f32) -> f32 {
     let l = liquidity(wetness);
     1.5 * (1.0 - l) + 1.0 * l
+}
+
+/// Task #70: Maximum fraction above nominal cell capacity that material is permitted to transiently occupy.
+/// Capped up to 1.5x nominal capacity (0.50 allowance) per user design decision.
+pub const OVERFILL_CEILING_RATIO: f32 = 0.50;
+
+/// Task #70: Hydrostatic stiffness parameter $k$ for the overfill pressure model.
+/// Calibrated so that steady-state overfill at the base of a deep resting column (depth ~300)
+/// reaches ~5% (0.05) overfill: k = (g * D) / sigma_max = (1.0 * 300) / 0.05 = 6000.
+pub const OVERFILL_STIFFNESS_K: f32 = 6000.0;
+
+/// Task #70: Yield friction coefficient for granular material under the overfill stress model (Mohr-Coulomb).
+pub const OVERFILL_MOHR_COULOMB_MU: f32 = 0.60;
+
+/// Task #70: Maximum permitted cell fill capacity including transient overfill allowance.
+#[inline]
+pub fn cell_overfill_capacity(wetness: f32) -> f32 {
+    cell_capacity_for(wetness) * (1.0 + OVERFILL_CEILING_RATIO)
+}
+
+/// Task #70: Dimensionless relative overfill fraction (e = (h - cap) / cap for h > cap, else 0).
+#[inline]
+pub fn relative_overfill(h: f32, cap: f32) -> f32 {
+    if h > cap && cap > 0.0 {
+        (h - cap) / cap
+    } else {
+        0.0
+    }
 }
 
 /// Task #47 round 3. Graded support fraction for cell `idx`, in `[0, 1]`: how much of what is
@@ -1487,6 +1515,7 @@ fn pressure_project(
     nodes: &mut Vec<usize>,
     phase: usize,
     time_seed: u32,
+    overfill_active: bool,
     cell_out_total: &mut [f32],
     cell_in_total: &mut [f32],
     cell_out_total_jit: &mut [f32],
@@ -1512,6 +1541,15 @@ fn pressure_project(
         }
         nodes.clear();
 
+        let get_cap = |idx: usize| -> f32 {
+            let wetness = cell_props[idx * 4 + PROP_WETNESS];
+            if overfill_active {
+                cell_overfill_capacity(wetness)
+            } else {
+                cell_capacity_for(wetness)
+            }
+        };
+
         // Fused node-set build + `fstar` init + `cap_cache` init + delta apply: one pass per
         // orientation instead of three. `degree[i] == 0` still means "first time this call has
         // seen node `i`" (the clear above guarantees that), so it doubles as the node-set
@@ -1527,12 +1565,12 @@ fn pressure_project(
             if degree[a] == 0 {
                 nodes.push(a);
                 fstar[a] = temp_heights[a];
-                cap_cache[a] = cell_capacity_for(cell_props[a * 4 + PROP_WETNESS]);
+                cap_cache[a] = get_cap(a);
             }
             if degree[b] == 0 {
                 nodes.push(b);
                 fstar[b] = temp_heights[b];
-                cap_cache[b] = cell_capacity_for(cell_props[b * 4 + PROP_WETNESS]);
+                cap_cache[b] = get_cap(b);
             }
             degree[a] += 1;
             degree[b] += 1;
@@ -1546,12 +1584,12 @@ fn pressure_project(
             if degree[a] == 0 {
                 nodes.push(a);
                 fstar[a] = temp_heights[a];
-                cap_cache[a] = cell_capacity_for(cell_props[a * 4 + PROP_WETNESS]);
+                cap_cache[a] = get_cap(a);
             }
             if degree[b] == 0 {
                 nodes.push(b);
                 fstar[b] = temp_heights[b];
-                cap_cache[b] = cell_capacity_for(cell_props[b * 4 + PROP_WETNESS]);
+                cap_cache[b] = get_cap(b);
             }
             degree[a] += 1;
             degree[b] += 1;
@@ -1965,6 +2003,29 @@ mod head_field_gate {
     }
 }
 
+/// Task #70: thread-local gate for overfill pressure simulation in tests.
+#[cfg(test)]
+pub(crate) mod overfill_pressure_gate {
+    use std::cell::Cell;
+    thread_local! {
+        static ENABLED: Cell<bool> = const { Cell::new(false) };
+    }
+    pub fn set_enabled(v: bool) {
+        ENABLED.with(|c| c.set(v));
+    }
+    #[inline(always)]
+    pub fn is_enabled() -> bool {
+        ENABLED.with(|c| c.get())
+    }
+}
+#[cfg(not(test))]
+mod overfill_pressure_gate {
+    #[inline(always)]
+    pub fn is_enabled() -> bool {
+        false
+    }
+}
+
 /// Under-relaxation factor for the pressure projection's projected-Jacobi solve
 /// (`pressure_project`). The candidate-edge graph it runs on is not a fixed stencil -- its shape
 /// changes every phase (which edges exist depends on which cells the block-LOD scheduler ran this
@@ -2088,6 +2149,7 @@ fn note_phase_flow(phase: usize, flux: f32) {
 }
 #[cfg(not(test))]
 #[inline(always)]
+#[allow(dead_code)]
 fn note_phase_flow(_phase: usize, _flux: f32) {}
 
 fn wave_params(wetness: f32) -> (f32, f32) {
@@ -3451,13 +3513,21 @@ fn try_move(
 // The `K_*` indices themselves are NOT `#[cfg(test)]`-gated: `phase_offset(K_...)` call sites
 // live in production code (`settle_tick` itself), so the index constants must exist in every
 // build configuration. Only the backing storage and the non-zero read path are test-only.
+#[allow(dead_code)]
 pub(crate) const K_LOD_STALENESS: usize = 0;
+#[allow(dead_code)]
 pub(crate) const K_BLOCK_ORDER: usize = 1;
+#[allow(dead_code)]
 pub(crate) const K_NONDOWN_BLOCK_PARITY: usize = 2;
+#[allow(dead_code)]
 pub(crate) const K_NONDOWN_ROW_PARITY: usize = 3;
+#[allow(dead_code)]
 pub(crate) const K_LATERAL_SWEEP: usize = 4;
+#[allow(dead_code)]
 pub(crate) const K_NONGRAVITY_X_PARITY: usize = 5;
+#[allow(dead_code)]
 pub(crate) const K_CA_CHECKERBOARD: usize = 6;
+#[allow(dead_code)]
 pub(crate) const K_RNG_SEED: usize = 7;
 #[cfg(test)]
 pub(crate) const PHASE_MECHANISM_COUNT: usize = 8;
@@ -3603,6 +3673,12 @@ pub fn settle_tick(
     // own while transport stays off (transport is still blocked on #64). It therefore joins
     // `head_field_needs_advance` below -- turning this on alone is enough to keep the field live.
     pressure_sensitive_flow: bool,
+    // TASK #70: "overfill pressure simulation" toggle.
+    // `false` (default): unchanged from previous behaviour.
+    // `true`: per-cell overfill model where capacity is extended up to 1.5x nominal capacity,
+    // excess mass generates overfill stress driving upward relief against gravity, full-pipe
+    // conduction in siphons, and Mohr-Coulomb yield resistance for granular solids.
+    overfill_pressure: bool,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -3638,6 +3714,10 @@ pub fn settle_tick(
     if head_field.len() != heightmap.data.len() {
         head_field.resize(heightmap.data.len(), 0.0);
     }
+    
+    // Task #70: Overfill pressure simulation active gate
+    let overfill_active = overfill_pressure || overfill_pressure_gate::is_enabled();
+
     // RE-APPLIED (previously "tried and reverted"; see git history for the original attempt and
     // the task report for the full re-measurement this decision is based on). A one-tick-lagged
     // snapshot of `column_depth`, taken before anything below writes to it this tick, used only
@@ -4189,6 +4269,11 @@ pub fn settle_tick(
                         let h_b = heightmap.data[nb_idx];
                         let cap_a = cell_capacity_for(wetness);
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
+                        let (cap_a_eff, cap_b_eff) = if overfill_active {
+                            (cell_overfill_capacity(wetness), cell_overfill_capacity(cell_props[nb_idx * 4 + PROP_WETNESS]))
+                        } else {
+                            (cap_a, cap_b)
+                        };
                         // Driving head on this edge, fill term normalised to fraction-of-capacity
                         // (dimensionless, 0..1) rather than raw mass. Without this, "one saturated
                         // cell of fill" is 1.5 for granular material (`cell_capacity_for` at
@@ -4270,7 +4355,15 @@ pub fn settle_tick(
                         // branches now produce the identical number (`25.0`), which is the check
                         // that says the conversion is right.
                         let liq_b = liquidity(cell_props[nb_idx * 4 + PROP_WETNESS]);
-                        let (head_a, head_b) = if head_field_active
+                        let (head_a, head_b) = if overfill_active {
+                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                            let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                            let o_a = relative_overfill(h_a, cap_a);
+                            let o_b = relative_overfill(h_b, cap_b);
+                            let p_a = o_a * overfill_head_unit;
+                            let p_b = o_b * overfill_head_unit;
+                            (h_a / cap_a + base_head + p_a, h_b / cap_b + p_b)
+                        } else if head_field_active
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
                         {
@@ -4287,7 +4380,7 @@ pub fn settle_tick(
                         // and only the surface itself — a few cells per column — survives the test.
                         if edge_sleeps(
                             head_a - head_b, 0.0, edge_vel_v[center_idx],
-                            h_a, h_b, cap_a - h_a, cap_b - h_b,
+                            h_a, h_b, cap_a_eff - h_a, cap_b_eff - h_b,
                         ) {
                             if edge_vel_v[center_idx] != 0.0 {
                                 edge_vel_v[center_idx] = 0.0;
@@ -4364,7 +4457,7 @@ pub fn settle_tick(
                         let candidate = flux_edge_candidate(
                             head_a, head_b,
                             c_sq, damping, 0.0,
-                            cap_a, cap_b,
+                            cap_a_eff, cap_b_eff,
                             h_a, h_b,
                             h_a, h_b,
                             pressure_weight,
@@ -4374,9 +4467,9 @@ pub fn settle_tick(
                         edge_v_active[center_idx] = true;
                         touched_v.push(center_idx);
                         cell_avail[center_idx] = h_a;
-                        cell_freecap[center_idx] = (cap_a - h_a).max(0.0);
+                        cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
                         cell_avail[nb_idx] = h_b;
-                        cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
+                        cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
                         touched_cells.push(center_idx);
                         touched_cells.push(nb_idx);
                         // Totals deferred: see the unified post-COLLECT `accumulate_edge_totals`
@@ -4469,10 +4562,24 @@ pub fn settle_tick(
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
-                        max_head_diff = max_head_diff.max((head_c - heightmap.data[nb_idx]).abs());
+                        let (cap_c_eff, cap_b_eff) = if overfill_active {
+                            (cell_overfill_capacity(wetness), cell_overfill_capacity(cell_props[nb_idx * 4 + PROP_WETNESS]))
+                        } else {
+                            (cap_c, cap_b)
+                        };
+                        let (head_c_drive, head_b_drive) = if overfill_active {
+                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                            let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                            let o_c = relative_overfill(head_c, cap_c);
+                            let o_b = relative_overfill(heightmap.data[nb_idx], cap_b);
+                            (head_c + o_c * overfill_head_unit, heightmap.data[nb_idx] + o_b * overfill_head_unit)
+                        } else {
+                            (head_c, heightmap.data[nb_idx])
+                        };
+                        max_head_diff = max_head_diff.max((head_c_drive - head_b_drive).abs());
                         if edge_sleeps(
-                            head_c - heightmap.data[nb_idx], 0.0, edge_vel_h[center_idx],
-                            h_a, h_b, cap_c - h_a, cap_b - h_b,
+                            head_c_drive - head_b_drive, 0.0, edge_vel_h[center_idx],
+                            h_a, h_b, cap_c_eff - h_a, cap_b_eff - h_b,
                         ) {
                             if edge_vel_h[center_idx] != 0.0 {
                                 edge_vel_h[center_idx] = 0.0;
@@ -4484,9 +4591,9 @@ pub fn settle_tick(
                             // (or acceptor) on *two* owned edges at once this phase, which is
                             // exactly the multi-edge case arbitration exists for.
                             let candidate = flux_edge_candidate(
-                                head_c, heightmap.data[nb_idx],
+                                head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
-                                cap_c, cap_b,
+                                cap_c_eff, cap_b_eff,
                                 h_a, h_b, h_a, h_b, 1.0,
                                 edge_vel_h[center_idx],
                             );
@@ -4494,9 +4601,9 @@ pub fn settle_tick(
                             edge_h_active[center_idx] = true;
                             touched_h.push(center_idx);
                             cell_avail[center_idx] = h_a;
-                            cell_freecap[center_idx] = (cap_c - h_a).max(0.0);
+                            cell_freecap[center_idx] = (cap_c_eff - h_a).max(0.0);
                             cell_avail[nb_idx] = h_b;
-                            cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
+                            cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
                             // Totals deferred: see the unified post-COLLECT pass below.
@@ -4508,10 +4615,24 @@ pub fn settle_tick(
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
                         let cap_b = cell_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS]);
-                        max_head_diff = max_head_diff.max((head_c - heightmap.data[nb_idx]).abs());
+                        let (cap_c_eff, cap_b_eff) = if overfill_active {
+                            (cell_overfill_capacity(wetness), cell_overfill_capacity(cell_props[nb_idx * 4 + PROP_WETNESS]))
+                        } else {
+                            (cap_c, cap_b)
+                        };
+                        let (head_c_drive, head_b_drive) = if overfill_active {
+                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                            let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                            let o_c = relative_overfill(head_c, cap_c);
+                            let o_b = relative_overfill(heightmap.data[nb_idx], cap_b);
+                            (head_c + o_c * overfill_head_unit, heightmap.data[nb_idx] + o_b * overfill_head_unit)
+                        } else {
+                            (head_c, heightmap.data[nb_idx])
+                        };
+                        max_head_diff = max_head_diff.max((head_c_drive - head_b_drive).abs());
                         if edge_sleeps(
-                            head_c - heightmap.data[nb_idx], 0.0, edge_vel_v[center_idx],
-                            h_a, h_b, cap_c - h_a, cap_b - h_b,
+                            head_c_drive - head_b_drive, 0.0, edge_vel_v[center_idx],
+                            h_a, h_b, cap_c_eff - h_a, cap_b_eff - h_b,
                         ) {
                             if edge_vel_v[center_idx] != 0.0 {
                                 edge_vel_v[center_idx] = 0.0;
@@ -4519,9 +4640,9 @@ pub fn settle_tick(
                         } else {
                             // COLLECT only — see the comment on the x-edge above.
                             let candidate = flux_edge_candidate(
-                                head_c, heightmap.data[nb_idx],
+                                head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
-                                cap_c, cap_b,
+                                cap_c_eff, cap_b_eff,
                                 h_a, h_b, h_a, h_b, 1.0,
                                 edge_vel_v[center_idx],
                             );
@@ -4529,9 +4650,9 @@ pub fn settle_tick(
                             edge_v_active[center_idx] = true;
                             touched_v.push(center_idx);
                             cell_avail[center_idx] = h_a;
-                            cell_freecap[center_idx] = (cap_c - h_a).max(0.0);
+                            cell_freecap[center_idx] = (cap_c_eff - h_a).max(0.0);
                             cell_avail[nb_idx] = h_b;
-                            cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
+                            cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
                             // Totals deferred: see the unified post-COLLECT pass below.
@@ -4737,7 +4858,35 @@ pub fn settle_tick(
                         // read by `edge_sleeps` and `flux_edge_candidate` below is unaffected by
                         // which branch produced it and neither of those two functions needs to
                         // know this gate exists.
-                        let (head_a, head_b_full) = if head_field_active
+                        let (cap_a_eff, cap_b_eff) = if overfill_active {
+                            (cell_overfill_capacity(wetness), cell_overfill_capacity(cell_props[nb_idx * 4 + PROP_WETNESS]))
+                        } else {
+                            (cell_capacity, cap_b)
+                        };
+
+                        let (head_a, head_b_full, tau_eff) = if overfill_active {
+                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                            let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                            let o_a = relative_overfill(h_a_frozen, cell_capacity);
+                            let o_b = relative_overfill(h_b_frozen, cap_b);
+                            let p_a = o_a * overfill_head_unit;
+                            let p_b = o_b * overfill_head_unit;
+                            let k_lat_a = k_of_liquidity(cell_liquidity);
+                            let k_lat_b = k_of_liquidity(liq_b);
+                            let driving_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE + k_lat_a * p_a + dispersion;
+                            let driving_b = h_b_frozen + k_lat_b * p_b;
+
+                            // Mohr-Coulomb yield stress for granular material:
+                            // Yield stress tau increases with local confining pressure (normal stress P_bar).
+                            // For pure liquid (cell_liquidity == 1.0), friction mu = 0 -> tau_eff = tau (0 for liquid).
+                            // For granular sand, friction mu = 0.60 -> deep sand resists failure under normal stress.
+                            let mu = OVERFILL_MOHR_COULOMB_MU * (1.0 - cell_liquidity).max(1.0 - liq_b);
+                            let normal_p = 0.5 * (p_a + p_b);
+                            let tau_overfill = mu * normal_p * (depth_scale / GRAVITY_HEAD_SCALE);
+                            let tau_eff = tau + tau_overfill;
+
+                            (driving_a, driving_b, tau_eff)
+                        } else if head_field_active
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
                         {
@@ -4791,48 +4940,8 @@ pub fn settle_tick(
                                 + gravity_dir.x * GRAVITY_HEAD_SCALE
                                 + dispersion;
                             let head_b_field = head_field[nb_idx] * head_scale;
-                            (head_a_field, head_b_field)
+                            (head_a_field, head_b_field, tau)
                         } else if multiplicative_lateral_gate::is_enabled() {
-                            // TASK #55 UNIT FIX: `h_a_frozen`/`h_b_frozen` are a LOCAL cell's own
-                            // fill fraction -- unscaled, one cell's worth of physical thickness at
-                            // THIS grid's own resolution `w`. `column_depth` is a top-down running
-                            // sum whose per-row contribution is pre-multiplied by `depth_scale =
-                            // REFERENCE_GRID_HEIGHT / w` (see `recompute_column_depth` and the
-                            // inline fallback above) specifically so it estimates physical depth
-                            // in "reference-resolution row" units, invariant to `w`. Adding the two
-                            // directly, as this branch used to, summed a local-cell-unit quantity
-                            // with a reference-row-unit quantity -- off by exactly `depth_scale`,
-                            // which is 1.0 only at production's `w == REFERENCE_GRID_HEIGHT == 512`
-                            // and up to 8x+ at the 64/128-wide grids every task-55 diagnostic runs
-                            // at (see `diag_task55_eta_depth_scale_consistency`). Fixed by lifting
-                            // the local term into the SAME reference-row units column_depth already
-                            // uses: `h * depth_scale`. `cell_capacity_for`'s material-dependent cap
-                            // (1.5 dry sand / 1.0 liquid) does NOT need a matching correction here
-                            // -- it depends only on wetness, never on `w`, so it cannot introduce
-                            // any resolution-DEPENDENT error; it only affects how `h`'s absolute
-                            // magnitude compares to a liquid's, which is a pre-existing, unrelated
-                            // design choice this task does not touch.
-                            //
-                            // `gravity_dir.x * GRAVITY_HEAD_SCALE` is deliberately left unscaled:
-                            // per its own doc comment it is calibrated "per cell of travel", a
-                            // discretization-relative CFL-style forcing term, not a physical-depth
-                            // estimate -- it was never in `column_depth`'s units to begin with, in
-                            // either the additive or multiplicative branch, and scaling it here
-                            // would be a new behaviour change this task does not ask for.
-                            //
-                            // With both terms in reference-row units, `conveyance`'s argument
-                            // (`local_fill + k * janssen_effective_depth(column_depth, liq)`) is
-                            // now a genuinely resolution-invariant physical quantity for a fixed
-                            // physical pile, so raising it to the `MULT_LATERAL_CONVEYANCE_EXPONENT`
-                            // power keeps `conveyance` itself resolution-invariant too -- no
-                            // separate per-resolution rescaling of `MULT_LATERAL_SCALE` is needed
-                            // (see `diag_task55_eta_depth_scale_consistency`'s resolution sweep).
-                            // The other candidate unit choice (deflating `column_depth` down to
-                            // local-cell units, `column_depth / depth_scale`) does NOT have this
-                            // property: `column_depth / depth_scale` is the local row COUNT, which
-                            // scales linearly with `w` for a fixed physical pile, so `conveyance`
-                            // would scale as `w^1.5` and `MULT_LATERAL_SCALE` would need
-                            // re-deriving at every resolution -- reference-row units avoid that.
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let h_a_ref = h_a_frozen * depth_scale;
                             let h_b_ref = h_b_frozen * depth_scale;
@@ -4845,12 +4954,13 @@ pub fn settle_tick(
                                 mult_lateral_conveyance(h_b_ref, column_depth[nb_idx], k_b, liq_b);
                             let conveyance = 0.5 * (conveyance_a + conveyance_b);
                             let driving = MULT_LATERAL_SCALE * conveyance * (eta_a - eta_b) + dispersion;
-                            (driving, 0.0)
+                            (driving, 0.0, tau)
                         } else {
                             (
                                 h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
                                     + k_a * LATERAL_PRESSURE_SCALE * depth_a + dispersion,
                                 h_b_frozen + k_b * LATERAL_PRESSURE_SCALE * depth_b,
+                                tau,
                             )
                         };
 
@@ -4885,8 +4995,8 @@ pub fn settle_tick(
                         // quantity `flux_edge` will compute internally below — or branch 2 could
                         // sleep an edge the depth-pressure/dispersion terms would in fact have moved.
                         if locked || edge_sleeps(
-                            head_a - head_b_full, tau, edge_vel_h[center_idx],
-                            h_a, h_b, cell_capacity - h_a, cap_b - h_b,
+                            head_a - head_b_full, tau_eff, edge_vel_h[center_idx],
+                            h_a, h_b, cap_a_eff - h_a, cap_b_eff - h_b,
                         ) {
                             if edge_vel_h[center_idx] != 0.0 {
                                 edge_vel_h[center_idx] = 0.0;
@@ -4980,8 +5090,8 @@ pub fn settle_tick(
                             let candidate = flux_edge_candidate(
                                 head_a,
                                 head_b_full,
-                                c_sq, damping, tau,
-                                cell_capacity, cap_b,
+                                c_sq, damping, tau_eff,
+                                cap_a_eff, cap_b_eff,
                                 avail_a, avail_b,
                                 h_a, h_b,
                                 pressure_weight,
@@ -4991,9 +5101,9 @@ pub fn settle_tick(
                             edge_h_active[center_idx] = true;
                             touched_h.push(center_idx);
                             cell_avail[center_idx] = avail_a;
-                            cell_freecap[center_idx] = (cell_capacity - h_a).max(0.0);
+                            cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
                             cell_avail[nb_idx] = avail_b;
-                            cell_freecap[nb_idx] = (cap_b - h_b).max(0.0);
+                            cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
                             // Totals deferred: see the unified post-COLLECT pass below.
@@ -5413,7 +5523,7 @@ pub fn settle_tick(
         temp_heights, cell_props, w,
         &mut pressure_phi_a, &mut pressure_phi_b, &mut pressure_fstar, &mut pressure_lap,
         &mut pressure_degree, &mut pressure_cap, &mut pressure_nodes,
-        phase, time_seed,
+        phase, time_seed, overfill_active,
         &mut cell_out_total, &mut cell_in_total, &mut cell_out_total_jit, &mut cell_in_total_jit,
     );
 
@@ -5813,6 +5923,9 @@ mod tests {
         /// test is unaffected; set directly (`sim.pressure_sensitive_flow = true`) to exercise the
         /// pressure-attenuated conveyance rate on a specific scenario.
         pressure_sensitive_flow: bool,
+        /// Mirrors `DrawingSimulation::overfill_pressure` / `settle_tick`'s parameter of the
+        /// same name (TASK #70). Defaults to `false` in `new()`.
+        pub overfill_pressure: bool,
     }
 
     impl TestSim {
@@ -5840,6 +5953,7 @@ mod tests {
                 fresh_pressure_field: false,
                 head_field_transport: false,
                 pressure_sensitive_flow: false,
+                overfill_pressure: false,
             }
         }
 
@@ -5869,6 +5983,7 @@ mod tests {
                 self.head_field_transport,
                 false,
                 self.pressure_sensitive_flow,
+                self.overfill_pressure,
             );
             self.tick_count += 1;
             flow
@@ -6196,7 +6311,7 @@ mod tests {
                 glam::Vec2::ZERO,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -6267,7 +6382,7 @@ mod tests {
             glam::Vec2::ZERO,
             false,
             false,
-            false, false,
+            false, false, false,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -6345,7 +6460,7 @@ mod tests {
                 glam::Vec2::ZERO,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -6450,7 +6565,7 @@ mod tests {
             glam::Vec2::ZERO,
             false,
             false,
-            false, false,
+            false, false, false,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -6759,7 +6874,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -6857,7 +6972,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -6909,7 +7024,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -6982,7 +7097,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -7086,7 +7201,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -10255,7 +10370,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -10370,7 +10485,7 @@ mod tests {
                     12345u32.wrapping_add(i),
                     &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false,
                     false,
-                    false, false,
+                    false, false, false,
                 );
             }
 
@@ -10469,7 +10584,7 @@ mod tests {
                 12345u32.wrapping_add(i),
                 &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -10556,7 +10671,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -10642,7 +10757,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -10891,7 +11006,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -11071,7 +11186,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
 
@@ -11213,7 +11328,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             ) as f64;
         }
 
@@ -11456,7 +11571,7 @@ mod tests {
                 gravity_dir,
                 false,
                 false,
-                false, false,
+                false, false, false,
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -11993,7 +12108,7 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, t as u32, gravity_dir, false,
                 false,
-                false, false,
+                false, false, false,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();

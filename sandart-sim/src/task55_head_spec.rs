@@ -1167,6 +1167,7 @@ impl DynSim {
             head_field_transport,
             false,
             pressure_sensitive_flow,
+            false,
         );
         self.tick_count += 1;
         flow
