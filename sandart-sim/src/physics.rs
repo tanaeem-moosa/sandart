@@ -4425,9 +4425,17 @@ pub fn settle_tick(
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
                         {
-                            pressure_rate_factor(task55_head_field::rows_of_head_at(
-                                center_idx, w, head_field,
-                            ))
+                            if overfill_active {
+                                let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                                let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                                let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
+                                let depth_equivalent = column_depth[center_idx] + p_a / GRAVITY_HEAD_SCALE;
+                                pressure_rate_factor(depth_equivalent)
+                            } else {
+                                pressure_rate_factor(task55_head_field::rows_of_head_at(
+                                    center_idx, w, head_field,
+                                ))
+                            }
                         } else {
                             1.0
                         };
@@ -5034,9 +5042,17 @@ pub fn settle_tick(
                                 && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                                 && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
                             {
-                                pressure_rate_factor(task55_head_field::rows_of_head_at(
-                                    center_idx, w, head_field,
-                                ))
+                                if overfill_active {
+                                    let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                                    let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                                    let p_a = overfill_pressure_val(h_a_frozen, cell_capacity, overfill_ratio, overfill_head_unit);
+                                    let depth_equivalent = column_depth[center_idx] + p_a / GRAVITY_HEAD_SCALE;
+                                    pressure_rate_factor(depth_equivalent)
+                                } else {
+                                    pressure_rate_factor(task55_head_field::rows_of_head_at(
+                                        center_idx, w, head_field,
+                                    ))
+                                }
                             } else {
                                 1.0
                             };
