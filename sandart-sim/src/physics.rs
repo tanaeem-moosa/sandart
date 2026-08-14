@@ -4429,7 +4429,7 @@ pub fn settle_tick(
                                 let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                                 let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                                 let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
-                                let depth_equivalent = column_depth[center_idx] + p_a / GRAVITY_HEAD_SCALE;
+                                let depth_equivalent = p_a / GRAVITY_HEAD_SCALE;
                                 pressure_rate_factor(depth_equivalent)
                             } else {
                                 pressure_rate_factor(task55_head_field::rows_of_head_at(
@@ -4897,10 +4897,8 @@ pub fn settle_tick(
                             let p_b = overfill_pressure_val(h_b_frozen, cap_b, overfill_ratio, overfill_head_unit);
                             let k_lat_a = k_of_liquidity(cell_liquidity);
                             let k_lat_b = k_of_liquidity(liq_b);
-                            let p_hydro_a = k_lat_a * LATERAL_PRESSURE_SCALE * depth_a * cell_liquidity;
-                            let p_hydro_b = k_lat_b * LATERAL_PRESSURE_SCALE * depth_b * liq_b;
-                            let driving_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE + p_hydro_a + k_lat_a * p_a + dispersion;
-                            let driving_b = h_b_frozen + p_hydro_b + k_lat_b * p_b;
+                            let driving_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE + k_lat_a * p_a + dispersion;
+                            let driving_b = h_b_frozen + k_lat_b * p_b;
 
                             // Mohr-Coulomb yield stress for granular material:
                             // Yield stress tau increases with local confining pressure (normal stress P_bar).
@@ -5046,7 +5044,7 @@ pub fn settle_tick(
                                     let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                                     let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                                     let p_a = overfill_pressure_val(h_a_frozen, cell_capacity, overfill_ratio, overfill_head_unit);
-                                    let depth_equivalent = column_depth[center_idx] + p_a / GRAVITY_HEAD_SCALE;
+                                    let depth_equivalent = p_a / GRAVITY_HEAD_SCALE;
                                     pressure_rate_factor(depth_equivalent)
                                 } else {
                                     pressure_rate_factor(task55_head_field::rows_of_head_at(

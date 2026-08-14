@@ -1098,8 +1098,7 @@ impl DrawingSimulation {
                     let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
                     let p_val = physics::overfill_pressure_val(h_val, cap, overfill_ratio, overfill_head_unit);
                     let overfill_depth = p_val / base_head;
-                    let total_depth = self.column_depth[idx] + overfill_depth;
-                    to_byte(total_depth)
+                    to_byte(overfill_depth)
                 })
                 .collect()
         } else if self.pressure_heatmap_head_field {
