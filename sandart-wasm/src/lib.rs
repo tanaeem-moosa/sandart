@@ -773,7 +773,7 @@ impl WasmSimulationState {
         self.sim.overfill_pressure = enabled;
     }
 
-    /// "Overfill capacity multiplier" (task #70): 1.00..=1.50, forwarded straight to the sim.
+    /// "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.
     pub fn set_overfill_capacity(&mut self, capacity: f32) {
         self.sim.overfill_capacity = capacity;
     }

@@ -1095,9 +1095,11 @@ impl DrawingSimulation {
                     let wetness = self.cell_props[idx * 4 + PROP_WETNESS];
                     let cap = physics::cell_capacity_for(wetness);
                     let h_val = self.heightmap.data[idx];
-                    let overfill = physics::relative_overfill(h_val, cap);
-                    let depth = overfill * (overfill_head_unit / base_head);
-                    to_byte(depth)
+                    let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
+                    let p_val = physics::overfill_pressure_val(h_val, cap, overfill_ratio, overfill_head_unit);
+                    let overfill_depth = p_val / base_head;
+                    let total_depth = self.column_depth[idx] + overfill_depth;
+                    to_byte(total_depth)
                 })
                 .collect()
         } else if self.pressure_heatmap_head_field {

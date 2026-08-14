@@ -658,6 +658,20 @@ pub fn relative_overfill(h: f32, cap: f32) -> f32 {
     }
 }
 
+/// Task #70: Computes the nonlinear overfill pressure representing fluid compressibility.
+/// As overfill fraction approaches `overfill_ratio`, pressure asymptotically rises toward infinity,
+/// ensuring pressure never saturates with depth and strictly prevents packing beyond the ceiling.
+#[inline]
+pub fn overfill_pressure_val(h: f32, cap: f32, overfill_ratio: f32, overfill_head_unit: f32) -> f32 {
+    let o = relative_overfill(h, cap);
+    if o <= 0.0 {
+        return 0.0;
+    }
+    let o_max = overfill_ratio.max(0.01);
+    let ratio = (o / o_max).clamp(0.0, 0.999);
+    overfill_head_unit * o / (1.0 - ratio)
+}
+
 /// Task #47 round 3. Graded support fraction for cell `idx`, in `[0, 1]`: how much of what is
 /// below it can bear its weight. `1.0` = fully supported (resting on the container floor/casing,
 /// or the cell below is at or over its own material capacity, `cell_capacity_for`). `0.0` = fully
@@ -4361,10 +4375,8 @@ pub fn settle_tick(
                         let (head_a, head_b) = if overfill_active {
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                            let o_a = relative_overfill(h_a, cap_a);
-                            let o_b = relative_overfill(h_b, cap_b);
-                            let p_a = o_a * overfill_head_unit;
-                            let p_b = o_b * overfill_head_unit;
+                            let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
+                            let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
                             (h_a / cap_a + base_head + p_a, h_b / cap_b + p_b)
                         } else if head_field_active
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
@@ -4409,36 +4421,6 @@ pub fn settle_tick(
                         let (liquid_c_sq, liquid_damping) = wave_params(wetness);
                         let c_sq = GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity;
                         let damping = GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity;
-                        // TASK #63: pressure-sensitive flow rate. Scales this edge's FLUX -- via
-                        // `flux_edge_candidate`'s own `weight` parameter, which exists to do
-                        // exactly this -- by how much hydrostatic head the DONOR carries. It does
-                        // NOT touch the driving head, so which branch produced `head_a`/`head_b`
-                        // above is irrelevant here and this composes with `head_field_transport`
-                        // either way.
-                        //
-                        // THE FLUX, NOT `c_sq`, and the distinction is load-bearing. A first
-                        // version attenuated `c_sq` -- how fast the edge's momentum spins up --
-                        // which is the more obvious reading of "flow rate". MEASURED, and it
-                        // cannot produce a depth ordering: at any edge with real room to move
-                        // into, the driving head is large enough that `v` reaches the
-                        // donor-mass/acceptor-room clamp within a tick or two whatever `c_sq` is,
-                        // so the realised flux is MASS-limited and `c_sq` drops out entirely. A
-                        // draining vessel measured 127.1 (10 deep) against 124.5 (20 deep) -- no
-                        // ordering at all. `c_sq` only matters where flow is velocity-limited,
-                        // i.e. the low-gradient case, which is not where depth lives. Scaling the
-                        // realised flux is also the more faithful reading of the law being
-                        // implemented: Torricelli's `Q = C_d * A * sqrt(2*g*h)` puts the head
-                        // dependence in a DISCHARGE COEFFICIENT on the flux, which is what this
-                        // now is.
-                        //
-                        // DONOR, not the edge average or the higher end: this scales the rate at
-                        // which a cell can PUSH material out, and only the cell material is
-                        // leaving has a say in that.
-                        //
-                        // Free fall is untouched: `rows_of_head_at` returns exactly `0.0` for
-                        // material `advance_head_field` pinned as unsupported, and
-                        // `pressure_rate_factor` returns `1.0` there -- see both functions' doc
-                        // comments for why that separation is exact rather than an epsilon.
                         let pressure_weight = if pressure_sensitive_flow
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
@@ -4449,34 +4431,27 @@ pub fn settle_tick(
                         } else {
                             1.0
                         };
-                        let (cap_a_eff, cap_b_eff, g_step) = if overfill_active {
-                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                            let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                            let g_step = (base_head.max(0.0) / overfill_head_unit) * cell_liquidity;
+                        let (cap_a_eff, cap_b_eff) = if overfill_active {
                             (
                                 cell_overfill_capacity_for(wetness, overfill_ratio),
                                 cell_overfill_capacity_for(cell_props[nb_idx * 4 + PROP_WETNESS], overfill_ratio),
-                                g_step,
                             )
                         } else {
-                            (cap_a, cap_b, 0.0)
+                            (cap_a, cap_b)
                         };
-                        // COLLECT only: compute this edge's candidate flux and record it, plus
-                        // this cell's and its neighbour's donor/acceptor limits for arbitration.
-                        // Nothing is mutated yet — see this phase's post-collection ARBITRATE +
-                        // APPLY pass below the nested loops, and the buffer comment above the
-                        // phase loop for why phase 0's arbitration is provably a no-op (each cell
-                        // owns exactly one vertical edge as donor and one as acceptor here) but is
-                        // still routed through the same general machinery rather than
-                        // special-cased.
                         let (max_accept_fwd, max_accept_bwd) = if overfill_active {
                             let nom_b = (cap_b - h_b).max(0.0);
-                            let comp_b = (h_a + g_step - h_b.max(cap_b)).max(0.0);
+                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                            let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                            let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
+                            let p_target = p_a + base_head;
+                            let o_max = overfill_ratio.max(0.01);
+                            let o_target = o_max * (p_target / (p_target + overfill_head_unit));
+                            let h_target = cap_b * (1.0 + o_target);
+                            let comp_b = (h_target - h_b.max(cap_b)).max(0.0);
                             let fwd = (nom_b + comp_b).min((cap_b_eff - h_b).max(0.0));
 
-                            let nom_a = (cap_a - h_a).max(0.0);
-                            let comp_a = 0.5 * (h_b - h_a.max(cap_a)).max(0.0);
-                            let bwd = (nom_a + comp_a).min((cap_a_eff - h_a).max(0.0));
+                            let bwd = (cap_a_eff - h_a).max(0.0);
                             (fwd, bwd)
                         } else {
                             ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
@@ -4617,18 +4592,10 @@ pub fn settle_tick(
                             // COLLECT only — see the phase-loop buffer comment and
                             // `flux_edge_candidate`'s doc comment. This cell also owns the y-edge
                             // below (next block), so — unlike phase 0 — this cell can be a donor
-                            let (max_accept_fwd, max_accept_bwd) = if overfill_active {
-                                let nom_b = (cap_b - h_b).max(0.0);
-                                let eq_b = 0.5 * (h_a - h_b.max(cap_b)).max(0.0);
-                                let fwd = (nom_b + eq_b).min((cap_b_eff - h_b).max(0.0));
-
-                                let nom_a = (cap_c - h_a).max(0.0);
-                                let eq_a = 0.5 * (h_b - h_a.max(cap_c)).max(0.0);
-                                let bwd = (nom_a + eq_a).min((cap_c_eff - h_a).max(0.0));
-                                (fwd, bwd)
-                            } else {
-                                ((cap_b - h_b).max(0.0), (cap_c - h_a).max(0.0))
-                            };
+                            let (max_accept_fwd, max_accept_bwd) = (
+                                (cap_b_eff - h_b).max(0.0),
+                                (cap_c_eff - h_a).max(0.0),
+                            );
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
@@ -4682,18 +4649,10 @@ pub fn settle_tick(
                             }
                         } else {
                             // COLLECT only — see the comment on the x-edge above.
-                            let (max_accept_fwd, max_accept_bwd) = if overfill_active {
-                                let nom_b = (cap_b - h_b).max(0.0);
-                                let eq_b = 0.5 * (h_a - h_b.max(cap_b)).max(0.0);
-                                let fwd = (nom_b + eq_b).min((cap_b_eff - h_b).max(0.0));
-
-                                let nom_a = (cap_c - h_a).max(0.0);
-                                let eq_a = 0.5 * (h_b - h_a.max(cap_c)).max(0.0);
-                                let bwd = (nom_a + eq_a).min((cap_c_eff - h_a).max(0.0));
-                                (fwd, bwd)
-                            } else {
-                                ((cap_b - h_b).max(0.0), (cap_c - h_a).max(0.0))
-                            };
+                            let (max_accept_fwd, max_accept_bwd) = (
+                                (cap_b_eff - h_b).max(0.0),
+                                (cap_c_eff - h_a).max(0.0),
+                            );
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
@@ -4926,14 +4885,14 @@ pub fn settle_tick(
                         let (head_a, head_b_full, tau_eff) = if overfill_active {
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                            let o_a = relative_overfill(h_a_frozen, cell_capacity);
-                            let o_b = relative_overfill(h_b_frozen, cap_b);
-                            let p_a = o_a * overfill_head_unit;
-                            let p_b = o_b * overfill_head_unit;
+                            let p_a = overfill_pressure_val(h_a_frozen, cell_capacity, overfill_ratio, overfill_head_unit);
+                            let p_b = overfill_pressure_val(h_b_frozen, cap_b, overfill_ratio, overfill_head_unit);
                             let k_lat_a = k_of_liquidity(cell_liquidity);
                             let k_lat_b = k_of_liquidity(liq_b);
-                            let driving_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE + k_lat_a * p_a + dispersion;
-                            let driving_b = h_b_frozen + k_lat_b * p_b;
+                            let p_hydro_a = k_lat_a * LATERAL_PRESSURE_SCALE * depth_a * cell_liquidity;
+                            let p_hydro_b = k_lat_b * LATERAL_PRESSURE_SCALE * depth_b * liq_b;
+                            let driving_a = h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE + p_hydro_a + k_lat_a * p_a + dispersion;
+                            let driving_b = h_b_frozen + p_hydro_b + k_lat_b * p_b;
 
                             // Mohr-Coulomb yield stress for granular material:
                             // Yield stress tau increases with local confining pressure (normal stress P_bar).
