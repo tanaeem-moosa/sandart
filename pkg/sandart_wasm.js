@@ -381,6 +381,13 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_neck_width(this.__wbg_ptr, width);
     }
     /**
+     * "Per-cell overfill pressure simulation" toggle (task #70): forwarded straight to the sim.
+     * @param {boolean} enabled
+     */
+    set_overfill_pressure(enabled) {
+        wasm.wasmsimulationstate_set_overfill_pressure(this.__wbg_ptr, enabled);
+    }
+    /**
      * @param {string} mode
      */
     set_pattern_mode(mode) {
