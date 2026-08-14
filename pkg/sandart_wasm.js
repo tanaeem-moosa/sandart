@@ -114,6 +114,13 @@ export class WasmSimulationState {
         return ret >>> 0;
     }
     /**
+     * @returns {number}
+     */
+    get_overfill_capacity() {
+        const ret = wasm.wasmsimulationstate_get_overfill_capacity(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * List every material as `[id, label, wetness, threshold, flow_rate, grain_size]` rows, in
      * menu order. The web UI should build its material `<select>` options from this at
      * startup rather than hardcoding its own copy of the material list — that hardcoded-copy
@@ -379,6 +386,13 @@ export class WasmSimulationState {
      */
     set_neck_width(width) {
         wasm.wasmsimulationstate_set_neck_width(this.__wbg_ptr, width);
+    }
+    /**
+     * "Overfill capacity multiplier" (task #70): 1.00..=1.50, forwarded straight to the sim.
+     * @param {number} capacity
+     */
+    set_overfill_capacity(capacity) {
+        wasm.wasmsimulationstate_set_overfill_capacity(this.__wbg_ptr, capacity);
     }
     /**
      * "Per-cell overfill pressure simulation" toggle (task #70): forwarded straight to the sim.
