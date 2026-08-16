@@ -672,6 +672,99 @@ pub fn overfill_pressure_val(h: f32, cap: f32, overfill_ratio: f32, overfill_hea
     overfill_head_unit * o / (1.0 - ratio)
 }
 
+/// Task #70: backward-Euler implicit scaling on the liquid wave speed while the overfill model is
+/// active, so the acoustic wave the overfill spring introduces stays inside the grid's CFL bound
+/// instead of ringing at `k = pi` (alternating-row stripes).
+///
+/// **This is the single definition for BOTH solver passes.** They previously computed it inline
+/// from different denominators -- the gravity-aligned pass from `gravity_dir.y * GRAVITY_HEAD_SCALE`
+/// and the lateral pass from the bare `GRAVITY_HEAD_SCALE` constant -- so at the demo's gravity
+/// setting vertical momentum built 4.7x more slowly than lateral for the same physics, and the
+/// lateral pass silently ignored the gravity slider while the vertical one tracked it. The wave
+/// speed is a property of the material's stiffness, not of how hard gravity is pulling, so the
+/// gravity-independent form is the correct one and the constant is used here.
+#[inline]
+pub fn overfill_acoustic_scale() -> f32 {
+    1.0 / (1.0 + (OVERFILL_STIFFNESS_K / GRAVITY_HEAD_SCALE).sqrt())
+}
+
+/// Task #70: critical damping applied alongside `overfill_acoustic_scale`.
+pub const OVERFILL_DAMPING: f32 = 0.90;
+
+/// Task #70: under-relaxation on the compression half of `overfill_max_accept`. Compression is a
+/// correction toward a hydrostatic target, not a transport budget, so taking it in one step
+/// overshoots and rings; a fraction per tick is a relaxation. Applied to both passes.
+pub const OVERFILL_COMPRESSION_RELAXATION: f32 = 0.5;
+
+/// Task #70: convective through-flow allowance, in cells per tick, granted only when BOTH
+/// endpoints of an edge are at or above nominal capacity. A saturated cell in a saturated pipe is
+/// not a sponge -- what enters one side leaves the other in the same tick -- so its acceptance is
+/// bounded by throughput, not by the room it has left (which is nearly none). Without this a full
+/// conduit conducts only at the compression rate, which is two orders of magnitude slower.
+pub const OVERFILL_CONVECTIVE_THROUGHPUT: f32 = 1.0;
+
+/// Task #70: how much mass one cell may accept across one edge this tick, under the overfill
+/// pressure model. **This is the single acceptance rule for BOTH solver passes.**
+///
+/// It used to be two rules. `settle_tick`'s gravity-aligned pass (phase 0) and its lateral pass
+/// (phase 1) each carried their own hand-written copy, ~700 lines apart, and they had drifted on
+/// six separate axes: the lateral copy had the convective term and the vertical one did not; the
+/// lateral copy took the compression step at full rate and used `p_a.max(p_b)` as the target where
+/// the vertical one used a signed `p +/- base_head`; the vertical one measured compression from
+/// `h.max(cap)` and the lateral one from raw `h`; the vertical one had an extra `p_b > base_head`
+/// cutoff on reverse flow. None of that divergence was intended -- the two passes are meant to
+/// differ ONLY in that lateral edges have no hydrostatic step across them. That is now the single
+/// parameter `gravity_head`, which callers pass as `+base_head` transferring downward,
+/// `-base_head` transferring upward, and `0.0` for every lateral edge.
+///
+/// The divergence was not cosmetic: it is how the convective through-flow fix of 2026-08-16
+/// (642b380) came to be applied to horizontal conduits only, so a U-tube's basin conducted freely
+/// while its riser did not.
+///
+/// The three terms are disjoint by construction, which is why they are summed rather than maxed:
+/// - `nominal` is room strictly below capacity, and is zero once the cell is saturated.
+/// - `compression` is headroom strictly above capacity, measured from `h.max(cap)`, and is zero
+///   below it. (Measuring from raw `h`, as the lateral copy did, double-counts `nominal`.)
+/// - `convective` is throughput, and applies only when both endpoints are already saturated --
+///   exactly the regime where the other two terms have gone to zero.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn overfill_max_accept(
+    h_donor: f32,
+    h_acceptor: f32,
+    cap_acceptor: f32,
+    cap_acceptor_eff: f32,
+    p_donor: f32,
+    gravity_head: f32,
+    overfill_ratio: f32,
+    overfill_head_unit: f32,
+    donor_saturated: bool,
+    acceptor_saturated: bool,
+) -> f32 {
+    let o_max = overfill_ratio.max(0.01);
+    // The acceptor's hydrostatic target is the donor's pressure carried across the edge: one row
+    // of head is GAINED transferring downward and LOST transferring upward, and nothing changes
+    // laterally. Clamped at zero because a donor with less pressure than one row of head cannot
+    // compress its neighbour at all -- that clamp is what the vertical copy's separate
+    // `p_b > base_head` cutoff was doing by hand.
+    let p_target = (p_donor + gravity_head).max(0.0);
+    let o_target = o_max * (p_target / (p_target + overfill_head_unit));
+    let h_target = cap_acceptor * (1.0 + o_target);
+
+    let nominal = (cap_acceptor - h_acceptor).max(0.0);
+    let compression =
+        OVERFILL_COMPRESSION_RELAXATION * (h_target - h_acceptor.max(cap_acceptor)).max(0.0);
+    let convective = if donor_saturated && acceptor_saturated {
+        OVERFILL_CONVECTIVE_THROUGHPUT
+    } else {
+        0.0
+    };
+
+    (nominal + compression + convective)
+        .min((cap_acceptor_eff - h_acceptor).max(0.0))
+        .min(h_donor)
+}
+
 /// Task #47 round 3. Graded support fraction for cell `idx`, in `[0, 1]`: how much of what is
 /// below it can bear its weight. `1.0` = fully supported (resting on the container floor/casing,
 /// or the cell below is at or over its own material capacity, `cell_capacity_for`). `0.0` = fully
@@ -4419,8 +4512,7 @@ pub fn settle_tick(
                         const GRANULAR_FALL_DAMPING: f32 = 1.0;
                         let (liquid_c_sq, liquid_damping) = wave_params(wetness);
                         let (c_sq, damping) = if overfill_active && cell_liquidity > 0.5 {
-                            let acoustic_scale = 1.0 / (1.0 + (OVERFILL_STIFFNESS_K / base_head.max(1.0)).sqrt());
-                            (liquid_c_sq * acoustic_scale, 0.90)
+                            (liquid_c_sq * overfill_acoustic_scale(), OVERFILL_DAMPING)
                         } else {
                             (
                                 GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity,
@@ -4454,29 +4546,25 @@ pub fn settle_tick(
                             (cap_a, cap_b)
                         };
                         let (max_accept_fwd, max_accept_bwd) = if overfill_active {
+                            // Gravity-aligned edge: `a` is the upper cell, `b` the lower, so the
+                            // forward (donate-downward) transfer GAINS one row of head and the
+                            // backward (rise) transfer LOSES it. That sign is the only thing
+                            // separating this call pair from the lateral one -- see
+                            // `overfill_max_accept`.
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                             let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
                             let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
-                            let o_max = overfill_ratio.max(0.01);
-
-                            let p_target_b = p_a + base_head;
-                            let o_target_b = o_max * (p_target_b / (p_target_b + overfill_head_unit));
-                            let h_target_b = cap_b * (1.0 + o_target_b);
-                            let nom_b = (cap_b - h_b).max(0.0);
-                            let comp_b = 0.5 * (h_target_b - h_b.max(cap_b)).max(0.0);
-                            let fwd = (nom_b + comp_b).min((cap_b_eff - h_b).max(0.0)).min(h_a);
-
-                            let p_target_a = (p_b - base_head).max(0.0);
-                            let o_target_a = o_max * (p_target_a / (p_target_a + overfill_head_unit));
-                            let h_target_a = cap_a * (1.0 + o_target_a);
-                            let nom_a = (cap_a - h_a).max(0.0);
-                            let comp_a = if p_b > base_head {
-                                0.5 * (h_target_a - h_a.max(cap_a)).max(0.0)
-                            } else {
-                                0.0
-                            };
-                            let bwd = (nom_a + comp_a).min((cap_a_eff - h_a).max(0.0)).min(h_b);
+                            let sat_a = h_a >= cap_a;
+                            let sat_b = h_b >= cap_b;
+                            let fwd = overfill_max_accept(
+                                h_a, h_b, cap_b, cap_b_eff, p_a, base_head,
+                                overfill_ratio, overfill_head_unit, sat_a, sat_b,
+                            );
+                            let bwd = overfill_max_accept(
+                                h_b, h_a, cap_a, cap_a_eff, p_b, -base_head,
+                                overfill_ratio, overfill_head_unit, sat_b, sat_a,
+                            );
                             (fwd, bwd)
                         } else {
                             ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
@@ -4493,9 +4581,24 @@ pub fn settle_tick(
                         edge_v_active[center_idx] = true;
                         touched_v.push(center_idx);
                         cell_avail[center_idx] = h_a;
-                        cell_freecap[center_idx] = if overfill_active { max_accept_bwd } else { (cap_a - h_a).max(0.0) };
+                        // MUST be a pure function of this cell -- see the `cell_freecap` contract
+                        // in the frozen-Jacobi buffer comment above. This used to be written as
+                        // `max_accept_bwd`/`max_accept_fwd` under overfill, which are per-EDGE
+                        // limits: they depend on the far endpoint's pressure and, via
+                        // `.min(h_donor)`, on the far endpoint's MASS. Two edges write each cell,
+                        // so that made the surviving value depend on sweep order, and it silently
+                        // broke exactly one case -- a cell with EMPTY space above it. The edge from
+                        // above contributes `max_accept_fwd = ....min(h_donor) = 0` because an
+                        // empty donor has nothing to give, and when that write landed last the
+                        // cell's acceptor budget was 0, so arbitration scaled its perfectly good
+                        // upward flux from below to zero. Every tick, absolutely, at every rising
+                        // water front. The per-edge limits are already applied inside
+                        // `flux_edge_candidate`; arbitration only needs the cell's own AGGREGATE
+                        // room, which is what `cap_eff - h` is. Reduces to the previous non-overfill
+                        // expression exactly, since `cap_eff == cap` when overfill is off.
+                        cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
                         cell_avail[nb_idx] = h_b;
-                        cell_freecap[nb_idx] = if overfill_active { max_accept_fwd } else { (cap_b - h_b).max(0.0) };
+                        cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
                         touched_cells.push(center_idx);
                         touched_cells.push(nb_idx);
                         // Totals deferred: see the unified post-COLLECT `accumulate_edge_totals`
@@ -5047,8 +5150,7 @@ pub fn settle_tick(
                         } else {
                             let (liquid_c_sq, liquid_damping) = wave_params(wetness);
                             let (c_sq, damping) = if overfill_active && cell_liquidity > 0.5 {
-                                let acoustic_scale = 1.0 / (1.0 + (OVERFILL_STIFFNESS_K / GRAVITY_HEAD_SCALE).sqrt());
-                                (liquid_c_sq * acoustic_scale, 0.90)
+                                (liquid_c_sq * overfill_acoustic_scale(), OVERFILL_DAMPING)
                             } else {
                                 (liquid_c_sq, liquid_damping)
                             };
@@ -5145,29 +5247,24 @@ pub fn settle_tick(
                             // neighbour is higher), and its left neighbour's owned edge — which is
                             // exactly the multi-edge case arbitration exists for.
                             let (max_accept_fwd, max_accept_bwd) = if overfill_active {
-                                if h_a >= cell_capacity && h_b >= cap_b {
-                                    let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                                    let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                                    let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit);
-                                    let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
-                                    let o_max = overfill_ratio.max(0.01);
-
-                                    let p_target_b = p_a.max(p_b);
-                                    let o_target_b = o_max * (p_target_b / (p_target_b + overfill_head_unit));
-                                    let h_target_b = cap_b * (1.0 + o_target_b);
-                                    let fwd = ((h_target_b - h_b).max(0.0) + 1.0).min((cap_b_eff - h_b).max(0.0)).min(h_a);
-
-                                    let p_target_a = p_b.max(p_a);
-                                    let o_target_a = o_max * (p_target_a / (p_target_a + overfill_head_unit));
-                                    let h_target_a = cell_capacity * (1.0 + o_target_a);
-                                    let bwd = ((h_target_a - h_a).max(0.0) + 1.0).min((cap_a_eff - h_a).max(0.0)).min(h_b);
-                                    (fwd, bwd)
-                                } else {
-                                    (
-                                        (0.5 * (h_a - h_b).max(0.0)).min((cap_b_eff - h_b).max(0.0)),
-                                        (0.5 * (h_b - h_a).max(0.0)).min((cap_a_eff - h_a).max(0.0)),
-                                    )
-                                }
+                                // Lateral edge: no hydrostatic step across it, so `gravity_head`
+                                // is 0.0 in both directions. Everything else is the same rule the
+                                // gravity-aligned pass uses -- see `overfill_max_accept`.
+                                let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                                let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                                let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit);
+                                let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
+                                let sat_a = h_a >= cell_capacity;
+                                let sat_b = h_b >= cap_b;
+                                let fwd = overfill_max_accept(
+                                    h_a, h_b, cap_b, cap_b_eff, p_a, 0.0,
+                                    overfill_ratio, overfill_head_unit, sat_a, sat_b,
+                                );
+                                let bwd = overfill_max_accept(
+                                    h_b, h_a, cell_capacity, cap_a_eff, p_b, 0.0,
+                                    overfill_ratio, overfill_head_unit, sat_b, sat_a,
+                                );
+                                (fwd, bwd)
                             } else {
                                 ((cap_b - h_b).max(0.0), (cell_capacity - h_a).max(0.0))
                             };
@@ -5184,9 +5281,14 @@ pub fn settle_tick(
                             edge_h_active[center_idx] = true;
                             touched_h.push(center_idx);
                             cell_avail[center_idx] = avail_a;
-                            cell_freecap[center_idx] = if overfill_active { max_accept_bwd } else { (cell_capacity - h_a).max(0.0) };
+                            // Pure function of the cell, same contract and same fix as the
+                            // gravity-aligned pass above -- the lateral copy had the identical
+                            // per-edge write. It bites far less often here (a lateral neighbour
+                            // usually HAS mass, so the clobbering write is not zero) which is
+                            // precisely why the defect read as "sideways works, upward does not".
+                            cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
                             cell_avail[nb_idx] = avail_b;
-                            cell_freecap[nb_idx] = if overfill_active { max_accept_fwd } else { (cap_b - h_b).max(0.0) };
+                            cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
                             // Totals deferred: see the unified post-COLLECT pass below.
