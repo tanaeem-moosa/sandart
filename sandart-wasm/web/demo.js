@@ -988,6 +988,14 @@ function updateNeckSliderRange() {
     return false;
 }
 
+function syncQuantileSetting() {
+    if (!state) return;
+    const quantileSelect = document.getElementById('quantile-select');
+    if (quantileSelect) {
+        state.set_quantile_mode(parseInt(quantileSelect.value));
+    }
+}
+
 function syncSandFallSettings() {
     if (!state) return;
     state.set_gravity(0.0, SANDFALL_GRAVITY_STRENGTH);
@@ -1263,16 +1271,9 @@ function setupPanelInput() {
     const chambersSlider = document.getElementById('chambers-slider');
     const quantileSelect = document.getElementById('quantile-select');
 
-    // Mass Distribution Lines (quantile overlay): off / quartiles / deciles. Sand-fall only —
-    // the sidebar control lives in #sandfall-controls, which switchMode() already hides in
-    // Sandbox, and the Rust side independently forces this off whenever not in Sand-fall mode.
-    function syncQuantileSetting() {
-        if (!state) return;
-        state.set_quantile_mode(parseInt(quantileSelect.value));
+    if (quantileSelect) {
+        quantileSelect.addEventListener('change', syncQuantileSetting);
     }
-    quantileSelect.addEventListener('change', syncQuantileSetting);
-
-    quantileSelect.addEventListener('change', syncQuantileSetting);
 
     // Neck Width Slider
     neckSlider.addEventListener('input', () => {
