@@ -943,6 +943,80 @@ function loadActivePattern() {
     state.load_preset_pattern(type);
 }
 
+const MULTISTAGE_HOURGLASS_SHAPE = 4;
+
+function updateChambersRowVisibility() {
+    const el = document.getElementById('chambers-row');
+    if (!el) return;
+    const shapeSelect = document.getElementById('shape-select');
+    const shapeVal = shapeSelect ? parseInt(shapeSelect.value) : 0;
+    el.style.display = (shapeVal === MULTISTAGE_HOURGLASS_SHAPE) ? '' : 'none';
+}
+
+function updateVesselReadouts() {
+    if (!state) return;
+    const neckSlider = document.getElementById('neck-slider');
+    const chambersSlider = document.getElementById('chambers-slider');
+    if (!neckSlider || !chambersSlider) return;
+
+    const neckVal = parseFloat(neckSlider.value);
+    const neckCells = 2 * state.neck_half_width_cells();
+    const neckValEl = document.getElementById('neck-val');
+    if (neckValEl) neckValEl.innerText = `${neckVal.toFixed(4)} · ${neckCells.toFixed(1)} cells`;
+
+    const chambersVal = parseInt(chambersSlider.value);
+    const gridSize = state.get_grid_size();
+    const chamberCells = gridSize / chambersVal;
+    const chambersValEl = document.getElementById('chambers-val');
+    if (chambersValEl) chambersValEl.innerText = `${chambersVal} · ${chamberCells.toFixed(1)} cells`;
+}
+
+function updateNeckSliderRange() {
+    if (!state) return false;
+    const neckSlider = document.getElementById('neck-slider');
+    if (!neckSlider) return false;
+    const gridSize = state.get_grid_size();
+    const newMin = 0.5 / gridSize;
+    neckSlider.min = String(newMin);
+    neckSlider.step = String(newMin);
+
+    if (parseFloat(neckSlider.value) < newMin) {
+        neckSlider.value = String(newMin);
+        state.set_neck_width(newMin);
+        return true;
+    }
+    return false;
+}
+
+function syncSandFallSettings() {
+    if (!state) return;
+    state.set_gravity(0.0, SANDFALL_GRAVITY_STRENGTH);
+
+    const neckSlider = document.getElementById('neck-slider');
+    const curvatureSlider = document.getElementById('curvature-slider');
+    const chambersSlider = document.getElementById('chambers-slider');
+
+    if (neckSlider) {
+        const neckVal = parseFloat(neckSlider.value);
+        state.set_neck_width(neckVal);
+    }
+
+    if (curvatureSlider) {
+        const curveVal = parseFloat(curvatureSlider.value);
+        const curveEl = document.getElementById('curvature-val');
+        if (curveEl) curveEl.innerText = curveVal.toFixed(1);
+        state.set_hourglass_curve(curveVal);
+    }
+
+    if (chambersSlider) {
+        const chambersVal = parseInt(chambersSlider.value);
+        state.set_multistage_chambers(chambersVal);
+    }
+
+    updateVesselReadouts();
+    syncQuantileSetting();
+}
+
 function switchMode(mode) {
     if (!state) return;
     const tabSandbox = document.getElementById('tab-sandbox');
@@ -955,14 +1029,14 @@ function switchMode(mode) {
 
     if (mode === 'sandbox') {
         isSandFall = false;
-        tabSandbox.classList.add('active');
-        tabSandFall.classList.remove('active');
-        sandboxMarbles.style.display = 'block';
-        sandboxPatterns.style.display = 'block';
-        sandfallControls.style.display = 'none';
+        if (tabSandbox) tabSandbox.classList.add('active');
+        if (tabSandFall) tabSandFall.classList.remove('active');
+        if (sandboxMarbles) sandboxMarbles.style.display = 'block';
+        if (sandboxPatterns) sandboxPatterns.style.display = 'block';
+        if (sandfallControls) sandfallControls.style.display = 'none';
 
-        shapeGroupSandfall.hidden = true;
-        if (parseInt(shapeSelect.value) >= 3) {
+        if (shapeGroupSandfall) shapeGroupSandfall.hidden = true;
+        if (shapeSelect && parseInt(shapeSelect.value) >= 3) {
             shapeSelect.value = '0';
             state.set_sandbox_shape(0);
         }
@@ -976,13 +1050,13 @@ function switchMode(mode) {
         syncMaterialTheme(true);
     } else if (mode === 'sandfall') {
         isSandFall = true;
-        tabSandbox.classList.remove('active');
-        tabSandFall.classList.add('active');
-        sandboxMarbles.style.display = 'none';
-        sandboxPatterns.style.display = 'none';
-        sandfallControls.style.display = 'block';
+        if (tabSandbox) tabSandbox.classList.remove('active');
+        if (tabSandFall) tabSandFall.classList.add('active');
+        if (sandboxMarbles) sandboxMarbles.style.display = 'none';
+        if (sandboxPatterns) sandboxPatterns.style.display = 'none';
+        if (sandfallControls) sandfallControls.style.display = 'block';
 
-        shapeGroupSandfall.hidden = false;
+        if (shapeGroupSandfall) shapeGroupSandfall.hidden = false;
         updateChambersRowVisibility();
 
         state.set_simulator_mode(1);
@@ -1042,24 +1116,6 @@ function setupPanelInput() {
             }
         });
     });
-
-    // SandboxShape::MultiStageHourglass ("Merging cascade") is value 4 -- see set_sandbox_shape
-    // in sandart-wasm/src/lib.rs. The widest-tier chamber-count slider is meaningless for every
-    // other shape, so it gets the same shape-specific show/hide treatment as the pattern param
-    // panels (updateParamPanels above): hidden by default in the markup, shown only for this one
-    // shape.
-    const MULTISTAGE_HOURGLASS_SHAPE = 4;
-    function updateChambersRowVisibility() {
-        const shapeVal = parseInt(document.getElementById('shape-select').value);
-        // '' (not 'block') to show: `.field row` is `display: grid` in index.html's stylesheet,
-        // and the slider inside it relies on `grid-column: 1 / -1` to span the label/value
-        // pair. An inline `display: block` would win over the class and silently collapse that
-        // two-column gauge layout into a plain stack. Clearing the inline value hands the row
-        // back to the stylesheet. (The pattern-param panels updateParamPanels toggles are
-        // ordinary block containers, which is why 'block' is right there and wrong here.)
-        document.getElementById('chambers-row').style.display =
-            (shapeVal === MULTISTAGE_HOURGLASS_SHAPE) ? '' : 'none';
-    }
 
     document.getElementById('shape-select').addEventListener('change', () => {
         if (!state) return;
@@ -1216,88 +1272,7 @@ function setupPanelInput() {
     }
     quantileSelect.addEventListener('change', syncQuantileSetting);
 
-    // Cell-count readouts alongside the neck-width and chamber-count sliders. Both sliders
-    // store a FRACTION of grid width/count, not a cell count — that's what keeps the vessel
-    // the same shape at every resolution, which is the entire point of the resolution
-    // selector, so the underlying stored value must not change here. But the floor/cap logic
-    // that turns that fraction into an actual opening is inherently expressed in cells, so the
-    // point where a slider stops visibly doing anything is otherwise invisible (this is what
-    // was behind a report that the neck stayed mouse-cursor-sized across a chunk of the
-    // slider's travel at low grid resolutions — the fraction looked fine, the cell count did
-    // not). Purely a display: neither line writes back to `state` or affects geometry.
-    function updateVesselReadouts() {
-        if (!state) return;
-        const neckVal = parseFloat(neckSlider.value);
-        // neck_half_width_cells() is a HALF-width; the readout is the full opening.
-        const neckCells = 2 * state.neck_half_width_cells();
-        // 4 decimal places, not 3: the slider's range now reaches as low as ~0.001 at grid 512
-        // (see updateNeckSliderRange below), and 3 decimals would round that to a value
-        // indistinguishable from its neighbours.
-        document.getElementById('neck-val').innerText = `${neckVal.toFixed(4)} · ${neckCells.toFixed(1)} cells`;
-
-        const chambersVal = parseInt(chambersSlider.value);
-        const gridSize = state.get_grid_size();
-        const chamberCells = gridSize / chambersVal;
-        document.getElementById('chambers-val').innerText = `${chambersVal} · ${chamberCells.toFixed(1)} cells`;
-    }
-
-    // The neck-width slider's minimum (and step) are resolution-dependent, not fixed. The
-    // STORED value stays a fraction of grid width -- that's what keeps the vessel the same
-    // shape at every resolution, and it must not change -- but a fixed fraction's minimum
-    // rasterises to a wildly different cell count at different resolutions (0.001 is under
-    // half a cell at grid 64 but a whole cell at grid 512), so the point the slider actually
-    // stops doing anything moves with resolution too. Setting `min = 0.5 / grid_width` puts
-    // the slider's bottom end at exactly a 1-cell-wide neck (0.5 half-width) at whatever
-    // resolution is current -- see `multistage_neck_half_width`'s doc comment in
-    // sandart-sim/src/physics.rs for the Rust-side floor this mirrors.
-    //
-    // Step is set to that same `0.5 / grid_width`: each notch of the slider then moves the
-    // neck by exactly one cell of half-width near the bottom of the range, which is both fine
-    // enough to actually reach the new minimum (a fixed 0.005 step, the old value, would skip
-    // over it entirely at most resolutions) and ties the step's meaning to something physical
-    // rather than an arbitrary constant.
-    // Returns true if the current value had to be clamped up to the new minimum, so the caller
-    // can decide whether a full reset is warranted (the geometry actually changed in that case).
-    function updateNeckSliderRange() {
-        if (!state) return false;
-        const gridSize = state.get_grid_size();
-        const newMin = 0.5 / gridSize;
-        neckSlider.min = String(newMin);
-        neckSlider.step = String(newMin);
-
-        // Moving to a COARSER grid raises `min`; the current value may now fall below it and
-        // has to be clamped up -- and the clamped value must actually reach the sim, not just
-        // the displayed slider, or the stored neck_width would silently disagree with what the
-        // control shows. Moving to a FINER grid lowers `min`, so the current value stays valid
-        // and is left untouched (the user's choice shouldn't jump just because more of the
-        // slider's range opened up below it).
-        if (parseFloat(neckSlider.value) < newMin) {
-            neckSlider.value = String(newMin);
-            state.set_neck_width(newMin);
-            return true;
-        }
-        return false;
-    }
-
-    function syncSandFallSettings() {
-        if (!state) return;
-        // Force downward gravity (0.0, strength). No longer user-adjustable; see
-        // SANDFALL_GRAVITY_STRENGTH above.
-        state.set_gravity(0.0, SANDFALL_GRAVITY_STRENGTH);
-
-        const neckVal = parseFloat(neckSlider.value);
-        state.set_neck_width(neckVal);
-
-        const curveVal = parseFloat(curvatureSlider.value);
-        document.getElementById('curvature-val').innerText = curveVal.toFixed(1);
-        state.set_hourglass_curve(curveVal);
-
-        const chambersVal = parseInt(chambersSlider.value);
-        state.set_multistage_chambers(chambersVal);
-
-        updateVesselReadouts();
-        syncQuantileSetting();
-    }
+    quantileSelect.addEventListener('change', syncQuantileSetting);
 
     // Neck Width Slider
     neckSlider.addEventListener('input', () => {
