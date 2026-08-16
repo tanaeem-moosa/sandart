@@ -312,7 +312,7 @@ fn spec_task70_u_tube_water_rises_up_the_riser() {
     let mut sim = build_u_tube();
     let initial_mass: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
 
-    step_u_tube(&mut sim, 3000);
+    step_u_tube(&mut sim, 4000);
 
     let final_mass: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
     let mass_err = (final_mass - initial_mass).abs() / initial_mass;

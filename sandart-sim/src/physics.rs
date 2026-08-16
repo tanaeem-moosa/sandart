@@ -697,8 +697,8 @@ pub fn overfill_pressure_val(
     let o = relative_overfill(h, cap);
     if o > 0.0 {
         let o_max = overfill_ratio.max(0.01);
-        let ratio = (o / o_max).clamp(0.0, 0.999);
-        return overfill_head_unit * o / (1.0 - ratio);
+        let ratio = o / o_max;
+        return overfill_head_unit * (o + o * ratio);
     }
     if underfill_tension <= 0.0 || cap <= 0.0 {
         return 0.0;

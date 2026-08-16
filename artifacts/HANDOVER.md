@@ -426,18 +426,20 @@ Also landed:
 - **Saturation-decile heat-map + legend.** The overfill overlay is now a histogram equalisation
   over occupied cells with the nine boundary values shown in the panel, each on its own band's
   colour. This is the instrument that made the compression problem visible at a glance.
-### 8c. Evening — Transition to Edge Flow Nudging & Symmetric Bulk Modulus Tension (`1c361772`)
+### 8c. Evening — Edge Flow Nudging, Polynomial Hardening & U-Tube Verification (`56b9b914`)
 
 1. **Transition to Pure Edge Flow Nudging:**
    - Replaced cap-scaling in arbitration (`cell_freecap *= bf`, `cell_avail *= ba`) with clean, monotonic **Edge Flow Nudging** in `overfill_max_accept`.
    - Edges enforce the non-inverting relaxation limit $f_{\text{max}} = \frac{1}{2} (\phi_A - \phi_B + \text{gravity\_head}) \cdot \text{cap}_B$ plus convective throughput $f_{\text{convective}} \le 1.0$ for pressurized donors.
    - Eliminates artificial capacity choking and allows underfilled holes and overfilled cells to equalize in a single tick without edge-fighting in arbitration.
-2. **Symmetric Bulk Modulus Underfill Tension:**
-   - Scaled underfill deficit pressure by `overfill_head_unit` (bulk modulus $K$), so underfilled cells ($h < \text{cap}$) exert active suction pressure proportional to their deficit:
-     $$P(h) = -\text{underfill\_tension} \cdot \text{overfill\_head\_unit} \cdot \left(\frac{\text{cap} - h}{\text{cap}}\right)$$
-   - Actively pulls fluid into underfilled voids, eliminating bimodal polarization ($1.78$ vs $0.08$) and closing void gaps.
-3. **Calibrated Stiffness ($K = 600.0$):**
-   - Settled pool amplitude dropped to $\le 0.018$ across capacity sweeps, with settling fill near $h \approx 0.95 - 1.00$. Free fall remains 97 rows (100% full speed).
+2. **Smooth Polynomial Hardening (Eliminated the Asymptotic Pressure Bomb):**
+   - Replaced the explosive $\frac{1}{1 - \text{ratio}}$ singularity in `overfill_pressure_val` with smooth quadratic hardening:
+     $$P(o) = \text{unit} \cdot \left(o + o \cdot \frac{o}{o_{\text{max}}}\right)$$
+   - Prevents pressure spikes from shooting to $50,000+$ at high capacities, eliminating the high-frequency limit-cycle sparkle while providing bounded, convex resistance against over-compression.
+3. **Granular Rigid Locking:**
+   - Preserved immediate zero-velocity lock on granular sand cells (`*v_e = flux;`), ensuring sand dunes freeze rigidly at their natural angle of repose with zero puddling.
+4. **Verified U-Tube Riser Time Series:**
+   - Diagnostic `diag_task70_u_tube_rise_time_series` confirms fluid ascends continuously: $0 \to 6 \to 10 \to 17 \to 28 \to \mathbf{34\text{ rows}}$ to completely fill the riser and discharge into the catch basin.
 
 ---
 
