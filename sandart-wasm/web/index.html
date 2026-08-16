@@ -863,6 +863,17 @@
                     <input type="checkbox" id="check-pressure-heatmap-head-field">
                     <span class="checkmark"></span>
                 </label>
+                <!-- Legend for the overfill heat-map's decile colouring. Hidden unless that
+                     colouring is actually what is on screen (overfill model on AND overlay on),
+                     because under any other source the colours are an absolute scale and these
+                     numbers would describe something that is not being drawn. Under decile
+                     colouring the hue only encodes a cell's RANK, so without this the overlay
+                     cannot answer "how saturated are we" at all -- it is the legend, not a
+                     decoration. 1.00 is exactly full; above that is overfill. -->
+                <div id="saturation-deciles-row" style="display: none;">
+                    <div class="field-label">Saturation deciles (h / capacity)</div>
+                    <div id="saturation-deciles-val" class="val-display">—</div>
+                </div>
                 <!-- Pause / step: reading a heat-map that changes every frame is impossible.
                      Pause freezes physics (render keeps running, so the canvas and overlays
                      stay live); Step advances exactly one tick while paused. Pure JS loop

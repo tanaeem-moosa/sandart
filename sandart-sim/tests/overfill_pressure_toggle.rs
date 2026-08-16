@@ -380,6 +380,189 @@ fn diag_task70_riser_foot_realised_profile() {
     }
 }
 
+/// #70: the overfill heat-map's saturation-decile legend.
+///
+/// Guards the three properties the overlay's readability actually rests on: the legend appears at
+/// all (it is gated on the overlay being on, and a gate that never opens is the failure mode this
+/// codebase has shipped before), the boundaries are sorted (they are read left-to-right as a
+/// scale), and the colouring is genuinely EQUALISED -- no single decile may swallow the frame,
+/// which is the whole reason for preferring deciles over a fixed scale.
+#[test]
+fn spec_task70_saturation_decile_legend() {
+    let w = 128;
+    let targets = [None; 5];
+    let mut sim = DrawingSimulation::new_with_size(w);
+    sim.sandbox_shape = SandboxShape::Square;
+    sim.gravity_dir = Vec2::new(0.0, 0.04);
+    sim.apply_preset(MaterialMode::Water);
+    sim.overfill_pressure = true;
+    sim.overfill_capacity = 1.90;
+    sim.initialize_hourglass();
+
+    // Overlay off: the legend must stay empty, because computing it is the cost this gate exists
+    // to avoid.
+    for _ in 0..90 {
+        sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+    }
+    assert!(
+        sim.saturation_deciles.is_empty(),
+        "deciles computed while the overlay is off: {:?}", sim.saturation_deciles
+    );
+
+    sim.pressure_heatmap_overlay = true;
+    for _ in 0..90 {
+        sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+    }
+
+    let d = sim.saturation_deciles.clone();
+    assert_eq!(d.len(), 9, "expected 9 decile boundaries: {d:?}");
+    assert!(
+        d.windows(2).all(|p| p[1] >= p[0]),
+        "decile boundaries must be non-decreasing: {d:?}"
+    );
+    assert!(d[0] > 0.0, "lowest decile should be over an OCCUPIED cell, got {d:?}");
+
+    // Equalisation check, over occupied cells only. Air is mapped to 0 and excluded from the
+    // deciles, so it is excluded here too -- otherwise "most of the screen is empty" would look
+    // like a failure of equalisation rather than a fact about the scene.
+    let texels = sim.pressure_field_texels();
+    let occupied: Vec<u8> = texels.iter().copied().filter(|&t| t > 0).collect();
+    assert!(!occupied.is_empty(), "no occupied cells in the overlay");
+    let mut hist = [0usize; 10];
+    for &t in &occupied {
+        // Inverse of the bucket -> byte map in `pressure_field_texels`.
+        let bucket = (((t as usize).saturating_sub(1)) * 9 + 127) / 254;
+        hist[bucket.min(9)] += 1;
+    }
+    let worst = *hist.iter().max().unwrap();
+    assert!(
+        worst * 2 <= occupied.len(),
+        "colouring is not equalised -- one decile holds {worst} of {} occupied cells: {hist:?}",
+        occupied.len()
+    );
+}
+
+/// A RESTING POOL MUST BE STILL. The controlled version of the capacity sweep below.
+///
+/// The U-tube sweep is confounded: changing `overfill_capacity` changes the entire flow, so
+/// fixed-coordinate probes sample different physical situations at each setting (three of its five
+/// rows have a near-EMPTY vertical probe, whose zero amplitude means nothing). This uses a plain
+/// square vessel filled with water and left to settle, where the correct answer is known a priori
+/// and is the same at every capacity: a body of water at rest must not move. Any tick-to-tick
+/// change is pure numerical artifact, so amplitude is directly comparable across settings, and a
+/// vertical pair and a lateral pair are sampled from the SAME settled pool.
+///
+/// Run with `-- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn diag_task70_settled_pool_stillness_vs_capacity() {
+    let w = 128;
+    let targets = [None; 5];
+    println!("overfill_cap | vert amp | vert fill | lat amp | lat fill");
+    for &cap in &[1.00f32, 1.10, 1.30, 1.50, 1.90] {
+        let mut sim = DrawingSimulation::new_with_size(w);
+        sim.sandbox_shape = SandboxShape::Square;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.apply_preset(MaterialMode::Water);
+        sim.overfill_pressure = true;
+        sim.overfill_capacity = cap;
+        sim.initialize_hourglass();
+        for _ in 0..3000 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+        }
+
+        // Probe pairs taken deep inside the settled body, away from the free surface and the
+        // walls: a vertical run of rows in one column, and a lateral run of columns in one row.
+        let vertical: Vec<(usize, usize)> = (100..106).map(|y| (64usize, y)).collect();
+        let lateral: Vec<(usize, usize)> = (40..46).map(|x| (x, 103usize)).collect();
+        let sample = |sim: &DrawingSimulation, p: &[(usize, usize)]| -> Vec<f32> {
+            p.iter().map(|&(x, y)| sim.heightmap.data[y * w + x]).collect()
+        };
+        let (mut prev_v, mut prev_l) = (sample(&sim, &vertical), sample(&sim, &lateral));
+        let (mut sum_v, mut sum_l, mut fill_v, mut fill_l) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        const WINDOW: usize = 60;
+        for _ in 0..WINDOW {
+            sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+            let (nv, nl) = (sample(&sim, &vertical), sample(&sim, &lateral));
+            sum_v += nv.iter().zip(&prev_v).map(|(a, b)| (a - b).abs()).sum::<f32>();
+            sum_l += nl.iter().zip(&prev_l).map(|(a, b)| (a - b).abs()).sum::<f32>();
+            fill_v += nv.iter().sum::<f32>();
+            fill_l += nl.iter().sum::<f32>();
+            prev_v = nv;
+            prev_l = nl;
+        }
+        let n_v = (WINDOW * vertical.len()) as f32;
+        let n_l = (WINDOW * lateral.len()) as f32;
+        println!(
+            "{cap:12.2} | {:8.4} | {:9.3} | {:7.4} | {:8.3}",
+            sum_v / n_v, fill_v / n_v, sum_l / n_l, fill_l / n_l
+        );
+    }
+}
+
+/// WHY IS THE OSCILLATION VERTICAL-ONLY? Discriminator between the two candidate causes.
+///
+/// HYPOTHESIS A (overfill removes the brake): gravity puts a permanent driving head of
+/// `base_head` on EVERY vertical edge, including deep inside a settled column. What used to stop
+/// that column moving was `edge_sleeps`' first branch -- the acceptor is at capacity, so it has no
+/// room and the edge is skipped. Overfill raises the effective capacity to `1.0 + overfill_ratio`,
+/// so a cell at nominal capacity still reports `cap_eff - h` of room and the brake never engages;
+/// gravity then pumps each row toward the ceiling indefinitely. Laterally two level cells have a
+/// driving head of exactly ZERO, so `edge_sleeps`' second branch fires whatever the capacity is.
+/// That asymmetry is the whole prediction: amplitude should scale with `overfill_capacity` and
+/// collapse as it approaches 1.0.
+///
+/// HYPOTHESIS B (sweep-order parity): the solver flips sweep parity every tick, and a period-2
+/// signal is exactly what that produces. This would be indifferent to `overfill_capacity`.
+///
+/// The two are separated by one sweep of the slider. Amplitude here is the mean absolute
+/// tick-to-tick change in cell height over the sampling window -- a settled cell reads ~0.
+/// Run with `-- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn diag_task70_oscillation_vs_overfill_capacity() {
+    let w = 128;
+    // A vertical-interior probe inside the riser column, and a lateral-interior probe inside the
+    // basin, so "vertical oscillates, lateral does not" is read off the same run.
+    let vertical = [(62usize, 108usize), (62, 110), (62, 112)];
+    let lateral = [(30usize, 114usize), (34, 114), (38, 114)];
+    // Mean height at each probe is printed alongside, because an EMPTY probe also reads zero
+    // amplitude -- without it, "no oscillation at capacity 1.0" is indistinguishable from "no
+    // water reached the probe at capacity 1.0", and the second says nothing.
+    println!("overfill_cap | vert amp | vert fill | lat amp | lat fill | vert:lat");
+    for &cap in &[1.00f32, 1.10, 1.30, 1.50, 1.90] {
+        let mut sim = build_u_tube();
+        sim.overfill_capacity = cap;
+        step_u_tube(&mut sim, 4000);
+        let (mut fill_v, mut fill_l) = (0.0f32, 0.0f32);
+
+        let sample = |sim: &DrawingSimulation, probes: &[(usize, usize)]| -> Vec<f32> {
+            probes.iter().map(|&(x, y)| sim.heightmap.data[y * w + x]).collect()
+        };
+        let mut prev_v = sample(&sim, &vertical);
+        let mut prev_l = sample(&sim, &lateral);
+        let (mut sum_v, mut sum_l) = (0.0f32, 0.0f32);
+        const WINDOW: usize = 60;
+        for _ in 0..WINDOW {
+            step_u_tube(&mut sim, 1);
+            let now_v = sample(&sim, &vertical);
+            let now_l = sample(&sim, &lateral);
+            sum_v += now_v.iter().zip(&prev_v).map(|(a, b)| (a - b).abs()).sum::<f32>();
+            sum_l += now_l.iter().zip(&prev_l).map(|(a, b)| (a - b).abs()).sum::<f32>();
+            fill_v += now_v.iter().sum::<f32>();
+            fill_l += now_l.iter().sum::<f32>();
+            prev_v = now_v;
+            prev_l = now_l;
+        }
+        let amp_v = sum_v / (WINDOW * vertical.len()) as f32;
+        let amp_l = sum_l / (WINDOW * lateral.len()) as f32;
+        let fill_v = fill_v / (WINDOW * vertical.len()) as f32;
+        let fill_l = fill_l / (WINDOW * lateral.len()) as f32;
+        let ratio = if amp_l > 1e-6 { format!("{:.1}x", amp_v / amp_l) } else { "n/a".to_string() };
+        println!("{cap:12.2} | {amp_v:8.4} | {fill_v:9.3} | {amp_l:7.4} | {fill_l:8.3} | {ratio:>9}");
+    }
+}
+
 /// Time series behind `spec_task70_u_tube_water_rises_up_the_riser`. Run with
 /// `-- --ignored --nocapture`. Prints the reservoir draining, the basin filling and -- the number
 /// under investigation -- the riser's fill height in rows, plus catch-well mass as the end-to-end

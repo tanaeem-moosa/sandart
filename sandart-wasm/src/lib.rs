@@ -367,6 +367,7 @@ impl WasmSimulationState {
         let pressure_sensitive_flow = self.sim.pressure_sensitive_flow;
         let overfill_pressure = self.sim.overfill_pressure;
         let overfill_capacity = self.sim.overfill_capacity;
+        let pressure_heatmap_overlay = self.sim.pressure_heatmap_overlay;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -387,6 +388,9 @@ impl WasmSimulationState {
         // Same reasoning again: a UI debug toggle (which pressure heat-map source is selected),
         // not simulation state -- must survive a resolution rebuild like its siblings above.
         sim.pressure_heatmap_head_field = pressure_heatmap_head_field;
+        // Same reasoning again -- and if this were dropped the decile legend would silently stop
+        // refreshing after any resolution change, leaving a stale scale on screen.
+        sim.pressure_heatmap_overlay = pressure_heatmap_overlay;
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.head_field_transport = head_field_transport;
         // Same reasoning again: a UI debug toggle, not simulation state.
@@ -797,6 +801,19 @@ impl WasmSimulationState {
     /// toggle (`set_fresh_pressure_field`) automatically and can be used to compare the two.
     pub fn set_pressure_heatmap_overlay(&mut self, enabled: bool) {
         self.pressure_heatmap_enabled = enabled;
+        // Mirrored into the sim purely as a cost gate on the saturation-decile refresh, which
+        // only exists to produce this overlay's legend.
+        self.sim.pressure_heatmap_overlay = enabled;
+    }
+
+    /// The overfill heat-map's legend: nine saturation decile boundaries (D1..D9), where
+    /// saturation is `height / capacity`, so 1.0 is exactly full and above that is overfill.
+    /// Empty until the overlay has been on long enough for the first refresh, and empty whenever
+    /// the overfill model is off (the overlay then shows an absolute pressure scale, which needs
+    /// no legend of its own). Read this to answer "how saturated are we" -- under decile
+    /// colouring the hue tells you a cell's RANK, and only these numbers tell you its magnitude.
+    pub fn get_saturation_deciles(&self) -> Vec<f32> {
+        self.sim.saturation_deciles.clone()
     }
 
     pub fn load_pattern_gcode(&mut self, content: &str) -> bool {

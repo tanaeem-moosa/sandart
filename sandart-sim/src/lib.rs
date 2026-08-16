@@ -66,6 +66,13 @@ const HEAT_BUCKET_TICKS: u32 = 30;
 /// empty grid) reads uniformly dim rather than being stretched to use the full range.
 const PRESSURE_HEATMAP_LOG_MAX: f32 = 512.0;
 
+/// How often the overfill heat-map's saturation deciles are recomputed, in ticks. These are a
+/// LEGEND -- a scale the reader is reading off the screen -- so the requirement is legibility, not
+/// freshness: boundaries that move every frame make the colour of a cell incomparable between two
+/// consecutive frames and the overlay unreadable. 30 ticks is about half a second at 60fps, slow
+/// enough to read and fast enough to follow a filling vessel.
+const SATURATION_DECILE_REFRESH_TICKS: u32 = 30;
+
 pub const PROP_WETNESS: usize = 0;
 pub const PROP_THRESHOLD: usize = 1;
 pub const PROP_FLOW_RATE: usize = 2;
@@ -476,6 +483,27 @@ pub struct DrawingSimulation {
     /// regardless of this field's value (`pressure_heatmap_head_field_toggle.rs`).
     pub pressure_heatmap_head_field: bool,
 
+    /// Whether the pressure heat-map overlay is actually being DRAWN. Purely a cost gate: the
+    /// saturation-decile refresh below is the only thing that reads it, and that exists solely to
+    /// produce the overlay's legend, so it must not run when nobody is looking at the overlay.
+    /// Mirrors the wasm wrapper's own `pressure_heatmap_enabled`, which owns the user-facing
+    /// switch; kept here too so the sim can gate its own work without the renderer having to
+    /// remember to ask.
+    pub pressure_heatmap_overlay: bool,
+
+    /// Decile boundaries (9 values, D1..D9) of per-cell SATURATION -- `height / capacity`, where
+    /// 1.0 is exactly full and anything above is overfill -- taken over cells that hold material.
+    /// Empty at construction and until the first refresh.
+    ///
+    /// These drive the overfill heat-map's colouring, which is a histogram equalisation rather
+    /// than a fixed scale: each decile gets one tenth of the occupied cells, so the overlay always
+    /// spends its full colour range on the distribution actually present instead of compressing
+    /// everything into one band. That is the property that makes "how saturated are we" readable
+    /// at a glance, and it is why the boundary VALUES have to be surfaced in the UI alongside it
+    /// -- without the legend an equalised map tells you the shape of the distribution but not its
+    /// magnitude, and magnitude is the whole question.
+    pub saturation_deciles: Vec<f32>,
+
     /// "Drive transport from the head field" debug toggle (task #55 step 3). Off by default
     /// (today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`-derived driving head, unchanged --
     /// bit-identical). When on, `settle_tick`'s lateral and vertical (gravity-aligned) edge
@@ -745,6 +773,8 @@ impl DrawingSimulation {
             perfect_simulation: false,
             fresh_pressure_field: false,
             pressure_heatmap_head_field: false,
+            pressure_heatmap_overlay: false,
+            saturation_deciles: Vec::new(),
             head_field_transport: false,
             pressure_sensitive_flow: false,
             overfill_pressure: false,
@@ -1085,20 +1115,53 @@ impl DrawingSimulation {
             (normalized.clamp(0.0, 1.0) * 255.0).round() as u8
         };
         if self.overfill_pressure {
+            // SATURATION DECILES, not a log-compressed pressure. The question this overlay is
+            // asked under the overfill model is "how saturated are we" -- how close the material
+            // is to capacity, and where it has gone past. A fixed scale answers that badly:
+            // saturation lives almost entirely in a narrow band around 1.0, so any fixed map
+            // renders the whole body one flat colour and hides exactly the structure being looked
+            // for. Equalising against the frame's own decile boundaries spends the full colour
+            // range on the distribution actually present.
+            //
+            // The cost is that colour is no longer comparable between frames, which is why the
+            // boundary values are surfaced in the UI (`saturation_deciles`) -- read the legend,
+            // not the hue. Boundaries refresh on a slow cadence so they are legible rather than
+            // strobing; between refreshes the mapping is fixed, so motion within a frame pair is
+            // real motion.
+            //
+            // Falls back to the log-compressed absolute scale until the first refresh has run
+            // (deciles empty), so the overlay is never blank.
             let w = self.heightmap.width;
             let h = self.heightmap.height;
-            let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / w as f32;
-            let overfill_head_unit = (physics::GRAVITY_HEAD_SCALE / depth_scale) * physics::OVERFILL_STIFFNESS_K;
-            let base_head = physics::GRAVITY_HEAD_SCALE;
+            if self.saturation_deciles.is_empty() {
+                let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                let overfill_head_unit =
+                    (physics::GRAVITY_HEAD_SCALE / depth_scale) * physics::OVERFILL_STIFFNESS_K;
+                let base_head = physics::GRAVITY_HEAD_SCALE;
+                let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
+                return (0..w * h)
+                    .map(|idx| {
+                        let cap = physics::cell_capacity_for(self.cell_props[idx * 4 + PROP_WETNESS]);
+                        let p_val = physics::overfill_pressure_val(
+                            self.heightmap.data[idx], cap, overfill_ratio, overfill_head_unit,
+                        );
+                        to_byte(p_val / base_head)
+                    })
+                    .collect();
+            }
+            const OCCUPIED: f32 = 1e-3;
             (0..w * h)
                 .map(|idx| {
-                    let wetness = self.cell_props[idx * 4 + PROP_WETNESS];
-                    let cap = physics::cell_capacity_for(wetness);
                     let h_val = self.heightmap.data[idx];
-                    let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
-                    let p_val = physics::overfill_pressure_val(h_val, cap, overfill_ratio, overfill_head_unit);
-                    let overfill_depth = p_val / base_head;
-                    to_byte(overfill_depth)
+                    if h_val <= OCCUPIED || self.shape_mask[idx] == MASK_OUTSIDE {
+                        return 0u8;
+                    }
+                    let cap = physics::cell_capacity_for(self.cell_props[idx * 4 + PROP_WETNESS]);
+                    let sat = if cap > 0.0 { h_val / cap } else { 0.0 };
+                    // Buckets 0..=9 spread over 1..=255; 0 is reserved for "no material", so an
+                    // occupied cell in the lowest decile is still visibly distinct from air.
+                    let bucket = self.saturation_bucket(sat);
+                    (1 + (bucket * 254) / 9) as u8
                 })
                 .collect()
         } else if self.pressure_heatmap_head_field {
@@ -1115,6 +1178,48 @@ impl DrawingSimulation {
         } else {
             self.column_depth.iter().map(|&d| to_byte(d)).collect()
         }
+    }
+
+    /// Recomputes `saturation_deciles` from the current heightmap. `O(n log n)` in the number of
+    /// OCCUPIED cells, which is why it runs on a slow cadence (`SATURATION_DECILE_REFRESH_TICKS`)
+    /// and only while the overlay is on.
+    ///
+    /// Empty cells are excluded deliberately. In a typical scene most of the grid is air, so
+    /// including it would put every decile boundary below D8 at 0.0 and the legend would read
+    /// "0, 0, 0, 0, 0, 0, 0, 0, 1.2" -- describing how much of the screen is empty, which the
+    /// reader can already see, instead of how saturated the material is, which is the question.
+    fn refresh_saturation_deciles(&mut self) {
+        const OCCUPIED: f32 = 1e-3;
+        let mut sat: Vec<f32> = self
+            .heightmap
+            .data
+            .iter()
+            .enumerate()
+            .filter(|&(idx, &h)| h > OCCUPIED && self.shape_mask[idx] != MASK_OUTSIDE)
+            .map(|(idx, &h)| {
+                let cap = physics::cell_capacity_for(self.cell_props[idx * 4 + PROP_WETNESS]);
+                if cap > 0.0 { h / cap } else { 0.0 }
+            })
+            .collect();
+
+        if sat.is_empty() {
+            self.saturation_deciles.clear();
+            return;
+        }
+        sat.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+        self.saturation_deciles.clear();
+        for d in 1..10usize {
+            // Nearest-rank: the value at the d/10 position of the sorted sample.
+            let rank = (d * sat.len()) / 10;
+            self.saturation_deciles.push(sat[rank.min(sat.len() - 1)]);
+        }
+    }
+
+    /// Which decile bucket `0..=9` a saturation value falls in, given the current boundaries.
+    /// `saturation_deciles` is sorted, so this is a straight scan over nine values.
+    fn saturation_bucket(&self, sat: f32) -> usize {
+        self.saturation_deciles.iter().take_while(|&&b| sat >= b).count()
     }
 
     /// Full (all `GRID_SIZE` rows) row-mass recompute plus a fresh quantile target computation.
@@ -1575,6 +1680,16 @@ impl DrawingSimulation {
             } else if has_active && self.tick_count % 5 == 0 {
                 self.refresh_quantiles_partial();
             }
+        }
+
+        // Saturation deciles for the overfill heat-map. Gated on the overlay actually being on,
+        // so a normal run never pays for it, and refreshed on a slow cadence because these are a
+        // legend the reader is reading, not a per-frame signal -- a scale that jumps every frame
+        // is unreadable and makes two frames incomparable.
+        if self.overfill_pressure && self.pressure_heatmap_overlay
+            && self.tick_count % SATURATION_DECILE_REFRESH_TICKS == 0
+        {
+            self.refresh_saturation_deciles();
         }
 
         // Update EMA of frame time and adjust budget_n
