@@ -943,6 +943,54 @@ function loadActivePattern() {
     state.load_preset_pattern(type);
 }
 
+function switchMode(mode) {
+    if (!state) return;
+    const tabSandbox = document.getElementById('tab-sandbox');
+    const tabSandFall = document.getElementById('tab-sandfall');
+    const sandboxMarbles = document.getElementById('sandbox-only-marbles');
+    const sandboxPatterns = document.getElementById('sandbox-only-patterns');
+    const sandfallControls = document.getElementById('sandfall-controls');
+    const shapeSelect = document.getElementById('shape-select');
+    const shapeGroupSandfall = document.getElementById('shape-group-sandfall');
+
+    if (mode === 'sandbox') {
+        isSandFall = false;
+        tabSandbox.classList.add('active');
+        tabSandFall.classList.remove('active');
+        sandboxMarbles.style.display = 'block';
+        sandboxPatterns.style.display = 'block';
+        sandfallControls.style.display = 'none';
+
+        shapeGroupSandfall.hidden = true;
+        if (parseInt(shapeSelect.value) >= 3) {
+            shapeSelect.value = '0';
+            state.set_sandbox_shape(0);
+        }
+        updateChambersRowVisibility();
+
+        state.set_simulator_mode(0);
+        state.set_gravity(0.0, 0.0);
+
+        syncSettings();
+        loadActivePattern();
+        syncMaterialTheme(true);
+    } else if (mode === 'sandfall') {
+        isSandFall = true;
+        tabSandbox.classList.remove('active');
+        tabSandFall.classList.add('active');
+        sandboxMarbles.style.display = 'none';
+        sandboxPatterns.style.display = 'none';
+        sandfallControls.style.display = 'block';
+
+        shapeGroupSandfall.hidden = false;
+        updateChambersRowVisibility();
+
+        state.set_simulator_mode(1);
+        syncSandFallSettings();
+        syncMaterialTheme(true);
+    }
+}
+
 function setupPanelInput() {
     // Input sync listeners
     const sliders = [
@@ -1142,66 +1190,8 @@ function setupPanelInput() {
         loadActivePattern();
     });
 
-    // Tab switching event listeners
     const tabSandbox = document.getElementById('tab-sandbox');
     const tabSandFall = document.getElementById('tab-sandfall');
-    const sandboxMarbles = document.getElementById('sandbox-only-marbles');
-    const sandboxPatterns = document.getElementById('sandbox-only-patterns');
-    const sandfallControls = document.getElementById('sandfall-controls');
-
-    const shapeSelect = document.getElementById('shape-select');
-    const shapeGroupSandfall = document.getElementById('shape-group-sandfall');
-
-    function switchMode(mode) {
-        if (!state) return;
-        if (mode === 'sandbox') {
-            isSandFall = false;
-            tabSandbox.classList.add('active');
-            tabSandFall.classList.remove('active');
-            sandboxMarbles.style.display = 'block';
-            sandboxPatterns.style.display = 'block';
-            sandfallControls.style.display = 'none';
-
-            // Sandbox mode is a flat pattern-drawing bed - funnel/hourglass shapes only make
-            // sense with gravity, so hide them here rather than let the user pick a broken combo.
-            shapeGroupSandfall.hidden = true;
-            if (parseInt(shapeSelect.value) >= 3) {
-                shapeSelect.value = '0';
-                state.set_sandbox_shape(0);
-            }
-            updateChambersRowVisibility();
-
-            // Tell WASM to switch to Sandbox mode
-            state.set_simulator_mode(0);
-
-            // Restore gravity to zero (standard sandbox behavior)
-            state.set_gravity(0.0, 0.0);
-
-            // Sync settings and patterns
-            syncSettings();
-            loadActivePattern();
-            syncMaterialTheme(true);
-        } else if (mode === 'sandfall') {
-            isSandFall = true;
-            tabSandbox.classList.remove('active');
-            tabSandFall.classList.add('active');
-            sandboxMarbles.style.display = 'none';
-            sandboxPatterns.style.display = 'none';
-            sandfallControls.style.display = 'block';
-
-            // All shapes (funnels and flat beds alike) work under gravity in Sand-fall mode.
-            shapeGroupSandfall.hidden = false;
-            updateChambersRowVisibility();
-
-            // Tell WASM to switch to Sand-fall mode
-            state.set_simulator_mode(1);
-
-            // Sync gravity and neck width
-            syncSandFallSettings();
-            syncMaterialTheme(true);
-        }
-    }
-
     tabSandbox.addEventListener('click', () => switchMode('sandbox'));
     tabSandFall.addEventListener('click', () => switchMode('sandfall'));
 

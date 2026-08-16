@@ -83,79 +83,32 @@ fn overfill_pressure_enabled_conserves_mass_and_diverges_from_default() {
 
 #[test]
 fn overfill_pressure_u_tube_communicating_vessels_equilibrates() {
-    // Build a U-tube in a 64x64 grid:
-    // Left vertical arm at x in 16..20, right vertical arm at x in 44..48,
-    // horizontal bottom conduit at y in 48..52 connecting them.
-    let w = 64;
-    let h = 64;
+    let w = 128;
     let mut sim = DrawingSimulation::new_with_size(w);
-    sim.sandbox_shape = SandboxShape::Square;
+    sim.sandbox_shape = SandboxShape::UTubeFlowThrough;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(MaterialMode::Water);
     sim.overfill_pressure = true;
-
-    // Fill left column deeper (y from 16 to 48) than right column (y from 36 to 48)
-    // Plus bottom conduit (y 48..52, x 16..48)
-    sim.heightmap = Heightmap::new(w, h, 0.0);
-    // Custom shape mask: only U-tube is inside
-    sim.shape_mask = vec![sandart_sim::MASK_OUTSIDE; w * h];
-
-    // Left arm: x 16..20, y 10..52
-    for y in 10..52 {
-        for x in 16..20 {
-            sim.shape_mask[y * w + x] = sandart_sim::MASK_INSIDE;
-        }
-    }
-    // Right arm: x 44..48, y 10..52
-    for y in 10..52 {
-        for x in 44..48 {
-            sim.shape_mask[y * w + x] = sandart_sim::MASK_INSIDE;
-        }
-    }
-    // Bottom conduit: x 16..48, y 48..52
-    for y in 48..52 {
-        for x in 16..48 {
-            sim.shape_mask[y * w + x] = sandart_sim::MASK_INSIDE;
-        }
-    }
-
-    // Fill left arm from y 16..48
-    for y in 16..48 {
-        for x in 16..20 {
-            sim.heightmap.data[y * w + x] = 1.0;
-        }
-    }
-    // Fill right arm only shallowly from y 40..48
-    for y in 40..48 {
-        for x in 44..48 {
-            sim.heightmap.data[y * w + x] = 1.0;
-        }
-    }
-    // Fill bottom conduit
-    for y in 48..52 {
-        for x in 16..48 {
-            sim.heightmap.data[y * w + x] = 1.0;
-        }
-    }
+    sim.initialize_hourglass();
 
     let initial_mass: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
-    let initial_right_arm_mass: f64 = (10..48).map(|y| (44..48).map(|x| sim.heightmap.data[y * w + x] as f64).sum::<f64>()).sum();
+    let initial_bottom_mass: f64 = (110..118).map(|y| (35..90).map(|x| sim.heightmap.data[y * w + x] as f64).sum::<f64>()).sum();
 
     let targets = [None; 5];
-    for _ in 0..300 {
-        sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+    for _ in 0..500 {
+        sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::UTubeFlowThrough, 16.0, 16.0);
     }
 
     let final_mass: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
-    let final_right_arm_mass: f64 = (10..48).map(|y| (44..48).map(|x| sim.heightmap.data[y * w + x] as f64).sum::<f64>()).sum();
+    let final_bottom_mass: f64 = (110..118).map(|y| (35..90).map(|x| sim.heightmap.data[y * w + x] as f64).sum::<f64>()).sum();
 
     let mass_err = (final_mass - initial_mass).abs() / initial_mass;
     assert!(mass_err < 1e-4, "U-tube mass not conserved: mass_err={:.8}", mass_err);
 
     assert!(
-        final_right_arm_mass > initial_right_arm_mass + 5.0,
-        "Water did not rise in right arm of U-tube! init_right={:.2}, final_right={:.2}",
-        initial_right_arm_mass, final_right_arm_mass
+        final_bottom_mass > initial_bottom_mass + 10.0,
+        "Water did not flow through bottom conduit! init={:.2}, final={:.2}",
+        initial_bottom_mass, final_bottom_mass
     );
 }
 

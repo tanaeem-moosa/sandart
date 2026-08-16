@@ -4455,22 +4455,11 @@ pub fn settle_tick(
                         let (max_accept_fwd, max_accept_bwd) = if overfill_active {
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                            let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
                             let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
-                            let o_max = overfill_ratio.max(0.01);
 
-                            let p_target_b = p_a + base_head;
-                            let o_target_b = o_max * (p_target_b / (p_target_b + overfill_head_unit));
-                            let h_target_b = cap_b * (1.0 + o_target_b);
-                            let nom_b = (cap_b - h_b).max(0.0);
-                            let comp_b = 0.5 * (h_target_b - h_b.max(cap_b)).max(0.0);
-                            let fwd = (nom_b + comp_b).min((cap_b_eff - h_b).max(0.0));
-
+                            let fwd = (cap_b_eff - h_b).max(0.0).min(h_a);
                             let bwd = if p_b > base_head {
-                                let p_target_a = p_b - base_head;
-                                let o_target_a = o_max * (p_target_a / (p_target_a + overfill_head_unit));
-                                let h_target_a = cap_a * (1.0 + o_target_a);
-                                (0.5 * (h_target_a - h_a).max(0.0)).min((cap_a_eff - h_a).max(0.0))
+                                (cap_a_eff - h_a).max(0.0).min(h_b)
                             } else {
                                 0.0
                             };
@@ -4490,9 +4479,9 @@ pub fn settle_tick(
                         edge_v_active[center_idx] = true;
                         touched_v.push(center_idx);
                         cell_avail[center_idx] = h_a;
-                        cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
+                        cell_freecap[center_idx] = if overfill_active { max_accept_bwd } else { (cap_a - h_a).max(0.0) };
                         cell_avail[nb_idx] = h_b;
-                        cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
+                        cell_freecap[nb_idx] = if overfill_active { max_accept_fwd } else { (cap_b - h_b).max(0.0) };
                         touched_cells.push(center_idx);
                         touched_cells.push(nb_idx);
                         // Totals deferred: see the unified post-COLLECT `accumulate_edge_totals`
@@ -5142,20 +5131,14 @@ pub fn settle_tick(
                             // neighbour is higher), and its left neighbour's owned edge — which is
                             // exactly the multi-edge case arbitration exists for.
                             let (max_accept_fwd, max_accept_bwd) = if overfill_active {
-                                let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                                let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                                let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit);
-                                let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
-                                let o_max = overfill_ratio.max(0.01);
-
-                                let o_target_b = o_max * (p_a / (p_a + overfill_head_unit));
-                                let h_target_b = cap_b * (1.0 + o_target_b);
-                                let fwd = (0.5 * (h_a.max(h_target_b) - h_b).max(0.0)).min((cap_b_eff - h_b).max(0.0));
-
-                                let o_target_a = o_max * (p_b / (p_b + overfill_head_unit));
-                                let h_target_a = cell_capacity * (1.0 + o_target_a);
-                                let bwd = (0.5 * (h_b.max(h_target_a) - h_a).max(0.0)).min((cap_a_eff - h_a).max(0.0));
-                                (fwd, bwd)
+                                if h_a >= cell_capacity && h_b >= cap_b {
+                                    ((cap_b_eff - h_b).max(0.0).min(h_a), (cap_a_eff - h_a).max(0.0).min(h_b))
+                                } else {
+                                    (
+                                        (0.5 * (h_a - h_b).max(0.0)).min((cap_b_eff - h_b).max(0.0)),
+                                        (0.5 * (h_b - h_a).max(0.0)).min((cap_a_eff - h_a).max(0.0)),
+                                    )
+                                }
                             } else {
                                 ((cap_b - h_b).max(0.0), (cell_capacity - h_a).max(0.0))
                             };
@@ -5172,9 +5155,9 @@ pub fn settle_tick(
                             edge_h_active[center_idx] = true;
                             touched_h.push(center_idx);
                             cell_avail[center_idx] = avail_a;
-                            cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
+                            cell_freecap[center_idx] = if overfill_active { max_accept_bwd } else { (cell_capacity - h_a).max(0.0) };
                             cell_avail[nb_idx] = avail_b;
-                            cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
+                            cell_freecap[nb_idx] = if overfill_active { max_accept_fwd } else { (cap_b - h_b).max(0.0) };
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
                             // Totals deferred: see the unified post-COLLECT pass below.
