@@ -121,6 +121,21 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * The overfill heat-map's legend: nine saturation decile boundaries (D1..D9), where
+     * saturation is `height / capacity`, so 1.0 is exactly full and above that is overfill.
+     * Empty until the overlay has been on long enough for the first refresh, and empty whenever
+     * the overfill model is off (the overlay then shows an absolute pressure scale, which needs
+     * no legend of its own). Read this to answer "how saturated are we" -- under decile
+     * colouring the hue tells you a cell's RANK, and only these numbers tell you its magnitude.
+     * @returns {Float32Array}
+     */
+    get_saturation_deciles() {
+        const ret = wasm.wasmsimulationstate_get_saturation_deciles(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * List every material as `[id, label, wetness, threshold, flow_rate, grain_size]` rows, in
      * menu order. The web UI should build its material `<select>` options from this at
      * startup rather than hardcoding its own copy of the material list — that hardcoded-copy

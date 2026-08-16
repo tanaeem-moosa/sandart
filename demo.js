@@ -284,6 +284,7 @@ function tick(now) {
     // Calculate FPS and average frame time, update UI once per second to prevent DOM thrashing
     frameCount++;
     if (now - fpsTime >= 1000) {
+        updateSaturationDeciles();
         const avgStepTime = renderTimeCount > 0 ? (totalStepTime / renderTimeCount) : 0;
         const avgRenderTime = renderTimeCount > 0 ? (totalRenderTime / renderTimeCount) : 0;
         const avgTotalTime = avgStepTime + avgRenderTime;
@@ -825,6 +826,7 @@ function syncSettings() {
 
     const walkSteps = parseInt(document.getElementById('walk-steps-slider').value);
     const walkSize = parseFloat(document.getElementById('walk-size-slider').value);
+    // (see updateSaturationDeciles at module scope for the decile legend)
     state.set_random_walk_params(walkSteps, walkSize);
     document.getElementById('walk-steps-val').innerText = walkSteps;
     document.getElementById('walk-size-val').innerText = walkSize.toFixed(3);
@@ -861,6 +863,7 @@ function syncSettings() {
         if (overfillCapVal) overfillCapVal.innerText = `${overfillCap.toFixed(2)}×`;
         state.set_overfill_capacity(overfillCap);
     }
+    updateSaturationDeciles();
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
@@ -944,6 +947,35 @@ function loadActivePattern() {
 }
 
 const MULTISTAGE_HOURGLASS_SHAPE = 4;
+
+// Legend for the overfill heat-map's decile colouring. Module scope, like every other helper here
+// -- see scripts/check_js.js, which exists because helpers defined inside another function were
+// silently unreachable and shipped broken more than once.
+//
+// Under decile colouring a cell's hue encodes its RANK in the saturation distribution, not its
+// value, so these nine numbers are the only thing that turns the overlay into an answer to "how
+// saturated are we". 1.00 is exactly full; anything above is overfill. The row hides itself unless
+// decile colouring is what is actually on screen, since under the other heat-map sources the
+// colours are an absolute scale and these numbers would describe something that is not drawn.
+function updateSaturationDeciles() {
+    const row = document.getElementById('saturation-deciles-row');
+    if (!row) return;
+    const heatmapOn = document.getElementById('check-pressure-heatmap');
+    const overfillOn = document.getElementById('check-overfill-pressure');
+    const active = !!state && !!heatmapOn && heatmapOn.checked && !!overfillOn && overfillOn.checked;
+    row.style.display = active ? '' : 'none';
+    if (!active) return;
+    const out = document.getElementById('saturation-deciles-val');
+    if (!out) return;
+    const deciles = state.get_saturation_deciles();
+    if (!deciles || deciles.length === 0) {
+        // Deciles refresh on a slow cadence and start empty, so this is the normal state for the
+        // first fraction of a second after the overlay is switched on -- not an error.
+        out.innerText = '—';
+        return;
+    }
+    out.innerText = Array.from(deciles).map((v) => v.toFixed(2)).join('  ');
+}
 
 function updateChambersRowVisibility() {
     const el = document.getElementById('chambers-row');
