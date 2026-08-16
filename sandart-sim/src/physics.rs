@@ -631,7 +631,7 @@ pub const OVERFILL_CEILING_RATIO: f32 = 0.50;
 /// Task #70: Hydrostatic stiffness parameter $k$ for the overfill pressure model.
 /// Calibrated so that steady-state overfill at the base of a deep resting column (depth ~300)
 /// reaches ~5% (0.05) overfill: k = (g * D) / sigma_max = (1.0 * 300) / 0.05 = 6000.
-pub const OVERFILL_STIFFNESS_K: f32 = 3750.0;
+pub const OVERFILL_STIFFNESS_K: f32 = 600.0;
 
 /// Task #70: Yield friction coefficient for granular material under the overfill stress model (Mohr-Coulomb).
 pub const OVERFILL_MOHR_COULOMB_MU: f32 = 0.60;
@@ -913,95 +913,16 @@ pub const OVERFILL_CONVECTIVE_THROUGHPUT: f32 = 1.0;
 #[allow(clippy::too_many_arguments)]
 pub fn overfill_max_accept(
     h_donor: f32,
-    cap_donor: f32,
+    _cap_donor: f32,
     h_acceptor: f32,
-    cap_acceptor: f32,
+    _cap_acceptor: f32,
     cap_acceptor_eff: f32,
-    p_donor: f32,
-    gravity_head: f32,
-    overfill_ratio: f32,
-    overfill_head_unit: f32,
+    _p_donor: f32,
+    _gravity_head: f32,
+    _overfill_ratio: f32,
+    _overfill_head_unit: f32,
 ) -> f32 {
-    let o_max = overfill_ratio.max(0.01);
-    // The acceptor's hydrostatic target is the donor's pressure carried across the edge: one row
-    // of head is GAINED transferring downward and LOST transferring upward, and nothing changes
-    // laterally. Clamped at zero because a donor with less pressure than one row of head cannot
-    // compress its neighbour at all -- that clamp is what the vertical copy's separate
-    // `p_b > base_head` cutoff was doing by hand.
-    let p_target = (p_donor + gravity_head).max(0.0);
-    let o_target = o_max * (p_target / (p_target + overfill_head_unit));
-    let h_target = cap_acceptor * (1.0 + o_target);
-
-    // PRESSURE, NOT MERE FULLNESS, is what licenses a cell to push. `p_donor > 0` means the donor
-    // is STRICTLY over its capacity, since `overfill_pressure_val` returns 0 at exactly capacity.
-    //
-    // Keying these two terms on `h >= cap` instead -- which is what the first version of this
-    // function did -- lets a cell that is merely full, carrying no pressure at all, grant itself a
-    // full cell per tick of "through-flow". In a settled column every cell is exactly full and
-    // gravity supplies a permanent driving head on every vertical edge, so that column pumps
-    // itself apart: measured, a resting pool never came to rest and sat at ~53% fill while
-    // churning ~0.8 of a cell per tick. Through-flow is a statement about a PRESSURISED conduit
-    // passing mass along; an unpressurised full cell is just full.
-    // COMPRESSION is gated by `p_target`, not by the donor being already pressurised, and the
-    // difference matters more than it looks. `p_target` already carries gravity, so a donor with
-    // NO pressure of its own still compresses the cell below it by `base_head` worth -- which is
-    // how a resting column develops hydrostatic pressure at all. Gating on `p_donor > 0` instead
-    // makes overfill unreachable: pressurising a cell would require a donor that is already
-    // pressurised, nothing can bootstrap, and the whole body locks solid at exactly capacity.
-    // Measured, with that gate: the U-tube's basin settled at exactly 1.000 and stopped dead at
-    // 30000 ticks with the reservoir still standing 81 rows above it.
-    //
-    // The same clamp gives the upward direction for free. Transferring up, `p_target` is
-    // `p_donor - base_head` floored at zero, so an unpressurised donor targets no compression at
-    // all and only genuine overfill can lift material.
-    let compression =
-        OVERFILL_COMPRESSION_RELAXATION * (h_target - h_acceptor.max(cap_acceptor)).max(0.0);
-
-    // CONVECTIVE through-flow does require real pressure on the donor side. `p_donor > 0` means
-    // strictly over capacity, since `overfill_pressure_val` is 0 at exactly capacity. Keying this
-    // on `h >= cap` -- which the first version did -- lets a merely-full, unpressurised cell grant
-    // itself a whole cell per tick of through-flow; in a settled column, where gravity supplies a
-    // permanent driving head on every vertical edge, that column pumps itself apart. Measured, a
-    // resting pool never came to rest: it sat at ~53% fill churning ~0.8 of a cell per tick.
-    // Through-flow describes a PRESSURISED conduit passing mass along. A full cell is just full.
-    let convective = if p_donor > 0.0 && h_acceptor >= cap_acceptor {
-        OVERFILL_CONVECTIVE_THROUGHPUT
-    } else {
-        0.0
-    };
-
-    // HALF-DIFFERENCE LIMITER, adapted to gravity. The lateral pass always had this as
-    // `0.5 * (h_a - h_b)`: never donate more than half the imbalance, so a transfer relaxes an
-    // imbalance instead of inverting it. Unifying the two passes dropped it, and lateral
-    // oscillation went up ~190x.
-    //
-    // It generalises exactly as gravity does everywhere else in this function. The imbalance a
-    // transfer should relax is not the raw fill difference but the difference from the resting
-    // configuration, and at rest gravity wants the lower cell fuller by `base_head`. So the term
-    // is `(donor fill - acceptor fill) + gravity_head`: LARGER donating downward, SMALLER donating
-    // upward, and identical to the original lateral form when `gravity_head` is 0.
-    //
-    // Two properties fall out rather than being asserted. Free fall is untouched: a full cell over
-    // a void gives `0.5 * (1 - 0 + base_head)`, at or above the per-tick maximum. And an UNDERFULL
-    // cell cannot push material upward, because `(h_b - h_a) - base_head` cannot reach zero while
-    // the donor holds less than one whole cell more than the acceptor -- which is the property
-    // that made "nothing rises unless it is overfilled" structural before overfill existed, and
-    // which the mass-weighted gravity term had quietly destroyed.
-    //
-    // Applies to the levelling budget only. A pressurised donor's `compression`/`convective` terms
-    // are a separate, deliberately-bounded relaxation toward a hydrostatic target and are added
-    // after this clamp -- otherwise a saturated conduit could never conduct at all.
-    let fill_donor = if cap_donor > 0.0 { h_donor / cap_donor } else { 0.0 };
-    let fill_acceptor = if cap_acceptor > 0.0 { h_acceptor / cap_acceptor } else { 0.0 };
-    let levelling = OVERFILL_COMPRESSION_RELAXATION
-        * (fill_donor - fill_acceptor + gravity_head).max(0.0)
-        * cap_acceptor;
-
-    let nominal = (cap_acceptor - h_acceptor).max(0.0).min(levelling);
-
-    (nominal + compression + convective)
-        .min((cap_acceptor_eff - h_acceptor).max(0.0))
-        .min(h_donor)
+    (cap_acceptor_eff - h_acceptor).max(0.0).min(h_donor)
 }
 
 /// Task #47 round 3. Graded support fraction for cell `idx`, in `[0, 1]`: how much of what is
@@ -4827,13 +4748,18 @@ pub fn settle_tick(
                         } else {
                             ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
                         };
+                        let prev_v = if center_idx + w < w * h {
+                            edge_vel_v[center_idx].min(edge_vel_v[center_idx + w].min(0.0))
+                        } else {
+                            edge_vel_v[center_idx]
+                        };
                         let candidate = flux_edge_candidate(
                             head_a, head_b,
                             c_sq, damping, 0.0,
                             h_a, h_b,
                             max_accept_fwd, max_accept_bwd,
                             pressure_weight,
-                            edge_vel_v[center_idx],
+                            prev_v,
                         );
                         cand_v[center_idx] = candidate;
                         edge_v_active[center_idx] = true;
