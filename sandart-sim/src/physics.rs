@@ -1431,7 +1431,9 @@ fn flux_edge_candidate(
         0.0
     };
 
-    let v = ((v_e_prev + c_sq * yielded) * damping).clamp(-1.0, 1.0);
+    let v_raw = ((v_e_prev + c_sq * yielded) * damping).clamp(-1.0, 1.0);
+    const ACCEL_FILTER_GAMMA: f32 = 0.30;
+    let v = (1.0 - ACCEL_FILTER_GAMMA) * v_raw + ACCEL_FILTER_GAMMA * v_e_prev;
 
     weight * if v > 0.0 {
         v.min(avail_a).min(max_accept_fwd)
