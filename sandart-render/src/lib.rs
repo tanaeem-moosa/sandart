@@ -570,25 +570,54 @@ impl HeightmapRenderer {
     /// toggle -- not just the shader read -- is to cost nothing when it's off.
     pub fn update_block_heat(&mut self, queue: &wgpu::Queue, data: &[u8]) {
         let size = HEAT_GRID_SIZE as u32;
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &self.block_heat_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(size), // 1 byte per pixel for R8Unorm
-                rows_per_image: Some(size),
-            },
-            wgpu::Extent3d {
-                width: size,
-                height: size,
-                depth_or_array_layers: 1,
-            },
-        );
+        let aligned_bytes_per_row = (size + 255) & !255;
+        if aligned_bytes_per_row == size {
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.block_heat_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        } else {
+            let mut padded = vec![0u8; (aligned_bytes_per_row * size) as usize];
+            for y in 0..size as usize {
+                let src_start = y * size as usize;
+                let dst_start = y * aligned_bytes_per_row as usize;
+                padded[dst_start..dst_start + size as usize].copy_from_slice(&data[src_start..src_start + size as usize]);
+            }
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.block_heat_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &padded,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_bytes_per_row),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
     }
 
     /// Upload the per-cell pressure-field heat-map (R8Unorm) to GPU. `data` must be
@@ -599,25 +628,54 @@ impl HeightmapRenderer {
     /// that the shader-side `pressure_heatmap_enabled == 0u` early-out doesn't cover on its own.
     pub fn update_pressure_heat(&mut self, queue: &wgpu::Queue, data: &[u8]) {
         let grid_size = self.grid_size as u32;
-        queue.write_texture(
-            wgpu::ImageCopyTexture {
-                texture: &self.pressure_heat_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            data,
-            wgpu::ImageDataLayout {
-                offset: 0,
-                bytes_per_row: Some(grid_size), // 1 byte per pixel for R8Unorm
-                rows_per_image: Some(grid_size),
-            },
-            wgpu::Extent3d {
-                width: grid_size,
-                height: grid_size,
-                depth_or_array_layers: 1,
-            },
-        );
+        let aligned_bytes_per_row = (grid_size + 255) & !255;
+        if aligned_bytes_per_row == grid_size {
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.pressure_heat_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(grid_size), // 1 byte per pixel for R8Unorm
+                    rows_per_image: Some(grid_size),
+                },
+                wgpu::Extent3d {
+                    width: grid_size,
+                    height: grid_size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        } else {
+            let mut padded = vec![0u8; (aligned_bytes_per_row * grid_size) as usize];
+            for y in 0..grid_size as usize {
+                let src_start = y * grid_size as usize;
+                let dst_start = y * aligned_bytes_per_row as usize;
+                padded[dst_start..dst_start + grid_size as usize].copy_from_slice(&data[src_start..src_start + grid_size as usize]);
+            }
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.pressure_heat_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &padded,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_bytes_per_row),
+                    rows_per_image: Some(grid_size),
+                },
+                wgpu::Extent3d {
+                    width: grid_size,
+                    height: grid_size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
     }
 
     /// Upload a sub-rectangle of CPU float heightmap data directly to the WGPU texture.

@@ -237,58 +237,28 @@ fn overfill_pressure_u_tube_flow_through_conduction_and_rise() {
 
 #[test]
 fn diagnostic_u_tube_gradient_64x64() {
-    let w = 64;
-    let h = 64;
+    let w = 128;
+    let _h = 128;
     let mut sim = DrawingSimulation::new_with_size(w);
-    sim.sandbox_shape = SandboxShape::Square;
+    sim.sandbox_shape = SandboxShape::UTubeFlowThrough;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(MaterialMode::Water);
     sim.overfill_pressure = true;
-    sim.overfill_capacity = 1.75;
-
-    // Custom U-tube shape
-    sim.shape_mask = vec![sandart_sim::MASK_OUTSIDE; w * h];
-    for y in 10..52 {
-        for x in 16..24 {
-            sim.shape_mask[y * w + x] = sandart_sim::MASK_INSIDE;
-        }
-    }
-    for y in 10..52 {
-        for x in 40..48 {
-            sim.shape_mask[y * w + x] = sandart_sim::MASK_INSIDE;
-        }
-    }
-    for y in 48..52 {
-        for x in 16..48 {
-            sim.shape_mask[y * w + x] = sandart_sim::MASK_INSIDE;
-        }
-    }
-
-    // Fill left arm from y 16..48
-    for y in 16..48 {
-        for x in 16..24 {
-            sim.heightmap.data[y * w + x] = 1.0;
-        }
-    }
-    // Fill bottom conduit
-    for y in 48..52 {
-        for x in 16..48 {
-            sim.heightmap.data[y * w + x] = 1.0;
-        }
-    }
+    sim.overfill_capacity = 1.90;
+    sim.initialize_hourglass();
 
     let targets = [None; 5];
-    for tick in 0..500 {
-        sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
-        if tick % 100 == 0 || tick == 499 {
-            let left_top = (16..24).map(|x| sim.heightmap.data[20 * w + x]).sum::<f32>() / 8.0;
-            let left_mid = (16..24).map(|x| sim.heightmap.data[35 * w + x]).sum::<f32>() / 8.0;
-            let left_bot = (16..24).map(|x| sim.heightmap.data[50 * w + x]).sum::<f32>() / 8.0;
-            let right_top = (40..48).map(|x| sim.heightmap.data[20 * w + x]).sum::<f32>() / 8.0;
-            let right_mid = (40..48).map(|x| sim.heightmap.data[35 * w + x]).sum::<f32>() / 8.0;
-            let right_bot = (40..48).map(|x| sim.heightmap.data[50 * w + x]).sum::<f32>() / 8.0;
-            println!("Tick {:3}: Left[top={:.3}, mid={:.3}, bot={:.3}] Right[top={:.3}, mid={:.3}, bot={:.3}]",
-                tick, left_top, left_mid, left_bot, right_top, right_mid, right_bot);
+    for tick in 0..50 {
+        if tick % 5 == 0 {
+            println!("--- TICK {} ---", tick);
+            for y in 62..66 {
+                print!("y={:2}: ", y);
+                for x in 30..34 {
+                    print!("{:.3} ", sim.heightmap.data[y * w + x]);
+                }
+                println!();
+            }
         }
+        sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::UTubeFlowThrough, 16.0, 16.0);
     }
 }

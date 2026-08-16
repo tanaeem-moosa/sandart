@@ -4456,10 +4456,12 @@ pub fn settle_tick(
                             let o_max = overfill_ratio.max(0.01);
                             let o_target = o_max * (p_target / (p_target + overfill_head_unit));
                             let h_target = cap_b * (1.0 + o_target);
-                            let comp_b = (h_target - h_b.max(cap_b)).max(0.0);
+                            let comp_b = 0.5 * (h_target - h_b.max(cap_b)).max(0.0);
                             let fwd = (nom_b + comp_b).min((cap_b_eff - h_b).max(0.0));
 
-                            let bwd = (cap_a_eff - h_a).max(0.0);
+                            let nom_a = (cap_a - h_a).max(0.0);
+                            let eq_a = 0.5 * (h_b - h_a.max(cap_a)).max(0.0);
+                            let bwd = (nom_a + eq_a).min((cap_a_eff - h_a).max(0.0));
                             (fwd, bwd)
                         } else {
                             ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
