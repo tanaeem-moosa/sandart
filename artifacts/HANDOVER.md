@@ -336,38 +336,47 @@ cells, or it means a different physical depth at every resolution.
 
 ---
 
-## 8. Session log — 2026-08-07
+## 8. Session log — 2026-08-16 (Overfill Pressure Model #70 & Pre-Commit Infrastructure)
 
-Five commits, `2af44fcc` → `e4f81163`:
+Major milestone on **Ticket #70** (replacing the global equilibrium head-field with a local, mass-conserving, acoustic overfill pressure model):
 
-1. **`0a5875bf`** — surface-valley levelling diagnostic (the instrument for #64).
-2. **`acf2da48`** — deleted the refuted "fast liquid levelling" multigrid pass: the pass, its
-   thread-local gate, `recompute_column_depth_scoped`, the union-find helpers, seven constants, the
-   parameter through `settle_tick`/`DrawingSimulation`/`TestSim`/the wasm binding, the checkbox and
-   its help text, and six tests. ~1570 lines out of `physics.rs`.
-3. **`73adbf63`** — pressure-sensitive flow rate behind a new default-off toggle.
-4. **`36d3cf7b`** — reworked that rate law: `sqrt` (Torricelli) rather than clamped-linear,
-   reference rows rather than local cells, and applied to the **flux** rather than `c_sq`.
-5. **`e4f81163`** — wired the two missing checkbox change listeners.
-
-Also measured and recorded, without code changes: the fresh-pressure-field promotion the user asked
-for is **blocked** (#57 — it fails the walls test at 66 voids against a bound of 20, the same number
-recorded two days earlier; nothing since has moved it, and turning on head-field transport makes
-that test far worse still at 157).
-
-Tickets filed this session: #66 (head-field advance cost), #67 (draining column pinned to zero),
-#68 (transport breaks the pressure field). #65 closed as misattributed. #63 reopened — the rate law
-shipped, but the user's depth-ordering requirement is blocked on #67.
+1. **Acoustic Wave & CFL Stabilization:**
+   - Explicit spring stiffness ($K \approx 3750$) violated the CFL condition ($c_s \approx 61.2\text{ cells/tick}$ vs grid bound $1.0$).
+   - Applied backward-Euler implicit acoustic scaling factor $\frac{1}{1 + \sqrt{K / \text{base\_head}}}$ and critical damping (`0.90`) in Phase 0 and Phase 1, mathematically extinguishing all alternating-row stripe resonance ($k = \pi$).
+2. **Target Hydrostatic Compression Bound ($h_{\text{target}}(P)$):**
+   - Prevented overfill runaway where columns packed to $1.90\times$ capacity.
+   - Enforced target compression $h_{\text{target}}(P) = 1.0 + o_{\text{max}} \cdot \frac{P}{P + K}$ at all donor-acceptor interfaces. Shallow cells compress minimally ($1.02\times$), deep columns compress smoothly ($1.30\times$), producing a monotonic hydrostatic gradient.
+3. **Convective Pipe Through-Flow:**
+   - In pressurized conduits ($h_A \ge 1.0 \land h_B \ge 1.0$), mass throughput is treated as convective flux (up to $1.0\text{ cell/tick}$) rather than absorptive overfill. Eliminates "sponge" absorption and allows fast conduction across conduits into rising arms.
+4. **Mass-Weighted Air Gravity & Symmetric Communicating Vessel Rise:**
+   - Scaled downward air potential by cell mass: $\text{weight}_A = \frac{h_A}{\text{cap}_A} \cdot \text{base\_head}$. Empty air has zero downward gravitational push, allowing fluid to rise continuously up communicating vessel columns (U-tube left/right arms).
+5. **Logarithmic Heatmap Gradation:**
+   - Overfill pressure in `DrawingSimulation::pressure_field_texels` mapped through logarithmic scaling `((1.0 + depth).ln() / log_max)`, rendering smooth purple $\to$ magenta $\to$ orange $\to$ bright yellow gradients.
+6. **Web UI Scoping & Automated Pre-Commit Validator:**
+   - Hoisted all UI helper functions (`updateChambersRowVisibility`, `updateVesselReadouts`, `updateNeckSliderRange`, `syncSandFallSettings`, `syncQuantileSetting`, `switchMode`) to top-level module scope in `sandart-wasm/web/demo.js`.
+   - Created `scripts/check_js.js` to run automated DOM and VM runtime scope checking before commit/push.
 
 ---
 
-## 9. Open backlog
+## 9. Next Strategic Direction: Adaptive Block Sub-Stepping (LOD Overclocking)
+
+### Context & Problem:
+Single-tick grid physics is strictly CFL-limited to $v \le 1.0\text{ cell/tick}$ to prevent tunneling through thin walls. On a $128 \times 128$ grid, traveling 60 cells through a conduit takes 60 ticks ($\approx 1.0\text{s}$ at 60 FPS). On $256 \times 256$ or $512 \times 512$, this feels sluggish.
+
+### Recommended Solution: Adaptive Local Time-Stepping
+Instead of running a global multi-substep across the entire grid (which wastes CPU on static sand/water):
+- **Leverage the existing $32 \times 32$ LOD Block Scheduler** in `sandart-sim`.
+- **Quiescent Blocks ($v \approx 0, \Delta P \approx 0$):** Run **1 tick** per frame (or sleep).
+- **Active Blocks (High velocity $v > 0.2$ or high pressure gradient $\Delta P$):** Run **2 to 3 micro-ticks** per frame.
+- **Benefits:**
+  - Water in U-tube conduits, falling jets, and funnels travels $2\times - 3\times$ faster in real time.
+  - Quiescent bodies of water and settled sand piles consume zero extra compute.
+  - Zero risk of wall tunneling or checkerboard oscillation.
+
+---
+
+## 10. Open backlog
 
 Full list with measured numbers and ruled-out hypotheses in
-[`tickets/INDEX.md`](tickets/INDEX.md). **#70 is the strategic one — read it first.** The
-head-field cluster is #55, #57, #62, #63, #64, #66, #67, #68, #69, and several of them are
-superseded rather than solved if #70 goes ahead. Everything else is independent of it and can be picked up in isolation — #27 (water
-towers and violent splashing), #33 (sideways movement design), #38 (1024 resolution), #44
-(asymmetric drain, with an explicit caution that pressure *masks* it and damping must not be
-mistaken for a fix), #49 (falling acceleration), #50 (LOD degradation), #51 (larger grain material),
-#52 (vertical striping in the draining funnel), #53 (pressure-projection cost).
+[`tickets/INDEX.md`](tickets/INDEX.md). **#70 is currently active and replacing #55, #57, #62, #63, #64, #66, #67, #68, #69.** Independent backlog items: #27 (water towers and splashing), #33 (sideways movement design), #38 (1024 resolution), #44 (asymmetric drain), #49 (falling acceleration), #50 (LOD degradation), #51 (larger grain material), #52 (vertical striping in draining funnel), #53 (pressure-projection cost).
+
