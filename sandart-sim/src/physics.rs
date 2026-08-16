@@ -5124,12 +5124,22 @@ pub fn settle_tick(
                             // neighbour is higher), and its left neighbour's owned edge — which is
                             // exactly the multi-edge case arbitration exists for.
                             let (max_accept_fwd, max_accept_bwd) = if overfill_active {
+                                let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                                let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
+                                let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit);
+                                let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
+                                let o_max = overfill_ratio.max(0.01);
+
+                                let o_target_b = o_max * (p_a / (p_a + overfill_head_unit));
+                                let h_target_b = cap_b * (1.0 + o_target_b);
                                 let nom_b = (cap_b - h_b).max(0.0);
-                                let eq_b = 0.5 * (h_a - h_b.max(cap_b)).max(0.0);
+                                let eq_b = 0.5 * (h_target_b - h_b.max(cap_b)).max(0.0);
                                 let fwd = (nom_b + eq_b).min((cap_b_eff - h_b).max(0.0));
 
+                                let o_target_a = o_max * (p_b / (p_b + overfill_head_unit));
+                                let h_target_a = cell_capacity * (1.0 + o_target_a);
                                 let nom_a = (cell_capacity - h_a).max(0.0);
-                                let eq_a = 0.5 * (h_b - h_a.max(cell_capacity)).max(0.0);
+                                let eq_a = 0.5 * (h_target_a - h_a.max(cell_capacity)).max(0.0);
                                 let bwd = (nom_a + eq_a).min((cap_a_eff - h_a).max(0.0));
                                 (fwd, bwd)
                             } else {
