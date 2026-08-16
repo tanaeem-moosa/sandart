@@ -4748,18 +4748,13 @@ pub fn settle_tick(
                         } else {
                             ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
                         };
-                        let prev_v = if center_idx + w < w * h {
-                            edge_vel_v[center_idx].min(edge_vel_v[center_idx + w].min(0.0))
-                        } else {
-                            edge_vel_v[center_idx]
-                        };
                         let candidate = flux_edge_candidate(
                             head_a, head_b,
                             c_sq, damping, 0.0,
                             h_a, h_b,
                             max_accept_fwd, max_accept_bwd,
                             pressure_weight,
-                            prev_v,
+                            edge_vel_v[center_idx],
                         );
                         cand_v[center_idx] = candidate;
                         edge_v_active[center_idx] = true;
