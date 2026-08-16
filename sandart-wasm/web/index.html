@@ -771,14 +771,14 @@
                         <option value="1">Square</option>
                         <option value="2">Oval</option>
                     </optgroup>
-                    <optgroup label="Sand-fall funnels" id="shape-group-sandfall" hidden>
+                    <optgroup label="Sand-fall funnels" id="shape-group-sandfall">
                         <option value="3">Classic hourglass</option>
                         <option value="4">Merging cascade</option>
                         <option value="5">Galton board</option>
                         <option value="6">Staircase cascade</option>
                         <option value="7">Procedural cave</option>
                         <option value="8">Multi-neck, 3 necks</option>
-                        <option value="9">U-tube, flow-through</option>
+                        <option value="9" selected>U-tube, flow-through</option>
                     </optgroup>
                 </select>
             </div>
@@ -793,9 +793,9 @@
                 <div class="row"><label for="resolution-select">Grid</label></div>
                 <select id="resolution-select">
                     <option value="64">64 &times; 64</option>
-                    <option value="128">128 &times; 128</option>
+                    <option value="128" selected>128 &times; 128</option>
                     <option value="256">256 &times; 256</option>
-                    <option value="512" selected>512 &times; 512</option>
+                    <option value="512">512 &times; 512</option>
                 </select>
             </div>
 
@@ -855,7 +855,7 @@
                 </label>
                 <label class="checkbox-container">
                     Pressure field heat-map
-                    <input type="checkbox" id="check-pressure-heatmap">
+                    <input type="checkbox" id="check-pressure-heatmap" checked>
                     <span class="checkmark"></span>
                 </label>
                 <label class="checkbox-container">
@@ -885,13 +885,13 @@
                 </label>
                 <label class="checkbox-container">
                     Overfill pressure simulation
-                    <input type="checkbox" id="check-overfill-pressure">
+                    <input type="checkbox" id="check-overfill-pressure" checked>
                     <span class="checkmark"></span>
                 </label>
                 <div class="field row" id="overfill-capacity-row">
                     <label for="overfill-capacity-slider">Overfill capacity</label>
-                    <span id="overfill-capacity-val" class="val-display">1.50×</span>
-                    <input type="range" id="overfill-capacity-slider" min="1.00" max="2.00" step="0.05" value="1.50">
+                    <span id="overfill-capacity-val" class="val-display">1.90×</span>
+                    <input type="range" id="overfill-capacity-slider" min="1.00" max="2.00" step="0.05" value="1.90">
                 </div>
             </div>
 

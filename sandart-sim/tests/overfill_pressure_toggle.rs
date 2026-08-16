@@ -237,8 +237,8 @@ fn overfill_pressure_u_tube_flow_through_conduction_and_rise() {
 
 #[test]
 fn diagnostic_u_tube_gradient_64x64() {
-    let w = 256;
-    let _h = 256;
+    let w = 128;
+    let _h = 128;
     let mut sim = DrawingSimulation::new_with_size(w);
     sim.sandbox_shape = SandboxShape::UTubeFlowThrough;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
@@ -248,18 +248,17 @@ fn diagnostic_u_tube_gradient_64x64() {
     sim.initialize_hourglass();
 
     let targets = [None; 5];
-    for _ in 0..100 {
+    for tick in 0..425 {
         sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::UTubeFlowThrough, 16.0, 16.0);
+        if tick >= 405 {
+            println!("==================== TICK {} ====================", tick);
+            for y in 50..54 {
+                print!("y={:2} h: ", y);
+                for x in 23..27 {
+                    print!("{:6.3} ", sim.heightmap.data[y * w + x]);
+                }
+                println!();
+            }
+        }
     }
-
-    println!("Row 100 (x in 40..80):");
-    for x in 40..80 {
-        print!("{:.2} ", sim.heightmap.data[100 * w + x]);
-    }
-    println!();
-    println!("Row 101 (x in 40..80):");
-    for x in 40..80 {
-        print!("{:.2} ", sim.heightmap.data[101 * w + x]);
-    }
-    println!();
 }

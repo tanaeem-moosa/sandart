@@ -4417,8 +4417,15 @@ pub fn settle_tick(
                         const GRANULAR_FALL_C_SQ: f32 = 1.0;
                         const GRANULAR_FALL_DAMPING: f32 = 1.0;
                         let (liquid_c_sq, liquid_damping) = wave_params(wetness);
-                        let c_sq = GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity;
-                        let damping = GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity;
+                        let (c_sq, damping) = if overfill_active && cell_liquidity > 0.5 {
+                            let acoustic_scale = (base_head / OVERFILL_STIFFNESS_K).sqrt().min(1.0);
+                            (liquid_c_sq * acoustic_scale, 0.85)
+                        } else {
+                            (
+                                GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity,
+                                GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity,
+                            )
+                        };
                         let pressure_weight = if pressure_sensitive_flow
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
@@ -4446,20 +4453,27 @@ pub fn settle_tick(
                             (cap_a, cap_b)
                         };
                         let (max_accept_fwd, max_accept_bwd) = if overfill_active {
-                            let nom_b = (cap_b - h_b).max(0.0);
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                             let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
-                            let p_target = p_a + base_head;
+                            let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
                             let o_max = overfill_ratio.max(0.01);
-                            let o_target = o_max * (p_target / (p_target + overfill_head_unit));
-                            let h_target = cap_b * (1.0 + o_target);
-                            let comp_b = 0.5 * (h_target - h_b.max(cap_b)).max(0.0);
+
+                            let p_target_b = p_a + base_head;
+                            let o_target_b = o_max * (p_target_b / (p_target_b + overfill_head_unit));
+                            let h_target_b = cap_b * (1.0 + o_target_b);
+                            let nom_b = (cap_b - h_b).max(0.0);
+                            let comp_b = 0.5 * (h_target_b - h_b.max(cap_b)).max(0.0);
                             let fwd = (nom_b + comp_b).min((cap_b_eff - h_b).max(0.0));
 
-                            let nom_a = (cap_a - h_a).max(0.0);
-                            let eq_a = 0.5 * (h_b - h_a.max(cap_a)).max(0.0);
-                            let bwd = (nom_a + eq_a).min((cap_a_eff - h_a).max(0.0));
+                            let bwd = if p_b > base_head {
+                                let p_target_a = p_b - base_head;
+                                let o_target_a = o_max * (p_target_a / (p_target_a + overfill_head_unit));
+                                let h_target_a = cap_a * (1.0 + o_target_a);
+                                (0.5 * (h_target_a - h_a).max(0.0)).min((cap_a_eff - h_a).max(0.0))
+                            } else {
+                                0.0
+                            };
                             (fwd, bwd)
                         } else {
                             ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
@@ -5028,7 +5042,13 @@ pub fn settle_tick(
                                 edge_vel_h[center_idx] = 0.0;
                             }
                         } else {
-                            let (c_sq, damping) = wave_params(wetness);
+                            let (liquid_c_sq, liquid_damping) = wave_params(wetness);
+                            let (c_sq, damping) = if overfill_active && cell_liquidity > 0.5 {
+                                let acoustic_scale = (GRAVITY_HEAD_SCALE / OVERFILL_STIFFNESS_K).sqrt().min(1.0);
+                                (liquid_c_sq * acoustic_scale, 0.85)
+                            } else {
+                                (liquid_c_sq, liquid_damping)
+                            };
                             // TASK #63: pressure-sensitive flow rate -- see the phase-0 vertical
                             // site's own comment for the full reasoning (the flux and not `c_sq`;
                             // donor and not average; free fall exempt by construction; the driving
@@ -5130,15 +5150,11 @@ pub fn settle_tick(
 
                                 let o_target_b = o_max * (p_a / (p_a + overfill_head_unit));
                                 let h_target_b = cap_b * (1.0 + o_target_b);
-                                let nom_b = (cap_b - h_b).max(0.0);
-                                let eq_b = 0.5 * (h_target_b - h_b.max(cap_b)).max(0.0);
-                                let fwd = (nom_b + eq_b).min((cap_b_eff - h_b).max(0.0));
+                                let fwd = (0.5 * (h_a.max(h_target_b) - h_b).max(0.0)).min((cap_b_eff - h_b).max(0.0));
 
                                 let o_target_a = o_max * (p_b / (p_b + overfill_head_unit));
                                 let h_target_a = cell_capacity * (1.0 + o_target_a);
-                                let nom_a = (cell_capacity - h_a).max(0.0);
-                                let eq_a = 0.5 * (h_target_a - h_a.max(cell_capacity)).max(0.0);
-                                let bwd = (nom_a + eq_a).min((cap_a_eff - h_a).max(0.0));
+                                let bwd = (0.5 * (h_b.max(h_target_a) - h_a).max(0.0)).min((cap_a_eff - h_a).max(0.0));
                                 (fwd, bwd)
                             } else {
                                 ((cap_b - h_b).max(0.0), (cell_capacity - h_a).max(0.0))

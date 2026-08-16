@@ -143,6 +143,7 @@ async function start() {
     window.addEventListener('resize', handleResize);
     setupCanvasInput();
     setupPanelInput();
+    switchMode('sandfall');
 
     // Start requestAnimationFrame loop
     lastTime = performance.now();
@@ -619,6 +620,8 @@ function populateMaterialSelects() {
         mat1Select.appendChild(option);
         mat2Select.appendChild(option.cloneNode(true));
     }
+    mat1Select.value = 'water';
+    mat2Select.value = 'water';
 }
 
 function generateMaterialProps(pattern, mat1Id, mat2Id) {
