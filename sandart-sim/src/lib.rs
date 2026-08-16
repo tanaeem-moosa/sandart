@@ -1090,7 +1090,6 @@ impl DrawingSimulation {
             let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / w as f32;
             let overfill_head_unit = (physics::GRAVITY_HEAD_SCALE / depth_scale) * physics::OVERFILL_STIFFNESS_K;
             let base_head = physics::GRAVITY_HEAD_SCALE;
-            let max_depth = w as f32;
             (0..w * h)
                 .map(|idx| {
                     let wetness = self.cell_props[idx * 4 + PROP_WETNESS];
@@ -1099,8 +1098,7 @@ impl DrawingSimulation {
                     let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
                     let p_val = physics::overfill_pressure_val(h_val, cap, overfill_ratio, overfill_head_unit);
                     let overfill_depth = p_val / base_head;
-                    let normalized = (overfill_depth / max_depth).clamp(0.0, 1.0);
-                    (normalized * 255.0).round() as u8
+                    to_byte(overfill_depth)
                 })
                 .collect()
         } else if self.pressure_heatmap_head_field {

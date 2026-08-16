@@ -198,20 +198,17 @@ fn diagnostic_u_tube_gradient_64x64() {
     sim.apply_preset(MaterialMode::Water);
     sim.overfill_pressure = true;
     sim.overfill_capacity = 1.90;
-    sim.initialize_hourglass();
-
     let targets = [None; 5];
-    for tick in 0..425 {
+    for tick in 0..3000 {
         sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::UTubeFlowThrough, 16.0, 16.0);
-        if tick >= 405 {
-            println!("==================== TICK {} ====================", tick);
-            for y in 50..54 {
-                print!("y={:2} h: ", y);
-                for x in 23..27 {
-                    print!("{:6.3} ", sim.heightmap.data[y * w + x]);
-                }
-                println!();
-            }
+        if tick % 300 == 0 || tick == 2999 {
+            let left_mass: f32 = (0..w).map(|y| (15..35).map(|x| sim.heightmap.data[y * w + x]).sum::<f32>()).sum();
+            let conduit_mass: f32 = (110..118).map(|y| (35..90).map(|x| sim.heightmap.data[y * w + x]).sum::<f32>()).sum();
+            let right_mass: f32 = (0..w).map(|y| (90..115).map(|x| sim.heightmap.data[y * w + x]).sum::<f32>()).sum();
+            let highest_left_y = (0..110).filter(|&y| (15..35).any(|x| sim.heightmap.data[y * w + x] > 0.1)).min();
+            let highest_right_y = (0..110).filter(|&y| (90..115).any(|x| sim.heightmap.data[y * w + x] > 0.1)).min();
+            println!("Tick {:4}: Left (Reservoir)={:6.1} (y={:?}), Conduit={:5.1}, Right (Rise)={:6.1} (y={:?})",
+                tick, left_mass, highest_left_y, conduit_mass, right_mass, highest_right_y);
         }
     }
 }
