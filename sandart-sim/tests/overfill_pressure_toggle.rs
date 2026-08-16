@@ -578,12 +578,12 @@ fn diag_task70_u_tube_rise_time_series() {
     println!("tick | reservoir_h  basin_m  foot_m/cell  riser_h  riser_m  catch_m");
     for checkpoint in 0..=20 {
         if checkpoint > 0 {
-            step_u_tube(&mut sim, 250);
+            step_u_tube(&mut sim, 1000);
         }
         let foot_cells = (RISER_X.len() * BASIN_Y.len()) as f32;
         println!(
             "{:4} | {:10}  {:7.1}  {:11.3}  {:7}  {:7.1}  {:7.1}",
-            checkpoint * 250,
+            checkpoint * 1000,
             fill_height(&sim, w, RESERVOIR_X, RESERVOIR_Y),
             region_mass(&sim, w, BASIN_X, BASIN_Y),
             region_mass(&sim, w, RISER_X, BASIN_Y) / foot_cells,

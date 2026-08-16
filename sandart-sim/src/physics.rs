@@ -731,6 +731,7 @@ pub const OVERFILL_CONVECTIVE_THROUGHPUT: f32 = 1.0;
 #[allow(clippy::too_many_arguments)]
 pub fn overfill_max_accept(
     h_donor: f32,
+    cap_donor: f32,
     h_acceptor: f32,
     cap_acceptor: f32,
     cap_acceptor_eff: f32,
@@ -738,8 +739,6 @@ pub fn overfill_max_accept(
     gravity_head: f32,
     overfill_ratio: f32,
     overfill_head_unit: f32,
-    donor_saturated: bool,
-    acceptor_saturated: bool,
 ) -> f32 {
     let o_max = overfill_ratio.max(0.01);
     // The acceptor's hydrostatic target is the donor's pressure carried across the edge: one row
@@ -751,14 +750,72 @@ pub fn overfill_max_accept(
     let o_target = o_max * (p_target / (p_target + overfill_head_unit));
     let h_target = cap_acceptor * (1.0 + o_target);
 
-    let nominal = (cap_acceptor - h_acceptor).max(0.0);
+    // PRESSURE, NOT MERE FULLNESS, is what licenses a cell to push. `p_donor > 0` means the donor
+    // is STRICTLY over its capacity, since `overfill_pressure_val` returns 0 at exactly capacity.
+    //
+    // Keying these two terms on `h >= cap` instead -- which is what the first version of this
+    // function did -- lets a cell that is merely full, carrying no pressure at all, grant itself a
+    // full cell per tick of "through-flow". In a settled column every cell is exactly full and
+    // gravity supplies a permanent driving head on every vertical edge, so that column pumps
+    // itself apart: measured, a resting pool never came to rest and sat at ~53% fill while
+    // churning ~0.8 of a cell per tick. Through-flow is a statement about a PRESSURISED conduit
+    // passing mass along; an unpressurised full cell is just full.
+    // COMPRESSION is gated by `p_target`, not by the donor being already pressurised, and the
+    // difference matters more than it looks. `p_target` already carries gravity, so a donor with
+    // NO pressure of its own still compresses the cell below it by `base_head` worth -- which is
+    // how a resting column develops hydrostatic pressure at all. Gating on `p_donor > 0` instead
+    // makes overfill unreachable: pressurising a cell would require a donor that is already
+    // pressurised, nothing can bootstrap, and the whole body locks solid at exactly capacity.
+    // Measured, with that gate: the U-tube's basin settled at exactly 1.000 and stopped dead at
+    // 30000 ticks with the reservoir still standing 81 rows above it.
+    //
+    // The same clamp gives the upward direction for free. Transferring up, `p_target` is
+    // `p_donor - base_head` floored at zero, so an unpressurised donor targets no compression at
+    // all and only genuine overfill can lift material.
     let compression =
         OVERFILL_COMPRESSION_RELAXATION * (h_target - h_acceptor.max(cap_acceptor)).max(0.0);
-    let convective = if donor_saturated && acceptor_saturated {
+
+    // CONVECTIVE through-flow does require real pressure on the donor side. `p_donor > 0` means
+    // strictly over capacity, since `overfill_pressure_val` is 0 at exactly capacity. Keying this
+    // on `h >= cap` -- which the first version did -- lets a merely-full, unpressurised cell grant
+    // itself a whole cell per tick of through-flow; in a settled column, where gravity supplies a
+    // permanent driving head on every vertical edge, that column pumps itself apart. Measured, a
+    // resting pool never came to rest: it sat at ~53% fill churning ~0.8 of a cell per tick.
+    // Through-flow describes a PRESSURISED conduit passing mass along. A full cell is just full.
+    let convective = if p_donor > 0.0 && h_acceptor >= cap_acceptor {
         OVERFILL_CONVECTIVE_THROUGHPUT
     } else {
         0.0
     };
+
+    // HALF-DIFFERENCE LIMITER, adapted to gravity. The lateral pass always had this as
+    // `0.5 * (h_a - h_b)`: never donate more than half the imbalance, so a transfer relaxes an
+    // imbalance instead of inverting it. Unifying the two passes dropped it, and lateral
+    // oscillation went up ~190x.
+    //
+    // It generalises exactly as gravity does everywhere else in this function. The imbalance a
+    // transfer should relax is not the raw fill difference but the difference from the resting
+    // configuration, and at rest gravity wants the lower cell fuller by `base_head`. So the term
+    // is `(donor fill - acceptor fill) + gravity_head`: LARGER donating downward, SMALLER donating
+    // upward, and identical to the original lateral form when `gravity_head` is 0.
+    //
+    // Two properties fall out rather than being asserted. Free fall is untouched: a full cell over
+    // a void gives `0.5 * (1 - 0 + base_head)`, at or above the per-tick maximum. And an UNDERFULL
+    // cell cannot push material upward, because `(h_b - h_a) - base_head` cannot reach zero while
+    // the donor holds less than one whole cell more than the acceptor -- which is the property
+    // that made "nothing rises unless it is overfilled" structural before overfill existed, and
+    // which the mass-weighted gravity term had quietly destroyed.
+    //
+    // Applies to the levelling budget only. A pressurised donor's `compression`/`convective` terms
+    // are a separate, deliberately-bounded relaxation toward a hydrostatic target and are added
+    // after this clamp -- otherwise a saturated conduit could never conduct at all.
+    let fill_donor = if cap_donor > 0.0 { h_donor / cap_donor } else { 0.0 };
+    let fill_acceptor = if cap_acceptor > 0.0 { h_acceptor / cap_acceptor } else { 0.0 };
+    let levelling = OVERFILL_COMPRESSION_RELAXATION
+        * (fill_donor - fill_acceptor + gravity_head).max(0.0)
+        * cap_acceptor;
+
+    let nominal = (cap_acceptor - h_acceptor).max(0.0).min(levelling);
 
     (nominal + compression + convective)
         .min((cap_acceptor_eff - h_acceptor).max(0.0))
@@ -4468,8 +4525,28 @@ pub fn settle_tick(
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                             let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
                             let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
-                            let weight_a = (h_a / cap_a).clamp(0.0, 1.0) * base_head;
-                            (h_a / cap_a + weight_a + p_a, h_b / cap_b + p_b)
+                            // FULL gravity on the upper cell, exactly as the legacy branch below
+                            // does -- NOT scaled by the upper cell's own fill.
+                            //
+                            // The mass-weighted form (`(h_a/cap_a) * base_head`) was introduced to
+                            // let liquid rise up a communicating vessel, on the reasoning that
+                            // empty air should exert no downward push. The consequence was that an
+                            // EMPTY cell contributes zero gravitational head, so ANY cell below
+                            // holding any material at all out-heads the void above it and pushes
+                            // material upward -- underfull cells included. Material rising out of
+                            // a cell that is not even full is not a thing this model is supposed
+                            // to be able to do; it is a fountain, and it is a large part of why a
+                            // settled pool would not come to rest.
+                            //
+                            // Rise does not need that hack and never did. With full gravity, an
+                            // upward transfer requires the lower cell to exceed the upper by more
+                            // than `base_head`, i.e. by more than one whole cell of fill. At the
+                            // legacy capacity of 1.0 that is unreachable, which is precisely what
+                            // made "nothing rises" structural before overfill existed. Overfill
+                            // raises the ceiling above 1.0 AND adds `p_b`, so genuinely overfilled
+                            // material clears the bar on its own -- pressure lifts water, fill
+                            // alone does not. That is the #70 design: overfill IS the pressure.
+                            (h_a / cap_a + base_head + p_a, h_b / cap_b + p_b)
                         } else if head_field_active
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
@@ -4555,15 +4632,13 @@ pub fn settle_tick(
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                             let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
                             let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
-                            let sat_a = h_a >= cap_a;
-                            let sat_b = h_b >= cap_b;
                             let fwd = overfill_max_accept(
-                                h_a, h_b, cap_b, cap_b_eff, p_a, base_head,
-                                overfill_ratio, overfill_head_unit, sat_a, sat_b,
+                                h_a, cap_a, h_b, cap_b, cap_b_eff, p_a, base_head,
+                                overfill_ratio, overfill_head_unit,
                             );
                             let bwd = overfill_max_accept(
-                                h_b, h_a, cap_a, cap_a_eff, p_b, -base_head,
-                                overfill_ratio, overfill_head_unit, sat_b, sat_a,
+                                h_b, cap_b, h_a, cap_a, cap_a_eff, p_b, -base_head,
+                                overfill_ratio, overfill_head_unit,
                             );
                             (fwd, bwd)
                         } else {
@@ -5254,15 +5329,13 @@ pub fn settle_tick(
                                 let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                                 let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit);
                                 let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
-                                let sat_a = h_a >= cell_capacity;
-                                let sat_b = h_b >= cap_b;
                                 let fwd = overfill_max_accept(
-                                    h_a, h_b, cap_b, cap_b_eff, p_a, 0.0,
-                                    overfill_ratio, overfill_head_unit, sat_a, sat_b,
+                                    h_a, cell_capacity, h_b, cap_b, cap_b_eff, p_a, 0.0,
+                                    overfill_ratio, overfill_head_unit,
                                 );
                                 let bwd = overfill_max_accept(
-                                    h_b, h_a, cell_capacity, cap_a_eff, p_b, 0.0,
-                                    overfill_ratio, overfill_head_unit, sat_b, sat_a,
+                                    h_b, cap_b, h_a, cell_capacity, cap_a_eff, p_b, 0.0,
+                                    overfill_ratio, overfill_head_unit,
                                 );
                                 (fwd, bwd)
                             } else {
