@@ -1469,13 +1469,13 @@ fn flux_edge_apply(
     total_flow: &mut f32,
     flow_occurred: &mut bool,
 ) {
-    let is_liquid = cell_props[a_idx * 4 + PROP_WETNESS] > 0.5 || cell_props[b_idx * 4 + PROP_WETNESS] > 0.5;
-    if is_liquid {
-        const LIQUID_VEL_EMA_ALPHA: f32 = 0.30;
-        *v_e = (1.0 - LIQUID_VEL_EMA_ALPHA) * (*v_e) + LIQUID_VEL_EMA_ALPHA * flux;
-    } else {
-        *v_e = flux;
-    }
+    let wetness = cell_props[a_idx * 4 + PROP_WETNESS]
+        .max(cell_props[b_idx * 4 + PROP_WETNESS])
+        .clamp(0.0, 1.0);
+    // Continuous liquidity scaling: dry granular sand (wetness = 0.0) locks immediately (alpha = 1.0),
+    // while pure liquid (wetness = 1.0) uses full temporal EMA (alpha = 0.30).
+    let alpha = 1.0 - 0.70 * wetness;
+    *v_e = (1.0 - alpha) * (*v_e) + alpha * flux;
 
     // Below this the transfer is pure f32 noise; skipping it is still exactly conservative
     // (nothing is added or removed), it just avoids an advect_properties call per edge per tick.
