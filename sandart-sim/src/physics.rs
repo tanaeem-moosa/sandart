@@ -704,7 +704,7 @@ pub fn overfill_pressure_val(
         return 0.0;
     }
     let deficit = ((cap - h) / cap).clamp(0.0, 1.0);
-    -underfill_tension * overfill_head_unit * deficit
+    -underfill_tension * deficit
 }
 
 /// Task #70: backward-Euler implicit scaling on the liquid wave speed while the overfill model is
@@ -928,14 +928,22 @@ pub fn overfill_max_accept(
     // Half-difference monotonic leveling limit (prevents gradient inversion and checkerboarding)
     let levelling = 0.5 * (fill_donor - fill_acceptor + gravity_head).max(0.0) * cap_acceptor;
 
-    // Pressurized convective throughput (conduits, funnels, rising fronts)
-    let convective = if p_donor > 0.0 {
-        1.0
+    // Pressurized convective throughput (conduits, funnels, saturated transport)
+    let p_net = p_donor + gravity_head;
+    let convective = if p_net > 0.0 && h_acceptor >= cap_acceptor {
+        (cap_acceptor_eff - h_acceptor).min(OVERFILL_CONVECTIVE_THROUGHPUT)
     } else {
         0.0
     };
 
-    (levelling + convective)
+    // Upward flow into underfull acceptor: ceiling is available room in acceptor
+    let upward_room = if gravity_head < 0.0 && h_acceptor < cap_acceptor {
+        (cap_acceptor - h_acceptor).min(h_donor)
+    } else {
+        0.0
+    };
+
+    (levelling.max(convective).max(upward_room))
         .min((cap_acceptor_eff - h_acceptor).max(0.0))
         .min(h_donor)
 }
@@ -4763,13 +4771,18 @@ pub fn settle_tick(
                         } else {
                             ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
                         };
+                        let prev_v = if center_idx + w < w * h && edge_vel_v[center_idx + w] < 0.0 && h_b >= 0.5 * cap_b {
+                            edge_vel_v[center_idx].min(edge_vel_v[center_idx + w])
+                        } else {
+                            edge_vel_v[center_idx]
+                        };
                         let candidate = flux_edge_candidate(
                             head_a, head_b,
                             c_sq, damping, 0.0,
                             h_a, h_b,
                             max_accept_fwd, max_accept_bwd,
                             pressure_weight,
-                            edge_vel_v[center_idx],
+                            prev_v,
                         );
                         cand_v[center_idx] = candidate;
                         edge_v_active[center_idx] = true;
