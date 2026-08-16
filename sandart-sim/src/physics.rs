@@ -658,18 +658,53 @@ pub fn relative_overfill(h: f32, cap: f32) -> f32 {
     }
 }
 
-/// Task #70: Computes the nonlinear overfill pressure representing fluid compressibility.
-/// As overfill fraction approaches `overfill_ratio`, pressure asymptotically rises toward infinity,
-/// ensuring pressure never saturates with depth and strictly prevents packing beyond the ceiling.
+/// Task #70: the cell's pressure potential -- SIGNED. Positive above capacity (compression),
+/// negative below it (tension), zero exactly at capacity.
+///
+/// The compression branch is unchanged: as the overfill fraction approaches `overfill_ratio` the
+/// pressure rises asymptotically, so packing beyond the ceiling costs unbounded pressure.
+///
+/// THE TENSION BRANCH exists because the model was asymmetric in a way that produced a bimodal
+/// fluid. With tension at zero, a cell at 0.99 and a cell at 0.05 are indistinguishable to the
+/// solver: both report exactly zero pressure, so nothing anywhere says "do not empty me". All the
+/// pushback lived above capacity and none below it, leaving only two stable places for a cell to
+/// sit -- pinned at the ceiling, or scraped out. Measured on the deployed U-tube: the 60th
+/// percentile of occupied cells sat at exactly the 1.90 ceiling while the bottom decile sat below
+/// 0.74. That population split IS the checkerboard on screen.
+///
+/// `underfill_tension` is the tension at a completely empty cell, in the same units as the fill
+/// term (`h / cap`, which spans 0..1 across one cell) and as `base_head` (one row of gravity). It
+/// is DEFAULTED TO ZERO, which reproduces the previous behaviour exactly, because the workable
+/// range is narrow and had to be found by measurement rather than argued: the compression branch
+/// is scaled by `overfill_head_unit` (~23400 at w=128), so a tension on that scale swamps gravity
+/// everywhere, while a tension on gravity's scale is invisible next to a ceiling-pinned neighbour.
+///
+/// LINEAR in the deficit, deliberately. A quadratic has zero derivative at capacity, i.e. no
+/// restoring force exactly where a cell is about to be pulled under -- which is the moment the
+/// force exists for. Linear gives a constant restoring slope from the first unit of deficit.
+///
+/// Gravity still wins for falling water, and the tension branch helps rather than hinders there:
+/// the EMPTY cell below a falling one carries the most negative potential of all, so the drop
+/// across that edge grows rather than shrinks.
 #[inline]
-pub fn overfill_pressure_val(h: f32, cap: f32, overfill_ratio: f32, overfill_head_unit: f32) -> f32 {
+pub fn overfill_pressure_val(
+    h: f32,
+    cap: f32,
+    overfill_ratio: f32,
+    overfill_head_unit: f32,
+    underfill_tension: f32,
+) -> f32 {
     let o = relative_overfill(h, cap);
-    if o <= 0.0 {
+    if o > 0.0 {
+        let o_max = overfill_ratio.max(0.01);
+        let ratio = (o / o_max).clamp(0.0, 0.999);
+        return overfill_head_unit * o / (1.0 - ratio);
+    }
+    if underfill_tension <= 0.0 || cap <= 0.0 {
         return 0.0;
     }
-    let o_max = overfill_ratio.max(0.01);
-    let ratio = (o / o_max).clamp(0.0, 0.999);
-    overfill_head_unit * o / (1.0 - ratio)
+    let deficit = ((cap - h) / cap).clamp(0.0, 1.0);
+    -underfill_tension * deficit
 }
 
 /// Task #70: backward-Euler implicit scaling on the liquid wave speed while the overfill model is
@@ -3865,6 +3900,7 @@ pub fn settle_tick(
     // TASK #70: "overfill pressure simulation" toggle and configurable capacity ratio.
     overfill_pressure: bool,
     overfill_ratio: f32,
+    underfill_tension: f32,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -4547,8 +4583,8 @@ pub fn settle_tick(
                         let (head_a, head_b) = if overfill_active {
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                            let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
-                            let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
+                            let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit, underfill_tension);
+                            let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit, underfill_tension);
                             // FULL gravity on the upper cell, exactly as the legacy branch below
                             // does -- NOT scaled by the upper cell's own fill.
                             //
@@ -4627,7 +4663,7 @@ pub fn settle_tick(
                             if overfill_active {
                                 let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                                 let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                                let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
+                                let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit, underfill_tension);
                                 let depth_equivalent = p_a / GRAVITY_HEAD_SCALE;
                                 pressure_rate_factor(depth_equivalent)
                             } else {
@@ -4654,8 +4690,8 @@ pub fn settle_tick(
                             // `overfill_max_accept`.
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                            let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit);
-                            let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
+                            let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit, underfill_tension);
+                            let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit, underfill_tension);
                             let fwd = overfill_max_accept(
                                 h_a, cap_a, h_b, cap_b, cap_b_eff, p_a, base_head,
                                 overfill_ratio, overfill_head_unit,
@@ -5114,8 +5150,8 @@ pub fn settle_tick(
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                             let h_a_live = temp_heights[center_idx];
                             let h_b_live = temp_heights[nb_idx];
-                            let p_a = overfill_pressure_val(h_a_live, cell_capacity, overfill_ratio, overfill_head_unit);
-                            let p_b = overfill_pressure_val(h_b_live, cap_b, overfill_ratio, overfill_head_unit);
+                            let p_a = overfill_pressure_val(h_a_live, cell_capacity, overfill_ratio, overfill_head_unit, underfill_tension);
+                            let p_b = overfill_pressure_val(h_b_live, cap_b, overfill_ratio, overfill_head_unit, underfill_tension);
                             let k_lat_a = k_of_liquidity(cell_liquidity);
                             let k_lat_b = k_of_liquidity(liq_b);
                             let driving_a = h_a_live + gravity_dir.x * GRAVITY_HEAD_SCALE + k_lat_a * p_a + dispersion;
@@ -5269,7 +5305,7 @@ pub fn settle_tick(
                                 if overfill_active {
                                     let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                                     let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                                    let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit);
+                                    let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit, underfill_tension);
                                     let depth_equivalent = p_a / GRAVITY_HEAD_SCALE;
                                     pressure_rate_factor(depth_equivalent)
                                 } else {
@@ -5351,8 +5387,8 @@ pub fn settle_tick(
                                 // gravity-aligned pass uses -- see `overfill_max_accept`.
                                 let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                                 let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                                let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit);
-                                let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit);
+                                let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit, underfill_tension);
+                                let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit, underfill_tension);
                                 let fwd = overfill_max_accept(
                                     h_a, cell_capacity, h_b, cap_b, cap_b_eff, p_a, 0.0,
                                     overfill_ratio, overfill_head_unit,
@@ -6269,6 +6305,7 @@ mod tests {
                 self.pressure_sensitive_flow,
                 self.overfill_pressure,
                 self.overfill_ratio,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
             self.tick_count += 1;
             flow
@@ -6597,6 +6634,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -6668,6 +6706,7 @@ mod tests {
             false,
             false,
             false, false, false, 0.50,
+            0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -6746,6 +6785,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -6851,6 +6891,7 @@ mod tests {
             false,
             false,
             false, false, false, 0.50,
+            0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -7160,6 +7201,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -7258,6 +7300,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -7310,6 +7353,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -7383,6 +7427,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -7487,6 +7532,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -10659,6 +10705,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -10774,6 +10821,7 @@ mod tests {
                     &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false,
                     false,
                     false, false, false, 0.50,
+                    0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 );
             }
 
@@ -10873,6 +10921,7 @@ mod tests {
                 &mut edge_vel_h, &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, i, gravity_dir, false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -10960,6 +11009,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -11046,6 +11096,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -11295,6 +11346,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -11475,6 +11527,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
 
@@ -11617,6 +11670,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             ) as f64;
         }
 
@@ -11860,6 +11914,7 @@ mod tests {
                 false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -12397,6 +12452,7 @@ mod tests {
                 &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, t as u32, gravity_dir, false,
                 false,
                 false, false, false, 0.50,
+                0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();

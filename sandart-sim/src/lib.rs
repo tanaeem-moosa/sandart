@@ -491,6 +491,16 @@ pub struct DrawingSimulation {
     /// remember to ask.
     pub pressure_heatmap_overlay: bool,
 
+    /// Task #70: tension at a completely empty cell, in the same units as the fill term and as one
+    /// row of gravity head. Zero (the default) reproduces the pre-tension behaviour exactly.
+    ///
+    /// The pressure law had compression above capacity and NOTHING below it, so a cell at 0.99 and
+    /// a cell at 0.05 both reported zero pressure and neither resisted being drained. The only
+    /// stable states were "pinned at the ceiling" and "scraped out", which is the bimodal
+    /// population behind the visible checkerboard. This is the missing restoring force. See
+    /// `physics::overfill_pressure_val`.
+    pub underfill_tension: f32,
+
     /// Decile boundaries (9 values, D1..D9) of per-cell SATURATION -- `height / capacity`, where
     /// 1.0 is exactly full and anything above is overfill -- taken over cells that hold material.
     /// Empty at construction and until the first refresh.
@@ -774,6 +784,7 @@ impl DrawingSimulation {
             fresh_pressure_field: false,
             pressure_heatmap_head_field: false,
             pressure_heatmap_overlay: false,
+            underfill_tension: 0.0,
             saturation_deciles: Vec::new(),
             head_field_transport: false,
             pressure_sensitive_flow: false,
@@ -1144,6 +1155,7 @@ impl DrawingSimulation {
                         let cap = physics::cell_capacity_for(self.cell_props[idx * 4 + PROP_WETNESS]);
                         let p_val = physics::overfill_pressure_val(
                             self.heightmap.data[idx], cap, overfill_ratio, overfill_head_unit,
+                            self.underfill_tension,
                         );
                         to_byte(p_val / base_head)
                     })
@@ -1624,6 +1636,7 @@ impl DrawingSimulation {
                     self.pressure_sensitive_flow,
                     self.overfill_pressure,
                     (self.overfill_capacity - 1.0).max(0.0),
+                    self.underfill_tension,
                 );
             }
         } else {

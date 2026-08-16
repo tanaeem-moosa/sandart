@@ -442,6 +442,85 @@ fn spec_task70_saturation_decile_legend() {
     );
 }
 
+/// DOES THE TENSION BRANCH EARN ITS PLACE? Sweeps `underfill_tension` against the two properties
+/// it has to satisfy simultaneously, at the shipped overfill capacity of 1.90.
+///
+/// Zero is included as the control -- it reproduces the pre-tension model exactly, so any row that
+/// fails to beat it is an argument against the parameter, not for tuning it.
+///
+/// Reports, per setting: settled-pool stillness (must approach 0), the settled fill (must approach
+/// 1.0 rather than the 1.90 ceiling), the SPREAD between the bottom and top decile of saturation
+/// (the bimodality this branch exists to remove -- 1.16 on the deployed build), and free-fall
+/// distance over a fixed window (must NOT regress; tension is not allowed to hold water up).
+///
+/// Run with `-- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn diag_task70_underfill_tension_sweep() {
+    let w = 128;
+    let targets = [None; 5];
+    println!("tension | pool amp | pool fill | decile spread | free-fall rows");
+    for &tension in &[0.0f32, 0.25, 1.0, 4.0, 16.0] {
+        // --- settled pool: stillness, fill, and the bimodality spread ---
+        let mut sim = DrawingSimulation::new_with_size(w);
+        sim.sandbox_shape = SandboxShape::Square;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.apply_preset(MaterialMode::Water);
+        sim.overfill_pressure = true;
+        sim.overfill_capacity = 1.90;
+        sim.underfill_tension = tension;
+        sim.pressure_heatmap_overlay = true;
+        sim.initialize_hourglass();
+        for _ in 0..3000 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+        }
+        let probes: Vec<(usize, usize)> = (100..106).map(|y| (64usize, y)).collect();
+        let read = |sim: &DrawingSimulation| -> Vec<f32> {
+            probes.iter().map(|&(x, y)| sim.heightmap.data[y * w + x]).collect()
+        };
+        let mut prev = read(&sim);
+        let (mut amp, mut fill) = (0.0f32, 0.0f32);
+        const WINDOW: usize = 60;
+        for _ in 0..WINDOW {
+            sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+            let now = read(&sim);
+            amp += now.iter().zip(&prev).map(|(a, b)| (a - b).abs()).sum::<f32>();
+            fill += now.iter().sum::<f32>();
+            prev = now;
+        }
+        let n = (WINDOW * probes.len()) as f32;
+        let d = sim.saturation_deciles.clone();
+        let spread = if d.len() == 9 { d[8] - d[0] } else { f32::NAN };
+
+        // --- free fall: a slab dropped into empty space, unchanged by tension ---
+        let mut fall = DrawingSimulation::new_with_size(w);
+        fall.sandbox_shape = SandboxShape::Square;
+        fall.gravity_dir = Vec2::new(0.0, 0.04);
+        fall.apply_preset(MaterialMode::Water);
+        fall.overfill_pressure = true;
+        fall.overfill_capacity = 1.90;
+        fall.underfill_tension = tension;
+        fall.heightmap = Heightmap::new(w, w, 0.0);
+        for y in 20..26 {
+            for x in 56..72 {
+                fall.heightmap.data[y * w + x] = 1.0;
+            }
+        }
+        for _ in 0..200 {
+            fall.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+        }
+        let leading = (0..w)
+            .rev()
+            .find(|&y| (56..72).any(|x| fall.heightmap.data[y * w + x] > 0.1))
+            .unwrap_or(0);
+
+        println!(
+            "{tension:7.2} | {:8.4} | {:9.3} | {:13.3} | {:14}",
+            amp / n, fill / n, spread, leading as i32 - 25
+        );
+    }
+}
+
 /// A RESTING POOL MUST BE STILL. The controlled version of the capacity sweep below.
 ///
 /// The U-tube sweep is confounded: changing `overfill_capacity` changes the entire flow, so

@@ -1169,6 +1169,7 @@ impl DynSim {
             pressure_sensitive_flow,
             false,
             0.50,
+            0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
         );
         self.tick_count += 1;
         flow
