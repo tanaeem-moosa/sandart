@@ -691,6 +691,30 @@ pub fn overfill_acoustic_scale() -> f32 {
 /// Task #70: critical damping applied alongside `overfill_acoustic_scale`.
 pub const OVERFILL_DAMPING: f32 = 0.90;
 
+/// Task #70: a cell's AGGREGATE acceptance budget for one tick -- what arbitration clamps the sum
+/// of all inbound edges against, as distinct from `overfill_max_accept`'s per-EDGE limit.
+///
+/// Both limits are needed and neither implies the other. `overfill_max_accept` guarantees no
+/// SINGLE donor overshoots ("never more than half the imbalance"); it says nothing about three
+/// donors each contributing their own half into the same cell in the same tick. That aggregate is
+/// what this bounds. Setting it to the full overfill headroom `cap_eff - h` -- as the first
+/// version did -- lets a cell take on nearly a whole extra cell of mass per tick from multiple
+/// sources while every contributing edge individually believed it was being conservative.
+///
+/// Nominal room below capacity is granted in full: filling an empty cell is not an overshoot, and
+/// clamping it would slow ordinary flow for no stability gain. Only the OVERFILL portion is
+/// under-relaxed, by the same factor the per-edge compression term uses, so the two agree about
+/// how fast a cell is allowed to approach its compressed state.
+///
+/// Must stay a pure function of the cell -- see the `cell_freecap` contract in the frozen-Jacobi
+/// buffer comment in `settle_tick`. Two different edges write this slot and the surviving value
+/// must not depend on which of them wrote last.
+#[inline]
+#[allow(dead_code)]
+pub fn overfill_cell_budget(h: f32, cap: f32, cap_eff: f32) -> f32 {
+    (cap - h).max(0.0) + OVERFILL_COMPRESSION_RELAXATION * (cap_eff - cap).max(0.0)
+}
+
 /// Task #70: under-relaxation on the compression half of `overfill_max_accept`. Compression is a
 /// correction toward a hydrostatic target, not a transport budget, so taking it in one step
 /// overshoots and rings; a fraction per tick is a relaxation. Applied to both passes.

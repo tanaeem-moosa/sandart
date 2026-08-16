@@ -971,10 +971,40 @@ function updateSaturationDeciles() {
     if (!deciles || deciles.length === 0) {
         // Deciles refresh on a slow cadence and start empty, so this is the normal state for the
         // first fraction of a second after the overlay is switched on -- not an error.
-        out.innerText = '—';
+        out.textContent = '—';
         return;
     }
-    out.innerText = Array.from(deciles).map((v) => v.toFixed(2)).join('  ');
+    out.textContent = '';
+    Array.from(deciles).forEach((v, i) => {
+        const chip = document.createElement('span');
+        // Bucket i is the band ABOVE boundary i, and matches pressure_field_texels' own
+        // bucket -> byte map (1 + bucket * 254 / 9) so the swatch is the colour that band is
+        // actually drawn in.
+        const rgb = pressureRampColor((1 + ((i + 1) * 254) / 9) / 255);
+        chip.style.background = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
+        // Luminance-picked foreground: this ramp runs from a very dark violet to a pale yellow,
+        // so a single fixed text colour is unreadable at one end or the other.
+        const lum = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
+        chip.style.color = lum > 0.55 ? '#111' : '#fff';
+        chip.style.padding = '1px 4px';
+        chip.style.borderRadius = '2px';
+        chip.style.fontSize = '11px';
+        chip.textContent = v.toFixed(2);
+        out.appendChild(chip);
+    });
+}
+
+// The pressure heat-map's colour ramp, mirrored from sandart-render/src/shader.wgsl: deep violet
+// -> hot magenta -> pale warm yellow, piecewise-linear with the knee at 0.5. Kept in sync BY HAND
+// -- if that ramp changes, this legend silently starts lying, which is worse than having no
+// legend, so change both together. Takes the normalised [0,1] texel value, returns 0-255 RGB.
+function pressureRampColor(t) {
+    const cold = [0.20, 0.05, 0.35];
+    const mid = [0.85, 0.10, 0.55];
+    const hot = [1.0, 0.92, 0.55];
+    const x = Math.max(0, Math.min(1, t));
+    const [a, b, k] = x < 0.5 ? [cold, mid, x * 2.0] : [mid, hot, (x - 0.5) * 2.0];
+    return [0, 1, 2].map((c) => Math.round((a[c] + (b[c] - a[c]) * k) * 255));
 }
 
 function updateChambersRowVisibility() {

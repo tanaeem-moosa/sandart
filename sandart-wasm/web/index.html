@@ -872,7 +872,12 @@
                      decoration. 1.00 is exactly full; above that is overfill. -->
                 <div id="saturation-deciles-row" style="display: none;">
                     <div class="field-label">Saturation deciles (h / capacity)</div>
-                    <div id="saturation-deciles-val" class="val-display">—</div>
+                    <!-- Each boundary is drawn on its own decile's colour, sampled from the same
+                         violet->magenta->pale-yellow ramp shader.wgsl uses, so a colour on the
+                         canvas can be read straight off this row. Swatch colour is the PURE ramp;
+                         on the canvas it is blended 0.55 over the material underneath, so
+                         on-screen hues are muted versions of these. -->
+                    <div id="saturation-deciles-val" style="display: flex; flex-wrap: wrap; gap: 2px;">—</div>
                 </div>
                 <!-- Pause / step: reading a heat-map that changes every frame is impossible.
                      Pause freezes physics (render keeps running, so the canvas and overlays
