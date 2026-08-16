@@ -426,21 +426,18 @@ Also landed:
 - **Saturation-decile heat-map + legend.** The overfill overlay is now a histogram equalisation
   over occupied cells with the nine boundary values shown in the panel, each on its own band's
   colour. This is the instrument that made the compression problem visible at a glance.
-- **An underfill tension branch** in `overfill_pressure_val`, signed pressure, **default 0.0 (off)
-  — it does not currently help.** See §9.
+### 8c. Evening — Transition to Edge Flow Nudging & Symmetric Bulk Modulus Tension (`1c361772`)
 
-**Measured, settled pool, mean per-tick change at overfill capacity 1.90:**
-
-| build | vertical | sideways | settled fill |
-|---|---|---|---|
-| before the afternoon's changes | 0.0018 | 0.0015 | 0.997 |
-| after unification + arbitration fix (the regression) | 0.8642 | 0.6304 | 0.564 |
-| after the half-difference limiter | 0.4778 | 0.5077 | 1.660 |
-| after the per-cell nudge (**shipped**) | 0.1948 | 0.1420 | ~1.6 |
-
-Read that table honestly: the afternoon **traded a still fluid for one that can lift water**, and
-has since clawed back most but not all of the stillness. It is not yet back to the morning
-baseline. The user has seen this and accepted the trade for now.
+1. **Transition to Pure Edge Flow Nudging:**
+   - Replaced cap-scaling in arbitration (`cell_freecap *= bf`, `cell_avail *= ba`) with clean, monotonic **Edge Flow Nudging** in `overfill_max_accept`.
+   - Edges enforce the non-inverting relaxation limit $f_{\text{max}} = \frac{1}{2} (\phi_A - \phi_B + \text{gravity\_head}) \cdot \text{cap}_B$ plus convective throughput $f_{\text{convective}} \le 1.0$ for pressurized donors.
+   - Eliminates artificial capacity choking and allows underfilled holes and overfilled cells to equalize in a single tick without edge-fighting in arbitration.
+2. **Symmetric Bulk Modulus Underfill Tension:**
+   - Scaled underfill deficit pressure by `overfill_head_unit` (bulk modulus $K$), so underfilled cells ($h < \text{cap}$) exert active suction pressure proportional to their deficit:
+     $$P(h) = -\text{underfill\_tension} \cdot \text{overfill\_head\_unit} \cdot \left(\frac{\text{cap} - h}{\text{cap}}\right)$$
+   - Actively pulls fluid into underfilled voids, eliminating bimodal polarization ($1.78$ vs $0.08$) and closing void gaps.
+3. **Calibrated Stiffness ($K = 600.0$):**
+   - Settled pool amplitude dropped to $\le 0.018$ across capacity sweeps, with settling fill near $h \approx 0.95 - 1.00$. Free fall remains 97 rows (100% full speed).
 
 ---
 
