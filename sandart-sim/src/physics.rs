@@ -1542,7 +1542,7 @@ fn pressure_project(
     // or this phase touched nothing), the totals `accumulate_edge_totals` produces are still
     // required downstream by arbitration -- see the always-run accumulate pass at the bottom of
     // this function, which is exactly why this is a local instead of an early `return`.
-    let run_solve = !pressure_gate::is_disabled() && !(touched_h.is_empty() && touched_v.is_empty());
+    let run_solve = !pressure_gate::is_disabled() && !overfill_active && !(touched_h.is_empty() && touched_v.is_empty());
 
     let get_cap = |idx: usize| -> f32 {
         let wetness = cell_props[idx * 4 + PROP_WETNESS];
