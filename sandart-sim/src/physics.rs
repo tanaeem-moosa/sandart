@@ -631,7 +631,7 @@ pub const OVERFILL_CEILING_RATIO: f32 = 0.50;
 /// Task #70: Hydrostatic stiffness parameter $k$ for the overfill pressure model.
 /// Calibrated so that steady-state overfill at the base of a deep resting column (depth ~300)
 /// reaches ~5% (0.05) overfill: k = (g * D) / sigma_max = (1.0 * 300) / 0.05 = 6000.
-pub const OVERFILL_STIFFNESS_K: f32 = 6000.0;
+pub const OVERFILL_STIFFNESS_K: f32 = 400.0;
 
 /// Task #70: Yield friction coefficient for granular material under the overfill stress model (Mohr-Coulomb).
 pub const OVERFILL_MOHR_COULOMB_MU: f32 = 0.60;
