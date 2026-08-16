@@ -784,7 +784,7 @@ impl DrawingSimulation {
             fresh_pressure_field: false,
             pressure_heatmap_head_field: false,
             pressure_heatmap_overlay: false,
-            underfill_tension: 0.0,
+            underfill_tension: 1.0,
             saturation_deciles: Vec::new(),
             head_field_transport: false,
             pressure_sensitive_flow: false,

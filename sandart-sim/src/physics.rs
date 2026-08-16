@@ -704,7 +704,7 @@ pub fn overfill_pressure_val(
         return 0.0;
     }
     let deficit = ((cap - h) / cap).clamp(0.0, 1.0);
-    -underfill_tension * deficit
+    -underfill_tension * overfill_head_unit * deficit
 }
 
 /// Task #70: backward-Euler implicit scaling on the liquid wave speed while the overfill model is
@@ -913,16 +913,31 @@ pub const OVERFILL_CONVECTIVE_THROUGHPUT: f32 = 1.0;
 #[allow(clippy::too_many_arguments)]
 pub fn overfill_max_accept(
     h_donor: f32,
-    _cap_donor: f32,
+    cap_donor: f32,
     h_acceptor: f32,
-    _cap_acceptor: f32,
+    cap_acceptor: f32,
     cap_acceptor_eff: f32,
-    _p_donor: f32,
-    _gravity_head: f32,
+    p_donor: f32,
+    gravity_head: f32,
     _overfill_ratio: f32,
     _overfill_head_unit: f32,
 ) -> f32 {
-    (cap_acceptor_eff - h_acceptor).max(0.0).min(h_donor)
+    let fill_donor = if cap_donor > 0.0 { h_donor / cap_donor } else { 0.0 };
+    let fill_acceptor = if cap_acceptor > 0.0 { h_acceptor / cap_acceptor } else { 0.0 };
+
+    // Half-difference monotonic leveling limit (prevents gradient inversion and checkerboarding)
+    let levelling = 0.5 * (fill_donor - fill_acceptor + gravity_head).max(0.0) * cap_acceptor;
+
+    // Pressurized convective throughput (conduits, funnels, rising fronts)
+    let convective = if p_donor > 0.0 {
+        1.0
+    } else {
+        0.0
+    };
+
+    (levelling + convective)
+        .min((cap_acceptor_eff - h_acceptor).max(0.0))
+        .min(h_donor)
 }
 
 /// Task #47 round 3. Graded support fraction for cell `idx`, in `[0, 1]`: how much of what is
@@ -4782,18 +4797,7 @@ pub fn settle_tick(
                         // edges incident on a cell compute the identical value here (a pure function of the
                         // cell and its frozen neighbourhood), so last-write-wins is harmless -- unlike the
                         // per-edge limits that used to be written into these slots.
-                        if overfill_active {
-                            let depth_scale_band = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                            let unit_band = (GRAVITY_HEAD_SCALE / depth_scale_band) * OVERFILL_STIFFNESS_K;
-                            let (ba, bf) = overfill_cell_resistance(center_idx, w, h, shape_mask, &heightmap.data, cell_props,
-                                base_head, overfill_ratio, unit_band, underfill_tension);
-                            let (nba, nbf) = overfill_cell_resistance(nb_idx, w, h, shape_mask, &heightmap.data, cell_props,
-                                base_head, overfill_ratio, unit_band, underfill_tension);
-                            cell_avail[center_idx] *= ba;
-                            cell_freecap[center_idx] *= bf;
-                            cell_avail[nb_idx] *= nba;
-                            cell_freecap[nb_idx] *= nbf;
-                        }
+
                         touched_cells.push(center_idx);
                         touched_cells.push(nb_idx);
                         // Totals deferred: see the unified post-COLLECT `accumulate_edge_totals`
@@ -5486,22 +5490,7 @@ pub fn settle_tick(
                             // rather than `heightmap.data` because this phase runs AFTER phase 0's
                             // apply step, so the frozen snapshot for lateral edges is the
                             // post-gravity state, not the tick's opening state.
-                            if overfill_active {
-                                let depth_scale_band = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                                let unit_band = (GRAVITY_HEAD_SCALE / depth_scale_band) * OVERFILL_STIFFNESS_K;
-                                // `base_head` is local to the gravity-aligned pass; the band's
-                                // elevation term is a property of the grid, not of which pass is
-                                // running, so it is recomputed identically here.
-                                let base_head_band = gravity_dir.y * GRAVITY_HEAD_SCALE;
-                                let (ba, bf) = overfill_cell_resistance(center_idx, w, h, shape_mask, temp_heights, cell_props,
-                                    base_head_band, overfill_ratio, unit_band, underfill_tension);
-                                let (nba, nbf) = overfill_cell_resistance(nb_idx, w, h, shape_mask, temp_heights, cell_props,
-                                    base_head_band, overfill_ratio, unit_band, underfill_tension);
-                                cell_avail[center_idx] *= ba;
-                                cell_freecap[center_idx] *= bf;
-                                cell_avail[nb_idx] *= nba;
-                                cell_freecap[nb_idx] *= nbf;
-                            }
+
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
                             // Totals deferred: see the unified post-COLLECT pass below.
