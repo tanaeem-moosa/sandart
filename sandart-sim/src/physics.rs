@@ -631,7 +631,7 @@ pub const OVERFILL_CEILING_RATIO: f32 = 0.50;
 /// Task #70: Hydrostatic stiffness parameter $k$ for the overfill pressure model.
 /// Calibrated so that steady-state overfill at the base of a deep resting column (depth ~300)
 /// reaches ~5% (0.05) overfill: k = (g * D) / sigma_max = (1.0 * 300) / 0.05 = 6000.
-pub const OVERFILL_STIFFNESS_K: f32 = 400.0;
+pub const OVERFILL_STIFFNESS_K: f32 = 3750.0;
 
 /// Task #70: Yield friction coefficient for granular material under the overfill stress model (Mohr-Coulomb).
 pub const OVERFILL_MOHR_COULOMB_MU: f32 = 0.60;
@@ -1324,11 +1324,9 @@ const GRAIN_JITTER_MAX: f32 = 0.95;
 #[inline]
 fn grain_jitter_strength(cell_props: &[f32], cell: usize) -> f32 {
     let granular_share = (1.0 - liquidity(cell_props[cell * 4 + PROP_WETNESS])).clamp(0.0, 1.0);
-    if granular_share <= 0.0 {
-        return 0.0;
-    }
     let grain_size = cell_props[cell * 4 + PROP_GRAIN_SIZE];
-    (GRAIN_JITTER_SCALE * grain_size).clamp(0.0, GRAIN_JITTER_MAX) * granular_share
+    let gran_s = (GRAIN_JITTER_SCALE * grain_size).clamp(0.0, GRAIN_JITTER_MAX) * granular_share;
+    gran_s.max(0.05)
 }
 
 /// The per-edge multiplicative weight `r` this edge carries into arbitration, in `[0.05, 1.95]`.
