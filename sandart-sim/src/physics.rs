@@ -726,6 +726,124 @@ pub fn overfill_acoustic_scale() -> f32 {
 /// Task #70: critical damping applied alongside `overfill_acoustic_scale`.
 pub const OVERFILL_DAMPING: f32 = 0.90;
 
+/// Task #70: a cell's potential -- fill plus pressure, in the same units the driving head is
+/// assembled from. Gravity is NOT included; callers add the elevation term themselves, because
+/// only they know the two cells' relative rows.
+#[inline]
+pub fn cell_potential(h: f32, cap: f32, overfill_ratio: f32, unit: f32, tension: f32) -> f32 {
+    if cap <= 0.0 {
+        return 0.0;
+    }
+    h / cap + overfill_pressure_val(h, cap, overfill_ratio, unit, tension)
+}
+
+/// `d(potential)/dh` at the cell's current fill -- how much potential one unit of mass buys here.
+///
+/// This is what converts a potential TARGET into a mass BUDGET, and it is why a compressed cell is
+/// self-limiting: above capacity the compression term's derivative is enormous, so a small mass
+/// change covers the whole remaining potential gap and the budget collapses to near zero. Below
+/// capacity the slope is just `1/cap` and a cell can move freely, which is what keeps ordinary
+/// flow and free fall at full speed.
+#[inline]
+pub fn potential_slope(h: f32, cap: f32, overfill_ratio: f32, unit: f32) -> f32 {
+    if cap <= 0.0 {
+        return 1.0;
+    }
+    let o = relative_overfill(h, cap);
+    if o <= 0.0 {
+        return 1.0 / cap;
+    }
+    let o_max = overfill_ratio.max(0.01);
+    let r = (o / o_max).clamp(0.0, 0.999);
+    let d = 1.0 - r;
+    (1.0 + unit / (d * d)) / cap
+}
+
+/// Task #70: how strongly a cell RESISTS being pushed further from its own neighbourhood.
+///
+/// Edges decide the flow that is WANTED; cells decide the flow that HAPPENS. `cell_avail` has
+/// always been the cell half of that split, but it only ever said "do not go below zero". This is
+/// the same idea carried further: a cell whose potential is already above the gravity-adjusted
+/// average of its neighbours should find it progressively harder to take on MORE, and one already
+/// below should find it progressively harder to give away more. Crossing the neighbourhood average
+/// does not relax an imbalance, it INVERTS it -- 1.1 over 0.7 becoming 0.1 over 1.7 -- and an
+/// inverted gradient next tick is an oscillation.
+///
+/// A NUDGE, NOT A CAP, and the difference is not cosmetic. The first version of this returned a
+/// hard mass bound: "you may move at most as far as the neighbourhood average". That FROZE the
+/// simulation. A cell sitting exactly at its neighbourhood average gets a budget of zero, and a
+/// body of still air is trivially at its own average, so nothing could ever start moving.
+/// Measured: free fall went from 97 rows to 1. So the return is a multiplier in `(0, 1]` that
+/// never reaches zero -- moving further from the neighbourhood is non-linearly hard, never
+/// forbidden -- and how an oversubscribed budget is then divided is left to the proportional,
+/// jittered arbitration that already exists.
+///
+/// Quadratic in the excess, so small departures are nearly free (ordinary flow, free fall, and a
+/// settling free surface all involve cells legitimately ahead of their neighbours) while large
+/// ones are strongly damped.
+///
+/// Air neighbours participate at their own potential rather than being skipped, because a free
+/// surface open to air is a real boundary condition. Cells outside the mask are skipped -- a wall
+/// imposes no potential, it simply is not there.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+pub fn overfill_cell_resistance(
+    idx: usize,
+    w: usize,
+    grid_h: usize,
+    shape_mask: &[u8],
+    heights: &[f32],
+    cell_props: &[f32],
+    base_head: f32,
+    _overfill_ratio: f32,
+    _unit: f32,
+    _tension: f32,
+) -> (f32, f32) {
+    let x = idx % w;
+    let y = idx / w;
+    let cap_i = cell_capacity_for(cell_props[idx * 4 + PROP_WETNESS]);
+    // FILL, not full potential. The potential is dominated by the compression term, which runs
+    // 1e4..1e7 while gravity is 1.0 and fill spans 0..1, so any softness scale expressed in
+    // potential units is saturated and the resistance degenerates to on/off. Fill is the unit the
+    // overshoot is actually stated in -- 1.1 over 0.7 becoming 0.1 over 1.7 -- and is comparable
+    // with `base_head` by construction.
+    let phi_i = heights[idx] / cap_i.max(1e-6);
+
+    let mut sum = 0.0f32;
+    let mut count = 0u32;
+    // `dy` is the neighbour's row offset. A neighbour ABOVE (dy = -1) sits one row higher, so its
+    // potential arrives here boosted by one row of gravity; one BELOW arrives reduced; lateral
+    // neighbours arrive unchanged. Same sign convention the vertical driving head uses, where the
+    // upper cell carries `+ base_head`.
+    for (dx, dy) in [(0i32, -1i32), (0, 1), (-1, 0), (1, 0)] {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= grid_h as i32 {
+            continue;
+        }
+        let n = ny as usize * w + nx as usize;
+        if shape_mask[n] == crate::MASK_OUTSIDE {
+            continue;
+        }
+        let cap_n = cell_capacity_for(cell_props[n * 4 + PROP_WETNESS]);
+        sum += (heights[n] / cap_n.max(1e-6)) - dy as f32 * base_head;
+        count += 1;
+    }
+    if count == 0 {
+        return (1.0, 1.0);
+    }
+
+    let target = sum / count as f32;
+    let scale = OVERFILL_BAND_SOFTNESS.max(1e-6);
+    let soften = |excess: f32| -> f32 {
+        let e = (excess / scale).max(0.0);
+        1.0 / (1.0 + e * e)
+    };
+    // Above its neighbourhood: donating is free, ACCEPTING more is what gets hard. Below it: the
+    // mirror.
+    (soften(target - phi_i), soften(phi_i - target))
+}
+
 /// Task #70: a cell's AGGREGATE acceptance budget for one tick -- what arbitration clamps the sum
 /// of all inbound edges against, as distinct from `overfill_max_accept`'s per-EDGE limit.
 ///
@@ -749,6 +867,11 @@ pub const OVERFILL_DAMPING: f32 = 0.90;
 pub fn overfill_cell_budget(h: f32, cap: f32, cap_eff: f32) -> f32 {
     (cap - h).max(0.0) + OVERFILL_COMPRESSION_RELAXATION * (cap_eff - cap).max(0.0)
 }
+
+/// Task #70: potential scale over which `overfill_cell_resistance` softens, in the same units as
+/// the fill term and one row of gravity head. At exactly this much excess a cell's budget in the
+/// worsening direction is halved.
+pub const OVERFILL_BAND_SOFTNESS: f32 = 0.5;
 
 /// Task #70: under-relaxation on the compression half of `overfill_max_accept`. Compression is a
 /// correction toward a hydrostatic target, not a transport budget, so taking it in one step
@@ -4734,6 +4857,22 @@ pub fn settle_tick(
                         cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
                         cell_avail[nb_idx] = h_b;
                         cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
+                        // Cell-level band: edges decide the flow WANTED, cells the flow that HAPPENS. Both
+                        // edges incident on a cell compute the identical value here (a pure function of the
+                        // cell and its frozen neighbourhood), so last-write-wins is harmless -- unlike the
+                        // per-edge limits that used to be written into these slots.
+                        if overfill_active {
+                            let depth_scale_band = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                            let unit_band = (GRAVITY_HEAD_SCALE / depth_scale_band) * OVERFILL_STIFFNESS_K;
+                            let (ba, bf) = overfill_cell_resistance(center_idx, w, h, shape_mask, &heightmap.data, cell_props,
+                                base_head, overfill_ratio, unit_band, underfill_tension);
+                            let (nba, nbf) = overfill_cell_resistance(nb_idx, w, h, shape_mask, &heightmap.data, cell_props,
+                                base_head, overfill_ratio, unit_band, underfill_tension);
+                            cell_avail[center_idx] *= ba;
+                            cell_freecap[center_idx] *= bf;
+                            cell_avail[nb_idx] *= nba;
+                            cell_freecap[nb_idx] *= nbf;
+                        }
                         touched_cells.push(center_idx);
                         touched_cells.push(nb_idx);
                         // Totals deferred: see the unified post-COLLECT `accumulate_edge_totals`
@@ -5422,6 +5561,26 @@ pub fn settle_tick(
                             cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
                             cell_avail[nb_idx] = avail_b;
                             cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
+                            // Cell-level band -- see the gravity-aligned pass. Reads `temp_heights`
+                            // rather than `heightmap.data` because this phase runs AFTER phase 0's
+                            // apply step, so the frozen snapshot for lateral edges is the
+                            // post-gravity state, not the tick's opening state.
+                            if overfill_active {
+                                let depth_scale_band = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+                                let unit_band = (GRAVITY_HEAD_SCALE / depth_scale_band) * OVERFILL_STIFFNESS_K;
+                                // `base_head` is local to the gravity-aligned pass; the band's
+                                // elevation term is a property of the grid, not of which pass is
+                                // running, so it is recomputed identically here.
+                                let base_head_band = gravity_dir.y * GRAVITY_HEAD_SCALE;
+                                let (ba, bf) = overfill_cell_resistance(center_idx, w, h, shape_mask, temp_heights, cell_props,
+                                    base_head_band, overfill_ratio, unit_band, underfill_tension);
+                                let (nba, nbf) = overfill_cell_resistance(nb_idx, w, h, shape_mask, temp_heights, cell_props,
+                                    base_head_band, overfill_ratio, unit_band, underfill_tension);
+                                cell_avail[center_idx] *= ba;
+                                cell_freecap[center_idx] *= bf;
+                                cell_avail[nb_idx] *= nba;
+                                cell_freecap[nb_idx] *= nbf;
+                            }
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
                             // Totals deferred: see the unified post-COLLECT pass below.
