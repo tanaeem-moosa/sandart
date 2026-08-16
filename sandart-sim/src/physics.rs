@@ -1469,7 +1469,13 @@ fn flux_edge_apply(
     total_flow: &mut f32,
     flow_occurred: &mut bool,
 ) {
-    *v_e = flux;
+    let is_liquid = cell_props[a_idx * 4 + PROP_WETNESS] > 0.5 || cell_props[b_idx * 4 + PROP_WETNESS] > 0.5;
+    if is_liquid {
+        const LIQUID_VEL_EMA_ALPHA: f32 = 0.30;
+        *v_e = (1.0 - LIQUID_VEL_EMA_ALPHA) * (*v_e) + LIQUID_VEL_EMA_ALPHA * flux;
+    } else {
+        *v_e = flux;
+    }
 
     // Below this the transfer is pure f32 noise; skipping it is still exactly conservative
     // (nothing is added or removed), it just avoids an advect_properties call per edge per tick.
