@@ -5,13 +5,16 @@ assumes you can read code and does not re-explain what the code already says. Wh
 is the things the code cannot tell you: which experiments already failed, which hypotheses are
 already dead, and which passing tests are lying to you.
 
-**Deployed:** `origin/main` = `470323d4`. Confirm the deploy before believing it — read
-`origin/gh-pages`'s tip message for the sha it was built from (see §1). Confirm the deploy before believing it — read
-`origin/gh-pages`'s tip message for the sha it was built from (see §1).
+**Deployed:** `origin/main` = `394eed59`, confirmed serving from `gh-pages`. For any later sha,
+confirm the deploy rather than assuming it — read `origin/gh-pages`'s tip message for the sha it was
+built from (see §1).
 Live at <https://tanaeem-moosa.github.io/sandart/>.
 
-**If you read only one thing, read §9, then §10.** The oscillation defect that dominated this project for
-two days is FIXED, and the fix was structural rather than a constant: every overfill edge used to
+**If you are here to build adaptive overclocking, read §11's brief on it first — the scheduler
+already exists, it currently adapts only downward, and there is a live aliasing hazard.**
+
+**Otherwise, if you read only one thing, read §9, then §10.** The oscillation defect that dominated
+this project for two days is FIXED, and the fix was structural rather than a constant: every overfill edge used to
 compute `flux = c_sq * (potential difference)`, which is a gain times a pressure, and the gain was
 three orders of magnitude too large. It is now a solved mass transfer. Settled churn went from
 0.22234 to 0.00002 per cell per tick. §9 records the four things that did NOT work first, because
@@ -402,7 +405,7 @@ bandaid" and "a cap that is wrong is not self-correcting, a nudge is".
 
 ## 8. Session log
 
-Four sessions across two days, in order: 8a, 8b and 8d on 2026-08-16, then 8e on 2026-08-17.
+Five sessions across two days, in order: 8a, 8b and 8d on 2026-08-16, then 8e and 8f on 2026-08-17.
 
 **Earlier entries are kept VERBATIM with corrections marked inline, not rewritten.** Several of
 their claims are now known false, and a reader who finds them deleted will simply re-derive them
@@ -545,6 +548,24 @@ observations together.
 - **The compensation reached the granular blend for the first time.** Dry sand was carrying the
   full stiff pressure term through an UNDAMPED integrator (`c_sq = 1.0, damping = 1.0`). Settled
   dry sand at capacity 1.00 went from 0.0426 of permanent churn to exactly 0.00000.
+
+---
+
+### 8f. 2026-08-17 later — the velocity EMA off, and what it was really doing (`1d02f66b` -> `394eed59`)
+
+The user photographed a multi-neck vessel at 512 and asked about three things at once: a falling
+stream that spread sideways as it descended, regular ribs travelling down it with new ones emerging
+at the neck, and cone-shaped piles under each neck instead of a level pool. One defect. See §10.
+
+The decisive fact came from the user, not the instruments: *"they travel down with the flow and new
+one comes out."* A travelling pattern is advected material; a standing one is resonance. That single
+answer ruled out the entire resonance family of hypotheses in one line, and it is not something a
+still screenshot can settle — ask.
+
+Also in this entry: the superseded machinery was deleted (§9), and the EMA's arithmetic was pinned
+down after this agent claimed it was carrying material up the riser. It cannot. Its steady-state
+gain is `(alpha*damping)/(1 - damping*(1-alpha))`, which is 0.9363 at alpha 0.30 against 0.9800 at
+1.00 — strictly a lag. The user caught that with "is it not primarily for slowing down things?"
 
 ---
 
@@ -807,13 +828,53 @@ number in the doc comment (§1's rule); do not weaken any of them.
 3. **Compressed liquid.** Effectively resolved by §9 and now under user control via the stiffness
    dial. Nothing to do unless the visual feel is wrong.
 
-### Deferred by explicit user decision
+### ADAPTIVE OVERCLOCKING — read this before starting
 
-**Adaptive block sub-stepping.** The user's reasoning still stands and should be honoured: do not
-build it until the oscillation is understood, because if the sub-step period aliases against an
-oscillation period it makes things worse. The oscillation is now understood and largely gone, so
-this can be reconsidered — but on its own merits, as a performance change, and with the rest
-instrument watched before and after.
+The user intends to attempt this next (2026-08-17), possibly in another tool. It was deferred once,
+on the user's reasoning that a sub-step period aliasing against an oscillation period would make
+things worse. That objection is now **partly** discharged and partly sharper than before. Read all
+four points.
+
+**1. A scheduler already exists, and it only adapts DOWNWARD.** `budget_n` (`lib.rs`, bottom of
+`update`) is a frame-time governor: it starts at 256, steps down by 4 per frame while the EMA frame
+time exceeds `target * 1.05`, and creeps back up by 1. `BUDGET_MIN` is 32. `block_size` is
+`grid_size / 32`, so the block grid is **always 32x32 = 1024 blocks** at any resolution — that is
+deliberate, so `budget_n` means the same thing everywhere. Blocks carry a four-level
+`BlockActivity` (Inactive / Slow / Medium / Fast). Overclocking is the inverse operation on the same
+machinery; build it there, not beside it.
+
+**2. Measure which ceiling is actually binding FIRST.** There are two and they are confusable:
+
+- the `±1.0` clamp in `flux_edge_candidate` — one cell of mass per edge per tick (§10, measured:
+  the neck passes ~5 mass/tick through 5 cells);
+- `budget_n` starvation — at 512 the user sees 9-11 fps against a ~17 ms target, i.e. ~6x over
+  budget, which drives `budget_n` toward `BUDGET_MIN`. If it settles anywhere near 32 of 1024 then
+  most active blocks are being SKIPPED most frames, and that dominates everything else.
+
+This has not been measured in the browser, only inferred, and it matters enormously which it is.
+Sub-stepping a starved scheduler makes the disparity between served and skipped blocks worse, not
+better. **Add a readout of `budget_n` and the active-block count to the UI and look at it before
+writing any scheduling code.**
+
+**3. The aliasing hazard is REAL AGAIN, and worse than when it was first raised.** Turning the
+velocity EMA off re-excited an edge-level alternating mode: velocity parity power 0.87 against
+~0.05 with the filter on (§10). A per-block *variable* tick count can beat against a period-2 mode
+in a way a uniform sub-step cannot. So:
+
+- **uniform sub-stepping** (n solver ticks per rendered frame, same n everywhere) carries no
+  aliasing risk and is the safe first step;
+- **adaptive** (n varying per block) does, and needs
+  `diag_task70_rest_color_mixing_and_checkerboard` watched before and after — specifically the
+  `vpar` column, which is the direct read of that mode.
+
+**4. The model is on your side here, and §4 says why.** A partially relaxed overfill field is a
+VALID state, whereas a partially converged equilibrium solve is garbage. That is the whole #68
+argument for why overfill is compatible with a block scheduler and the head field was not. Variable
+work per block is legitimate under this model in a way it would not have been under the old one.
+
+Guard rails that must hold throughout: mass conservation (asserted in several specs), and
+`cargo test -p sandart-sim --release --test perfect_simulation_determinism`. `last_simulated_ticks`
+already exists to let a block know how much simulated time it missed.
 
 ### Smaller things
 
