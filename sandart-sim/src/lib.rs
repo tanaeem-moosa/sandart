@@ -1202,6 +1202,7 @@ impl DrawingSimulation {
     /// reader can already see, instead of how saturated the material is, which is the question.
     fn refresh_saturation_deciles(&mut self) {
         const OCCUPIED: f32 = 1e-3;
+        const MIN_BAND_SIZE: f32 = 0.05;
         let mut sat: Vec<f32> = self
             .heightmap
             .data
@@ -1220,11 +1221,21 @@ impl DrawingSimulation {
         }
         sat.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
+        let max_val = sat[sat.len() - 1];
+
         self.saturation_deciles.clear();
+        let mut prev = sat[0];
         for d in 1..10usize {
             // Nearest-rank: the value at the d/10 position of the sorted sample.
             let rank = (d * sat.len()) / 10;
-            self.saturation_deciles.push(sat[rank.min(sat.len() - 1)]);
+            let raw_val = sat[rank.min(sat.len() - 1)];
+            let val = if d == 1 {
+                raw_val
+            } else {
+                raw_val.max(prev + MIN_BAND_SIZE).min(max_val)
+            };
+            self.saturation_deciles.push(val);
+            prev = val;
         }
     }
 

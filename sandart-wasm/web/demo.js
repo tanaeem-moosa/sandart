@@ -990,6 +990,7 @@ function updateSaturationDeciles() {
         chip.style.borderRadius = '2px';
         chip.style.fontSize = '11px';
         chip.textContent = v.toFixed(2);
+        chip.title = `Band ${i + 1}: ${v.toFixed(2)} saturation (top ${(10 - i) * 10}% rank)`;
         out.appendChild(chip);
     });
 }
