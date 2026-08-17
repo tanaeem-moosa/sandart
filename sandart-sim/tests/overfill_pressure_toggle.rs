@@ -807,3 +807,64 @@ fn diag_task70_rest_color_mixing_and_checkerboard() {
         }
     }
 }
+
+/// GUARD FOR THE STIFFNESS CHOICE. Stillness is trivially achievable by making the fluid slow, so
+/// no stiffness may be picked on `diag_task70_rest_color_mixing_and_checkerboard` alone. This is
+/// the opposing measurement: how fast material actually moves.
+///
+///   spread   half-width of the puddle 300 ticks after a tall narrow column is released onto a
+///            flat floor. This is the "poured water piles into a pyramid instead of spreading"
+///            defect as a number — bigger is better.
+///   peak     tallest column in the puddle. Smaller is better; a pyramid reads high.
+///   fall     rows a single released parcel descends in 100 ticks through empty space. This is the
+///            guard rail: free fall must not be throttled by anything done to the overfill model.
+#[test]
+#[ignore]
+fn diag_task70_spread_and_fall() {
+    let w = 128usize;
+    let targets = [None; 5];
+    println!("overfill cap | spread | peak | fall");
+    for &(on, cap) in &[(false, 1.00f32), (true, 1.00), (true, 1.10), (true, 1.90)] {
+        let mut sim = DrawingSimulation::new_with_size(w);
+        sim.sandbox_shape = SandboxShape::Square;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.apply_preset(MaterialMode::Water);
+        sim.overfill_pressure = on;
+        sim.overfill_capacity = cap;
+        sim.heightmap = Heightmap::new(w, w, 0.0);
+        for y in 40..100 {
+            for x in 60..68 {
+                sim.heightmap.data[y * w + x] = 1.0;
+            }
+        }
+        for _ in 0..300 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+        }
+        let col_mass = |sim: &DrawingSimulation, x: usize| -> f32 {
+            (0..w).map(|y| sim.heightmap.data[y * w + x]).sum()
+        };
+        let spread = (0..w).filter(|&x| col_mass(&sim, x) > 0.5).count();
+        let peak = (0..w).map(|x| col_mass(&sim, x)).fold(0.0f32, f32::max);
+
+        let mut fs = DrawingSimulation::new_with_size(w);
+        fs.sandbox_shape = SandboxShape::Square;
+        fs.gravity_dir = Vec2::new(0.0, 0.04);
+        fs.apply_preset(MaterialMode::Water);
+        fs.overfill_pressure = on;
+        fs.overfill_capacity = cap;
+        fs.heightmap = Heightmap::new(w, w, 0.0);
+        for y in 20..26 {
+            for x in 56..72 {
+                fs.heightmap.data[y * w + x] = 1.0;
+            }
+        }
+        for _ in 0..100 {
+            fs.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+        }
+        let fall = (0..w)
+            .rev()
+            .find(|&y| (56..72).any(|x| fs.heightmap.data[y * w + x] > 0.1))
+            .unwrap_or(0);
+        println!("{on:>8} {cap:.2} | {spread:6} | {peak:4.0} | {fall:4}");
+    }
+}

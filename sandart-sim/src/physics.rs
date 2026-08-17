@@ -726,6 +726,44 @@ pub fn overfill_acoustic_scale() -> f32 {
 /// Task #70: critical damping applied alongside `overfill_acoustic_scale`.
 pub const OVERFILL_DAMPING: f32 = 0.90;
 
+/// Task #70: **the single definition of the overfill solver's `(c_sq, damping)` pair for BOTH
+/// passes.** The gravity-aligned pass and the lateral pass must integrate the overfill spring with
+/// identical parameters; the ONLY thing that may differ between them is the hydrostatic step,
+/// which enters as `overfill_max_accept`'s `gravity_head` and as the `+ base_head` term in the
+/// driving head. Gravity is what makes the two directions different — not the wave speed, and not
+/// the damping.
+///
+/// This exists because that alignment has now been broken twice. The first time, the two passes
+/// derived `overfill_acoustic_scale` from different denominators (see its doc comment). The second
+/// time, the lateral pass was given the raw `wave_params` pair to cure a visible defect — poured
+/// water piling into a pyramid instead of spreading across a floor — which left lateral running
+/// 5.9x the vertical wave speed with 0.98 damping against 0.90. Both times the fix was written at
+/// one of the two sites and the other silently kept its own copy.
+///
+/// Note the two are not in tension once the stiffness is calibrated: `overfill_acoustic_scale` is
+/// `1 / (1 + sqrt(K / GRAVITY_HEAD_SCALE))`, so it only throttles the wave speed hard because `K`
+/// is large. Lower `K` and this approaches 1.0 — the passes stay aligned AND the lateral pass
+/// recovers nearly its full spreading speed. Uncompensating one axis buys the same spreading by
+/// removing the stability margin from it, which is not the same thing.
+///
+/// `overfill_active == false` returns the legacy pair untouched, so the default (non-overfill)
+/// simulation path is bit-identical to before this function existed.
+#[inline]
+pub fn overfill_wave_params(
+    material_c_sq: f32,
+    material_damping: f32,
+    overfill_active: bool,
+) -> (f32, f32) {
+    if overfill_active {
+        (
+            material_c_sq * overfill_acoustic_scale(),
+            material_damping.min(OVERFILL_DAMPING),
+        )
+    } else {
+        (material_c_sq, material_damping)
+    }
+}
+
 /// Task #70: a cell's potential -- fill plus pressure, in the same units the driving head is
 /// assembled from. Gravity is NOT included; callers add the elevation term themselves, because
 /// only they know the two cells' relative rows.
@@ -4731,14 +4769,11 @@ pub fn settle_tick(
                         const GRANULAR_FALL_C_SQ: f32 = 1.0;
                         const GRANULAR_FALL_DAMPING: f32 = 1.0;
                         let (liquid_c_sq, liquid_damping) = wave_params(wetness);
-                        let (c_sq, damping) = if overfill_active && cell_liquidity > 0.5 {
-                            (liquid_c_sq * overfill_acoustic_scale(), OVERFILL_DAMPING)
-                        } else {
-                            (
-                                GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity,
-                                GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity,
-                            )
-                        };
+                        let (c_sq, damping) = overfill_wave_params(
+                            GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity,
+                            GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity,
+                            overfill_active,
+                        );
                         let pressure_weight = if pressure_sensitive_flow
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
@@ -5378,7 +5413,10 @@ pub fn settle_tick(
                             }
                         } else {
                             let (liquid_c_sq, liquid_damping) = wave_params(wetness);
-                            let (c_sq, damping) = (liquid_c_sq, liquid_damping);
+                            // Same call, same arguments, as the gravity-aligned pass. See
+                            // `overfill_wave_params` for why this must not be forked again.
+                            let (c_sq, damping) =
+                                overfill_wave_params(liquid_c_sq, liquid_damping, overfill_active);
                             // TASK #63: pressure-sensitive flow rate -- see the phase-0 vertical
                             // site's own comment for the full reasoning (the flux and not `c_sq`;
                             // donor and not average; free fall exempt by construction; the driving
