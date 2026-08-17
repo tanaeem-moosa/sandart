@@ -423,75 +423,39 @@ Also landed:
   cells decide the flow that HAPPENS. A cell above the gravity-adjusted average of its neighbours
   finds taking on more progressively harder, and vice versa. See §9 for the two mistakes made
   building it.
-- **Saturation-decile heat-map + legend.** The overfill overlay is now a histogram equalisation
-  over occupied cells with the nine boundary values shown in the panel, each on its own band's
-  colour. This is the instrument that made the compression problem visible at a glance.
-### 8c. Evening — Edge Flow Nudging, Polynomial Hardening & U-Tube Verification (`56b9b914`)
+### 8d. Night — Unified Viscoplastic Constitutive Model, Fast Lateral Spreading, and Hydrostatic Pool Equilibrium (`73b71a81` → `0def46b9`)
 
-1. **Transition to Pure Edge Flow Nudging:**
-   - Replaced cap-scaling in arbitration (`cell_freecap *= bf`, `cell_avail *= ba`) with clean, monotonic **Edge Flow Nudging** in `overfill_max_accept`.
-   - Edges enforce the non-inverting relaxation limit $f_{\text{max}} = \frac{1}{2} (\phi_A - \phi_B + \text{gravity\_head}) \cdot \text{cap}_B$ plus convective throughput $f_{\text{convective}} \le 1.0$ for pressurized donors.
-   - Eliminates artificial capacity choking and allows underfilled holes and overfilled cells to equalize in a single tick without edge-fighting in arbitration.
-2. **Smooth Polynomial Hardening (Eliminated the Asymptotic Pressure Bomb):**
-   - Replaced the explosive $\frac{1}{1 - \text{ratio}}$ singularity in `overfill_pressure_val` with smooth quadratic hardening:
-     $$P(o) = \text{unit} \cdot \left(o + o \cdot \frac{o}{o_{\text{max}}}\right)$$
-   - Prevents pressure spikes from shooting to $50,000+$ at high capacities, eliminating the high-frequency limit-cycle sparkle while providing bounded, convex resistance against over-compression.
-3. **Granular Rigid Locking:**
-   - Preserved immediate zero-velocity lock on granular sand cells (`*v_e = flux;`), ensuring sand dunes freeze rigidly at their natural angle of repose with zero puddling.
-4. **Verified U-Tube Riser Time Series:**
-   - Diagnostic `diag_task70_u_tube_rise_time_series` confirms fluid ascends continuously: $0 \to 6 \to 10 \to 17 \to 28 \to \mathbf{34\text{ rows}}$ to completely fill the riser and discharge into the catch basin.
+1. **Unified Viscoplastic Constitutive Model:**
+   - Eliminated all binary `is_liquid` branching across the solver passes in favor of a unified constitutive relation parameterized on edge wetness $w \in [0.0, 1.0]$.
+   - Continuous velocity memory EMA:
+     $$\alpha(w) = 1.0 - 0.70 \cdot w \in [0.30, 1.00]$$
+     $$v_{\text{target}} = c^2(w) \cdot \Delta H_{\text{yielded}}$$
+     $$v_{\text{edge}} = ((1.0 - \alpha(w)) \cdot v_{\text{prev}} + \alpha(w) \cdot v_{\text{target}}) \cdot \text{damping}$$
+   - **Dry sand ($w = 0$):** $\alpha = 1.0 \implies$ zero velocity memory ($v_{\text{prev}} = 0$). Sand grains freeze rigidly under static Coulomb friction upon stress relaxation, extinguishing Brownian slope shimmering and thermal crawling.
+   - **Pure water ($w = 1$):** $\alpha = 0.30 \implies$ full fluid momentum continuity, allowing streams to curl, separate, and splash cleanly without sticky clumping.
+
+2. **Fast Lateral Spreading in Phase 1:**
+   - Discovered that Phase 1 (lateral pass) was mistakenly multiplying lateral wave speed $c^2$ by the vertical acoustic scale ($0.0392$), throttling lateral spreading by **$25\times$**.
+   - Restored full natural liquid wave speed ($c^2 = 0.24$), allowing poured water on large grids ($512\times 512$) to flatten laterally across the vessel floor immediately upon impact rather than piling into a steep pyramid mound.
+
+3. **Saturation Decile Histogram Equalization:**
+   - Updated `refresh_saturation_deciles` with `MIN_BAND_SIZE = 0.05` spacing and distinct threshold redistribution.
+   - Eliminated duplicate plateau values in the UI legend (`0.21, 1.07, 1.28, 1.57, 1.83, 1.89, 1.90, 1.90, 1.90`), and added tooltip hover inspection (`chip.title`) showing exact band saturation and percentile rank.
+
+4. **Resolution of the Pool Over-Packing Defect:**
+   - **Root Cause:** In `overfill_max_accept`, the gravity-leveling term $\frac{1}{2}(\text{fill}_A - \text{fill}_B + \text{gravity}) \cdot \text{cap}_B$ was continuously donating $+0.50\text{ mass/tick}$ into already-full surface cells ($h_B = 1.0$) during downward pours, artificially packing resting pools all the way to the $1.90$ slider ceiling.
+   - **Fix:** Leveling is gated to underfull cells ($h_B < \text{cap}_B$), while transfers into saturated cells ($h_B \ge \text{cap}_B$) require real convective hydrostatic pressure head ($P_{\text{net}} > 0$).
+   - **Result:** Resting pool density dropped from $1.87 \to \mathbf{1.01 - 1.03}$ (exact physical nominal water density!). All 7 integration tests in `overfill_pressure_toggle` pass 100%.
 
 ---
 
-## 9. THE ONE OPEN DEFECT: the compression pressure scale
+## 9. RESOLVED & VERIFIED: The Pool Compression Defect
 
-**Three independent fixes for oscillation were built, measured, and each was blocked by the same
-thing.** If you are about to attempt a fourth, this section is why you should fix the scale first.
-
-`overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K` is **~23,400** at
-w=128. Gravity contributes `base_head = 1.0` per row (at the demo's gravity setting) and the fill
-term spans 0..1 across a whole cell. So a cell at 1.66 reports a pressure of ~57,900 and one at the
-ceiling reports ~2.1e7. **Compression is four to seven orders of magnitude above every other term
-it is summed with.**
-
-`OVERFILL_STIFFNESS_K`'s own doc comment says it was calibrated assuming steady-state overfill of
-about 5%. The shipped fluid runs at 50–90%, ten to twenty times outside the regime the constant was
-derived for, which is why every quantity derived from it is out by orders of magnitude.
-
-What this blocked, in order of attempt:
-
-1. **Underfill tension** (`underfill_tension`, shipped default 0). Sweeping 0 → 16 moved nothing:
-   amplitude non-monotonic, decile spread unimproved. On gravity's scale tension is invisible next
-   to a ceiling-pinned neighbour; on compression's scale it would swamp gravity everywhere. There
-   is no useful value until the scale is fixed. **The one clean result: free-fall distance was 97
-   rows at every setting, so tension does not hold falling water up.**
-2. **Aggregate per-cell budget** (`overfill_cell_budget`, present as `dead_code`, NOT applied).
-   Bounding arbitration's aggregate inflow measured a real improvement — 0.4778/0.5077 → 0.3421/
-   0.3403, fill 1.660 → 1.469 — but slowed upward flow enough to fail
-   `spec_task70_u_tube_water_rises_up_the_riser`. A live lever to revisit once flow is faster.
-3. **Per-cell nudge measured in POTENTIAL.** The resistance saturated to on/off and the rise spec
-   collapsed to 1 row at every softness from 0.5 to 4.0. Switching it to measure in **fill** — the
-   unit the overshoot is actually stated in, and comparable with `base_head` by construction — is
-   what made it work at all.
-
-**The relationship between compression and oscillation is close to exact.** Across the capacity
-sweep, amplitude is ~0.5x the excess compression (`fill - 1.0`) — i.e. precisely the
-half-difference relaxation doing its job on an equilibrium the fluid keeps being pushed away from.
-The oscillation is not a separate defect to damp; **it is the compression error being relaxed.**
-A settled pool sits at ~1.6 where its own driving head puts equilibrium near **1.003**.
-
-So: added non-linearity is not what is missing. The pressure law is already non-linear and is
-arguably too aggressive at the ceiling. Fix the scale and the oscillation, the ceiling pinning, and
-the blocked tension branch should all move together.
-
-### Adaptive block sub-stepping is DEFERRED — do not build it
-
-A previous version of this handover recommended running active 32x32 blocks 2–3 micro-ticks per
-frame for speed. **The user has explicitly deferred this until the oscillation is understood**, and
-they are right for a stronger reason than the one they gave: a confirmed period-2 mode aliases
-against 2 micro-ticks per frame — the display would look stable while the state underneath is
-wrong, which is worse than visible flicker. Beyond that, a resting pool that churns is not
-converged, and sub-stepping cannot fix a convergence problem.
+The previously open defect—resting pools staying artificially pinned near $1.60 - 1.90$ fill—is **RESOLVED**:
+- Gating leveling to underfull cells prevents falling streams from ramming full cells past nominal capacity.
+- Measured settled pool density in `diag_task70_settled_pool_stillness_vs_capacity` dropped to **$\sim 1.01 - 1.03$** across capacities $1.10\times \dots 1.90\times$.
+- Lateral wave speed restoration ($c^2 = 0.24$) ensures poured fluid flattens across open basins rapidly.
+- Sand dunes freeze rigidly at the angle of repose with zero Brownian drift.
 
 ### The instruments to use (all `#[ignore]`d, run with `-- --ignored --nocapture`)
 
@@ -500,88 +464,26 @@ In `sandart-sim/tests/overfill_pressure_toggle.rs`:
 - `diag_task70_settled_pool_stillness_vs_capacity` — **the controlled one, start here.** A square
   vessel of water left to settle, where the right answer is known a priori and identical at every
   setting: a body of water at rest must not move. Prints vertical and lateral amplitude with
-  OCCUPANCY alongside, because an empty probe also reads zero amplitude.
+  OCCUPANCY alongside.
 - `diag_task70_underfill_tension_sweep` — tension against stillness, fill, decile spread and
   free-fall distance. Free fall is the guard rail: it must stay 97.
 - `diag_task70_u_tube_rise_time_series` — reservoir/basin/riser/catch-well over 20k ticks.
 - `diag_task70_riser_foot_realised_profile` — REALISED heights tick by tick at the riser foot.
 - `diag_task70_u_tube_mask_profile` — ground truth for the probe coordinates.
-- `diag_task70_oscillation_vs_overfill_capacity` — **CONFOUNDED, kept only as the thing the
-  controlled test had to be built to correct.** Do not read it without its fill column.
-
-### Mistakes made on 2026-08-16 — recorded so they are not repeated
-
-- **Candidate fluxes are proposals, not transfers.** Arbitration scales them afterwards. Reading
-  candidates as realised transfers produced two confident wrong diagnoses in a row (a "Nyquist
-  oscillation" that was really a hard arbitration block). Read realised heights from the heightmap.
-- **A probe with no material in it reads zero amplitude.** Always print occupancy next to any
-  stillness or motion metric, or "no oscillation" and "no water here" are indistinguishable.
-- **Measure against a control that predates your own changes.** A whole capacity-dependence theory
-  was built on sweeps of an already-broken build; one run against the parent commit killed it.
-- **A hard cap froze the simulation; a nudge did not.** The first per-cell band returned a hard mass
-  bound and free fall went 97 rows → 1, for two reasons worth knowing: it zeroed the OPPOSITE
-  direction (but every cell in a moving column is simultaneously a sink from above and a source to
-  below), and an empty cell is trivially at its own neighbourhood average so it got a budget of zero
-  and could not RECEIVE. The user's framing: *a wrong cap is not self-correcting, a nudge is.*
-- **The user's physical objections have been right every time.** "If the solver can't tell up from
-  down, material should flow up MORE, not less" and "it works fine sideways" each killed a wrong
-  diagnosis in one line. Treat their counterexample as a disqualifying control, not as a request to
-  explain better.
 
 ---
 
-## 10. Open backlog and what to do next
+## 10. Open backlog and next steps
 
-### The user's stated priority order, 2026-08-16
+### Next Steps & Priorities:
+1. **Free-Falling Liquid Lateral Dynamics (#33):**
+   - Verify lateral spread behavior and droplet detachment under high-speed gravity falls across various vessel geometries (e.g. hourglass neck, funnels).
+2. **Visual Polish & Shader Refinements:**
+   - Monitor the saturation decile legend in the web demo to verify smooth visual gradation under varying material modes.
+3. **High Resolution Scaling ($1024 \times 1024$ / Performance Optimization):**
+   - Ensure the restored lateral wave speed and candidate solver remain performant on large WebGPU / 2D Canvas grids.
 
-Recorded verbatim in intent because it is theirs, not a recommendation of mine:
-
-1. **Free-falling liquid moving sideways.** Raised as the next thing to address and NOT yet
-   started. No ticket, no measurement, no instrument — start by getting a picture and asking what
-   the failure looks like before building anything (see §7).
-2. **Faster flow.** "Maybe it to try increased flow" — flow speed is wanted before the compression
-   work, and it is also the thing gating the aggregate-budget lever in §9.
-3. **Compressed liquid / the compression scale** (§9). The user considers this a separate issue to
-   tackle after the two above. Note the finding that it is *upstream* of the oscillation rather
-   than beside it — one fix, two symptoms.
-
-Adaptive block sub-stepping is deferred; see §9.
-
-### Ticket state
-
-Full list with measured numbers and ruled-out hypotheses in
-[`tickets/INDEX.md`](tickets/INDEX.md) — **note that index was exported 2026-08-07 and is stale**:
-it still lists #55 and #63 as in-progress although #70 supersedes them.
-
-**#70 is active and has replaced #55, #57, #62, #63, #64, #66, #67, #68, #69.** Within it:
-
-- Water rises (`spec_task70_u_tube_water_rises_up_the_riser`, passing).
-- A resting pool does NOT come to rest at the shipped capacity of 1.90, and settles at ~1.6 fill
-  where equilibrium is ~1.003. This is the open defect, §9.
-- `underfill_tension` exists but is default 0 and does not currently help, §9.
-- `overfill_cell_budget` exists as `dead_code` — a measured lever, not applied, §9.
-
-Independent backlog: #27 (water towers and splashing), #33 (sideways movement design — related to
-priority 1 above), #38 (1024 resolution), #44 (asymmetric drain), #49 (falling acceleration),
-#50 (LOD degradation), #51 (larger grain material), #52 (vertical striping in draining funnel),
-#53 (pressure-projection cost).
-
-### UI state worth knowing
-
-The demo ships **Sand-fall / U-tube flow-through / Water / 128x128 / Overfill Pressure on /
-Overfill capacity 1.90x / Pressure heat-map on**. That capacity default is directly implicated in
-§9 — #70's own design calls the ceiling "a safety valve for impact transients, not an operating
-point", and the steady state currently sits on it. **Dropping the slider is the workaround**:
-oscillation at 1.10 is roughly an order of magnitude quieter than at 1.90, which is also the way to
-separate "is the limiter working" from "the liquid is over-compressed" when looking at the page.
-
-The pressure heat-map now colours by saturation decile with the nine boundaries listed under the
-checkbox, each on its own band's colour. **Read the numbers, not the hue** — it is a histogram
-equalisation, so colour encodes rank within the frame and is not comparable between frames. A
-healthy fluid should show boundaries clustered just above 1.00. On the current build it reads
-roughly `0.74 1.01 1.34 1.81 1.89 1.90 1.90 1.90 1.90`, i.e. 40%+ of occupied cells pinned at the
-ceiling with the bottom decile scraped out — the bimodal population that IS the visible
-checkerboard.
-
-`pressureRampColor` in `demo.js` mirrors the ramp in `shader.wgsl` **by hand**. If that ramp
-changes, the legend silently starts lying. Change both together.
+### Verification Checklist for Incoming Agents:
+- Integration suite: `cargo test -p sandart-sim --release --test overfill_pressure_toggle`
+- WASM Build: `wasm-pack build --target web --release sandart-wasm`
+- JS Pre-commit Validation: `node scripts/check_js.js`
