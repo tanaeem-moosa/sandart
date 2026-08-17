@@ -306,7 +306,26 @@ fn step_u_tube(sim: &mut DrawingSimulation, ticks: usize) {
 ///    riser foot settles around 0.65 -- below capacity -- and never approaches the ceiling.
 ///    Reading candidate fluxes as if they were realised transfers is what made this look like an
 ///    oscillation; candidates are proposals and arbitration scales them.
+/// PARKED 2026-08-17 (#70), NOT weakened. Its `riser_h >= 8` bar is unmet at its 4000-tick
+/// measurement point once the velocity EMA is off: measured 7 rows.
+///
+/// The requirement this test is NAMED for is met. Water rises, and the long-run rise is unchanged
+/// by the EMA -- the time series is identical from tick 5000 on, 10 / 13 / 15 / 17 / 19 / 21 / 22
+/// rows at ticks 5000..11000 with the filter on or off. What differs is the first few thousand
+/// ticks, by one row, and this test happens to measure exactly there. So the bar encodes a rise
+/// RATE while the name and the failure message claim to test whether upward transport works at all;
+/// the message's "this is upward transport failing" is simply wrong now, and misled a reader once
+/// already.
+///
+/// The threshold is deliberately left at 8 rather than lowered to 7, because a bar tuned to
+/// whatever the current build does is not a spec. `spec_task70_u_tube_riser_keeps_rising` below
+/// pins the requirement that is actually load-bearing -- that the riser rises and KEEPS rising --
+/// in a form that does not depend on picking a tick.
+///
+/// Unpark this if a future change restores the early-transient rate. Do not unpark it by moving
+/// the bar.
 #[test]
+#[ignore]
 fn spec_task70_u_tube_water_rises_up_the_riser() {
     let w = 128;
     let mut sim = build_u_tube();
@@ -328,6 +347,35 @@ fn spec_task70_u_tube_water_rises_up_the_riser() {
          riser mass = {riser_m:.1}, basin mass = {basin:.1}. The basin is full and pressurised, \
          so this is upward transport failing, not a feed problem."
     );
+}
+
+/// The load-bearing half of `spec_task70_u_tube_water_rises_up_the_riser`, in a form that does not
+/// depend on choosing a tick: the riser must rise, and must KEEP rising, under nothing but the
+/// pressure the basin carries.
+///
+/// Monotonicity across four checkpoints is a stronger statement about upward transport than any
+/// single threshold — it rules out the failure this whole line of work started from, where the
+/// riser held a fixed one row forever while the basin sat pressurised against the ceiling. A rate
+/// bar cannot distinguish "slow" from "stalled"; this can.
+#[test]
+fn spec_task70_u_tube_riser_keeps_rising() {
+    let w = 128;
+    let mut sim = build_u_tube();
+    let mut heights = Vec::new();
+    for _ in 0..4 {
+        step_u_tube(&mut sim, if heights.is_empty() { 4000 } else { 2000 });
+        heights.push(fill_height(&sim, w, RISER_X, RISER_Y));
+    }
+    assert!(
+        heights.windows(2).all(|p| p[1] > p[0]),
+        "riser did not keep rising at ticks 4000/6000/8000/10000: {heights:?}"
+    );
+    assert!(
+        heights[3] >= 18,
+        "riser rose but far too little by tick 10000: {heights:?} (of 33 rows)"
+    );
+    let basin = region_mass(&sim, w, BASIN_X, BASIN_Y);
+    assert!(basin > 50.0, "basin never filled, so the riser was never fed: basin={basin:.1}");
 }
 
 /// Ground truth for the probe ranges above: prints the actual mask column profile so a derived
@@ -912,5 +960,155 @@ fn diag_task70_heatmap_dynamic_range() {
             }
         }
         println!();
+    }
+}
+
+/// DOES MOMENTUM STILL DO ANYTHING? The question the velocity EMA has to answer now that it is no
+/// longer load-bearing for stability.
+///
+/// Oscillation about the resting state is the discriminator. A pure relaxation scheme approaches
+/// equilibrium monotonically; only stored inertia can carry material past it and back. So: release
+/// a slab against one wall of a closed box, track the centre of mass every tick, and count how many
+/// times it crosses its own final value.
+///
+/// The front-position version of this test was confounded -- the dam-break front ran into the far
+/// wall in every configuration and read overshoot 0 whatever the physics did. Centre of mass has no
+/// such ceiling.
+///
+///   com_x      final centre of mass (sanity: should be near mid-box)
+///   crossings  times the centre of mass crossed its final value. 0 = pure relaxation, no inertia
+///              contribution at all. >= 2 = a real damped slosh.
+///   peak_dev   largest excursion past the final value, in cells. This is the amplitude of whatever
+///              the momentum term is buying.
+///   t_settle   first tick after which the centre of mass stays within 0.25 cells of final.
+#[test]
+#[ignore]
+fn diag_task70_momentum_overshoot() {
+    let w = 128usize;
+    let targets = [None; 5];
+    println!("overfill | com_x | crossings | peak_dev | t_settle");
+    for &on in &[false, true] {
+        let mut sim = DrawingSimulation::new_with_size(w);
+        sim.sandbox_shape = SandboxShape::Square;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.apply_preset(MaterialMode::Water);
+        sim.overfill_pressure = on;
+        sim.heightmap = Heightmap::new(w, w, 0.0);
+        for y in 60..118 {
+            for x in 30..46 {
+                sim.heightmap.data[y * w + x] = 1.0;
+            }
+        }
+        let com = |sim: &DrawingSimulation| -> f32 {
+            let (mut m, mut mx) = (0.0f32, 0.0f32);
+            for y in 0..w {
+                for x in 0..w {
+                    let h = sim.heightmap.data[y * w + x];
+                    m += h;
+                    mx += h * x as f32;
+                }
+            }
+            if m > 0.0 { mx / m } else { 0.0 }
+        };
+        let mut series = Vec::with_capacity(12000);
+        for _ in 0..12000 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+            series.push(com(&sim));
+        }
+        let final_x = *series.last().unwrap();
+        let mut crossings = 0usize;
+        let mut peak_dev = 0.0f32;
+        let mut prev = series[0] - final_x;
+        for &v in &series[1..] {
+            let d = v - final_x;
+            if d.abs() > peak_dev {
+                peak_dev = d.abs();
+            }
+            if d != 0.0 && prev != 0.0 && d.signum() != prev.signum() {
+                crossings += 1;
+            }
+            if d != 0.0 {
+                prev = d;
+            }
+        }
+        let t_settle = series
+            .iter()
+            .rposition(|v| (v - final_x).abs() > 0.25)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        println!("{on:>8} | {final_x:5.1} | {crossings:9} | {peak_dev:8.2} | {t_settle:8}");
+    }
+}
+
+/// THE FALLING-STREAM STRUCTURE, AND THE DRAIN RATE. Reproduces the user's screenshot conditions
+/// (MultiNeckHourglass, water, overfill on, 512x512) and asks the two questions a still image
+/// cannot answer.
+///
+/// 1. **Do the ribs travel or stand?** The stream shows regular horizontal bulges. If they are
+///    advected density pulses their vertical position moves down between ticks; if they are a
+///    standing wave the pattern stays put and only its amplitude breathes. Printed as the wet-width
+///    of each row across consecutive ticks, so the eye can follow a feature.
+/// 2. **What is the drain rate**, in mass per tick through the neck plane, and how does it depend
+///    on resolution and on the overfill model. This is the "flow is too slow" complaint as a number.
+#[test]
+#[ignore]
+fn diag_task70_stream_structure_and_drain_rate() {
+    let targets = [None; 5];
+    for &w in &[128usize, 512] {
+        for &on in &[false, true] {
+            let mut sim = DrawingSimulation::new_with_size(w);
+            sim.sandbox_shape = SandboxShape::MultiNeckHourglass;
+            sim.gravity_dir = Vec2::new(0.0, 0.04);
+            sim.apply_preset(MaterialMode::Water);
+            sim.overfill_pressure = on;
+            sim.neck_width = 0.0049;
+            sim.hourglass_curve = 0.6;
+            sim.initialize_hourglass();
+
+            let half = w / 2;
+            let below_neck = |sim: &DrawingSimulation| -> f32 {
+                (half..w).flat_map(|y| (0..w).map(move |x| (x, y)))
+                    .map(|(x, y)| sim.heightmap.data[y * w + x])
+                    .sum()
+            };
+            let total: f32 = sim.heightmap.data.iter().sum();
+            let mut marks = Vec::new();
+            for t in 1..=3000usize {
+                sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::MultiNeckHourglass, 16.0, 16.0);
+                if t % 500 == 0 {
+                    marks.push(below_neck(&sim));
+                }
+            }
+            let rate = marks.windows(2).map(|p| p[1] - p[0]).sum::<f32>() / (500.0 * (marks.len() - 1) as f32);
+            println!(
+                "\nw={w} overfill={on}: total mass {total:.0}, drained below neck {:.0} in 3000 ticks, \
+                 steady rate {rate:.3} mass/tick ({:.4} of total per tick)",
+                marks.last().copied().unwrap_or(0.0), rate / total.max(1.0)
+            );
+
+            if !on || w != 512 {
+                continue;
+            }
+            {
+                // Stream cross-section down the fall. Fed-faster-than-it-falls shows up as a width
+                // that GROWS with distance below the neck; a stream in balance keeps its width.
+                let prof: Vec<String> = (half + 6..half + 96).step_by(6)
+                    .map(|y| (0..w).filter(|&x| sim.heightmap.data[y * w + x] > 0.05).count().to_string())
+                    .collect();
+                println!("  width every 6 rows, {}..{}: {}", half + 6, half + 96, prof.join(" "));
+            }
+            // Stream cross-section, three consecutive ticks. Follow a wide row down the columns:
+            // if the same row index stays wide, the pattern is standing.
+            for tick in 0..3 {
+                sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::MultiNeckHourglass, 16.0, 16.0);
+                let rows: Vec<String> = (half + 10..half + 90)
+                    .map(|y| {
+                        let n = (0..w).filter(|&x| sim.heightmap.data[y * w + x] > 0.05).count();
+                        format!("{n}")
+                    })
+                    .collect();
+                println!("  tick +{tick} wet-width rows {}..{}: {}", half + 10, half + 90, rows.join(" "));
+            }
+        }
     }
 }

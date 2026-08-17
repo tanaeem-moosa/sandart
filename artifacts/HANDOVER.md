@@ -5,11 +5,11 @@ assumes you can read code and does not re-explain what the code already says. Wh
 is the things the code cannot tell you: which experiments already failed, which hypotheses are
 already dead, and which passing tests are lying to you.
 
-**Deployed:** `origin/main` = `e5a722a6`. Confirm the deploy before believing it — read
+**Deployed:** `origin/main` = see §8f; confirm the sha before believing it. Confirm the deploy before believing it — read
 `origin/gh-pages`'s tip message for the sha it was built from (see §1).
 Live at <https://tanaeem-moosa.github.io/sandart/>.
 
-**If you read only one thing, read §9.** The oscillation defect that dominated this project for
+**If you read only one thing, read §9, then §10.** The oscillation defect that dominated this project for
 two days is FIXED, and the fix was structural rather than a constant: every overfill edge used to
 compute `flux = c_sq * (potential difference)`, which is a gain times a pressure, and the gain was
 three orders of magnitude too large. It is now a solved mass transfer. Settled churn went from
@@ -365,6 +365,22 @@ cells, or it means a different physical depth at every resolution.
 - **`jj` only, not `git`, for anything that writes.** The repo is colocated, so `git` HEAD sits
   detached by design — that is jj's normal state and not a problem to fix.
 
+**A pile of partial fixes for one symptom means the FORMULATION is wrong.** This is the most
+expensive lesson on this project and it has now been learned more than once. The oscillation in the
+overfill solver accumulated six independent stabilisers — a velocity EMA, an acceleration filter, a
+CFL wave-speed compensation, an extra damping constant, a per-cell neighbourhood nudge, and a
+fill-domain acceptance rule. Every one was a reasonable idea. Every one measurably helped a little.
+None finished the job, because the actual defect was that flux was computed as `gain x pressure`
+with a gain three orders of magnitude too large. Recomputing it as a solved mass transfer took the
+symptom from 0.22234 to 0.00002 and made all six dead code, deleted in one commit that REMOVED ~300
+lines.
+
+The cheap check that would have found it: write down the units of every term being summed in the
+governing expression and confirm they are commensurate. `h/cap` spans 0..1 across a cell,
+`base_head` was 1.0, and `p` was in the thousands — three terms added together, one of them
+1000x the others. And the corollary, which is the useful half: **a correct reformulation is usually
+a simplification.** If a proposed fix only adds machinery, suspect it.
+
 **Prefer an irreversible measurement to a reversible one.** The user found the oscillation with
 "sand at rest mixes colours slowly" after two sessions of `|dh|` metrics reported the same pools as
 still. Colour advection is a ratchet; height amplitude is not. When you need to detect small
@@ -619,6 +635,28 @@ equalisation, so it CANNOT look flat. It assigns a tenth of the cells to each ba
 The only thing that collapses it is a block of cells sharing one exact saturation — which is what
 pinning against the ceiling does, and is now unreachable.
 
+### What the fix let us delete (2026-08-17)
+
+Six mechanisms had accumulated to suppress the oscillation. All six lost their call sites the
+moment the driving term was correct, and were removed in one commit with every measurement
+bit-identical before and after:
+
+    overfill_max_accept + OVERFILL_COMPRESSION_RELAXATION
+                        + OVERFILL_CONVECTIVE_THROUGHPUT    fill-domain acceptance rule
+    overfill_cell_resistance + OVERFILL_BAND_SOFTNESS       per-cell neighbourhood nudge
+    overfill_cell_budget, potential_slope                   never wired up
+    overfill_acoustic_scale + OVERFILL_DAMPING              CFL compensation the potential form needed
+    OVERFILL_TRANSFER_RELAXATION                            sat at 1.0, a literal no-op
+
+The last one is the one to understand, because it still looks like a tuning knob. The overfill
+driving term is a solved MASS, already in the units the flux is applied in, so there is nothing for
+a coefficient to convert; anything below 1.0 means deliberately stopping short of the equilibrium
+just solved for. Measured, it bought nothing — free fall 52 rows at 0.5 against 73 at 1.0, rest
+exact at either.
+
+**The EMA was then turned OFF (`OVERFILL_MOMENTUM_ALPHA = 1.00`) on 2026-08-17,** because it turned
+out to be the direct cause of three visible artifacts rather than a cure for anything. See §10.
+
 ### The instruments (all `#[ignore]`d, run with `-- --ignored --nocapture`)
 
 In `sandart-sim/tests/overfill_pressure_toggle.rs`:
@@ -630,6 +668,10 @@ In `sandart-sim/tests/overfill_pressure_toggle.rs`:
 - `diag_task70_spread_and_fall` — **the opposing guard, and it is not optional.** Stillness is
   trivially achievable by making the fluid slow, so NO stiffness may be chosen on the rest
   instrument alone. Reports puddle spread, pile peak and free-fall distance.
+- `diag_task70_momentum_overshoot` — releases a slab against a wall and counts how many times the
+  centre of mass crosses its own final value. Pure relaxation approaches monotonically, so any
+  crossing is inertia. (An earlier version measured the dam-break FRONT and was confounded: it hit
+  the far wall in every configuration and read zero whatever the physics did.)
 - `diag_task70_heatmap_dynamic_range` — decile boundaries, band populations and a depth profile,
   swept over the stiffness dial. This is how "is there anything to see on the overlay" gets
   answered with a number.
@@ -650,7 +692,81 @@ In `sandart-sim/tests/overfill_pressure_toggle.rs`:
 
 ---
 
-## 10. Open backlog and next steps
+## 10. Flow speed, and the three artifacts it causes
+
+The user's screenshot (multi-neck, water, 512x512, overfill on) showed three things at once: a
+falling stream that SPREADS SIDEWAYS as it descends, regular ribs travelling down it with new ones
+emerging at the neck, and cone-shaped "hats" piling under each neck instead of levelling. They are
+one defect.
+
+**A real falling stream narrows** — it accelerates, so mass conservation thins it. Ours widened.
+Measured at 512, stream width every 6 rows below the neck:
+
+    velocity EMA on   21  27  33  39  45  51  55
+    velocity EMA off  21  21  27  27  33  33  33
+
+That is the whole diagnosis: material was fed in faster than it fell away, so it queued sideways
+because there was nowhere else to go. The queue released in slugs (the travelling ribs) and piled
+into cones at the floor. The pressure overlay corroborates the last one — the cones read saturation
+1.00-1.03, i.e. NOT compressed, just un-levelled, so it is a transport-rate problem and not a
+pressure problem.
+
+The cause was the velocity EMA's lag, which cost free fall 122 rows against 73. It is now off.
+
+### The harder half: flow is pinned against a one-cell-per-tick ceiling
+
+    grid   drained per tick   fraction of total per tick
+    128    1.27               0.0003
+    512    4.99               0.0001
+
+The neck is ~5 cells wide at 512 and passes ~5 mass/tick. That is EXACTLY one cell of mass per
+neck-cell per tick — the `±1.0` clamp in `flux_edge_candidate`. Flow is not slow for want of tuning;
+it is railed.
+
+And because a cell at 512 is a quarter the physical size, the same scene needs **4x more ticks** to
+drain, at 16x the cost per tick. Simulated time per tick is resolution-dependent, in the wrong
+direction. Fixing that needs one of:
+
+- **solver sub-steps per frame** — n ticks per rendered frame, scaled with resolution. Simple, and
+  the user has an outstanding objection to a related idea (adaptive BLOCK sub-stepping, §11) that
+  does not apply here: this is uniform, so there is no aliasing between a sub-step period and a
+  per-block schedule.
+- **multi-cell transport for free fall** — a parcel moves k cells in one tick. This is the real fix
+  and it breaks the one-edge-one-cell assumption the frozen-Jacobi pass is built on, so it is a
+  design conversation.
+
+### Proper acceleration is the intended replacement for the EMA
+
+The user's reason for wanting the EMA was to get to real acceleration. The distinction that matters:
+the EMA is a filter over a TRANSFER, while acceleration is velocity as physical state integrating
+gravity. Both give an edge memory, which is what suppresses the alternating mode — so acceleration
+would not need the EMA alongside it for stabilisation, and the EMA never stabilised anything anyway
+(a linear filter between two saturating clamps is a no-op).
+
+Note acceleration alone cannot beat the 1 cell/tick clamp: at 512 a falling parcel saturates it
+almost immediately. Acceleration and multi-cell transport are the same project.
+
+### What turning the EMA off costs, so it can be watched
+
+Residual colour mixing in a settled body roughly doubles — drift 9.6 against 3.8 over 4000 ticks,
+stripe contrast 55.73 against 55.98 out of 56 — and an edge-level alternating mode returns (velocity
+parity 0.87 against ~0.05). Both are far below the defect this replaced, where contrast collapsed
+from 56 to 0.27, but it is the same failure mode. `diag_task70_rest_color_mixing_and_checkerboard`
+is the instrument.
+
+### `spec_task70_u_tube_water_rises_up_the_riser` is PARKED, not weakened
+
+Its `riser_h >= 8` bar at 4000 ticks reads 7 with the EMA off. The requirement it is NAMED for is
+met: the long-run rise is identical either way (10 / 13 / 15 / 17 / 19 / 21 / 22 rows at ticks
+5000..11000). The bar encodes a rise RATE while the name and failure message claim to test whether
+upward transport works at all. The threshold was left at 8 rather than lowered to 7, because a bar
+tuned to what the current build happens to do is not a spec. `spec_task70_u_tube_riser_keeps_rising`
+now pins the load-bearing requirement — the riser rises and KEEPS rising across four checkpoints —
+in a form that does not depend on choosing a tick.
+
+---
+
+## 11. Open backlog and next steps
 
 ### The 10 failing library tests
 
@@ -679,12 +795,14 @@ number in the doc comment (§1's rule); do not weaken any of them.
 
 ### The user's stated priorities, in their order
 
-1. **Free-falling liquid moving sideways (#33).** Untouched. Verify lateral spread and droplet
-   detachment under high-speed falls in an hourglass neck / funnel.
-2. **Faster flow.** Largely paid off as a side effect of the recalibration — spread and pile peak
-   now match the non-overfill baseline exactly. The residual is free fall: 73 rows against 122,
-   because the non-overfill path has a separate fast-fall route the overfill path does not use.
-   That is the specific remaining gap, and it is a small, well-defined one.
+1. **Free-falling liquid moving sideways (#33).** The pathological version of this — a stream
+   widening 21 -> 55 cells as it fell — was a symptom of the EMA lag and is fixed (§10). What
+   remains is the real ticket: droplet detachment and splash under high-speed falls.
+2. **Faster flow — now the live problem, and it is architectural. See §10.** Flow is railed against
+   a one-cell-per-tick clamp, and simulated time per tick gets 4x worse from 128 to 512. Turning the
+   velocity EMA off recovered free fall (73 -> 122 rows) and fixed the stream-widening, ribs and
+   floor cones it was causing, but the ceiling itself needs solver sub-steps or multi-cell
+   transport.
 3. **Compressed liquid.** Effectively resolved by §9 and now under user control via the stiffness
    dial. Nothing to do unless the visual feel is wrong.
 
@@ -698,10 +816,6 @@ instrument watched before and after.
 
 ### Smaller things
 
-- `overfill_max_accept` and `overfill_acoustic_scale` are now dead (`pub`, so no compiler warning).
-  Both carry long doc comments explaining defects worth remembering; delete deliberately, if at all.
-- `OVERFILL_DAMPING` is no longer applied — `overfill_wave_params` returns the material's own
-  damping, which is what restored free fall from 52 to 73 rows.
 - The saturation overlay colours FILL. Pressure and depth also have real gradients and might read
   better; the user has not asked for this.
 
