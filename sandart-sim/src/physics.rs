@@ -925,8 +925,12 @@ pub fn overfill_max_accept(
     let fill_donor = if cap_donor > 0.0 { h_donor / cap_donor } else { 0.0 };
     let fill_acceptor = if cap_acceptor > 0.0 { h_acceptor / cap_acceptor } else { 0.0 };
 
-    // Half-difference monotonic leveling limit (prevents gradient inversion and checkerboarding)
-    let levelling = 0.5 * (fill_donor - fill_acceptor + gravity_head).max(0.0) * cap_acceptor;
+    // Levelling into underfull acceptor: limited by room below nominal capacity
+    let levelling = if h_acceptor < cap_acceptor {
+        0.5 * (fill_donor - fill_acceptor + gravity_head).max(0.0) * cap_acceptor
+    } else {
+        0.0
+    };
 
     // Pressurized convective throughput (conduits, funnels, saturated transport)
     let p_net = p_donor + gravity_head;
@@ -4762,11 +4766,6 @@ pub fn settle_tick(
                             (cap_a, cap_b)
                         };
                         let (max_accept_fwd, max_accept_bwd) = if overfill_active {
-                            // Gravity-aligned edge: `a` is the upper cell, `b` the lower, so the
-                            // forward (donate-downward) transfer GAINS one row of head and the
-                            // backward (rise) transfer LOSES it. That sign is the only thing
-                            // separating this call pair from the lateral one -- see
-                            // `overfill_max_accept`.
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
                             let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
                             let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit, underfill_tension);
