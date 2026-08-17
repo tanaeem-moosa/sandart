@@ -1,17 +1,20 @@
-# Shoal & Swell — handover, updated 2026-08-16
+# Shoal & Swell — handover, updated 2026-08-17
 
 Written at the end of a long session, for whoever picks this up next (human or otherwise). It
 assumes you can read code and does not re-explain what the code already says. What it does explain
 is the things the code cannot tell you: which experiments already failed, which hypotheses are
 already dead, and which passing tests are lying to you.
 
-**Deployed and current:** `origin/main` = `cfcff812`, published to `gh-pages` from that same sha,
-live at <https://tanaeem-moosa.github.io/sandart/>.
+**Deployed:** `origin/main` = `e5a722a6`. Confirm the deploy before believing it — read
+`origin/gh-pages`'s tip message for the sha it was built from (see §1).
+Live at <https://tanaeem-moosa.github.io/sandart/>.
 
-**If you read only one thing, read §8.** The overfill model (#70) is now the shipped default and
-it has ONE dominant open defect — the compression pressure scale — which independently blocked
-three separate attempts to fix oscillation on 2026-08-16. Do not start a fourth without reading
-why the first three failed.
+**If you read only one thing, read §9.** The oscillation defect that dominated this project for
+two days is FIXED, and the fix was structural rather than a constant: every overfill edge used to
+compute `flux = c_sq * (potential difference)`, which is a gain times a pressure, and the gain was
+three orders of magnitude too large. It is now a solved mass transfer. Settled churn went from
+0.22234 to 0.00002 per cell per tick. §9 records the four things that did NOT work first, because
+each of them is a natural-looking idea that will occur to you too.
 
 ---
 
@@ -27,6 +30,11 @@ container.
 **`cargo check -p sandart-wasm` typechecks nothing.** The crate is `#![cfg(target_arch = "wasm32")]`-gated,
 so a host-target check compiles an empty crate and passes no matter what you broke. Always
 `cargo check -p sandart-wasm --target wasm32-unknown-unknown --release`.
+
+**The library suite has TEN failures on `main`, and only ONE of them is sanctioned.** See §10 for
+the list and for why sorting them out is the highest-value next task. Do not read "the tests pass"
+in any earlier handover entry as covering `--lib`; those statements were about the integration
+suites only.
 
 **One test fails on purpose and must keep failing.**
 `physics::tests::test_water_blob_stays_left_right_symmetric_under_gravity` is a deliberate marker
@@ -182,7 +190,15 @@ re-run with the gate forced on as the non-regression check.
 
 ## 4. Read #70 before deciding what to work on
 
-**There is a strategic decision on the table and it changes what "fixing" the tickets below even
+> **STATUS, 2026-08-17: this decision was taken and #70 SHIPPED.** It is the default model, the
+> transfer is solved in the pressure domain (§9), and stiffness is a user-facing dial. The section
+> below is kept because the *design rationale* is still the best statement of why the model looks
+> the way it does — but read it as the argument that was won, not as a choice still open. Three
+> claims in it are now testable rather than aspirational: siphons and tension are reachable (the
+> signed pressure law exists, `underfill_tension`, default off), free fall is no longer a special
+> case, and the Torricelli-vs-Beverloo validation pair still has not been built.
+
+**There was a strategic decision on the table and it changed what "fixing" the tickets below even
 means.** Ticket #70 proposes replacing the equilibrium head field with per-cell **overfill**: let a
 transfer overshoot capacity (target 1.0, tolerate ~1.2), then redistribute the excess on subsequent
 ticks, rather than rejecting per-edge against a frozen state.
@@ -349,14 +365,32 @@ cells, or it means a different physical depth at every resolution.
 - **`jj` only, not `git`, for anything that writes.** The repo is colocated, so `git` HEAD sits
   detached by design — that is jj's normal state and not a problem to fix.
 
+**Prefer an irreversible measurement to a reversible one.** The user found the oscillation with
+"sand at rest mixes colours slowly" after two sessions of `|dh|` metrics reported the same pools as
+still. Colour advection is a ratchet; height amplitude is not. When you need to detect small
+persistent motion, look for a quantity that accumulates rather than one that cancels.
+
+**Never pick a constant on one metric.** Stillness is trivially achievable by making the fluid
+slow; speed is trivially achievable by making it unstable. Every stiffness value considered on
+2026-08-17 was scored on BOTH `diag_task70_rest_color_mixing_and_checkerboard` and
+`diag_task70_spread_and_fall`, and the first candidate that looked good on rest alone was wrong.
+
+**When the user proposes a mechanism, build that mechanism.** "We need to compute target in the
+pressure domain" was the fix, arrived at while this agent was still sweeping constants. Their
+framing ("we saturate pressure, and 512 cells should not be enough to saturate it") had located the
+defect more precisely than the measurements had. Their earlier calls were right too: "EMA is a
+bandaid" and "a cap that is wrong is not self-correcting, a nudge is".
+
 ---
 
-## 8. Session log — 2026-08-16
+## 8. Session log
 
-Two sessions ran on this date. The morning one shipped the overfill model's first working version;
-the afternoon one found that several of its claims were wrong and fixed the largest defect. Read
-both — the morning entry is kept verbatim because three of its statements are now known false and
-you may otherwise re-derive them from the code and believe them.
+Four sessions across two days, in order: 8a, 8b and 8d on 2026-08-16, then 8e on 2026-08-17.
+
+**Earlier entries are kept VERBATIM with corrections marked inline, not rewritten.** Several of
+their claims are now known false, and a reader who finds them deleted will simply re-derive them
+from the code and believe them again. The pattern to follow when you add an entry: correct in
+place, in bold, saying what was measured instead.
 
 ### 8a. Morning — overfill model first cut (commits up to `81cf2452`)
 
@@ -421,8 +455,10 @@ Also landed:
   was granting itself a whole cell per tick of "through-flow" on gravity alone.
 - **Per-cell neighbourhood nudge** (`overfill_cell_resistance`). Edges decide the flow WANTED;
   cells decide the flow that HAPPENS. A cell above the gravity-adjusted average of its neighbours
-  finds taking on more progressively harder, and vice versa. See §9 for the two mistakes made
-  building it.
+  finds taking on more progressively harder, and vice versa. (The two mistakes made building it:
+  measuring the neighbourhood in potential rather than fill units, which saturated; and a hard cap
+  that froze the whole simulation because empty cells are trivially at their own neighbourhood
+  average and so were given a zero budget and could not receive.)
 ### 8d. Night — Unified Viscoplastic Constitutive Model, Fast Lateral Spreading, and Hydrostatic Pool Equilibrium (`73b71a81` → `0def46b9`)
 
 1. **Unified Viscoplastic Constitutive Model:**
@@ -442,48 +478,241 @@ Also landed:
    - Updated `refresh_saturation_deciles` with `MIN_BAND_SIZE = 0.05` spacing and distinct threshold redistribution.
    - Eliminated duplicate plateau values in the UI legend (`0.21, 1.07, 1.28, 1.57, 1.83, 1.89, 1.90, 1.90, 1.90`), and added tooltip hover inspection (`chip.title`) showing exact band saturation and percentile rank.
 
-4. **Resolution of the Pool Over-Packing Defect:**
+4. **Resolution of the Pool Over-Packing Defect** — **PARTIAL, and the "resolved" claim below is
+   wrong.** Gating the levelling term did lower the settled *density*, but the pool was still in a
+   permanent limit cycle at 0.222 mass/cell/tick: the metric used here (`|dh|`) measures the net
+   and reads a symmetric churn as zero. See 8e. The real cause was the driving term's units, not
+   the levelling gate.**
    - **Root Cause:** In `overfill_max_accept`, the gravity-leveling term $\frac{1}{2}(\text{fill}_A - \text{fill}_B + \text{gravity}) \cdot \text{cap}_B$ was continuously donating $+0.50\text{ mass/tick}$ into already-full surface cells ($h_B = 1.0$) during downward pours, artificially packing resting pools all the way to the $1.90$ slider ceiling.
    - **Fix:** Leveling is gated to underfull cells ($h_B < \text{cap}_B$), while transfers into saturated cells ($h_B \ge \text{cap}_B$) require real convective hydrostatic pressure head ($P_{\text{net}} > 0$).
    - **Result:** Resting pool density dropped from $1.87 \to \mathbf{1.01 - 1.03}$ (exact physical nominal water density!). All 7 integration tests in `overfill_pressure_toggle` pass 100%.
 
+### 8e. 2026-08-17 — the oscillation defect, root-caused and fixed (`95ce58e7` -> `e5a722a6`)
+
+The user came back from Antigravity with two observations, and they turned out to be one defect:
+
+1. *"Pressure still has checkerboard patterns, improving but not gone."*
+2. *"Sand at rest mixes colors slowly. Which means motion at rest."*
+
+**The second observation is a better instrument than anything in this repo, and it is worth
+understanding why.** Colour advection is a RATCHET — `advect_properties` blends, and blending is
+irreversible. A flux of `+f` followed next tick by `-f` puts the heightmap back exactly where it
+started, so every `|dh|` metric reads zero, while the colour field has been mixed twice. Height
+amplitude measures the NET; colour measures the GROSS. `diag_task70_settled_pool_stillness_vs_capacity`
+had been reporting settled pools as still while they were churning hard enough to homogenise a
+painted stripe pattern in eight seconds of sim time.
+
+That is now `diag_task70_rest_color_mixing_and_checkerboard` (§9's instrument list).
+
+**The control that located it.** Sweeping `overfill_capacity` with the overfill model on and off:
+
+| water pool, 4000 ticks | colour drift | stripe contrast | churn/cell/tick | checkerboard |
+|---|---|---|---|---|
+| capacity 1.00 (no headroom) | 0.000 | 56.000 -> 56.000 | 0.00000 | 0.001 |
+| capacity 1.10 | 111.9 | 56 -> 0.27 | 0.166 | 0.148 |
+| capacity 1.90 | 112.0 | 56 -> 0.16 | 0.222 | 0.429 |
+
+Zero headroom, perfect rest to the last byte. Any headroom, full-amplitude limit cycle. Rest was
+not being achieved by pressure balancing gravity; it was being achieved by material slamming into
+the hard capacity wall. The checkerboard scaled on the same knob (up to 77% of the residual
+velocity field in the alternating mode at capacity 1.90), which is what tied the user's two
+observations together.
+
+**Also landed on 2026-08-17, before the real fix:**
+
+- **The two solver passes were re-aligned, through `overfill_wave_params`.** Antigravity had
+  desynced them again — the lateral pass was handed the raw `wave_params` pair to cure poured water
+  piling into a pyramid, leaving it at 5.9x the vertical wave speed with 0.98 damping against 0.90.
+  That is the SECOND time this alignment has been broken by a fix written at one of the two sites.
+  Re-aligning did NOT reduce the churn (0.207 vs 0.217) — it is a correctness fix, not a cure.
+- **The compensation reached the granular blend for the first time.** Dry sand was carrying the
+  full stiff pressure term through an UNDAMPED integrator (`c_sq = 1.0, damping = 1.0`). Settled
+  dry sand at capacity 1.00 went from 0.0426 of permanent churn to exactly 0.00000.
+
 ---
 
-## 9. RESOLVED & VERIFIED: The Pool Compression Defect
+---
 
-The previously open defect—resting pools staying artificially pinned near $1.60 - 1.90$ fill—is **RESOLVED**:
-- Gating leveling to underfull cells prevents falling streams from ramming full cells past nominal capacity.
-- Measured settled pool density in `diag_task70_settled_pool_stillness_vs_capacity` dropped to **$\sim 1.01 - 1.03$** across capacities $1.10\times \dots 1.90\times$.
-- Lateral wave speed restoration ($c^2 = 0.24$) ensures poured fluid flattens across open basins rapidly.
-- Sand dunes freeze rigidly at the angle of repose with zero Brownian drift.
+## 9. FIXED: the oscillation defect — and the four things that did not fix it
 
-### The instruments to use (all `#[ignore]`d, run with `-- --ignored --nocapture`)
+**The defect.** Every overfill edge computed its flux as `c_sq * (potential difference)`. A
+potential difference is measured in pressure units, and `overfill_head_unit =
+(GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K` was ~3700 at `w = 128` against a gravity
+head of 1.0. So the flux overshot equilibrium by three orders of magnitude, hit
+`flux_edge_candidate`'s `±1.0` clamp, and stayed pinned there. The result was bang-bang transport
+bounded only by the capacity ceiling — a permanent limit cycle that no amount of filtering could
+touch.
+
+**The fix (`eb3b7799`).** `overfill_equilibrium_transfer` bisects for the mass `d` that solves
+
+    phi_a(h_a - d) + gravity_head = phi_b(h_b + d)
+
+where `phi = cell_potential` and `gravity_head` is `+base_head` down, `-base_head` up, `0.0`
+lateral. The flux becomes O(mass) instead of O(pressure). Two properties fall out that no amount of
+tuning had produced:
+
+- **Saturation is unreachable by construction.** The solve never carries an acceptor past the fill
+  its own back-pressure supports.
+- **Rest is exact, not asymptotic.** An edge already at equilibrium returns `0.0` with no
+  iteration, so a settled body transfers nothing and therefore advects no colour.
+
+Settled water pool at capacity 1.90, over 4000 ticks:
+
+|  | churn/cell/tick | stripe contrast | checkerboard |
+|---|---|---|---|
+| before | 0.22234 | 56 -> 0.16 | 0.4288 |
+| after | **0.00002** | 56 -> **56.0** | **0.0030** |
+
+### The four things that did NOT work. Read this before trying a fifth.
+
+Each is a reasonable idea. Each was measured. Each failed for the same underlying reason — the
+driving term was ~100x the clamp, so nothing that scaled or filtered it could change the output.
+
+1. **The velocity EMA (`alpha`), and a more aggressive one.** A linear filter between two
+   saturating clamps is a no-op while its input is far above the clamp. Measured: alpha 0.30 ->
+   0.10 changed settled churn by 2% (0.166 -> 0.162). It only bit at alpha ~0.01, and at alpha
+   0.001 the pool was still only because the settled configuration became byte-identical to
+   overfill being switched off (6786 cells either way) — it bought stillness by deleting the
+   physics.
+2. **The linear acceleration filter.** Same shape of idea, same reason it could not work.
+3. **Halving the lateral wave speed to re-align the passes.** 0.207 -> 0.217. No effect. Do this
+   anyway because the duplication is a real hazard (§6), but do not expect it to help stability.
+4. **Lowering `OVERFILL_STIFFNESS_K`.** This one DID work, monotonically, all the way to exact
+   rest — which is exactly why it was misleading. `K` was the gain. It bought stillness by making
+   the fluid less stiff, i.e. by deleting the physics the setting exists to express.
+
+### Two things that were fighting the fix and had to be removed
+
+- **`overfill_max_accept`'s fill-domain heuristic became a binding constraint rather than a guard.**
+  Its `compression` term is `0.5 * (h_target - h_acceptor)` with `h_target` from
+  `o_max * p/(p + unit)`, so with `unit` in the thousands a riser foot carrying 30 rows of head was
+  granted ~0.007 of a cell per tick of upward acceptance, and the U-tube riser filled ONE row in
+  3000 ticks. Both passes now clamp on physical room only; the solve is the acceptance limit. The
+  function is still in the file and still `pub` — it has no call sites.
+- **`refresh_saturation_deciles`' `MIN_BAND_SIZE = 0.05` spreading.** Added when settled water was
+  pinned at the ceiling and the legend read `1.90 1.90 1.90 ...`. Once the fluid stopped
+  over-compressing, every pair of consecutive deciles fell inside 0.05, so the redistribution path
+  became the ONLY path and destroyed the equalisation it was decorating —
+  `spec_task70_saturation_decile_legend` caught it with 58% of occupied cells in one band. True
+  nearest-rank deciles are restored.
+
+### `OVERFILL_STIFFNESS_K` is now a physical dial, and it is in the UI
+
+Solving in the pressure domain took stiffness off the stability path. It now means exactly one
+thing: how far a column compresses under its own weight. So it was recalibrated from TRANSPORT
+rather than from stillness (5.0), and it replaced the "Overfill capacity" slider (`e5a722a6`).
+
+**The ceiling is derived from it and must stay derived.** They are the same physical quantity
+stated twice; exposing both let a ceiling be set below what the fluid itself demanded, and the
+fluid then packed against it. At stiffness 5.0 with a 1.10 ceiling, 5382 of 6318 occupied cells
+pinned to exactly 1.100 and nine of ten decile bands emptied. See `overfill_ceiling_for`.
+
+| stiffness | surface -> floor fill | decile band populations |
+|---|---|---|
+| 2.0 (springy) | 0.58 -> 2.33 | 401..425 |
+| **5.0 (default)** | 1.06 -> 1.68 | 473..533 |
+| 15.0 | 1.04 -> 1.27 | 585..679 |
+| 40.0 (near-incompressible) | 1.01 -> 1.11 | 585..706 |
+
+A note on the overlay, because it was got wrong once in this session: decile colouring is histogram
+equalisation, so it CANNOT look flat. It assigns a tenth of the cells to each band by construction.
+The only thing that collapses it is a block of cells sharing one exact saturation — which is what
+pinning against the ceiling does, and is now unreachable.
+
+### The instruments (all `#[ignore]`d, run with `-- --ignored --nocapture`)
 
 In `sandart-sim/tests/overfill_pressure_toggle.rs`:
 
-- `diag_task70_settled_pool_stillness_vs_capacity` — **the controlled one, start here.** A square
-  vessel of water left to settle, where the right answer is known a priori and identical at every
-  setting: a body of water at rest must not move. Prints vertical and lateral amplitude with
-  OCCUPANCY alongside.
-- `diag_task70_underfill_tension_sweep` — tension against stillness, fill, decile spread and
-  free-fall distance. Free fall is the guard rail: it must stay 97.
-- `diag_task70_u_tube_rise_time_series` — reservoir/basin/riser/catch-well over 20k ticks.
-- `diag_task70_riser_foot_realised_profile` — REALISED heights tick by tick at the riser foot.
-- `diag_task70_u_tube_mask_profile` — ground truth for the probe coordinates.
+- `diag_task70_rest_color_mixing_and_checkerboard` — **the rest instrument, start here.** Settles a
+  body, paints stripes, leaves it alone. Reports colour drift, neighbour contrast, `|dh|`, mean
+  `|laplacian|` (the numeric read of the on-screen checkerboard) and the signed parity power of the
+  vertical edge velocities. Covers water and dry sand, overfill off and on.
+- `diag_task70_spread_and_fall` — **the opposing guard, and it is not optional.** Stillness is
+  trivially achievable by making the fluid slow, so NO stiffness may be chosen on the rest
+  instrument alone. Reports puddle spread, pile peak and free-fall distance.
+- `diag_task70_heatmap_dynamic_range` — decile boundaries, band populations and a depth profile,
+  swept over the stiffness dial. This is how "is there anything to see on the overlay" gets
+  answered with a number.
+- `diag_task70_settled_pool_stillness_vs_capacity` — the older `|dh|`-only stillness metric. Kept,
+  but understand its blind spot: it measures the net, so a symmetric churn reads as zero. Prefer
+  the colour instrument.
+- `diag_task70_riser_foot_realised_profile` — REALISED heights tick by tick at the riser foot. This
+  is what showed the riser rising at 0.0003/tick and located `overfill_max_accept` as the binding
+  constraint.
+- `diag_task70_u_tube_rise_time_series`, `diag_task70_u_tube_mask_profile`,
+  `diag_task70_underfill_tension_sweep` — as before.
+
+### Baselines worth keeping (2026-08-17, at stiffness 5.0)
+
+- Settled water pool, capacity 1.90: churn 0.00002/cell/tick, stripe contrast held at 56.
+- Spread 59 / pile peak 13 — **identical to the non-overfill baseline**, at every capacity.
+- Free fall 73 rows in 100 ticks, against a non-overfill baseline of 122. Still a gap; see §10.
 
 ---
 
 ## 10. Open backlog and next steps
 
-### Next Steps & Priorities:
-1. **Free-Falling Liquid Lateral Dynamics (#33):**
-   - Verify lateral spread behavior and droplet detachment under high-speed gravity falls across various vessel geometries (e.g. hourglass neck, funnels).
-2. **Visual Polish & Shader Refinements:**
-   - Monitor the saturation decile legend in the web demo to verify smooth visual gradation under varying material modes.
-3. **High Resolution Scaling ($1024 \times 1024$ / Performance Optimization):**
-   - Ensure the restored lateral wave speed and candidate solver remain performant on large WebGPU / 2D Canvas grids.
+### The 10 failing library tests
 
-### Verification Checklist for Incoming Agents:
-- Integration suite: `cargo test -p sandart-sim --release --test overfill_pressure_toggle`
-- WASM Build: `wasm-pack build --target web --release sandart-wasm`
-- JS Pre-commit Validation: `node scripts/check_js.js`
+**`cargo test -p sandart-sim --lib --release` has TEN failures on `main`, against a working
+agreement (§1) that permits exactly one.** They are pre-existing — they were failing at `95ce58e7`
+before any of 2026-08-17's work and are unchanged by it — but a previous handover stated the suite
+passed 100%, which was true only of the *integration* suites. Do not repeat that. The list:
+
+    task55_head_spec::test_task55_dynamic_transport_spec_scoreboard
+    tests::test_dry_sand_has_angle_of_repose
+    tests::test_head_field_transport_repose_non_regression
+    tests::test_liquid_pool_levels_flat_in_closed_box
+    tests::test_liquid_stream_stays_coherent
+    tests::test_sandbox_wave_decays_to_flat_pool
+    tests::test_sandbox_wave_reach_is_budget_independent
+    tests::test_sandbox_wave_reflects_off_boundary
+    tests::test_sandbox_wave_stays_left_right_symmetric
+    tests::test_water_blob_stays_left_right_symmetric_under_gravity   <- the ONE sanctioned failure
+
+Several of them (`liquid_pool_levels_flat_in_closed_box`, `sandbox_wave_decays_to_flat_pool`) name
+the exact symptoms the pressure-domain solve was built to cure, and none of them have been re-run
+against it with any attention. **That is the highest-value next task**: work out which now pass on
+their merits, which encode a requirement that is genuinely unmet, and which are testing something
+the model no longer does. Park the genuinely-unmet ones `#[ignore]`d WITH the diagnosis and ticket
+number in the doc comment (§1's rule); do not weaken any of them.
+
+### The user's stated priorities, in their order
+
+1. **Free-falling liquid moving sideways (#33).** Untouched. Verify lateral spread and droplet
+   detachment under high-speed falls in an hourglass neck / funnel.
+2. **Faster flow.** Largely paid off as a side effect of the recalibration — spread and pile peak
+   now match the non-overfill baseline exactly. The residual is free fall: 73 rows against 122,
+   because the non-overfill path has a separate fast-fall route the overfill path does not use.
+   That is the specific remaining gap, and it is a small, well-defined one.
+3. **Compressed liquid.** Effectively resolved by §9 and now under user control via the stiffness
+   dial. Nothing to do unless the visual feel is wrong.
+
+### Deferred by explicit user decision
+
+**Adaptive block sub-stepping.** The user's reasoning still stands and should be honoured: do not
+build it until the oscillation is understood, because if the sub-step period aliases against an
+oscillation period it makes things worse. The oscillation is now understood and largely gone, so
+this can be reconsidered — but on its own merits, as a performance change, and with the rest
+instrument watched before and after.
+
+### Smaller things
+
+- `overfill_max_accept` and `overfill_acoustic_scale` are now dead (`pub`, so no compiler warning).
+  Both carry long doc comments explaining defects worth remembering; delete deliberately, if at all.
+- `OVERFILL_DAMPING` is no longer applied — `overfill_wave_params` returns the material's own
+  damping, which is what restored free fall from 52 to 73 rows.
+- The saturation overlay colours FILL. Pressure and depth also have real gradients and might read
+  better; the user has not asked for this.
+
+### Verification checklist for incoming agents
+
+    cargo test -p sandart-sim --lib --release                              # expect the 10 above
+    cargo test -p sandart-sim --release --test overfill_pressure_toggle    # 7 pass, #70 lives here
+    cargo test -p sandart-sim --release --test perfect_simulation_determinism
+    cargo test -p sandart-sim --release --test fresh_pressure_field_toggle
+    cargo test -p sandart-sim --release --test pressure_heatmap_head_field_toggle
+    cargo test -p sandart-sim --release --test head_field_transport_toggle
+    cargo test -p sandart-sim --release --test pressure_sensitive_flow_toggle
+    cargo check -p sandart-wasm --target wasm32-unknown-unknown --release  # NOT a bare cargo check
+    node scripts/check_js.js                                              # before any demo.js push
