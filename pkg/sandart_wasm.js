@@ -121,6 +121,13 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * @returns {number}
+     */
+    get_overfill_stiffness() {
+        const ret = wasm.wasmsimulationstate_get_overfill_stiffness(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * The overfill heat-map's legend: nine saturation decile boundaries (D1..D9), where
      * saturation is `height / capacity`, so 1.0 is exactly full and above that is overfill.
      * Empty until the overlay has been on long enough for the first refresh, and empty whenever
@@ -403,7 +410,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_neck_width(this.__wbg_ptr, width);
     }
     /**
-     * "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.
      * @param {number} capacity
      */
     set_overfill_capacity(capacity) {
@@ -415,6 +421,18 @@ export class WasmSimulationState {
      */
     set_overfill_pressure(enabled) {
         wasm.wasmsimulationstate_set_overfill_pressure(this.__wbg_ptr, enabled);
+    }
+    /**
+     * "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.
+     * Task #70: the fluid's bulk stiffness — how hard a column resists compressing under its own
+     * weight. This replaced the "overfill capacity" control, which is now DERIVED from it:
+     * stiffness decides how much compression a column wants and the ceiling has to clear that, so
+     * exposing both let the user set a ceiling below what their own fluid demanded and pin every
+     * cell against it. Setting one and computing the other makes that unreachable.
+     * @param {number} stiffness
+     */
+    set_overfill_stiffness(stiffness) {
+        wasm.wasmsimulationstate_set_overfill_stiffness(this.__wbg_ptr, stiffness);
     }
     /**
      * @param {string} mode
