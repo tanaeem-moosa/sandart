@@ -672,3 +672,138 @@ fn diag_task70_u_tube_rise_time_series() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// REST INSTRUMENTS (2026-08-17)
+// ---------------------------------------------------------------------------
+//
+// The user's report — "sand at rest mixes colors slowly" — is a better detector of residual
+// motion than anything in this file, and the reason is worth stating: colour advection is a
+// RATCHET. `advect_properties` blends, and blending is irreversible. A flux of +f followed next
+// tick by -f returns the heightmap exactly where it started, so every |dh| metric we have reads
+// zero, while the colour field has been mixed TWICE. Height amplitude measures the net; colour
+// measures the gross. An oscillation that is invisible to `diag_task70_settled_pool_stillness...`
+// is fully visible here.
+//
+// Reported per window, for a body of material left alone with no input:
+//   dcolor   mean |R - R_initial| (0..255) over cells occupied throughout. Monotone by
+//            construction; the SLOPE is the residual gross flux.
+//   contrast mean |R[x] - R[x+1]| over adjacent occupied pairs. Starts at the painted stripe
+//            contrast and decays toward 0 as mixing homogenises. This is what the eye sees.
+//   dh       mean |delta h| per cell per tick — the OLD metric, for comparison.
+//   lap      mean |h_i - avg(4 neighbours)| over interior occupied cells. A checkerboard is the
+//            maximal-|laplacian| field, so this is the direct numeric read of the pattern on
+//            screen. A smooth hydrostatic column reads ~0.
+//   vpar     signed parity power of the vertical edge velocities:
+//            sum(v_i * (-1)^(x+y)) / sum|v_i|. +-1.0 means the residual velocity field IS a
+//            checkerboard; ~0 means the residual is unstructured noise. This separates "the
+//            solver is ringing in the k=pi mode" from "there is broadband numerical dirt".
+fn paint_stripes(sim: &mut DrawingSimulation, w: usize) {
+    let n = sim.heightmap.data.len();
+    for i in 0..n {
+        let x = i % w;
+        let v: u8 = if (x / 4) % 2 == 0 { 240 } else { 16 };
+        sim.cell_colors[i * 4] = v;
+        sim.cell_colors[i * 4 + 1] = 128;
+        sim.cell_colors[i * 4 + 2] = 255 - v;
+        sim.cell_colors[i * 4 + 3] = 255;
+    }
+}
+
+fn rest_metrics(
+    sim: &DrawingSimulation,
+    w: usize,
+    occupied: &[bool],
+    c0: &[u8],
+) -> (f32, f32, f32, f32) {
+    let h = sim.heightmap.data.len() / w;
+    let (mut dc, mut dc_n) = (0.0f32, 0usize);
+    let (mut ct, mut ct_n) = (0.0f32, 0usize);
+    let (mut lap, mut lap_n) = (0.0f32, 0usize);
+    let (mut vs, mut vm) = (0.0f32, 0.0f32);
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let i = y * w + x;
+            if !occupied[i] {
+                continue;
+            }
+            dc += (sim.cell_colors[i * 4] as f32 - c0[i * 4] as f32).abs();
+            dc_n += 1;
+            if occupied[i + 1] {
+                ct += (sim.cell_colors[i * 4] as f32 - sim.cell_colors[(i + 1) * 4] as f32).abs();
+                ct_n += 1;
+            }
+            let d = &sim.heightmap.data;
+            if occupied[i - 1] && occupied[i + 1] && occupied[i - w] && occupied[i + w] {
+                let avg = (d[i - 1] + d[i + 1] + d[i - w] + d[i + w]) * 0.25;
+                lap += (d[i] - avg).abs();
+                lap_n += 1;
+            }
+            let v = sim.edge_vel_v[i];
+            let s = if (x + y) % 2 == 0 { 1.0 } else { -1.0 };
+            vs += v * s;
+            vm += v.abs();
+        }
+    }
+    (
+        dc / dc_n.max(1) as f32,
+        ct / ct_n.max(1) as f32,
+        lap / lap_n.max(1) as f32,
+        if vm > 0.0 { vs / vm } else { 0.0 },
+    )
+}
+
+/// THE REST INSTRUMENT. Settle a body, paint stripes, then leave it alone and watch the colour
+/// field. See the block comment above `paint_stripes` for what each column means.
+#[test]
+#[ignore]
+fn diag_task70_rest_color_mixing_and_checkerboard() {
+    let w = 128usize;
+    let targets = [None; 5];
+    for &(name, mode) in &[("water", MaterialMode::Water), ("drysand", MaterialMode::DrySand)] {
+        for &(on, cap) in &[(false, 1.00f32), (true, 1.00), (true, 1.10), (true, 1.90)] {
+            let mut sim = DrawingSimulation::new_with_size(w);
+            sim.sandbox_shape = SandboxShape::Square;
+            sim.gravity_dir = Vec2::new(0.0, 0.04);
+            sim.apply_preset(mode);
+            sim.overfill_pressure = on;
+            sim.overfill_capacity = cap;
+            sim.initialize_hourglass();
+            for _ in 0..4000 {
+                sim.update(0.016, &targets, 0.08, mode, SandboxShape::Square, 16.0, 16.0);
+            }
+
+            let occupied: Vec<bool> = sim.heightmap.data.iter().map(|&v| v > 0.5).collect();
+            let n_occ = occupied.iter().filter(|&&b| b).count();
+            paint_stripes(&mut sim, w);
+            let c0 = sim.cell_colors.clone();
+            let mut prev_h = sim.heightmap.data.clone();
+
+            println!(
+                "\n=== {name} overfill={on} cap={cap:.2}  settled cells={n_occ} ===\n\
+                 tick |  dcolor | contrast |      dh |     lap |   vpar"
+            );
+            let (_, ct, lap, vp) = rest_metrics(&sim, w, &occupied, &c0);
+            println!("   0 |   0.000 | {ct:8.3} |       - | {lap:7.4} | {vp:6.3}");
+            for win in 1..=8 {
+                let mut dh = 0.0f32;
+                const STEP: usize = 500;
+                for _ in 0..STEP {
+                    sim.update(0.016, &targets, 0.08, mode, SandboxShape::Square, 16.0, 16.0);
+                    for i in 0..prev_h.len() {
+                        if occupied[i] {
+                            dh += (sim.heightmap.data[i] - prev_h[i]).abs();
+                        }
+                    }
+                    prev_h.copy_from_slice(&sim.heightmap.data);
+                }
+                let (dc, ct, lap, vp) = rest_metrics(&sim, w, &occupied, &c0);
+                println!(
+                    "{:4} | {dc:7.3} | {ct:8.3} | {:7.5} | {lap:7.4} | {vp:6.3}",
+                    win * STEP,
+                    dh / (STEP * n_occ.max(1)) as f32
+                );
+            }
+        }
+    }
+}
