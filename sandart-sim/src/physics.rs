@@ -943,10 +943,7 @@ pub fn overfill_max_accept(
         0.0
     };
 
-    // Overfill decompression: allow donor to shed excess mass above nominal capacity
-    let excess_shed = (h_donor - cap_donor).max(0.0);
-
-    (levelling.max(convective).max(upward_room).max(excess_shed))
+    (levelling.max(convective).max(upward_room))
         .min((cap_acceptor_eff - h_acceptor).max(0.0))
         .min(h_donor)
 }
@@ -5382,11 +5379,7 @@ pub fn settle_tick(
                             }
                         } else {
                             let (liquid_c_sq, liquid_damping) = wave_params(wetness);
-                            let (c_sq, damping) = if overfill_active && cell_liquidity > 0.5 {
-                                (liquid_c_sq * overfill_acoustic_scale(), OVERFILL_DAMPING)
-                            } else {
-                                (liquid_c_sq, liquid_damping)
-                            };
+                            let (c_sq, damping) = (liquid_c_sq, liquid_damping);
                             // TASK #63: pressure-sensitive flow rate -- see the phase-0 vertical
                             // site's own comment for the full reasoning (the flux and not `c_sq`;
                             // donor and not average; free fall exempt by construction; the driving
