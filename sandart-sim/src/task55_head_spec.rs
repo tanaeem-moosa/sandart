@@ -1170,6 +1170,7 @@ impl DynSim {
             false,
             0.50,
             0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
+            crate::physics::OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
         );
         self.tick_count += 1;
         flow

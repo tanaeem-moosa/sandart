@@ -367,6 +367,7 @@ impl WasmSimulationState {
         let pressure_sensitive_flow = self.sim.pressure_sensitive_flow;
         let overfill_pressure = self.sim.overfill_pressure;
         let overfill_capacity = self.sim.overfill_capacity;
+        let overfill_stiffness = self.sim.overfill_stiffness;
         let pressure_heatmap_overlay = self.sim.pressure_heatmap_overlay;
 
         let mut sim = DrawingSimulation::new_with_size(size);
@@ -398,6 +399,7 @@ impl WasmSimulationState {
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.overfill_pressure = overfill_pressure;
         sim.overfill_capacity = overfill_capacity;
+        sim.overfill_stiffness = overfill_stiffness;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -778,6 +780,20 @@ impl WasmSimulationState {
     }
 
     /// "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.
+    /// Task #70: the fluid's bulk stiffness — how hard a column resists compressing under its own
+    /// weight. This replaced the "overfill capacity" control, which is now DERIVED from it:
+    /// stiffness decides how much compression a column wants and the ceiling has to clear that, so
+    /// exposing both let the user set a ceiling below what their own fluid demanded and pin every
+    /// cell against it. Setting one and computing the other makes that unreachable.
+    pub fn set_overfill_stiffness(&mut self, stiffness: f32) {
+        self.sim.overfill_stiffness = stiffness;
+        self.sim.overfill_capacity = sandart_sim::physics::overfill_ceiling_for(stiffness);
+    }
+
+    pub fn get_overfill_stiffness(&self) -> f32 {
+        self.sim.overfill_stiffness
+    }
+
     pub fn set_overfill_capacity(&mut self, capacity: f32) {
         self.sim.overfill_capacity = capacity;
     }

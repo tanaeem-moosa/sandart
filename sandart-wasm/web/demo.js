@@ -856,12 +856,14 @@ function syncSettings() {
     state.set_head_field_transport(document.getElementById('check-head-field-transport').checked);
     state.set_pressure_sensitive_flow(document.getElementById('check-pressure-sensitive-flow').checked);
     state.set_overfill_pressure(document.getElementById('check-overfill-pressure').checked);
-    const overfillSlider = document.getElementById('overfill-capacity-slider');
-    if (overfillSlider) {
-        const overfillCap = parseFloat(overfillSlider.value);
-        const overfillCapVal = document.getElementById('overfill-capacity-val');
-        if (overfillCapVal) overfillCapVal.innerText = `${overfillCap.toFixed(2)}×`;
-        state.set_overfill_capacity(overfillCap);
+    const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
+    if (stiffnessSlider) {
+        const stiffness = parseFloat(stiffnessSlider.value);
+        const stiffnessVal = document.getElementById('overfill-stiffness-val');
+        if (stiffnessVal) stiffnessVal.innerText = stiffness.toFixed(1);
+        // Sets the overfill ceiling too -- see `set_overfill_stiffness`. Do not also call
+        // `set_overfill_capacity` from here or the two go out of step again.
+        state.set_overfill_stiffness(stiffness);
     }
     updateSaturationDeciles();
 
@@ -1284,10 +1286,10 @@ function setupPanelInput() {
     document.getElementById('check-head-field-transport').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-sensitive-flow').addEventListener('change', syncSettings);
     document.getElementById('check-overfill-pressure').addEventListener('change', syncSettings);
-    const overfillCapSlider = document.getElementById('overfill-capacity-slider');
-    if (overfillCapSlider) {
-        overfillCapSlider.addEventListener('input', syncSettings);
-        overfillCapSlider.addEventListener('change', syncSettings);
+    const overfillStiffSlider = document.getElementById('overfill-stiffness-slider');
+    if (overfillStiffSlider) {
+        overfillStiffSlider.addEventListener('input', syncSettings);
+        overfillStiffSlider.addEventListener('change', syncSettings);
     }
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above

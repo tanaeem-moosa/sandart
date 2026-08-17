@@ -904,10 +904,16 @@
                     <input type="checkbox" id="check-overfill-pressure" checked>
                     <span class="checkmark"></span>
                 </label>
-                <div class="field row" id="overfill-capacity-row">
-                    <label for="overfill-capacity-slider">Overfill capacity</label>
-                    <span id="overfill-capacity-val" class="val-display">1.90×</span>
-                    <input type="range" id="overfill-capacity-slider" min="1.00" max="2.00" step="0.05" value="1.90">
+                <!-- Replaced "Overfill capacity" (task #70). The ceiling and the stiffness are the
+                     same physical quantity stated twice: stiffness decides how far a column wants
+                     to compress and the ceiling has to clear that, so exposing both let a ceiling
+                     be set below what the fluid demanded and pinned every cell against it. The
+                     ceiling is now derived — see `overfill_ceiling_for`. LOW = soft/springy,
+                     HIGH = near-incompressible. -->
+                <div class="field row" id="overfill-stiffness-row">
+                    <label for="overfill-stiffness-slider" title="How hard the fluid resists being compressed under its own weight. Low is springy and compressible; high is nearly incompressible. The overfill ceiling follows this automatically.">Fluid stiffness</label>
+                    <span id="overfill-stiffness-val" class="val-display">5.0</span>
+                    <input type="range" id="overfill-stiffness-slider" min="1" max="60" step="0.5" value="5">
                 </div>
             </div>
 

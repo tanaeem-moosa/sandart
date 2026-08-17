@@ -501,6 +501,19 @@ pub struct DrawingSimulation {
     /// `physics::overfill_pressure_val`.
     pub underfill_tension: f32,
 
+    /// Task #70: the fluid's bulk stiffness — how hard a column resists compressing under its own
+    /// weight. This is the dial the UI exposes; `overfill_capacity` is derived from it by
+    /// `overfill_ceiling_for` and is no longer independently settable.
+    ///
+    /// The two are the same physical quantity stated twice, and letting a user set both is a
+    /// footgun. Measured at stiffness 5.0 on a 128-grid: a settled column wants fill 1.06 at the
+    /// surface rising to 1.68 at the floor. A 1.90 ceiling accommodates that and the heat map
+    /// shows a clean depth gradient with all ten decile bands populated (504/492/510/503/473/533/
+    /// 496/500/497/523 cells). A 1.10 ceiling cannot: 5382 of 6318 cells pin to exactly 1.100,
+    /// nine of the ten bands collapse, and the fluid is back to being packed against a wall.
+    /// Softer fluid needs a higher ceiling, so the ceiling follows the dial.
+    pub overfill_stiffness: f32,
+
     /// Decile boundaries (9 values, D1..D9) of per-cell SATURATION -- `height / capacity`, where
     /// 1.0 is exactly full and anything above is overfill -- taken over cells that hold material.
     /// Empty at construction and until the first refresh.
@@ -789,7 +802,8 @@ impl DrawingSimulation {
             head_field_transport: false,
             pressure_sensitive_flow: false,
             overfill_pressure: false,
-            overfill_capacity: 1.50,
+            overfill_capacity: physics::overfill_ceiling_for(physics::OVERFILL_STIFFNESS_K),
+            overfill_stiffness: physics::OVERFILL_STIFFNESS_K,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -1147,7 +1161,7 @@ impl DrawingSimulation {
             if self.saturation_deciles.is_empty() {
                 let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / w as f32;
                 let overfill_head_unit =
-                    (physics::GRAVITY_HEAD_SCALE / depth_scale) * physics::OVERFILL_STIFFNESS_K;
+                    (physics::GRAVITY_HEAD_SCALE / depth_scale) * self.overfill_stiffness;
                 let base_head = physics::GRAVITY_HEAD_SCALE;
                 let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
                 return (0..w * h)
@@ -1654,6 +1668,7 @@ impl DrawingSimulation {
                     self.overfill_pressure,
                     (self.overfill_capacity - 1.0).max(0.0),
                     self.underfill_tension,
+                    self.overfill_stiffness,
                 );
             }
         } else {

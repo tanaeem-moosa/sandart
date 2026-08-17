@@ -868,3 +868,49 @@ fn diag_task70_spread_and_fall() {
         println!("{on:>8} {cap:.2} | {spread:6} | {peak:4.0} | {fall:4}");
     }
 }
+
+/// WHAT THE HEAT MAP ACTUALLY SHOWS. Decile colouring is histogram equalisation, so it assigns a
+/// tenth of the occupied cells to each band BY CONSTRUCTION and can only look flat if a large
+/// block of cells share one exact f32 saturation. This prints the boundaries and a depth profile
+/// so "is there anything to see" is a measurement rather than an opinion.
+#[test]
+#[ignore]
+fn diag_task70_heatmap_dynamic_range() {
+    let w = 128;
+    let targets = [None; 5];
+    for &stiffness in &[2.0f32, 5.0, 15.0, 40.0] {
+        let cap = sandart_sim::physics::overfill_ceiling_for(stiffness);
+        let mut sim = DrawingSimulation::new_with_size(w);
+        sim.sandbox_shape = SandboxShape::Square;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.apply_preset(MaterialMode::Water);
+        sim.overfill_pressure = true;
+        sim.overfill_capacity = cap;
+        sim.overfill_stiffness = stiffness;
+        sim.pressure_heatmap_overlay = true;
+        sim.initialize_hourglass();
+        for _ in 0..4000 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Square, 16.0, 16.0);
+        }
+        let d = sim.saturation_deciles.clone();
+        println!("\nstiffness={stiffness:.1} (ceiling {cap:.2}) deciles: {}",
+            d.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(" "));
+        let texels = sim.pressure_field_texels();
+        let mut hist = [0usize; 10];
+        let mut occ = 0usize;
+        for &t in texels.iter().filter(|&&t| t > 0) {
+            occ += 1;
+            hist[((((t as usize) - 1) * 9 + 127) / 254).min(9)] += 1;
+        }
+        println!("stiffness={stiffness:.1} band populations ({occ} occupied): {hist:?}");
+        // Depth profile down one interior column: does the colour change with depth?
+        print!("stiffness={stiffness:.1} column x=64 fill by row:");
+        for y in (60..126).step_by(6) {
+            let h = sim.heightmap.data[y * w + 64];
+            if h > 0.001 {
+                print!(" y{y}={h:.3}");
+            }
+        }
+        println!();
+    }
+}
