@@ -1421,6 +1421,7 @@ fn flux_edge_candidate(
     max_accept_bwd: f32,
     weight: f32,
     v_e_prev: f32,
+    wetness: f32,
 ) -> f32 {
     let driving = head_a - head_b;
     let yielded = if driving > tau {
@@ -1431,7 +1432,12 @@ fn flux_edge_candidate(
         0.0
     };
 
-    let v = ((v_e_prev + c_sq * yielded) * damping).clamp(-1.0, 1.0);
+    // The Unified Viscoplastic Constitutive Equation:
+    // Continuous liquidity scaling: dry granular sand (w = 0.0) locks immediately with zero velocity
+    // memory (alpha = 1.0), while pure liquid (w = 1.0) carries full fluid momentum (alpha = 0.30).
+    let alpha = (1.0 - 0.70 * wetness.clamp(0.0, 1.0)).clamp(0.10, 1.0);
+    let v_target = c_sq * yielded;
+    let v = (((1.0 - alpha) * v_e_prev + alpha * v_target) * damping).clamp(-1.0, 1.0);
 
     weight * if v > 0.0 {
         v.min(avail_a).min(max_accept_fwd)
@@ -4782,6 +4788,7 @@ pub fn settle_tick(
                         } else {
                             edge_vel_v[center_idx]
                         };
+                        let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[(center_idx + w) * 4 + PROP_WETNESS]);
                         let candidate = flux_edge_candidate(
                             head_a, head_b,
                             c_sq, damping, 0.0,
@@ -4789,6 +4796,7 @@ pub fn settle_tick(
                             max_accept_fwd, max_accept_bwd,
                             pressure_weight,
                             prev_v,
+                            wetness,
                         );
                         cand_v[center_idx] = candidate;
                         edge_v_active[center_idx] = true;
@@ -4942,6 +4950,7 @@ pub fn settle_tick(
                                 (cap_b_eff - h_b).max(0.0),
                                 (cap_c_eff - h_a).max(0.0),
                             );
+                            let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[nb_idx * 4 + PROP_WETNESS]);
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
@@ -4949,6 +4958,7 @@ pub fn settle_tick(
                                 max_accept_fwd, max_accept_bwd,
                                 1.0,
                                 edge_vel_h[center_idx],
+                                wetness,
                             );
                             cand_h[center_idx] = candidate;
                             edge_h_active[center_idx] = true;
@@ -4999,6 +5009,7 @@ pub fn settle_tick(
                                 (cap_b_eff - h_b).max(0.0),
                                 (cap_c_eff - h_a).max(0.0),
                             );
+                            let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[nb_idx * 4 + PROP_WETNESS]);
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
                                 c_sq, damping, 0.0,
@@ -5006,6 +5017,7 @@ pub fn settle_tick(
                                 max_accept_fwd, max_accept_bwd,
                                 1.0,
                                 edge_vel_v[center_idx],
+                                wetness,
                             );
                             cand_v[center_idx] = candidate;
                             edge_v_active[center_idx] = true;
@@ -5484,6 +5496,7 @@ pub fn settle_tick(
                             } else {
                                 ((cap_b - h_b).max(0.0), (cell_capacity - h_a).max(0.0))
                             };
+                            let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[nb_idx * 4 + PROP_WETNESS]);
                             let candidate = flux_edge_candidate(
                                 head_a,
                                 head_b_full,
@@ -5492,6 +5505,7 @@ pub fn settle_tick(
                                 max_accept_fwd, max_accept_bwd,
                                 pressure_weight,
                                 edge_vel_h[center_idx],
+                                wetness,
                             );
                             cand_h[center_idx] = candidate;
                             edge_h_active[center_idx] = true;
