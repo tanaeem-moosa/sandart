@@ -1202,7 +1202,6 @@ impl DrawingSimulation {
     /// reader can already see, instead of how saturated the material is, which is the question.
     fn refresh_saturation_deciles(&mut self) {
         const OCCUPIED: f32 = 1e-3;
-        const MIN_BAND_SIZE: f32 = 0.05;
         let mut sat: Vec<f32> = self
             .heightmap
             .data
@@ -1221,36 +1220,29 @@ impl DrawingSimulation {
         }
         sat.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        let min_val = sat[0];
-        let max_val = sat[sat.len() - 1];
-
-        if (max_val - min_val).abs() < 1e-4 {
-            self.saturation_deciles = (1..10).map(|d| min_val + (d as f32) * MIN_BAND_SIZE).collect();
-            return;
-        }
-
-        // Collect raw quantiles
-        let mut raw_deciles = Vec::with_capacity(9);
-        for d in 1..10usize {
-            let rank = (d * sat.len()) / 10;
-            raw_deciles.push(sat[rank.min(sat.len() - 1)]);
-        }
-
-        // Check if top deciles collapse onto the same value
-        let mut distinct = Vec::new();
-        for val in raw_deciles {
-            if distinct.is_empty() || (val - distinct.last().unwrap()) >= MIN_BAND_SIZE {
-                distinct.push(val);
-            }
-        }
-
-        // If duplicate plateau collapsed bands, redistribute the 9 color bands across the distinct spread
-        if distinct.len() < 9 {
-            let step = (max_val - min_val) / 9.0;
-            self.saturation_deciles = (1..10).map(|d| min_val + (d as f32) * step).collect();
-        } else {
-            self.saturation_deciles = distinct;
-        }
+        // TRUE NEAREST-RANK DECILES, AND NOTHING ELSE. Equalisation is the entire point of this
+        // colouring -- each band must hold a tenth of the occupied cells -- and nearest rank gives
+        // that by construction.
+        //
+        // A `MIN_BAND_SIZE` pass used to sit here, forcing consecutive boundaries at least 0.05
+        // apart and, when that collapsed the count below nine, replacing the quantiles outright
+        // with an evenly spaced ramp between min and max. It was added when settled water was
+        // pinned against the overfill ceiling and the legend read `1.90 1.90 1.90 ...`, which it
+        // did make prettier. Once the solver stopped over-compressing, EVERY pair of consecutive
+        // deciles fell inside 0.05, so the redistribution path became the only path and the
+        // colouring stopped being equalised at all -- `spec_task70_saturation_decile_legend`
+        // caught it with 58% of occupied cells in one band.
+        //
+        // Near-identical numbers in the legend are now the honest reading. An incompressible fluid
+        // HAS almost no spread in saturation; that is the fix working, not a display bug. If the
+        // overlay needs visible structure, the quantity to colour is pressure or depth, which
+        // still have a real gradient -- not a synthetic spread over one that does not.
+        self.saturation_deciles = (1..10)
+            .map(|d| {
+                let rank = (d * sat.len()) / 10;
+                sat[rank.min(sat.len() - 1)]
+            })
+            .collect();
     }
 
     /// Which decile bucket `0..=9` a saturation value falls in, given the current boundaries.

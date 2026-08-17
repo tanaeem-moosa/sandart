@@ -631,7 +631,7 @@ pub const OVERFILL_CEILING_RATIO: f32 = 0.50;
 /// Task #70: Hydrostatic stiffness parameter $k$ for the overfill pressure model.
 /// Calibrated so that steady-state overfill at the base of a deep resting column (depth ~300)
 /// reaches ~5% (0.05) overfill: k = (g * D) / sigma_max = (1.0 * 300) / 0.05 = 6000.
-pub const OVERFILL_STIFFNESS_K: f32 = 600.0;
+pub const OVERFILL_STIFFNESS_K: f32 = 5.0;
 
 /// Task #70: Yield friction coefficient for granular material under the overfill stress model (Mohr-Coulomb).
 pub const OVERFILL_MOHR_COULOMB_MU: f32 = 0.60;
@@ -755,13 +755,130 @@ pub fn overfill_wave_params(
     overfill_active: bool,
 ) -> (f32, f32) {
     if overfill_active {
-        (
-            material_c_sq * overfill_acoustic_scale(),
-            material_damping.min(OVERFILL_DAMPING),
-        )
+        // The overfill driving term is `overfill_equilibrium_transfer`'s solved MASS, so this is an
+        // under-relaxation on a quantity already in the right units — not a wave speed multiplying
+        // a potential. `overfill_acoustic_scale` was the CFL compensation the potential form
+        // needed; the solved form does not need it and must not carry it, or every overfill edge
+        // would be throttled by a stiffness constant for no reason.
+        (OVERFILL_TRANSFER_RELAXATION, material_damping)
     } else {
         (material_c_sq, material_damping)
     }
+}
+
+/// Task #70: how far an edge moves toward its solved equilibrium in one tick. Under-relaxation,
+/// not a gain — `overfill_equilibrium_transfer` already returns the transfer that lands exactly on
+/// equilibrium, so this only decides how fast to get there and 1.0 would be a legal (if ringy)
+/// choice. Contrast `c_sq`, which multiplies a POTENTIAL and therefore had to shrink as the
+/// stiffness grew.
+pub const OVERFILL_TRANSFER_RELAXATION: f32 = 1.0;
+
+/// Task #70: **the transfer that puts one edge at equilibrium, solved in the pressure domain.**
+///
+/// This replaces `flux = c_sq * (potential difference)` on every overfill edge, and the difference
+/// is the whole stability story.
+///
+/// A potential difference is measured in pressure units, and the overfill spring makes those units
+/// enormous: `overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K` is
+/// ~3700 at `w = 128` against a gravity head of 1.0. So `c_sq * driving` overshot equilibrium by
+/// three orders of magnitude, hit the `±1.0` clamp in `flux_edge_candidate`, and stayed there. That
+/// single fact explains every stability measurement taken on this model:
+///
+/// - The velocity EMA could not damp it. A linear filter between two saturating clamps does
+///   nothing while its input is 100x the clamp; measured, alpha 0.30 -> 0.10 changed settled churn
+///   by 2% (0.166 -> 0.162), and only alpha ~0.01 bit at all.
+/// - Halving the lateral wave speed did not damp it either (0.207 -> 0.217).
+/// - Lowering `OVERFILL_STIFFNESS_K` DID work, monotonically, all the way to exact rest — because
+///   `K` is the gain. It bought stillness by making the fluid less stiff, i.e. by deleting the
+///   physics the setting exists to express.
+///
+/// Solving for the transfer instead makes the flux O(mass) rather than O(pressure), so `K` no
+/// longer sets the timestep at all — it sets only the equilibrium compression profile, which is
+/// what it is supposed to mean.
+///
+/// Returns the SIGNED mass to move from `a` to `b` (negative = `b` to `a`) that solves
+///
+///     phi_a(h_a - d) + gravity_head = phi_b(h_b + d)
+///
+/// where `phi = cell_potential` (fill below capacity, fill plus nonlinear pressure above) and
+/// `gravity_head` is `+base_head` for a downward edge, `-base_head` upward, `0.0` lateral — the
+/// same convention `overfill_max_accept` takes. `phi` is strictly increasing in `h`, so the
+/// residual is strictly decreasing in `d` and bisection is unconditionally convergent.
+///
+/// **Saturation is unreachable by construction, which is the point.** The solved `d` never carries
+/// the acceptor past the fill where its own back-pressure balances the donor. A flat acceptance
+/// grant (`OVERFILL_CONVECTIVE_THROUGHPUT`) or a fill-domain levelling term can both push a cell to
+/// the `o_max` ceiling regardless of how hard it is already pushing back; this cannot.
+///
+/// **Rest is exact, not asymptotic.** When the edge is already at equilibrium the residual at
+/// `d = 0` has the wrong sign and the function returns `0.0` with no iteration, so a settled body
+/// transfers nothing — and therefore advects no colour. Bisection precision only matters for edges
+/// that are genuinely moving.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn overfill_equilibrium_transfer(
+    h_a: f32,
+    cap_a: f32,
+    h_b: f32,
+    cap_b: f32,
+    cap_a_eff: f32,
+    cap_b_eff: f32,
+    gravity_head: f32,
+    yield_tau: f32,
+    pressure_gain_a: f32,
+    pressure_gain_b: f32,
+    overfill_ratio: f32,
+    unit: f32,
+    tension: f32,
+) -> f32 {
+    if cap_a <= 0.0 || cap_b <= 0.0 {
+        return 0.0;
+    }
+    // `pressure_gain` is the lateral pass's `k_of_liquidity`: granular material transmits far less
+    // of its overfill pressure sideways than liquid does. Both passes pass 1.0 vertically.
+    let phi = |h: f32, cap: f32, gain: f32| {
+        h / cap + gain * overfill_pressure_val(h, cap, overfill_ratio, unit, tension)
+    };
+    // Stress remaining after a candidate transfer `d`. A yield-stress material comes to rest ON the
+    // yield surface, not at zero stress, so `yield_tau` is subtracted from the target rather than
+    // used as a gate: below yield nothing moves, above it the solve stops at the yield surface and
+    // the residual stress is what holds a sand slope up at its angle of repose.
+    let stress = |d: f32| {
+        phi(h_a - d, cap_a, pressure_gain_a) + gravity_head - phi(h_b + d, cap_b, pressure_gain_b)
+    };
+    let tau = yield_tau.max(0.0);
+
+    let s0 = stress(0.0);
+    // The bracket is the physically transferable range in each direction: donor mass on one side,
+    // acceptor room (to the OVERFILL ceiling, not nominal capacity) on the other.
+    let (mut lo, mut hi, target) = if s0 > tau {
+        let limit = h_a.min((cap_b_eff - h_b).max(0.0));
+        if limit <= 0.0 || stress(limit) >= tau {
+            // Equilibrium is beyond what this edge can move; take the whole thing.
+            return limit.max(0.0);
+        }
+        (0.0f32, limit, tau)
+    } else if s0 < -tau {
+        let limit = h_b.min((cap_a_eff - h_a).max(0.0));
+        if limit <= 0.0 || stress(-limit) <= -tau {
+            return -limit.max(0.0);
+        }
+        (-limit, 0.0f32, -tau)
+    } else {
+        return 0.0;
+    };
+
+    // 12 halvings of a bracket that is at most one cell wide: better than 2.5e-4 of a cell, well
+    // inside the resolution anything downstream acts on.
+    for _ in 0..12 {
+        let mid = 0.5 * (lo + hi);
+        if stress(mid) > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
 }
 
 /// Task #70: a cell's potential -- fill plus pressure, in the same units the driving head is
@@ -4727,7 +4844,24 @@ pub fn settle_tick(
                             // raises the ceiling above 1.0 AND adds `p_b`, so genuinely overfilled
                             // material clears the bar on its own -- pressure lifts water, fill
                             // alone does not. That is the #70 design: overfill IS the pressure.
-                            (h_a / cap_a + base_head + p_a, h_b / cap_b + p_b)
+                            //
+                            // THE DRIVING TERM IS A SOLVED TRANSFER, NOT A POTENTIAL. `head_a` and
+                            // `head_b` are only ever consumed as a difference here (by
+                            // `edge_sleeps` and by `flux_edge_candidate`), so handing the pair
+                            // `(d, 0.0)` makes `driving = d` — the mass that lands this edge
+                            // exactly on equilibrium. See `overfill_equilibrium_transfer` for why
+                            // the potential form was unstable at any stiffness worth having.
+                            let _ = (p_a, p_b);
+                            let d = overfill_equilibrium_transfer(
+                                h_a, cap_a, h_b, cap_b,
+                                cell_overfill_capacity_for(wetness, overfill_ratio),
+                                cell_overfill_capacity_for(
+                                    cell_props[nb_idx * 4 + PROP_WETNESS], overfill_ratio,
+                                ),
+                                base_head, 0.0, 1.0, 1.0,
+                                overfill_ratio, overfill_head_unit, underfill_tension,
+                            );
+                            (d, 0.0)
                         } else if head_field_active
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
@@ -4801,18 +4935,19 @@ pub fn settle_tick(
                             (cap_a, cap_b)
                         };
                         let (max_accept_fwd, max_accept_bwd) = if overfill_active {
-                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                            let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                            let p_a = overfill_pressure_val(h_a, cap_a, overfill_ratio, overfill_head_unit, underfill_tension);
-                            let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit, underfill_tension);
-                            let fwd = overfill_max_accept(
-                                h_a, cap_a, h_b, cap_b, cap_b_eff, p_a, base_head,
-                                overfill_ratio, overfill_head_unit,
-                            );
-                            let bwd = overfill_max_accept(
-                                h_b, cap_b, h_a, cap_a, cap_a_eff, p_b, -base_head,
-                                overfill_ratio, overfill_head_unit,
-                            );
+                            // THE SOLVE IS THE ACCEPTANCE LIMIT. `overfill_max_accept`'s job --
+                            // never push an acceptor past the fill its own back-pressure supports --
+                            // is now done exactly, in the pressure domain, by
+                            // `overfill_equilibrium_transfer`. Leaving its fill-domain heuristic on
+                            // top does not add safety, it BINDS: its `compression` term is
+                            // `0.5 * (h_target - h_acceptor)` where `h_target` comes from
+                            // `o_max * p/(p + unit)`, so with `unit` in the thousands a riser foot
+                            // carrying 30 rows of head was granted ~0.007 of a cell per tick of
+                            // upward acceptance and the U-tube riser filled one row in 3000 ticks.
+                            // What remains is the only limit the solve does not already impose:
+                            // physical room to the overfill ceiling.
+                            let fwd = (cap_b_eff - h_b).max(0.0);
+                            let bwd = (cap_a_eff - h_a).max(0.0);
                             (fwd, bwd)
                         } else {
                             ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0))
@@ -5283,8 +5418,7 @@ pub fn settle_tick(
                             let p_b = overfill_pressure_val(h_b_live, cap_b, overfill_ratio, overfill_head_unit, underfill_tension);
                             let k_lat_a = k_of_liquidity(cell_liquidity);
                             let k_lat_b = k_of_liquidity(liq_b);
-                            let driving_a = h_a_live + gravity_dir.x * GRAVITY_HEAD_SCALE + k_lat_a * p_a + dispersion;
-                            let driving_b = h_b_live + k_lat_b * p_b;
+                            let _ = (p_a, p_b);
 
                             // Mohr-Coulomb yield stress for granular material:
                             // Yield stress tau increases with local confining pressure (normal stress P_bar).
@@ -5295,7 +5429,21 @@ pub fn settle_tick(
                             let tau_overfill = mu * normal_p * (depth_scale / GRAVITY_HEAD_SCALE);
                             let tau_eff = tau + tau_overfill;
 
-                            (driving_a, driving_b, tau_eff)
+                            // Same solved-transfer driving term as the gravity-aligned pass, with
+                            // the ONLY differences being the ones gravity and material make: the
+                            // hydrostatic step is the lateral gravity component instead of a full
+                            // row, the yield surface is Mohr-Coulomb rather than zero, and granular
+                            // material transmits only `k_of_liquidity` of its pressure sideways.
+                            // `tau_eff` is consumed inside the solve, so the pair handed downstream
+                            // carries no threshold of its own.
+                            let d = overfill_equilibrium_transfer(
+                                h_a_live, cell_capacity, h_b_live, cap_b,
+                                cap_a_eff, cap_b_eff,
+                                gravity_dir.x * GRAVITY_HEAD_SCALE + dispersion,
+                                tau_eff, k_lat_a, k_lat_b,
+                                overfill_ratio, overfill_head_unit, underfill_tension,
+                            );
+                            (d, 0.0, 0.0)
                         } else if head_field_active
                             && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
                             && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
@@ -5510,22 +5658,9 @@ pub fn settle_tick(
                             // neighbour is higher), and its left neighbour's owned edge — which is
                             // exactly the multi-edge case arbitration exists for.
                             let (max_accept_fwd, max_accept_bwd) = if overfill_active {
-                                // Lateral edge: no hydrostatic step across it, so `gravity_head`
-                                // is 0.0 in both directions. Everything else is the same rule the
-                                // gravity-aligned pass uses -- see `overfill_max_accept`.
-                                let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                                let overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K;
-                                let p_a = overfill_pressure_val(h_a, cell_capacity, overfill_ratio, overfill_head_unit, underfill_tension);
-                                let p_b = overfill_pressure_val(h_b, cap_b, overfill_ratio, overfill_head_unit, underfill_tension);
-                                let fwd = overfill_max_accept(
-                                    h_a, cell_capacity, h_b, cap_b, cap_b_eff, p_a, 0.0,
-                                    overfill_ratio, overfill_head_unit,
-                                );
-                                let bwd = overfill_max_accept(
-                                    h_b, cap_b, h_a, cell_capacity, cap_a_eff, p_b, 0.0,
-                                    overfill_ratio, overfill_head_unit,
-                                );
-                                (fwd, bwd)
+                                // Physical room only -- the solve is the acceptance limit. See the
+                                // matching note in the gravity-aligned pass.
+                                ((cap_b_eff - h_b).max(0.0), (cap_a_eff - h_a).max(0.0))
                             } else {
                                 ((cap_b - h_b).max(0.0), (cell_capacity - h_a).max(0.0))
                             };
