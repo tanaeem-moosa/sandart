@@ -1221,21 +1221,35 @@ impl DrawingSimulation {
         }
         sat.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
+        let min_val = sat[0];
         let max_val = sat[sat.len() - 1];
 
-        self.saturation_deciles.clear();
-        let mut prev = sat[0];
+        if (max_val - min_val).abs() < 1e-4 {
+            self.saturation_deciles = (1..10).map(|d| min_val + (d as f32) * MIN_BAND_SIZE).collect();
+            return;
+        }
+
+        // Collect raw quantiles
+        let mut raw_deciles = Vec::with_capacity(9);
         for d in 1..10usize {
-            // Nearest-rank: the value at the d/10 position of the sorted sample.
             let rank = (d * sat.len()) / 10;
-            let raw_val = sat[rank.min(sat.len() - 1)];
-            let val = if d == 1 {
-                raw_val
-            } else {
-                raw_val.max(prev + MIN_BAND_SIZE).min(max_val)
-            };
-            self.saturation_deciles.push(val);
-            prev = val;
+            raw_deciles.push(sat[rank.min(sat.len() - 1)]);
+        }
+
+        // Check if top deciles collapse onto the same value
+        let mut distinct = Vec::new();
+        for val in raw_deciles {
+            if distinct.is_empty() || (val - distinct.last().unwrap()) >= MIN_BAND_SIZE {
+                distinct.push(val);
+            }
+        }
+
+        // If duplicate plateau collapsed bands, redistribute the 9 color bands across the distinct spread
+        if distinct.len() < 9 {
+            let step = (max_val - min_val) / 9.0;
+            self.saturation_deciles = (1..10).map(|d| min_val + (d as f32) * step).collect();
+        } else {
+            self.saturation_deciles = distinct;
         }
     }
 

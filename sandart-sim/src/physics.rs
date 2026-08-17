@@ -943,7 +943,10 @@ pub fn overfill_max_accept(
         0.0
     };
 
-    (levelling.max(convective).max(upward_room))
+    // Overfill decompression: allow donor to shed excess mass above nominal capacity
+    let excess_shed = (h_donor - cap_donor).max(0.0);
+
+    (levelling.max(convective).max(upward_room).max(excess_shed))
         .min((cap_acceptor_eff - h_acceptor).max(0.0))
         .min(h_donor)
 }
