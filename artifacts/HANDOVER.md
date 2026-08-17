@@ -5,7 +5,8 @@ assumes you can read code and does not re-explain what the code already says. Wh
 is the things the code cannot tell you: which experiments already failed, which hypotheses are
 already dead, and which passing tests are lying to you.
 
-**Deployed:** `origin/main` = see §8f; confirm the sha before believing it. Confirm the deploy before believing it — read
+**Deployed:** `origin/main` = `470323d4`. Confirm the deploy before believing it — read
+`origin/gh-pages`'s tip message for the sha it was built from (see §1). Confirm the deploy before believing it — read
 `origin/gh-pages`'s tip message for the sha it was built from (see §1).
 Live at <https://tanaeem-moosa.github.io/sandart/>.
 
