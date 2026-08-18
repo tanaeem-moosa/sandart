@@ -852,7 +852,6 @@ function syncSettings() {
     state.set_heatmap_overlay(document.getElementById('check-heatmap').checked);
     state.set_fresh_pressure_field(false);
     state.set_pressure_heatmap_overlay(document.getElementById('check-pressure-heatmap').checked);
-    state.set_linear_pressure(document.getElementById('check-linear-pressure')?.checked ?? false);
     state.set_pressure_heatmap_head_field(false);
     state.set_head_field_transport(false);
     state.set_pressure_sensitive_flow(false);
@@ -1277,10 +1276,6 @@ function setupPanelInput() {
     document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
     document.getElementById('check-heatmap').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
-    const linearPressCheck = document.getElementById('check-linear-pressure');
-    if (linearPressCheck) {
-        linearPressCheck.addEventListener('change', syncSettings);
-    }
     const overfillStiffSlider = document.getElementById('overfill-stiffness-slider');
     if (overfillStiffSlider) {
         overfillStiffSlider.addEventListener('input', syncSettings);
