@@ -533,6 +533,54 @@ settling pile — i.e. what fraction genuinely wants `n_b > 1`. If it is a thin 
 and self-financing; if a whole pool wants it, it is not. Measurable at build step 2, where `P` exists
 but drives nothing.
 
+### The floor: underclocked must mean "rarely", never "not at all"
+
+This mechanism already exists and is load-bearing. `MAX_STALENESS = 30` forces any block unsimulated
+for 30 ticks into the STALE tier regardless of any activity signal. Measured on the 512 hourglass:
+**32.2 of the 121 blocks run per tick come from the STALE tier — 27% of all work.** The floor is not
+a safety margin, it is a quarter of the budget, and any clock design has to account for it rather
+than discover it.
+
+**Keep it as an INDEPENDENT backstop. Do not fold it into `n_b`.** The clock's own minimum rate
+(say 1/8) is the *intended* floor; staleness is the *safety net for the clock being wrong*. That
+layering matters here specifically because the history of this scheduler is a history of activation
+signals that were subtly wrong — the sand-slab defect (#47), the block-boundary gap that
+`activate_neighbor_upstream` exists to fix, the side-nudge that `activate_neighbor_side` exists to
+fix. A backstop whose correctness does not depend on the signal being right is what caught each of
+those. A coarse pressure gradient is a better signal, not an infallible one, and it is **blind below
+tile scale by construction** — a 1-cell arch, a colour boundary, a granular repose relaxation can all
+sit inside a tile with zero coarse gradient and real work to do.
+
+**Missed time is LOST, not deferred, and that is the whole reason the floor must be generous.** A
+block asleep for 8 ticks cannot integrate 8 ticks when it wakes: the `+/-1.0` clamp in
+`flux_edge_candidate` caps transport at one cell per step, so it can only *resume*, not catch up.
+`last_simulated_ticks` records the gap, but nothing can recover the transport. So the cost of
+underclocking a block that turns out to be busy is not "one slow step" — it is `n` ticks of transport
+that never happened, bounded only by `MAX_STALENESS`. Underclock conservatively.
+
+Three adaptations the clock design needs:
+
+**F1 — `MAX_STALENESS` is in ticks, and a tick stops being a fixed amount of simulated time.** Under
+sub-stepping the floor silently tightens or loosens with the global clock scale. Re-express it in
+simulated time (or in units of the fastest block's step) so it means the same thing at every clock
+setting.
+
+**F2 — Rate changes limited to one octave per tick.** A block jumping 1/8 -> 4 is a 32x step change
+in effective timestep. This is S1's nesting argument in time rather than space, and it has the same
+justification: adjacent-in-time rates that are not powers of two apart beat.
+
+**F3 — Hysteresis, because the scheduler itself can oscillate.** `n_b` derived from `|grad P|`, where
+running the block *reduces* `|grad P|`, is a feedback loop: speed up, resolve the gradient, slow
+down, gradient rebuilds, speed up. That is a limit cycle in the scheduler rather than the physics —
+the same failure mode, one level up, and exactly what the "design it self-correcting or it
+oscillates" rule is warning about. Different thresholds for speeding up and slowing down, and the
+gap between them derived from how fast `P` rebuilds, not picked.
+
+**Resolution note (favourable):** at `block_size = grid/64` there are 4096 blocks, so staleness forces
+~137 blocks/tick instead of ~34 — but each block holds a quarter of the cells, so the floor's cost in
+*cells* is unchanged (~8,700 cells/tick either way). The floor is resolution-invariant in the unit
+that matters.
+
 ## 8. Acceptance criteria
 
 Physics, in the user's words, all four required simultaneously:
