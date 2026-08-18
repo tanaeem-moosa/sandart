@@ -867,6 +867,46 @@ pub fn overfill_equilibrium_transfer(
     if cap_a <= 0.0 || cap_b <= 0.0 {
         return 0.0;
     }
+    // Exact analytical path for lateral liquid edges (zero gravity, zero yield stress, equal gains)
+    if gravity_head == 0.0 && yield_tau <= 0.0 && pressure_gain_a == pressure_gain_b && (cap_a - cap_b).abs() < 1e-5 {
+        let d_raw = 0.5 * (h_a - h_b);
+        if d_raw > 0.0 {
+            let limit = h_a.min((cap_b_eff - h_b).max(0.0));
+            return d_raw.min(limit);
+        } else if d_raw < 0.0 {
+            let limit = h_b.min((cap_a_eff - h_a).max(0.0));
+            return -((-d_raw).min(limit));
+        } else {
+            return 0.0;
+        }
+    }
+
+    // Exact analytical path for standard vertical liquid columns (gravity = base_head, zero yield stress)
+    if gravity_head > 0.0 && yield_tau <= 0.0 && pressure_gain_a == 1.0 && pressure_gain_b == 1.0 && (cap_a - 1.0).abs() < 1e-5 && (cap_b - 1.0).abs() < 1e-5 && tension <= 0.0 {
+        let total_m = h_a + h_b;
+        let o_max = overfill_ratio.max(0.01);
+        let h_a_star = if total_m <= 1.0 {
+            0.0
+        } else if total_m <= 2.0 {
+            total_m - 1.0
+        } else {
+            let excess = total_m - 2.0;
+            let stiff_mult = 1.0 + excess / o_max;
+            let offset = gravity_head / (2.0 * unit * stiff_mult);
+            1.0 + 0.5 * excess - offset
+        };
+        let d_target = h_a - h_a_star;
+        if d_target > 0.0 {
+            let limit = h_a.min((cap_b_eff - h_b).max(0.0));
+            return d_target.min(limit);
+        } else if d_target < 0.0 {
+            let limit = h_b.min((cap_a_eff - h_a).max(0.0));
+            return -((-d_target).min(limit));
+        } else {
+            return 0.0;
+        }
+    }
+
     let phi = |h: f32, cap: f32, gain: f32| {
         cell_potential(h, cap, overfill_ratio, unit, tension, gain)
     };
