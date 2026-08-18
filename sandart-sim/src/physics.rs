@@ -883,6 +883,31 @@ pub fn overfill_equilibrium_transfer(
     };
     let tau = yield_tau.max(0.0);
 
+    // Fast analytical path for uncompressed cells (zero bisection iterations required)
+    if tension <= 0.0 && h_a <= cap_a && h_b <= cap_b {
+        let fill_a = h_a / cap_a;
+        let fill_b = h_b / cap_b;
+        let delta = fill_a - fill_b + gravity_head;
+        let inv_sum = 1.0 / cap_a + 1.0 / cap_b;
+        if delta > tau {
+            let d_lin = (delta - tau) / inv_sum;
+            let limit = h_a.min((cap_b_eff - h_b).max(0.0));
+            let d = d_lin.min(limit);
+            if h_a - d <= cap_a && h_b + d <= cap_b {
+                return d;
+            }
+        } else if delta < -tau {
+            let d_lin = (delta + tau) / inv_sum;
+            let limit = h_b.min((cap_a_eff - h_a).max(0.0));
+            let d = (-d_lin).min(limit);
+            if h_b - d <= cap_b && h_a + d <= cap_a {
+                return -d;
+            }
+        } else {
+            return 0.0;
+        }
+    }
+
     let s0 = stress(0.0);
     // The bracket is the physically transferable range in each direction: donor mass on one side,
     // acceptor room (to the OVERFILL ceiling, not nominal capacity) on the other.
@@ -903,9 +928,8 @@ pub fn overfill_equilibrium_transfer(
         return 0.0;
     };
 
-    // 12 halvings of a bracket that is at most one cell wide: better than 2.5e-4 of a cell, well
-    // inside the resolution anything downstream acts on.
-    for _ in 0..12 {
+    // 6 bisections + 1 secant interpolation step (high precision with half the evals)
+    for _ in 0..6 {
         let mid = 0.5 * (lo + hi);
         if stress(mid) > target {
             lo = mid;
@@ -913,7 +937,14 @@ pub fn overfill_equilibrium_transfer(
             hi = mid;
         }
     }
-    0.5 * (lo + hi)
+    let slo = stress(lo);
+    let shi = stress(hi);
+    if (slo - shi).abs() > 1e-6 {
+        let d = lo + (target - slo) * (hi - lo) / (shi - slo);
+        d.clamp(lo.min(hi), lo.max(hi))
+    } else {
+        0.5 * (lo + hi)
+    }
 }
 
 /// Task #70: a cell's potential — fill plus pressure, in the same units the driving head is
@@ -3573,7 +3604,7 @@ pub fn eval_sandbox_shape(
 /// debug toggle (`sandart-sim/src/lib.rs`) can push a block into this exact tier by writing this
 /// exact threshold into `last_displacements`, instead of `settle_tick` growing a second bypass
 /// parameter that every one of its ~20 test call sites would also have to learn.
-pub(crate) const MUST_SIMULATE_THRESHOLD: f32 = 1e-4;
+pub(crate) const MUST_SIMULATE_THRESHOLD: f32 = 1e-3;
 
 /// Task #47 ("sand-slab" scheduling defect): fresh-overburden MUST-simulate predicate constants.
 /// See the big comment at this predicate's call site (top of `settle_tick`, just before the MUST/
