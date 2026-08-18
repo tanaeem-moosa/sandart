@@ -852,6 +852,45 @@ pub fn overfill_ceiling_for(stiffness: f32) -> f32 {
 /// transfers nothing — and therefore advects no colour. Bisection precision only matters for edges
 /// that are genuinely moving.
 #[inline]
+pub fn overfill_pressure_val_linear(
+    h: f32,
+    cap: f32,
+    _overfill_ratio: f32,
+    overfill_head_unit: f32,
+    underfill_tension: f32,
+) -> f32 {
+    let o = relative_overfill(h, cap);
+    if o > 0.0 {
+        return overfill_head_unit * o;
+    }
+    if underfill_tension <= 0.0 || cap <= 0.0 {
+        return 0.0;
+    }
+    let deficit = ((cap - h) / cap).clamp(0.0, 1.0);
+    -underfill_tension * deficit
+}
+
+#[inline]
+pub fn cell_potential_mode(
+    h: f32,
+    cap: f32,
+    overfill_ratio: f32,
+    unit: f32,
+    tension: f32,
+    pressure_gain: f32,
+    linear_pressure: bool,
+) -> f32 {
+    if cap <= 0.0 {
+        return 0.0;
+    }
+    if linear_pressure {
+        h / cap + pressure_gain * overfill_pressure_val_linear(h, cap, overfill_ratio, unit, tension)
+    } else {
+        h / cap + pressure_gain * overfill_pressure_val(h, cap, overfill_ratio, unit, tension)
+    }
+}
+
+#[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn overfill_equilibrium_transfer(
     h_a: f32,
@@ -867,83 +906,92 @@ pub fn overfill_equilibrium_transfer(
     overfill_ratio: f32,
     unit: f32,
     tension: f32,
+    linear_pressure: bool,
 ) -> f32 {
     if cap_a <= 0.0 || cap_b <= 0.0 {
         return 0.0;
     }
-    let phi = |h: f32, cap: f32, gain: f32| {
-        cell_potential(h, cap, overfill_ratio, unit, tension, gain)
-    };
-    // Stress remaining after a candidate transfer `d`. A yield-stress material comes to rest ON the
-    // yield surface, not at zero stress, so `yield_tau` is subtracted from the target rather than
-    // used as a gate: below yield nothing moves, above it the solve stops at the yield surface and
-    // the residual stress is what holds a sand slope up at its angle of repose.
-    let stress = |d: f32| {
-        phi(h_a - d, cap_a, pressure_gain_a) + gravity_head - phi(h_b + d, cap_b, pressure_gain_b)
-    };
     let tau = yield_tau.max(0.0);
+    let o_max = overfill_ratio.max(0.01);
 
-    // Fast analytical path for uncompressed cells (zero bisection iterations required)
-    if tension <= 0.0 && h_a <= cap_a && h_b <= cap_b {
-        let fill_a = h_a / cap_a;
-        let fill_b = h_b / cap_b;
-        let delta = fill_a - fill_b + gravity_head;
-        let inv_sum = 1.0 / cap_a + 1.0 / cap_b;
-        if delta > tau {
-            let d_lin = (delta - tau) / inv_sum;
-            let limit = h_a.min((cap_b_eff - h_b).max(0.0));
-            let d = d_lin.min(limit);
-            if h_a - d <= cap_a && h_b + d <= cap_b {
-                return d;
-            }
-        } else if delta < -tau {
-            let d_lin = (delta + tau) / inv_sum;
-            let limit = h_b.min((cap_a_eff - h_a).max(0.0));
-            let d = (-d_lin).min(limit);
-            if h_b - d <= cap_b && h_a + d <= cap_a {
-                return -d;
-            }
-        } else {
+    let pot_a = cell_potential_mode(h_a, cap_a, overfill_ratio, unit, tension, pressure_gain_a, linear_pressure);
+    let pot_b = cell_potential_mode(h_b, cap_b, overfill_ratio, unit, tension, pressure_gain_b, linear_pressure);
+    let s0 = pot_a + gravity_head - pot_b;
+
+    if s0 > tau {
+        let delta_stress = s0 - tau;
+        let limit = h_a.min((cap_b_eff - h_b).max(0.0));
+        if limit <= 0.0 {
             return 0.0;
         }
-    }
 
-    let s0 = stress(0.0);
-    // The bracket is the physically transferable range in each direction: donor mass on one side,
-    // acceptor room (to the OVERFILL ceiling, not nominal capacity) on the other.
-    let (mut lo, mut hi, target) = if s0 > tau {
-        let limit = h_a.min((cap_b_eff - h_b).max(0.0));
-        if limit <= 0.0 || stress(limit) >= tau {
-            // Equilibrium is beyond what this edge can move; take the whole thing.
-            return limit.max(0.0);
-        }
-        (0.0f32, limit, tau)
-    } else if s0 < -tau {
-        let limit = h_b.min((cap_a_eff - h_a).max(0.0));
-        if limit <= 0.0 || stress(-limit) <= -tau {
-            return -limit.max(0.0);
-        }
-        (-limit, 0.0f32, -tau)
-    } else {
-        return 0.0;
-    };
+        let k_a = pressure_gain_a * unit;
+        let k_b = pressure_gain_b * unit;
+        let x_a0 = ((h_a - cap_a) / cap_a).max(0.0);
+        let x_b0 = ((h_b - cap_b) / cap_b).max(0.0);
 
-    // 6 bisections + 1 secant interpolation step (high precision with half the evals)
-    for _ in 0..6 {
-        let mid = 0.5 * (lo + hi);
-        if stress(mid) > target {
-            lo = mid;
+        let (a_quad, b_lin) = if linear_pressure {
+            let s_a = if h_a > cap_a { (1.0 + k_a) / cap_a } else { 1.0 / cap_a };
+            let s_b = if h_b > cap_b { (1.0 + k_b) / cap_b } else { 1.0 / cap_b };
+            (0.0, s_a + s_b)
         } else {
-            hi = mid;
+            let a_q = (if h_a > cap_a { k_a / (o_max * cap_a * cap_a) } else { 0.0 })
+                    + (if h_b > cap_b { k_b / (o_max * cap_b * cap_b) } else { 0.0 });
+            let s_a = if h_a > cap_a { (1.0 + k_a + 2.0 * k_a * x_a0 / o_max) / cap_a } else { 1.0 / cap_a };
+            let s_b = if h_b > cap_b { (1.0 + k_b + 2.0 * k_b * x_b0 / o_max) / cap_b } else { 1.0 / cap_b };
+            (a_q, s_a + s_b)
+        };
+
+        let delta = if a_quad > 1e-7 {
+            let disc = b_lin * b_lin + 4.0 * a_quad * delta_stress;
+            if disc >= 0.0 {
+                (-b_lin + disc.sqrt()) / (2.0 * a_quad)
+            } else {
+                delta_stress / b_lin.max(1e-6)
+            }
+        } else {
+            delta_stress / b_lin.max(1e-6)
+        };
+
+        delta.clamp(0.0, limit)
+    } else if s0 < -tau {
+        let delta_stress = -s0 - tau;
+        let limit = h_b.min((cap_a_eff - h_a).max(0.0));
+        if limit <= 0.0 {
+            return 0.0;
         }
-    }
-    let slo = stress(lo);
-    let shi = stress(hi);
-    if (slo - shi).abs() > 1e-6 {
-        let d = lo + (target - slo) * (hi - lo) / (shi - slo);
-        d.clamp(lo.min(hi), lo.max(hi))
+
+        let k_a = pressure_gain_a * unit;
+        let k_b = pressure_gain_b * unit;
+        let x_a0 = ((h_a - cap_a) / cap_a).max(0.0);
+        let x_b0 = ((h_b - cap_b) / cap_b).max(0.0);
+
+        let (a_quad, b_lin) = if linear_pressure {
+            let s_a = if h_a > cap_a { (1.0 + k_a) / cap_a } else { 1.0 / cap_a };
+            let s_b = if h_b > cap_b { (1.0 + k_b) / cap_b } else { 1.0 / cap_b };
+            (0.0, s_a + s_b)
+        } else {
+            let a_q = (if h_b > cap_b { k_b / (o_max * cap_b * cap_b) } else { 0.0 })
+                    + (if h_a > cap_a { k_a / (o_max * cap_a * cap_a) } else { 0.0 });
+            let s_a = if h_a > cap_a { (1.0 + k_a + 2.0 * k_a * x_a0 / o_max) / cap_a } else { 1.0 / cap_a };
+            let s_b = if h_b > cap_b { (1.0 + k_b + 2.0 * k_b * x_b0 / o_max) / cap_b } else { 1.0 / cap_b };
+            (a_q, s_a + s_b)
+        };
+
+        let delta = if a_quad > 1e-7 {
+            let disc = b_lin * b_lin + 4.0 * a_quad * delta_stress;
+            if disc >= 0.0 {
+                (-b_lin + disc.sqrt()) / (2.0 * a_quad)
+            } else {
+                delta_stress / b_lin.max(1e-6)
+            }
+        } else {
+            delta_stress / b_lin.max(1e-6)
+        };
+
+        -delta.clamp(0.0, limit)
     } else {
-        0.5 * (lo + hi)
+        0.0
     }
 }
 
@@ -4007,6 +4055,7 @@ pub fn settle_tick(
     // which is what makes it safe to hand to a user at all. It now means exactly one thing: how
     // far a column compresses under its own weight.
     overfill_stiffness: f32,
+    linear_pressure: bool,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -4728,6 +4777,7 @@ pub fn settle_tick(
                                 ),
                                 base_head, 0.0, 1.0, 1.0,
                                 overfill_ratio, overfill_head_unit, underfill_tension,
+                                linear_pressure,
                             );
                             (d, 0.0)
                         } else if head_field_active
@@ -5307,6 +5357,7 @@ pub fn settle_tick(
                                 gravity_dir.x * GRAVITY_HEAD_SCALE + dispersion,
                                 tau_eff, k_lat_a, k_lat_b,
                                 overfill_ratio, overfill_head_unit, underfill_tension,
+                                linear_pressure,
                             );
                             (d, 0.0, 0.0)
                         } else if head_field_active

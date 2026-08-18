@@ -802,6 +802,14 @@ impl WasmSimulationState {
         self.sim.overfill_capacity
     }
 
+    pub fn set_linear_pressure(&mut self, linear: bool) {
+        self.sim.linear_pressure = linear;
+    }
+
+    pub fn get_linear_pressure(&self) -> bool {
+        self.sim.linear_pressure
+    }
+
     /// Block-simulation heat-map debug overlay: purely a render-side toggle (see
     /// `heatmap_enabled`'s field doc comment) — the underlying per-block counter runs
     /// unconditionally in `sim`, this only gates whether `render()` uploads/draws it.

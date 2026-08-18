@@ -513,6 +513,8 @@ pub struct DrawingSimulation {
     /// nine of the ten bands collapse, and the fluid is back to being packed against a wall.
     /// Softer fluid needs a higher ceiling, so the ceiling follows the dial.
     pub overfill_stiffness: f32,
+    /// Task #70: Use linear overfill pressure (exact closed-form) vs quadratic progressive stiffening.
+    pub linear_pressure: bool,
 
     /// Decile boundaries (9 values, D1..D9) of per-cell SATURATION -- `height / capacity`, where
     /// 1.0 is exactly full and anything above is overfill -- taken over cells that hold material.
@@ -804,6 +806,7 @@ impl DrawingSimulation {
             overfill_pressure: false,
             overfill_capacity: physics::overfill_ceiling_for(physics::OVERFILL_STIFFNESS_K),
             overfill_stiffness: physics::OVERFILL_STIFFNESS_K,
+            linear_pressure: false,
             block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
@@ -1669,6 +1672,7 @@ impl DrawingSimulation {
                     (self.overfill_capacity - 1.0).max(0.0),
                     self.underfill_tension,
                     self.overfill_stiffness,
+                    self.linear_pressure,
                 );
             }
         } else {
