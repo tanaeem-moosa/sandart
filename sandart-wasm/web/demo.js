@@ -850,12 +850,12 @@ function syncSettings() {
     // in index.html for what each one does.
     state.set_perfect_simulation(document.getElementById('check-perfect-sim').checked);
     state.set_heatmap_overlay(document.getElementById('check-heatmap').checked);
-    state.set_fresh_pressure_field(document.getElementById('check-fresh-pressure').checked);
+    state.set_fresh_pressure_field(false);
     state.set_pressure_heatmap_overlay(document.getElementById('check-pressure-heatmap').checked);
-    state.set_pressure_heatmap_head_field(document.getElementById('check-pressure-heatmap-head-field').checked);
-    state.set_head_field_transport(document.getElementById('check-head-field-transport').checked);
-    state.set_pressure_sensitive_flow(document.getElementById('check-pressure-sensitive-flow').checked);
-    state.set_overfill_pressure(document.getElementById('check-overfill-pressure').checked);
+    state.set_pressure_heatmap_head_field(false);
+    state.set_head_field_transport(false);
+    state.set_pressure_sensitive_flow(false);
+    state.set_overfill_pressure(true);
     const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
     if (stiffnessSlider) {
         const stiffness = parseFloat(stiffnessSlider.value);
@@ -963,8 +963,7 @@ function updateSaturationDeciles() {
     const row = document.getElementById('saturation-deciles-row');
     if (!row) return;
     const heatmapOn = document.getElementById('check-pressure-heatmap');
-    const overfillOn = document.getElementById('check-overfill-pressure');
-    const active = !!state && !!heatmapOn && heatmapOn.checked && !!overfillOn && overfillOn.checked;
+    const active = !!state && !!heatmapOn && heatmapOn.checked;
     row.style.display = active ? '' : 'none';
     if (!active) return;
     const out = document.getElementById('saturation-deciles-val');
@@ -1276,16 +1275,7 @@ function setupPanelInput() {
     document.getElementById('check-shadows').addEventListener('change', syncSettings);
     document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
     document.getElementById('check-heatmap').addEventListener('change', syncSettings);
-    document.getElementById('check-fresh-pressure').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
-    document.getElementById('check-pressure-heatmap-head-field').addEventListener('change', syncSettings);
-    // `check-head-field-transport` shipped without this line and was therefore inert on its own:
-    // syncSettings() reads every checkbox, so the toggle only took effect once some OTHER control
-    // was touched and pushed the whole panel. Anything measured by clicking it alone was measuring
-    // the previous state. `check-pressure-sensitive-flow` is listed here for the same reason.
-    document.getElementById('check-head-field-transport').addEventListener('change', syncSettings);
-    document.getElementById('check-pressure-sensitive-flow').addEventListener('change', syncSettings);
-    document.getElementById('check-overfill-pressure').addEventListener('change', syncSettings);
     const overfillStiffSlider = document.getElementById('overfill-stiffness-slider');
     if (overfillStiffSlider) {
         overfillStiffSlider.addEventListener('input', syncSettings);
