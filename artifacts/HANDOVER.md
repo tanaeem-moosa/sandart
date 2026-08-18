@@ -876,6 +876,28 @@ Guard rails that must hold throughout: mass conservation (asserted in several sp
 `cargo test -p sandart-sim --release --test perfect_simulation_determinism`. `last_simulated_ticks`
 already exists to let a block know how much simulated time it missed.
 
+### Hierarchical pressure — the current proposal for lateral movement at 512
+
+`artifacts/design/HIERARCHICAL-PRESSURE.md` (2026-08-18). Design only, nothing built, reviewed once
+and substantially revised — two of the first draft's three load-bearing claims were wrong and are
+marked as such in its §0.
+
+The measurement that motivates it: at 512 a settled pool carries **6% of its own hydrostatic
+pressure** after 1500 ticks (24% at 128, 13% at 256), because in a penalty model pressure must be
+*earned* by mass transfer at `~1/unit` per tick while each row of depth *needs* `1/unit` of
+compression — the same constant on both sides. Establishing hydrostatic pressure costs ~125 ticks
+per row of depth at 512. That is the U-tube not rising and the pile not settling; it is neither the
+CFL clamp nor diffusion.
+
+The identity behind it, `R * tau = o_max` (representable depth x saturated transfer), is why the
+stiffness dial fails in both directions: depth and speed are the same budget. Read §1 before
+proposing any constant change.
+
+**Read §0 before doing anything with this.** One unresolved question — whether deep coarse tiles pin
+at the ceiling, which would make the coarse driving force vanish at exactly the depth it exists to
+supply — can kill the whole approach and is falsifiable offline with no new code paths (build
+step 0).
+
 ### Smaller things
 
 - The saturation overlay colours FILL. Pressure and depth also have real gradients and might read
