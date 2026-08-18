@@ -35,7 +35,19 @@ jobs:
         with:
           tool: wasm-pack
 
+      # `simd128` is NOT on by default for wasm32-unknown-unknown -- without this every float
+      # op in the solver ships scalar. Supported by every browser this app targets (Chrome 91+,
+      # Firefox 89+, Safari 16.4+).
+      #
+      # MEASURED: on its own this is worth ~2% (16.57 -> 16.27 ms/tick, best-of-4 interleaved,
+      # 512 hourglass water at 120 blocks, run as real wasm under node). LLVM will not
+      # auto-vectorise the per-edge solver -- it is branchy and reads ~14 separate cell-keyed
+      # arrays 16 bytes at a time. The flag is here because it is a PREREQUISITE for explicit
+      # `core::arch::wasm32` intrinsics on a future SoA layout, not because it is a win today.
+      # `wasm-opt -O4` was measured too and was NOT better than wasm-pack's default `-O`.
       - name: Compile WebAssembly
+        env:
+          RUSTFLAGS: "-C target-feature=+simd128"
         run: wasm-pack build sandart-wasm --target web
 
       - name: Restructure Assets for Deployment

@@ -890,6 +890,24 @@ pub fn build_vertical_equilibrium_lut(
     lut
 }
 
+thread_local! {
+    static LUT_CACHE: std::cell::RefCell<Option<((u32,u32,u32,u32), Box<[f32; EQUILIBRIUM_LUT_SIZE]>)>> =
+        std::cell::RefCell::new(None);
+}
+/// Cached rebuild: the table depends on the stiffness dial, gravity, overfill ratio and tension,
+/// all of which are runtime-settable, so it must be keyed on them and rebuilt when they move.
+#[inline]
+pub fn cached_vertical_lut(ratio: f32, unit: f32, tension: f32, g: f32, m: f32) -> f32 {
+    LUT_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        let key = (ratio.to_bits(), unit.to_bits(), tension.to_bits(), g.to_bits());
+        if c.as_ref().map(|(k, _)| *k != key).unwrap_or(true) {
+            *c = Some((key, Box::new(build_vertical_equilibrium_lut(ratio, unit, tension, g))));
+        }
+        lookup_equilibrium_lut(&c.as_ref().unwrap().1, m)
+    })
+}
+
 #[inline]
 pub fn lookup_equilibrium_lut(lut: &[f32; EQUILIBRIUM_LUT_SIZE], total_m: f32) -> f32 {
     let m = total_m.clamp(0.0, EQUILIBRIUM_LUT_MAX_M);
@@ -921,88 +939,106 @@ pub fn overfill_equilibrium_transfer(
     }
     let tau = yield_tau.max(0.0);
 
-    // Fast path for vertical liquid column (g >= 0.5, tau = 0, equal nominal capacities)
-    if gravity_head >= 0.5 && tau <= 0.0 && pressure_gain_a == 1.0 && pressure_gain_b == 1.0 && (cap_a - 1.0).abs() < 1e-5 && (cap_b - 1.0).abs() < 1e-5 {
-        // Fast exact bisection to 32 bits (100% exact numerical ground truth)
-        let phi = |h: f32| cell_potential(h, 1.0, overfill_ratio, unit, tension, 1.0);
-        let stress = |d: f32| phi(h_a - d) + gravity_head - phi(h_b + d);
-        let s0 = stress(0.0);
-        if s0 > 0.0 {
-            let limit = h_a.min((cap_b_eff - h_b).max(0.0));
-            if limit <= 0.0 || stress(limit) >= 0.0 {
-                return limit.max(0.0);
-            }
-            let mut lo = 0.0f32;
-            let mut hi = limit;
-            for _ in 0..16 {
-                let mid = 0.5 * (lo + hi);
-                if stress(mid) > 0.0 { lo = mid; } else { hi = mid; }
-            }
-            return 0.5 * (lo + hi);
-        } else if s0 < 0.0 {
-            let limit = h_b.min((cap_a_eff - h_a).max(0.0));
-            if limit <= 0.0 || stress(-limit) <= 0.0 {
-                return -limit.max(0.0);
-            }
-            let mut lo = -limit;
-            let mut hi = 0.0f32;
-            for _ in 0..16 {
-                let mid = 0.5 * (lo + hi);
-                if stress(mid) > 0.0 { lo = mid; } else { hi = mid; }
-            }
-            return 0.5 * (lo + hi);
-        } else {
-            return 0.0;
+    // LUT path for the vertical liquid column, the case `build_vertical_equilibrium_lut` covers.
+    if gravity_head >= 0.5 && tau <= 0.0 && pressure_gain_a == 1.0 && pressure_gain_b == 1.0
+        && (cap_a - 1.0).abs() < 1e-5 && (cap_b - 1.0).abs() < 1e-5 {
+        let h_a_star = cached_vertical_lut(overfill_ratio, unit, tension, gravity_head, h_a + h_b);
+        let d = h_a - h_a_star;
+        if d > 0.0 {
+            return d.min(h_a.min((cap_b_eff - h_b).max(0.0)));
+        } else if d < 0.0 {
+            return -((-d).min(h_b.min((cap_a_eff - h_a).max(0.0))));
         }
+        return 0.0;
     }
-
-    // Fast path for lateral liquid edges (small g, tau = 0, equal gains)
-    if tau <= 0.0 && pressure_gain_a == pressure_gain_b && (cap_a - cap_b).abs() < 1e-5 {
-        let d_raw = 0.5 * (h_a - h_b + gravity_head);
-        if d_raw > 0.0 {
-            let limit = h_a.min((cap_b_eff - h_b).max(0.0));
-            return d_raw.min(limit);
-        } else if d_raw < 0.0 {
-            let limit = h_b.min((cap_a_eff - h_a).max(0.0));
-            return -((-d_raw).min(limit));
-        } else {
-            return 0.0;
-        }
-    }
-
-    // General fallback for granular sand (tau > 0)
+    let o_max = overfill_ratio.max(0.01);
+    let ten = tension.max(0.0);
     let phi = |h: f32, cap: f32, gain: f32| {
         cell_potential(h, cap, overfill_ratio, unit, tension, gain)
     };
-    let stress = |d: f32| {
-        phi(h_a - d, cap_a, pressure_gain_a) + gravity_head - phi(h_b + d, cap_b, pressure_gain_b)
-    };
-    let s0 = stress(0.0);
 
+    // EXACT, no iteration. `cell_potential` is degree <= 2 in h on each side of capacity, so
+    // `stress(d)` is piecewise quadratic in the transfer, with breakpoints exactly where either
+    // endpoint crosses ITS OWN capacity -- at most three segments. Walk to the segment holding
+    // the root, then solve that segment's quadratic in closed form.
+    //
+    // (slope, curvature) of phi about height `h` within one regime:
+    //     phi(h + e) = phi(h) + slope*e + curv*e^2
+    // Below capacity the slope carries the tension term; dropping it understates the slope by
+    // (1 + gain*tension), a factor of 2 at the shipped `underfill_tension = 1.0`.
+    let coeffs = |h: f32, over: bool, cap: f32, gain: f32| -> (f32, f32) {
+        if over {
+            let k = gain * unit;
+            let x = ((h - cap) / cap).max(0.0);
+            ((1.0 + k + 2.0 * k * x / o_max) / cap, k / (o_max * cap * cap))
+        } else {
+            ((1.0 + gain * ten) / cap, 0.0)
+        }
+    };
+    // Smallest root in [0, len] of  a*e^2 - b*e + c = 0, with b > 0 and c > 0.
+    let solve_seg = |a: f32, b: f32, c: f32, len: f32| -> f32 {
+        let lin = (c / b.max(1e-9)).clamp(0.0, len);
+        if a.abs() < 1e-9 { return lin; }
+        let disc = b * b - 4.0 * a * c;
+        if disc < 0.0 { return lin; }
+        let r = disc.sqrt();
+        // Stable form: the textbook (b - r)/(2a) loses all precision as `a` -> 0, which is the
+        // COMMON case here -- two cells of equal capacity and gain have curvature difference
+        // exactly zero, so the quadratic degenerates to a line and the root must be c/b.
+        let r1 = 2.0 * c / (b + r);
+        let r2 = (b + r) / (2.0 * a);
+        let mut best = f32::MAX;
+        for cand in [r1, r2] {
+            if cand >= -1e-6 && cand <= len + 1e-6 && cand < best { best = cand; }
+        }
+        if best == f32::MAX { lin } else { best.clamp(0.0, len) }
+    };
+    // Positive transfer `m` from donor -> receiver solving phi_d(h_d - m) + g - phi_r(h_r + m) = tau.
+    let solve_forward = |h_d: f32, cap_d: f32, gain_d: f32,
+                         h_r: f32, cap_r: f32, gain_r: f32,
+                         g: f32, limit: f32| -> f32 {
+        if limit <= 0.0 { return 0.0; }
+        let st = |m: f32| phi(h_d - m, cap_d, gain_d) + g - phi(h_r + m, cap_r, gain_r);
+        if st(limit) >= tau { return limit; }
+        let mut bp = [limit; 2];
+        let mut n = 0usize;
+        if h_d > cap_d {
+            let b = h_d - cap_d;
+            if b > 0.0 && b < limit { bp[n] = b; n += 1; }
+        }
+        if h_r < cap_r {
+            let b = cap_r - h_r;
+            if b > 0.0 && b < limit { bp[n] = b; n += 1; }
+        }
+        if n == 2 && bp[0] > bp[1] { bp.swap(0, 1); }
+        let mut lo = 0.0f32;
+        let mut s_lo = st(0.0);
+        for i in 0..=n {
+            let hi = if i < n { bp[i] } else { limit };
+            if hi <= lo { continue; }
+            let s_hi = st(hi);
+            if s_hi <= tau {
+                let mid = 0.5 * (lo + hi);
+                let (sd, qd) = coeffs(h_d - lo, (h_d - mid) > cap_d, cap_d, gain_d);
+                let (sr, qr) = coeffs(h_r + lo, (h_r + mid) > cap_r, cap_r, gain_r);
+                // stress(lo + e) = s_lo - (sd + sr)*e + (qd - qr)*e^2. The receiver's curvature
+                // enters NEGATIVE -- stress is a difference of potentials, not a sum -- so for two
+                // similar cells the quadratic term cancels.
+                return lo + solve_seg(qd - qr, sd + sr, s_lo - tau, hi - lo);
+            }
+            lo = hi;
+            s_lo = s_hi;
+        }
+        limit
+    };
+
+    let s0 = phi(h_a, cap_a, pressure_gain_a) + gravity_head - phi(h_b, cap_b, pressure_gain_b);
     if s0 > tau {
         let limit = h_a.min((cap_b_eff - h_b).max(0.0));
-        if limit <= 0.0 || stress(limit) >= tau {
-            return limit.max(0.0);
-        }
-        let mut lo = 0.0f32;
-        let mut hi = limit;
-        for _ in 0..14 {
-            let mid = 0.5 * (lo + hi);
-            if stress(mid) > tau { lo = mid; } else { hi = mid; }
-        }
-        0.5 * (lo + hi)
+        solve_forward(h_a, cap_a, pressure_gain_a, h_b, cap_b, pressure_gain_b, gravity_head, limit)
     } else if s0 < -tau {
         let limit = h_b.min((cap_a_eff - h_a).max(0.0));
-        if limit <= 0.0 || stress(-limit) <= -tau {
-            return -limit.max(0.0);
-        }
-        let mut lo = -limit;
-        let mut hi = 0.0f32;
-        for _ in 0..14 {
-            let mid = 0.5 * (lo + hi);
-            if stress(mid) > -tau { lo = mid; } else { hi = mid; }
-        }
-        0.5 * (lo + hi)
+        -solve_forward(h_b, cap_b, pressure_gain_b, h_a, cap_a, pressure_gain_a, -gravity_head, limit)
     } else {
         0.0
     }
@@ -1349,6 +1385,12 @@ fn fresh_overburden_must_blocks(
     cell_props: &[f32],
     edge_vel_v: &[f32],
     variant: FreshOverburdenVariant,
+    // Blocks the caller still needs an answer for. A block already over
+    // `MUST_SIMULATE_THRESHOLD` on recorded displacement is unconditionally MUST whatever this
+    // predicate says (`displacement >= bar || fresh_active[b]`), so scanning its 256 cells can
+    // only produce a value nothing reads. Skipping those is behaviour-identical and, on the 512
+    // hourglass, cuts this pass roughly in half.
+    needed: &[bool],
 ) -> Vec<bool> {
     let expected_len = cols * rows;
     let mut fresh_active = vec![false; expected_len];
@@ -1435,6 +1477,9 @@ fn fresh_overburden_must_blocks(
             let start_x = bx * block_size;
             let end_x = ((bx + 1) * block_size).min(w);
             let b = by * cols + bx;
+            if !needed[b] {
+                continue;
+            }
             'scan: for y in start_y..end_y {
                 let row_offset = y * w;
                 for x in start_x..end_x {
@@ -1746,12 +1791,53 @@ fn accumulate_edge_totals(
     candidate: f32,
     a_idx: usize,
     b_idx: usize,
+    out_total: &mut [f32],
+    in_total: &mut [f32],
+    avail: &[f32],
+    freecap: &[f32],
+    oversubscribed: &mut bool,
+) {
+    let (donor, acceptor, mag) = if candidate >= 0.0 {
+        (a_idx, b_idx, candidate)
+    } else {
+        (b_idx, a_idx, -candidate)
+    };
+    let o = out_total[donor] + mag;
+    let i = in_total[acceptor] + mag;
+    out_total[donor] = o;
+    in_total[acceptor] = i;
+    // Both totals are monotone, so testing at each increment is equivalent to testing once at the
+    // end -- and it costs two loads that are already in cache, instead of a separate sweep over
+    // `touched_cells` (which holds ~98k entries per phase, with duplicates, against 21k edges).
+    *oversubscribed |= o > avail[donor] || i > freecap[acceptor];
+}
+
+/// The JITTERED half of the same accumulation, split out because it is only ever *read* by a cell
+/// that is oversubscribed -- `budget_term` returns a flat `1.0` whenever `raw_total <= budget`,
+/// without looking at the jittered total at all.
+///
+/// Deferring it is worth doing rather than tidy: `edge_share_jitter` is a five-round integer hash,
+/// it ran for every edge in COLLECT and again for the same edge in APPLY, and
+/// `grain_jitter_strength` ends in `.max(0.05)` so its `s <= 0.0` early-out could never fire --
+/// liquid paid the full hash to obtain a jitter that liquid never wanted. Measured on the 512
+/// hourglass: 9.3% of the whole frame, for a value that was multiplied by 1.0 and discarded
+/// (instrumentation over 42,702 edges/tick found arbitration clamping exactly none of them).
+///
+/// Correctness is unchanged, not approximated: when no touched cell is oversubscribed every
+/// `edge_arbitration_scale` would have returned exactly `1.0`, and when one is, this pass runs and
+/// rebuilds the identical totals from the identical `(edge_key, salt, time_seed)` before any scale
+/// is computed. It reads `cand_h`/`cand_v` rather than a saved candidate because
+/// `pressure_project` writes its final, post-correction flux back into those arrays.
+#[allow(clippy::too_many_arguments)]
+#[inline]
+fn accumulate_edge_jitter(
+    candidate: f32,
+    a_idx: usize,
+    b_idx: usize,
     edge_key: usize,
     salt: u32,
     time_seed: u32,
     cell_props: &[f32],
-    out_total: &mut [f32],
-    in_total: &mut [f32],
     out_total_jit: &mut [f32],
     in_total_jit: &mut [f32],
 ) {
@@ -1761,8 +1847,6 @@ fn accumulate_edge_totals(
         (b_idx, a_idx, -candidate)
     };
     let jit = edge_share_jitter(cell_props, donor, edge_key, salt, time_seed);
-    out_total[donor] += mag;
-    in_total[acceptor] += mag;
     out_total_jit[donor] += mag * jit;
     in_total_jit[acceptor] += mag * jit;
 }
@@ -1893,14 +1977,13 @@ fn pressure_project(
     degree: &mut [u32],
     cap_cache: &mut [f32],
     nodes: &mut Vec<usize>,
-    phase: usize,
-    time_seed: u32,
     overfill_active: bool,
     overfill_ratio: f32,
     cell_out_total: &mut [f32],
     cell_in_total: &mut [f32],
-    cell_out_total_jit: &mut [f32],
-    cell_in_total_jit: &mut [f32],
+    cell_avail: &[f32],
+    cell_freecap: &[f32],
+    oversubscribed: &mut bool,
 ) {
     // Whether the Jacobi solve itself runs this call. Even when it doesn't (diagnostic gate off,
     // or this phase touched nothing), the totals `accumulate_edge_totals` produces are still
@@ -2039,11 +2122,7 @@ fn pressure_project(
             let corrected = cand_h[idx] + (cur[a] - cur[b]);
             let final_flux = clamp_edge_feasible(corrected, temp_heights, cap_cache[a], cap_cache[b], a, b);
             cand_h[idx] = final_flux;
-            accumulate_edge_totals(
-                final_flux, a, b, idx,
-                EDGE_SALT_H.wrapping_add(phase as u32), time_seed, cell_props,
-                cell_out_total, cell_in_total, cell_out_total_jit, cell_in_total_jit,
-            );
+            accumulate_edge_totals(final_flux, a, b, cell_out_total, cell_in_total, cell_avail, cell_freecap, oversubscribed);
         }
         for &idx in touched_v {
             let a = idx;
@@ -2051,29 +2130,17 @@ fn pressure_project(
             let corrected = cand_v[idx] + (cur[a] - cur[b]);
             let final_flux = clamp_edge_feasible(corrected, temp_heights, cap_cache[a], cap_cache[b], a, b);
             cand_v[idx] = final_flux;
-            accumulate_edge_totals(
-                final_flux, a, b, idx,
-                EDGE_SALT_V.wrapping_add(phase as u32), time_seed, cell_props,
-                cell_out_total, cell_in_total, cell_out_total_jit, cell_in_total_jit,
-            );
+            accumulate_edge_totals(final_flux, a, b, cell_out_total, cell_in_total, cell_avail, cell_freecap, oversubscribed);
         }
     } else {
         // Pressure did not run this call (gate off, or nothing touched this phase): arbitration
         // still needs totals from whatever `cand_h`/`cand_v` already hold (the untouched raw
         // COLLECT candidates).
         for &idx in touched_h {
-            accumulate_edge_totals(
-                cand_h[idx], idx, idx + 1, idx,
-                EDGE_SALT_H.wrapping_add(phase as u32), time_seed, cell_props,
-                cell_out_total, cell_in_total, cell_out_total_jit, cell_in_total_jit,
-            );
+            accumulate_edge_totals(cand_h[idx], idx, idx + 1, cell_out_total, cell_in_total, cell_avail, cell_freecap, oversubscribed);
         }
         for &idx in touched_v {
-            accumulate_edge_totals(
-                cand_v[idx], idx, idx + w, idx,
-                EDGE_SALT_V.wrapping_add(phase as u32), time_seed, cell_props,
-                cell_out_total, cell_in_total, cell_out_total_jit, cell_in_total_jit,
-            );
+            accumulate_edge_totals(cand_v[idx], idx, idx + w, cell_out_total, cell_in_total, cell_avail, cell_freecap, oversubscribed);
         }
     }
 }
@@ -3972,6 +4039,75 @@ pub(crate) fn phase_offset(_k: usize) -> u32 {
     0
 }
 
+
+/// Tick-to-tick home for `settle_tick`'s grid-sized working buffers.
+///
+/// These used to be `vec![0.0; cell_count]` locals, i.e. ten zeroed 1 MB allocations per tick at
+/// 512, freed again at the end of the same tick. Measured at 512 that was the largest single item
+/// in the tick's fixed overhead -- larger than the `temp_heights` copy, which is only ~0.16 ms.
+///
+/// **The zeroing is not needed, because the solver already clears them sparsely.** Each phase
+/// begins by walking `touched_h`/`touched_v`/`touched_cells`/`g0_liquid_cells` and resetting
+/// exactly the entries the PREVIOUS phase wrote. Persisting the four lists alongside the buffers
+/// extends that same mechanism across the tick boundary: at the end of a tick `touched_v` is
+/// already empty (phase 1 cleared it) and the other three hold phase 1's entries, which is
+/// precisely what the next tick's phase-0 clear consumes. So a pooled buffer arrives dirty only
+/// where a list says it is dirty, and gets cleaned before anything reads it.
+///
+/// All fifteen live or die together, in one `Option`, deliberately: buffers and lists must agree
+/// about what is dirty. If a panic or an early return loses the set, the next call rebuilds the
+/// whole thing zeroed with empty lists -- consistent, just one tick slower.
+#[derive(Default)]
+struct SolverScratch {
+    cand_h: Vec<f32>,
+    cand_v: Vec<f32>,
+    edge_h_active: Vec<bool>,
+    edge_v_active: Vec<bool>,
+    cell_out_total: Vec<f32>,
+    cell_in_total: Vec<f32>,
+    cell_out_total_jit: Vec<f32>,
+    cell_in_total_jit: Vec<f32>,
+    cell_avail: Vec<f32>,
+    cell_freecap: Vec<f32>,
+    max_head_diff_cell: Vec<f32>,
+    touched_h: Vec<usize>,
+    touched_v: Vec<usize>,
+    touched_cells: Vec<usize>,
+    g0_liquid_cells: Vec<usize>,
+}
+
+mod solver_scratch {
+    use super::SolverScratch;
+    use std::cell::RefCell;
+    thread_local! {
+        static POOL: RefCell<Option<SolverScratch>> = const { RefCell::new(None) };
+    }
+    /// Hand out the pooled set, sized for `cell_count`. A size change (grid resize) discards the
+    /// old contents entirely -- the dirty-entry lists refer to the old indexing and cannot be
+    /// trusted across it.
+    pub fn take(cell_count: usize) -> SolverScratch {
+        let mut s = POOL.with(|p| p.borrow_mut().take()).unwrap_or_default();
+        if s.cand_h.len() != cell_count {
+            s = SolverScratch::default();
+            s.cand_h.resize(cell_count, 0.0);
+            s.cand_v.resize(cell_count, 0.0);
+            s.edge_h_active.resize(cell_count, false);
+            s.edge_v_active.resize(cell_count, false);
+            s.cell_out_total.resize(cell_count, 0.0);
+            s.cell_in_total.resize(cell_count, 0.0);
+            s.cell_out_total_jit.resize(cell_count, 0.0);
+            s.cell_in_total_jit.resize(cell_count, 0.0);
+            s.cell_avail.resize(cell_count, 0.0);
+            s.cell_freecap.resize(cell_count, 0.0);
+            s.max_head_diff_cell.resize(cell_count, 0.0);
+        }
+        s
+    }
+    pub fn put(s: SolverScratch) {
+        POOL.with(|p| *p.borrow_mut() = Some(s));
+    }
+}
+
 /// Perform a single gravity flow/settling iteration inside the active bounding box.
 pub fn settle_tick(
     heightmap: &mut Heightmap,
@@ -4193,6 +4329,10 @@ pub fn settle_tick(
     let fresh_active = if fresh_overburden_gate::is_disabled() {
         vec![false; expected_len]
     } else {
+        let mut fresh_needed = vec![false; expected_len];
+        for b in 0..expected_len {
+            fresh_needed[b] = last_displacements[b] < MUST_SIMULATE_THRESHOLD;
+        }
         fresh_overburden_must_blocks(
             w,
             h,
@@ -4205,6 +4345,7 @@ pub fn settle_tick(
             cell_props,
             edge_vel_v,
             fresh_overburden_gate::variant(),
+            &fresh_needed,
         )
     };
 
@@ -4451,45 +4592,56 @@ pub fn settle_tick(
     // the `touched_*` lists are what let the next phase clear exactly those entries back to their
     // default instead of paying an O(grid) reset every phase.
     let cell_count = heightmap.data.len();
-    let mut cand_h = vec![0.0f32; cell_count];
-    let mut cand_v = vec![0.0f32; cell_count];
-    let mut edge_h_active = vec![false; cell_count];
-    let mut edge_v_active = vec![false; cell_count];
-    let mut cell_out_total = vec![0.0f32; cell_count];
-    let mut cell_in_total = vec![0.0f32; cell_count];
-    let mut cell_out_total_jit = vec![0.0f32; cell_count];
-    let mut cell_in_total_jit = vec![0.0f32; cell_count];
-    let mut cell_avail = vec![0.0f32; cell_count];
-    let mut cell_freecap = vec![0.0f32; cell_count];
+    let mut scratch = solver_scratch::take(cell_count);
+    let mut cand_h = std::mem::take(&mut scratch.cand_h);
+    let mut cand_v = std::mem::take(&mut scratch.cand_v);
+    let mut edge_h_active = std::mem::take(&mut scratch.edge_h_active);
+    let mut edge_v_active = std::mem::take(&mut scratch.edge_v_active);
+    let mut cell_out_total = std::mem::take(&mut scratch.cell_out_total);
+    let mut cell_in_total = std::mem::take(&mut scratch.cell_in_total);
+    let mut cell_out_total_jit = std::mem::take(&mut scratch.cell_out_total_jit);
+    let mut cell_in_total_jit = std::mem::take(&mut scratch.cell_in_total_jit);
+    let mut cell_avail = std::mem::take(&mut scratch.cell_avail);
+    let mut cell_freecap = std::mem::take(&mut scratch.cell_freecap);
     // Phase 1's g=0 (Sandbox) liquid branch also needs, per center cell, the largest raw head
     // difference across its owned edges (`max_head_diff`, computed unconditionally during COLLECT
     // — it does not depend on arbitration) so the post-APPLY block-wake check can be run once
     // arbitration has settled `cand_h`/`cand_v` into their final values. `g0_liquid_cells` is the
     // set of cells that took that branch this phase at all, whether or not they ended up owning a
     // live edge.
-    let mut max_head_diff_cell = vec![0.0f32; cell_count];
-    let mut touched_h: Vec<usize> = Vec::new();
-    let mut touched_v: Vec<usize> = Vec::new();
-    let mut touched_cells: Vec<usize> = Vec::new();
-    let mut g0_liquid_cells: Vec<usize> = Vec::new();
+    let mut max_head_diff_cell = std::mem::take(&mut scratch.max_head_diff_cell);
+    let mut touched_h = std::mem::take(&mut scratch.touched_h);
+    let mut touched_v = std::mem::take(&mut scratch.touched_v);
+    let mut touched_cells = std::mem::take(&mut scratch.touched_cells);
+    let mut g0_liquid_cells = std::mem::take(&mut scratch.g0_liquid_cells);
 
     // Pressure projection scratch (`pressure_project`, run once per phase between COLLECT and the
     // arbitration totals below). Same allocate-once-outside-the-loop, clear-only-what-was-touched
     // discipline as the buffers above; `pressure_project` itself owns clearing these via its own
     // `nodes` list from the previous call.
-    let mut pressure_phi_a = vec![0.0f32; cell_count];
-    let mut pressure_phi_b = vec![0.0f32; cell_count];
-    let mut pressure_fstar = vec![0.0f32; cell_count];
-    let mut pressure_lap = vec![0.0f32; cell_count];
-    let mut pressure_degree = vec![0u32; cell_count];
+    // `pressure_project` reads these six only inside its `run_solve` branch, and `run_solve` is
+    // `!overfill_active` -- so with the overfill model on (the shipped configuration) they are
+    // never indexed at all. Allocating them empty there saves six zeroed grid-sized buffers per
+    // tick; measured at 512 that is the single largest item in the tick's fixed overhead.
+    let pressure_scratch_len = if overfill_active { 0 } else { cell_count };
+    let mut pressure_phi_a = vec![0.0f32; pressure_scratch_len];
+    let mut pressure_phi_b = vec![0.0f32; pressure_scratch_len];
+    let mut pressure_fstar = vec![0.0f32; pressure_scratch_len];
+    let mut pressure_lap = vec![0.0f32; pressure_scratch_len];
+    let mut pressure_degree = vec![0u32; pressure_scratch_len];
     // Per-node capacity cache, populated once per node on its first visit each call (wetness, and
     // therefore `cell_capacity_for(wetness)`, is constant for the duration of one `pressure_project`
     // call, so this is what lets the Jacobi loop stop re-deriving it every iteration -- see that
     // function's perf note). Never needs clearing: every read is preceded, within the SAME call, by
     // a write at that node's first visit, unlike `phi_a`/`phi_b`/`fstar`/`lap`/`degree`, which carry
     // meaning across a call's own iterations and so must be reset from the previous call's leftovers.
-    let mut pressure_cap = vec![0.0f32; cell_count];
+    let mut pressure_cap = vec![0.0f32; pressure_scratch_len];
     let mut pressure_nodes: Vec<usize> = Vec::new();
+
+    // `pressure_project`'s solve is gated on `!overfill_active`, so with the overfill model on it
+    // can never revise a candidate and the arbitration totals can be summed at COLLECT time
+    // instead of in a second pass over the touched-edge lists. See the vertical-edge COLLECT site.
+    let accumulate_at_collect = overfill_active;
 
     // 2. Continuous per-cell solver (loop over active blocks)
     let b_len = expected_len;
@@ -4550,6 +4702,7 @@ pub fn settle_tick(
         touched_v.clear();
         touched_cells.clear();
         g0_liquid_cells.clear();
+        let mut oversubscribed = false;
 
         // True when phase 0 should walk rows bottom-to-top (the usual case: gravity points at
         // +y, i.e. down the grid).
@@ -4918,9 +5071,20 @@ pub fn settle_tick(
 
                         touched_cells.push(center_idx);
                         touched_cells.push(nb_idx);
-                        // Totals deferred: see the unified post-COLLECT `accumulate_edge_totals`
-                        // pass below (after `pressure_project`), which sums the (possibly
-                        // pressure-corrected) final candidates instead of these raw ones.
+                        // With the overfill model on, `pressure_project`'s solve never runs
+                        // (`run_solve` is `!overfill_active`), so it can never revise this
+                        // candidate -- and then summing it here, where the value and both
+                        // endpoints' budgets are already in registers, saves walking the whole
+                        // `touched_h`/`touched_v` lists a second time just to add it up. With the
+                        // model off the correction can still move it, so the totals stay deferred
+                        // to the post-COLLECT pass, which sums the corrected candidates instead.
+                        if accumulate_at_collect {
+                            accumulate_edge_totals(
+                                candidate, center_idx, nb_idx,
+                                &mut cell_out_total, &mut cell_in_total,
+                                &cell_avail, &cell_freecap, &mut oversubscribed,
+                            );
+                        }
                     }
                     continue;
                 }
@@ -5060,7 +5224,15 @@ pub fn settle_tick(
                             cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
-                            // Totals deferred: see the unified post-COLLECT pass below.
+                            // See the vertical-edge site above for why this is summed here
+                            // rather than in a second pass over the touched lists.
+                            if accumulate_at_collect {
+                                accumulate_edge_totals(
+                                    candidate, center_idx, nb_idx,
+                                    &mut cell_out_total, &mut cell_in_total,
+                                    &cell_avail, &cell_freecap, &mut oversubscribed,
+                                );
+                            }
                         }
                     }
 
@@ -5119,7 +5291,15 @@ pub fn settle_tick(
                             cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
-                            // Totals deferred: see the unified post-COLLECT pass below.
+                            // See the vertical-edge site above for why this is summed here
+                            // rather than in a second pass over the touched lists.
+                            if accumulate_at_collect {
+                                accumulate_edge_totals(
+                                    candidate, center_idx, nb_idx,
+                                    &mut cell_out_total, &mut cell_in_total,
+                                    &cell_avail, &cell_freecap, &mut oversubscribed,
+                                );
+                            }
                         }
                     }
 
@@ -5616,7 +5796,15 @@ pub fn settle_tick(
 
                             touched_cells.push(center_idx);
                             touched_cells.push(nb_idx);
-                            // Totals deferred: see the unified post-COLLECT pass below.
+                            // See the vertical-edge site above for why this is summed here
+                            // rather than in a second pass over the touched lists.
+                            if accumulate_at_collect {
+                                accumulate_edge_totals(
+                                    candidate, center_idx, nb_idx,
+                                    &mut cell_out_total, &mut cell_in_total,
+                                    &cell_avail, &cell_freecap, &mut oversubscribed,
+                                );
+                            }
                         }
                     }
 
@@ -6028,14 +6216,39 @@ pub fn settle_tick(
     // index into `cand_h`/`cand_v`, `a_idx`/`b_idx` its two endpoints, salt keyed only by
     // orientation and phase) -- see the `EDGE_SALT_*` calls above, at each COLLECT site, which
     // this replaces.
-    pressure_project(
+    if !accumulate_at_collect {
+        pressure_project(
         &mut cand_h, &mut cand_v, &touched_h, &touched_v,
         temp_heights, cell_props, w,
         &mut pressure_phi_a, &mut pressure_phi_b, &mut pressure_fstar, &mut pressure_lap,
         &mut pressure_degree, &mut pressure_cap, &mut pressure_nodes,
-        phase, time_seed, overfill_active, overfill_ratio,
-        &mut cell_out_total, &mut cell_in_total, &mut cell_out_total_jit, &mut cell_in_total_jit,
-    );
+        overfill_active, overfill_ratio,
+        &mut cell_out_total, &mut cell_in_total,
+        &cell_avail, &cell_freecap, &mut oversubscribed,
+        );
+    }
+
+    // Arbitration can only ever change a flux for a cell whose RAW claims exceed its own budget
+    // (`budget_term` returns a flat 1.0 otherwise), and `accumulate_edge_totals` has just told us
+    // whether any cell did. That one bool is what lets both APPLY loops below skip
+    // `edge_share_jitter` and `edge_arbitration_scale` entirely in the common case -- see
+    // `accumulate_edge_jitter`'s doc comment for what that is worth and why it is exact.
+    if oversubscribed {
+        for &idx in &touched_h {
+            accumulate_edge_jitter(
+                cand_h[idx], idx, idx + 1, idx,
+                EDGE_SALT_H.wrapping_add(phase as u32), time_seed, cell_props,
+                &mut cell_out_total_jit, &mut cell_in_total_jit,
+            );
+        }
+        for &idx in &touched_v {
+            accumulate_edge_jitter(
+                cand_v[idx], idx, idx + w, idx,
+                EDGE_SALT_V.wrapping_add(phase as u32), time_seed, cell_props,
+                &mut cell_out_total_jit, &mut cell_in_total_jit,
+            );
+        }
+    }
 
     // --- ARBITRATE + APPLY ---
     //
@@ -6059,14 +6272,18 @@ pub fn settle_tick(
         let a_idx = idx;
         let b_idx = idx + w;
         let (donor, acceptor) = if raw >= 0.0 { (a_idx, b_idx) } else { (b_idx, a_idx) };
-        let jit = edge_share_jitter(
-            cell_props, donor, idx, EDGE_SALT_V.wrapping_add(phase as u32), time_seed,
-        );
-        let scale = edge_arbitration_scale(
-            cell_out_total[donor], cell_out_total_jit[donor], cell_avail[donor],
-            cell_in_total[acceptor], cell_in_total_jit[acceptor], cell_freecap[acceptor],
-            jit,
-        );
+        let scale = if oversubscribed {
+            let jit = edge_share_jitter(
+                cell_props, donor, idx, EDGE_SALT_V.wrapping_add(phase as u32), time_seed,
+            );
+            edge_arbitration_scale(
+                cell_out_total[donor], cell_out_total_jit[donor], cell_avail[donor],
+                cell_in_total[acceptor], cell_in_total_jit[acceptor], cell_freecap[acceptor],
+                jit,
+            )
+        } else {
+            1.0
+        };
         let final_flux = raw * scale;
         cand_v[idx] = final_flux;
         let x = idx % w;
@@ -6132,14 +6349,18 @@ pub fn settle_tick(
         let a_idx = idx;
         let b_idx = idx + 1;
         let (donor, acceptor) = if raw >= 0.0 { (a_idx, b_idx) } else { (b_idx, a_idx) };
-        let jit = edge_share_jitter(
-            cell_props, donor, idx, EDGE_SALT_H.wrapping_add(phase as u32), time_seed,
-        );
-        let scale = edge_arbitration_scale(
-            cell_out_total[donor], cell_out_total_jit[donor], cell_avail[donor],
-            cell_in_total[acceptor], cell_in_total_jit[acceptor], cell_freecap[acceptor],
-            jit,
-        );
+        let scale = if oversubscribed {
+            let jit = edge_share_jitter(
+                cell_props, donor, idx, EDGE_SALT_H.wrapping_add(phase as u32), time_seed,
+            );
+            edge_arbitration_scale(
+                cell_out_total[donor], cell_out_total_jit[donor], cell_avail[donor],
+                cell_in_total[acceptor], cell_in_total_jit[acceptor], cell_freecap[acceptor],
+                jit,
+            )
+        } else {
+            1.0
+        };
         let final_flux = raw * scale;
         cand_h[idx] = final_flux;
         let x = idx % w;
@@ -6278,6 +6499,23 @@ pub fn settle_tick(
     // the way to section 2's per-cell pass — then must be zeroed here so the next tick's calls
     // aren't added on top of this tick's stale leftovers.
     heightmap.external_mass_this_tick.fill(0.0);
+
+    scratch.cand_h = cand_h;
+    scratch.cand_v = cand_v;
+    scratch.edge_h_active = edge_h_active;
+    scratch.edge_v_active = edge_v_active;
+    scratch.cell_out_total = cell_out_total;
+    scratch.cell_in_total = cell_in_total;
+    scratch.cell_out_total_jit = cell_out_total_jit;
+    scratch.cell_in_total_jit = cell_in_total_jit;
+    scratch.cell_avail = cell_avail;
+    scratch.cell_freecap = cell_freecap;
+    scratch.max_head_diff_cell = max_head_diff_cell;
+    scratch.touched_h = touched_h;
+    scratch.touched_v = touched_v;
+    scratch.touched_cells = touched_cells;
+    scratch.g0_liquid_cells = g0_liquid_cells;
+    solver_scratch::put(scratch);
 
     total_flow
 }
@@ -15196,6 +15434,7 @@ mod tests {
             let promoted = fresh_overburden_must_blocks(
                 w, h, block_size, cols, rows, mask, &sim.hm.data, &sim.hm.external_mass_this_tick,
                 &sim.cell_props, &sim.edge_vel_v, variant,
+                &vec![true; cols * rows],
             );
             let n = promoted.iter().filter(|&&x| x).count();
             println!(
@@ -15838,11 +16077,13 @@ mod tests {
                     w, h, block_size, cols, rows_blk, &mask, &sim.hm.data,
                     &sim.hm.external_mass_this_tick, &sim.cell_props, &sim.edge_vel_v,
                     FreshOverburdenVariant::RoomOnly,
+                    &vec![true; cols * rows_blk],
                 );
                 let shipped = fresh_overburden_must_blocks(
                     w, h, block_size, cols, rows_blk, &mask, &sim.hm.data,
                     &sim.hm.external_mass_this_tick, &sim.cell_props, &sim.edge_vel_v,
                     FreshOverburdenVariant::OverburdenAndRoom,
+                    &vec![true; cols * rows_blk],
                 );
                 let excluded_by_overburden = room_only
                     .iter()
