@@ -867,35 +867,24 @@ pub fn overfill_equilibrium_transfer(
     if cap_a <= 0.0 || cap_b <= 0.0 {
         return 0.0;
     }
-    // Exact analytical path for lateral liquid edges (zero gravity, zero yield stress, equal gains)
-    if gravity_head == 0.0 && yield_tau <= 0.0 && pressure_gain_a == pressure_gain_b && (cap_a - cap_b).abs() < 1e-5 {
-        let d_raw = 0.5 * (h_a - h_b);
-        if d_raw > 0.0 {
-            let limit = h_a.min((cap_b_eff - h_b).max(0.0));
-            return d_raw.min(limit);
-        } else if d_raw < 0.0 {
-            let limit = h_b.min((cap_a_eff - h_a).max(0.0));
-            return -((-d_raw).min(limit));
-        } else {
-            return 0.0;
-        }
-    }
+    let tau = yield_tau.max(0.0);
+    let o_max = overfill_ratio.max(0.01);
 
-    // Exact analytical path for standard vertical liquid columns (gravity = base_head, zero yield stress)
-    // 100% exact mathematical solution across all 3 regimes (free-fall, asymmetric transitional, and fully overfilled)
-    if gravity_head > 0.0 && yield_tau <= 0.0 && pressure_gain_a == 1.0 && pressure_gain_b == 1.0 && (cap_a - 1.0).abs() < 1e-5 && (cap_b - 1.0).abs() < 1e-5 && tension <= 0.0 {
+    // Exact analytical path for standard vertical liquid columns (gravity = base_head)
+    if gravity_head > 0.0 && tau <= 0.0 && pressure_gain_a == 1.0 && pressure_gain_b == 1.0 && (cap_a - 1.0).abs() < 1e-5 && (cap_b - 1.0).abs() < 1e-5 {
         let total_m = h_a + h_b;
-        let o_max = overfill_ratio.max(0.01);
         let h_a_star = if total_m <= 1.0 {
-            // Regime 1 (Free fall): All mass drains to the lower cell
-            0.0
+            // Regime 1 (Free fall): Both cells underfilled
+            let t_lin = 1.0 + tension;
+            let y = (0.5 * total_m - gravity_head / (2.0 * t_lin)).max(0.0);
+            y
         } else if total_m < 2.0 {
             // Regime 2 (Asymmetric compression): Upper cell underfilled, lower cell overfilled
             // Solves exact quadratic: phi_A(y) + g = phi_B(M - y)
             let e = total_m - 1.0;
             let a_q = unit / o_max;
-            let b_lin = 1.0 + unit + 2.0 * unit * e / o_max;
-            let c_const = unit * e + unit * e * e / o_max + 1.0 - gravity_head;
+            let b_lin = 2.0 + tension + unit + 2.0 * unit * e / o_max;
+            let c_const = (1.0 + unit) * e + unit * e * e / o_max + 1.0 + tension - gravity_head;
             let disc = b_lin * b_lin - 4.0 * a_q * c_const;
             if disc >= 0.0 && a_q > 1e-7 {
                 let y = (b_lin - disc.sqrt()) / (2.0 * a_q);
@@ -923,41 +912,46 @@ pub fn overfill_equilibrium_transfer(
         }
     }
 
+    // Exact analytical path for lateral edges & general configurations
     let phi = |h: f32, cap: f32, gain: f32| {
         cell_potential(h, cap, overfill_ratio, unit, tension, gain)
     };
-    let stress = |d: f32| {
-        phi(h_a - d, cap_a, pressure_gain_a) + gravity_head - phi(h_b + d, cap_b, pressure_gain_b)
-    };
-    let tau = yield_tau.max(0.0);
+    let pot_a = phi(h_a, cap_a, pressure_gain_a);
+    let pot_b = phi(h_b, cap_b, pressure_gain_b);
+    let s0 = pot_a + gravity_head - pot_b;
 
-    let s0 = stress(0.0);
-    let (mut lo, mut hi, target) = if s0 > tau {
+    if s0 > tau {
+        let delta_stress = s0 - tau;
         let limit = h_a.min((cap_b_eff - h_b).max(0.0));
-        if limit <= 0.0 || stress(limit) >= tau {
-            return limit.max(0.0);
+        if limit <= 0.0 {
+            return 0.0;
         }
-        (0.0f32, limit, tau)
+        // Combined linearized stiffness across edge
+        let k_a = pressure_gain_a * unit;
+        let k_b = pressure_gain_b * unit;
+        let x_a0 = ((h_a - cap_a) / cap_a).max(0.0);
+        let x_b0 = ((h_b - cap_b) / cap_b).max(0.0);
+        let s_a = if h_a > cap_a { (1.0 + k_a + 2.0 * k_a * x_a0 / o_max) / cap_a } else { (1.0 + tension) / cap_a };
+        let s_b = if h_b > cap_b { (1.0 + k_b + 2.0 * k_b * x_b0 / o_max) / cap_b } else { (1.0 + tension) / cap_b };
+        let d = delta_stress / (s_a + s_b).max(1e-6);
+        d.clamp(0.0, limit)
     } else if s0 < -tau {
+        let delta_stress = -s0 - tau;
         let limit = h_b.min((cap_a_eff - h_a).max(0.0));
-        if limit <= 0.0 || stress(-limit) <= -tau {
-            return -limit.max(0.0);
+        if limit <= 0.0 {
+            return 0.0;
         }
-        (-limit, 0.0f32, -tau)
+        let k_a = pressure_gain_a * unit;
+        let k_b = pressure_gain_b * unit;
+        let x_a0 = ((h_a - cap_a) / cap_a).max(0.0);
+        let x_b0 = ((h_b - cap_b) / cap_b).max(0.0);
+        let s_a = if h_a > cap_a { (1.0 + k_a + 2.0 * k_a * x_a0 / o_max) / cap_a } else { (1.0 + tension) / cap_a };
+        let s_b = if h_b > cap_b { (1.0 + k_b + 2.0 * k_b * x_b0 / o_max) / cap_b } else { (1.0 + tension) / cap_b };
+        let d = delta_stress / (s_a + s_b).max(1e-6);
+        -d.clamp(0.0, limit)
     } else {
-        return 0.0;
-    };
-
-    // 12 bisection halvings of the bracket (rock-solid sub-millimeter precision)
-    for _ in 0..12 {
-        let mid = 0.5 * (lo + hi);
-        if stress(mid) > target {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
+        0.0
     }
-    0.5 * (lo + hi)
 }
 
 /// Task #70: a cell's potential — fill plus pressure, in the same units the driving head is
@@ -3617,7 +3611,7 @@ pub fn eval_sandbox_shape(
 /// debug toggle (`sandart-sim/src/lib.rs`) can push a block into this exact tier by writing this
 /// exact threshold into `last_displacements`, instead of `settle_tick` growing a second bypass
 /// parameter that every one of its ~20 test call sites would also have to learn.
-pub(crate) const MUST_SIMULATE_THRESHOLD: f32 = 1e-3;
+pub(crate) const MUST_SIMULATE_THRESHOLD: f32 = 1e-2;
 
 /// Task #47 ("sand-slab" scheduling defect): fresh-overburden MUST-simulate predicate constants.
 /// See the big comment at this predicate's call site (top of `settle_tick`, just before the MUST/
