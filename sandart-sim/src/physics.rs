@@ -892,7 +892,8 @@ pub fn overfill_equilibrium_transfer(
         return 0.0;
     };
 
-    for _ in 0..12 {
+    // 6 bisection halvings of the bracket
+    for _ in 0..6 {
         let mid = 0.5 * (lo + hi);
         if stress(mid) > target {
             lo = mid;
