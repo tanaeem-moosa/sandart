@@ -105,13 +105,6 @@ export class WasmSimulationState {
         return ret;
     }
     /**
-     * @returns {boolean}
-     */
-    get_linear_pressure() {
-        const ret = wasm.wasmsimulationstate_get_linear_pressure(this.__wbg_ptr);
-        return ret !== 0;
-    }
-    /**
      * Current `multistage_chambers` value, so the web UI can initialise its slider/readout
      * from the actual backing value rather than assuming its own hard-coded default matches.
      * @returns {number}
@@ -362,12 +355,6 @@ export class WasmSimulationState {
      */
     set_light_angle(angle) {
         wasm.wasmsimulationstate_set_light_angle(this.__wbg_ptr, angle);
-    }
-    /**
-     * @param {boolean} linear
-     */
-    set_linear_pressure(linear) {
-        wasm.wasmsimulationstate_set_linear_pressure(this.__wbg_ptr, linear);
     }
     /**
      * @param {number} a
