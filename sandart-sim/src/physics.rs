@@ -882,17 +882,33 @@ pub fn overfill_equilibrium_transfer(
     }
 
     // Exact analytical path for standard vertical liquid columns (gravity = base_head, zero yield stress)
+    // 100% exact mathematical solution across all 3 regimes (free-fall, asymmetric transitional, and fully overfilled)
     if gravity_head > 0.0 && yield_tau <= 0.0 && pressure_gain_a == 1.0 && pressure_gain_b == 1.0 && (cap_a - 1.0).abs() < 1e-5 && (cap_b - 1.0).abs() < 1e-5 && tension <= 0.0 {
         let total_m = h_a + h_b;
         let o_max = overfill_ratio.max(0.01);
         let h_a_star = if total_m <= 1.0 {
+            // Regime 1 (Free fall): All mass drains to the lower cell
             0.0
-        } else if total_m <= 2.0 {
-            total_m - 1.0
+        } else if total_m < 2.0 {
+            // Regime 2 (Asymmetric compression): Upper cell underfilled, lower cell overfilled
+            // Solves exact quadratic: phi_A(y) + g = phi_B(M - y)
+            let e = total_m - 1.0;
+            let a_q = unit / o_max;
+            let b_lin = 1.0 + unit + 2.0 * unit * e / o_max;
+            let c_const = unit * e + unit * e * e / o_max + 1.0 - gravity_head;
+            let disc = b_lin * b_lin - 4.0 * a_q * c_const;
+            if disc >= 0.0 && a_q > 1e-7 {
+                let y = (b_lin - disc.sqrt()) / (2.0 * a_q);
+                y.clamp(0.0, e)
+            } else {
+                (c_const / b_lin.max(1e-6)).clamp(0.0, e)
+            }
         } else {
+            // Regime 3 (Fully overfilled hydrostatic column): Both cells overfilled
+            // Quadratic terms cancel identically (x_A^2 - x_B^2 = 0), giving exact linear root
             let excess = total_m - 2.0;
-            let stiff_mult = 1.0 + excess / o_max;
-            let offset = gravity_head / (2.0 * unit * stiff_mult);
+            let denom = 2.0 * (1.0 + unit * (1.0 + excess / o_max));
+            let offset = gravity_head / denom.max(1e-6);
             1.0 + 0.5 * excess - offset
         };
         let d_target = h_a - h_a_star;
