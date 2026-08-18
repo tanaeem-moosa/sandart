@@ -1112,3 +1112,129 @@ fn diag_task70_stream_structure_and_drain_rate() {
         }
     }
 }
+
+#[test]
+#[ignore]
+fn diag_task70_exact_solver_vs_bisection_sweep() {
+    let mut max_err_vert = 0.0f32;
+    let mut worst_params_vert = String::new();
+    let mut max_err_lat = 0.0f32;
+    let mut worst_params_lat = String::new();
+    let mut total_tested = 0usize;
+
+    let h_samples: Vec<f32> = (0..=40).map(|i| i as f32 * 0.05).collect(); // 0.0 to 2.0
+    let units = [10.0, 100.0, 500.0, 23400.0];
+    let tensions = [0.0, 0.5, 1.0];
+    let ratios = [0.1, 0.5, 0.9];
+    let taus = [0.0, 0.05, 0.2];
+
+    for &unit in &units {
+        for &tension in &tensions {
+            for &ratio in &ratios {
+                for &tau in &taus {
+                    // Vertical sweep (g = 1.0, gains = 1.0)
+                    for &h_a in &h_samples {
+                        for &h_b in &h_samples {
+                            total_tested += 1;
+                            let exact = sandart_sim::physics::overfill_equilibrium_transfer(
+                                h_a, 1.0, h_b, 1.0,
+                                2.0, 2.0,
+                                1.0, tau, 1.0, 1.0,
+                                ratio, unit, tension,
+                            );
+
+                            // 64-step ground truth bisection
+                            let phi = |h: f32, cap: f32, gain: f32| {
+                                sandart_sim::physics::cell_potential(h, cap, ratio, unit, tension, gain)
+                            };
+                            let stress = |d: f32| {
+                                phi(h_a - d, 1.0, 1.0) + 1.0 - phi(h_b + d, 1.0, 1.0)
+                            };
+                            let s0 = stress(0.0);
+                            let target = if s0 > tau { tau } else if s0 < -tau { -tau } else { 0.0 };
+                            let (mut lo, mut hi) = if s0 > tau {
+                                (0.0f32, h_a.min((2.0 - h_b).max(0.0)))
+                            } else if s0 < -tau {
+                                (-h_b.min((2.0 - h_a).max(0.0)), 0.0f32)
+                            } else {
+                                (0.0, 0.0)
+                            };
+                            let bisect = if lo == hi {
+                                0.0
+                            } else {
+                                for _ in 0..64 {
+                                    let mid = 0.5 * (lo + hi);
+                                    if stress(mid) > target { lo = mid; } else { hi = mid; }
+                                }
+                                0.5 * (lo + hi)
+                            };
+
+                            let err = (exact - bisect).abs();
+                            if err > max_err_vert {
+                                max_err_vert = err;
+                                worst_params_vert = format!(
+                                    "h_a={h_a:.3} h_b={h_b:.3} unit={unit} tension={tension} ratio={ratio} tau={tau} -> exact={exact:.6} bisect={bisect:.6} (err={err:.6})"
+                                );
+                            }
+                        }
+                    }
+
+                    // Lateral sweep (g = 0.02 dispersion, gains = 1.0 or 0.05)
+                    for &gain in &[1.0f32, 0.05f32] {
+                        for &h_a in &h_samples {
+                            for &h_b in &h_samples {
+                                total_tested += 1;
+                                let exact = sandart_sim::physics::overfill_equilibrium_transfer(
+                                    h_a, 1.0, h_b, 1.0,
+                                    2.0, 2.0,
+                                    0.02, tau, gain, gain,
+                                    ratio, unit, tension,
+                                );
+
+                                let phi = |h: f32, cap: f32, g: f32| {
+                                    sandart_sim::physics::cell_potential(h, cap, ratio, unit, tension, g)
+                                };
+                                let stress = |d: f32| {
+                                    phi(h_a - d, 1.0, gain) + 0.02 - phi(h_b + d, 1.0, gain)
+                                };
+                                let s0 = stress(0.0);
+                                let target = if s0 > tau { tau } else if s0 < -tau { -tau } else { 0.0 };
+                                let (mut lo, mut hi) = if s0 > tau {
+                                    (0.0f32, h_a.min((2.0 - h_b).max(0.0)))
+                                } else if s0 < -tau {
+                                    (-h_b.min((2.0 - h_a).max(0.0)), 0.0f32)
+                                } else {
+                                    (0.0, 0.0)
+                                };
+                                let bisect = if lo == hi {
+                                    0.0
+                                } else {
+                                    for _ in 0..64 {
+                                        let mid = 0.5 * (lo + hi);
+                                        if stress(mid) > target { lo = mid; } else { hi = mid; }
+                                    }
+                                    0.5 * (lo + hi)
+                                };
+
+                                let err = (exact - bisect).abs();
+                                if err > max_err_lat {
+                                    max_err_lat = err;
+                                    worst_params_lat = format!(
+                                        "h_a={h_a:.3} h_b={h_b:.3} gain={gain} unit={unit} tension={tension} ratio={ratio} tau={tau} -> exact={exact:.6} bisect={bisect:.6} (err={err:.6})"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("\n=== EXHAUSTIVE SWEEP RESULTS (tested {total_tested} parameter pairs) ===");
+    println!("Max Vertical Error: {:.8}", max_err_vert);
+    println!("Worst Vertical Case: {}", worst_params_vert);
+    println!("Max Lateral Error:  {:.8}", max_err_lat);
+    println!("Worst Lateral Case:  {}", worst_params_lat);
+}
+
