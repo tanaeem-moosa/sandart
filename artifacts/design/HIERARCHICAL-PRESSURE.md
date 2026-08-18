@@ -441,6 +441,50 @@ within a tile and states the elevation head exactly once.
 
 ---
 
+## 7b. Advection, and sub-stepping as the intra-tile half of the hierarchy
+
+**Advection never sees the coarse level.** Real mass moves only through fine edges, and
+`flux_edge_apply` calls `advect_properties` with the realised flux, so colour and the four material
+properties transport at full fine resolution. This is a direct consequence of I1/I6 and it is the
+reason the design does not trade visual fidelity for propagation speed. `acf2da4` moved heights at
+coarse resolution, which advects colour at coarse resolution; "falling water drifted sideways" is
+what that looks like.
+
+Second order, and it points the favourable way: `advect_properties` blends by
+`flow / (h_dst + flow)`, so numerical diffusion accumulates per *transfer event*, not per unit of
+mass moved. Fewer, larger transfers over a journey therefore smear *less* than many small ones — a
+faster solver should sharpen colour boundaries, not blur them.
+
+Measured, two-tone column at grid 256, equal simulated progress, sub-steps 1/2/4/8: boundary smear
+118 / 117 / 116 / 114 rows. **Sub-stepping does not cost colour fidelity.** (The instrument is
+blunt — the boundary smears across most of the column within 25 ticks regardless — so this is
+evidence of no penalty, not a resolution of small differences.)
+
+### The intra-tile bottleneck, and why sub-stepping is its natural fix
+
+The hierarchy splits by wavelength. The coarse field carries signal *between* tiles. *Within* a
+tile, propagation is still one fine cell per tick, and a tile is `t = grid/64` cells across. So once
+the coarse level is doing its job, the residual latency is intra-tile and is **bounded by `t`, not
+by the domain** — 8 ticks at 512, and it does not grow as the grid grows. That is the principled
+answer to "how many sub-steps", which HANDOVER §11 never had: enough to cross a tile.
+
+### Better: the coarse field is a predictive work scheduler
+
+The LOD scheduler is *reactive* — a block is admitted on what moved LAST tick
+(`last_displacements`), which is why 100% of material-bearing blocks were measured sitting in the
+MUST tier. A coarse pressure gradient is a **predictive** signal: it knows where mass wants to go
+before the fine level has moved any. So sub-step only the blocks whose tile shows a large `|grad P|`
+and leave the rest at one step.
+
+This makes the selector for adaptive overclocking fall out of the physics instead of being a
+heuristic, and it is also the fix for I8 (the scheduler otherwise cannot see `P` at all, so a
+settled pile's blocks sleep through exactly the pressure that is supposed to wake them).
+
+Cost, from measurement: 4 sub-steps applied to the whole MUST set is ~3.2x the tick (~34 ms against
+today's 10.5). Applied only to a high-gradient subset it is a fraction of that. **Unmeasured:** how
+large that subset actually is in a settling pile, which decides whether this is affordable. Measure
+it at build step 2, where `P` exists but drives nothing.
+
 ## 8. Acceptance criteria
 
 Physics, in the user's words, all four required simultaneously:
