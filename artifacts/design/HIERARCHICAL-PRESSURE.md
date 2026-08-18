@@ -406,8 +406,7 @@ the granular case is designed deliberately.
 **I8 — The LOD scheduler must see `P`.** A settled pile is exactly the case where blocks go
 Inactive, and block activation is driven by last tick's displacement and head difference with no `P`
 term. Without this, `P` builds in the coarse field while the fine cells that should respond are
-asleep, waking only via the 30-tick staleness path. A coarse tile whose `|P|` exceeds a threshold
-must mark its block active.
+asleep, waking only via the 30-tick staleness path. A coarse tile whose `|grad eta|` exceeds a threshold must mark its block active (G1).
 
 **I6 — Conservation is untouched.** Real mass moves only through the fine edge solver, which is
 conservative by construction. `M` is a modelling variable. No reconciliation pass, no fixups.
@@ -430,6 +429,15 @@ If both levels supply the depth term, the same physical pressure is applied twic
 The fine model keeps its local term because that is what makes free-fall pressureless and keeps the
 equilibrium solve exact. The coarse level supplies only what the fine level provably cannot earn in
 reasonable time: 125 ticks per row of depth at 512.
+
+**The coupling variable is a POTENTIAL, never a flux.** The distinction decides whether this repeats
+`acf2da4`. "The fine level tries to match how material flows at block level" prescribes a *flux*: the
+fine level's job becomes reproducing a coarse-decided transfer, and when it cannot (blocked cell,
+capacity, mask) the result is mass error or a forcing that never vanishes. What this design specifies
+instead is that the coarse level supplies a *potential* and the fine level solves its own equilibrium
+including that term — so when the fine level cannot move, the equilibrium is simply not reached, which
+is a valid state (HANDOVER §68's argument for why overfill is compatible with a block scheduler and
+the head field was not). Same overfill model, coarser grid, potential coupling.
 
 **RESOLVED, against the first draft.** The cancellation argument — that `P[C]` appears on both sides
 of `phi_a - phi_b` for a same-tile edge and drops out — is correct *as algebra* and checks the wrong
@@ -473,8 +481,8 @@ answer to "how many sub-steps", which HANDOVER §11 never had: enough to cross a
 The LOD scheduler is *reactive* — a block is admitted on what moved LAST tick
 (`last_displacements`), which is why 100% of material-bearing blocks were measured sitting in the
 MUST tier. A coarse pressure gradient is a **predictive** signal: it knows where mass wants to go
-before the fine level has moved any. So sub-step only the blocks whose tile shows a large `|grad P|`
-and leave the rest at one step.
+before the fine level has moved any. So sub-step only the blocks whose tile shows a large `|grad eta|`
+(head, NOT pressure — see G1 below) and leave the rest at one step.
 
 This makes the selector for adaptive overclocking fall out of the physics instead of being a
 heuristic, and it is also the fix for I8 (the scheduler otherwise cannot see `P` at all, so a
@@ -489,11 +497,11 @@ it at build step 2, where `P` exists but drives nothing.
 
 Overclocking spends budget; **underclocking is what pays for it**, and today nothing can safely say
 "this block needs less" — the scheduler only knows what moved last tick, which is why 100% of
-material-bearing blocks were measured in the MUST tier. A coarse `|grad P|` is a continuous per-block
+material-bearing blocks were measured in the MUST tier. A coarse `|grad eta|` is a continuous per-block
 *demand*, so it assigns a rate rather than an admission:
 
 ```
-n_b = clamp( quantise( |grad P|_b / P_ref ), 1/8 .. 8 )      // powers of two only
+n_b = clamp( quantise( |grad eta|_b / eta_ref ), 1/8 .. 8 )   // powers of two only
 ```
 
 and `budget_n` stops being a block count. The frame's cost is `sum(n_b)`, so the frame-time governor
@@ -509,7 +517,7 @@ every rate is a power of two, a slow block's steps always coincide with a *subse
 neighbour's steps and the two never drift out of phase. Arbitrary rates (3 against 4) beat with
 period 12. The rates are also derived from a spatially smooth field, so adjacent blocks differ by at
 most one octave in practice — but that should be *enforced*, not assumed, because a one-cell mask
-feature can put a sharp step in `grad P`.
+feature can put a sharp step in `grad eta`.
 
 **S2 — "Underclocked" means "does not sweep its interior", NOT "is frozen".** A block that skips its
 own sweep must still receive mass across boundary edges owned by a running neighbour, or mass piles
@@ -528,10 +536,36 @@ the most likely place for a multi-rate scheme to lose mass or stall a front.
 in HANDOVER §11 as the mechanism "to let a block know how much simulated time it missed". An
 underclocked block's solver step must integrate the elapsed simulated time, not one tick.
 
-**Unmeasured, and it decides affordability:** the distribution of `|grad P|` over blocks in a
+**Unmeasured, and it decides affordability:** the distribution of `|grad eta|` over blocks in a
 settling pile — i.e. what fraction genuinely wants `n_b > 1`. If it is a thin front, this is cheap
 and self-financing; if a whole pool wants it, it is not. Measurable at build step 2, where `P` exists
 but drives nothing.
+
+### G1 — The scheduler must key on HEAD, not pressure, or it activates everything
+
+The existing wake mechanism is safe against runaway for a reason worth stating, because the coarse
+field does not inherit it: **a wake is emitted by mass MOVEMENT, not by activation.**
+`activate_neighbor` is called only from `flux_edge_apply` (gated `|flux| > MIN_FLUX`) and `try_move`
+(gated on real flow), so a block that is woken and finds nothing to do moves nothing and therefore
+wakes no one. Propagation terminates in one step by construction. Second guard: the hints are
+deliberately below the MUST bar (`UPSTREAM_DISPLACEMENT_HINT = 0.5 * MUST`,
+`SIDE_DISPLACEMENT_HINT = 0.1 * MUST`), so a woken neighbour is a budget-tier *candidate*, not a MUST
+block.
+
+A field-derived signal has neither guard: it does not need movement to exist. And **pressure is the
+wrong field** — hydrostatic pressure has a gradient of one `base_head` per row *by definition*, so
+`|grad P|` is nonzero everywhere in any resting pool and a threshold on it activates the whole
+domain. That is exactly the degenerate state measured today, where 100% of material-bearing blocks
+sit in the MUST tier, re-created by a new mechanism.
+
+**Head is the right field.** A connected body at rest has `eta = z + p/(rho g) = constant`, so
+`grad eta = 0` at equilibrium and nonzero only where there is genuine disequilibrium. The signal
+vanishes at rest, which is the self-correction property required of anything with memory.
+
+This is the same variable change §0.2 demands to avoid double-counting elevation. **The two arguments
+are independent and reach the same conclusion**, which is the strongest reason to believe it:
+elevation must be stated once (§0.2), and the scheduler's signal must vanish at rest (G1). Both are
+satisfied by the coarse level carrying `eta` and the fine cell reading `eta[tile] - z_fine`.
 
 ### The floor: underclocked must mean "rarely", never "not at all"
 
@@ -569,8 +603,8 @@ setting.
 in effective timestep. This is S1's nesting argument in time rather than space, and it has the same
 justification: adjacent-in-time rates that are not powers of two apart beat.
 
-**F3 — Hysteresis, because the scheduler itself can oscillate.** `n_b` derived from `|grad P|`, where
-running the block *reduces* `|grad P|`, is a feedback loop: speed up, resolve the gradient, slow
+**F3 — Hysteresis, because the scheduler itself can oscillate.** `n_b` derived from `|grad eta|`, where
+running the block *reduces* `|grad eta|`, is a feedback loop: speed up, resolve the gradient, slow
 down, gradient rebuilds, speed up. That is a limit cycle in the scheduler rather than the physics —
 the same failure mode, one level up, and exactly what the "design it self-correcting or it
 oscillates" rule is warning about. Different thresholds for speeding up and slowing down, and the
