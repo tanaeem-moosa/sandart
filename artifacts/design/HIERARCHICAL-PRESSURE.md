@@ -485,6 +485,54 @@ today's 10.5). Applied only to a high-gradient subset it is a fraction of that. 
 large that subset actually is in a settling pile, which decides whether this is affordable. Measure
 it at build step 2, where `P` exists but drives nothing.
 
+### The same signal assigns clock rates in BOTH directions
+
+Overclocking spends budget; **underclocking is what pays for it**, and today nothing can safely say
+"this block needs less" — the scheduler only knows what moved last tick, which is why 100% of
+material-bearing blocks were measured in the MUST tier. A coarse `|grad P|` is a continuous per-block
+*demand*, so it assigns a rate rather than an admission:
+
+```
+n_b = clamp( quantise( |grad P|_b / P_ref ), 1/8 .. 8 )      // powers of two only
+```
+
+and `budget_n` stops being a block count. The frame's cost is `sum(n_b)`, so the frame-time governor
+becomes a global scale on the clock instead of a count of admitted blocks — which also removes the
+thing measured to be inert today (`budget_n` from 1024 down to 32 changes ms/tick by ~1%, because
+the MUST tier bypasses it entirely).
+
+Three constraints this must satisfy, all derivable rather than tunable:
+
+**S1 — Powers of two, so clock domains nest instead of beating.** HANDOVER §11.3 warns that "a
+per-block *variable* tick count can beat against a period-2 mode", and that is the real hazard. If
+every rate is a power of two, a slow block's steps always coincide with a *subset* of a fast
+neighbour's steps and the two never drift out of phase. Arbitrary rates (3 against 4) beat with
+period 12. The rates are also derived from a spatially smooth field, so adjacent blocks differ by at
+most one octave in practice — but that should be *enforced*, not assumed, because a one-cell mask
+feature can put a sharp step in `grad P`.
+
+**S2 — "Underclocked" means "does not sweep its interior", NOT "is frozen".** A block that skips its
+own sweep must still receive mass across boundary edges owned by a running neighbour, or mass piles
+up at clock-domain boundaries. This already works in the existing scheduler — a non-simulated block
+that receives flux is marked `modified` by `activate_neighbor` and gets copied back — so the
+machinery exists; the design must simply not break it.
+
+**S3 — Edge ownership must follow the FASTER block.** Edges are owned by their lower-index cell
+(`physics.rs`: "each edge is owned... by its lower-index cell"), and a block only evaluates edges its
+own cells own. So an edge between a fast block and a slow one whose *lower-index* side is the slow
+block would silently run at the slow rate — half of every clock-domain boundary, chosen by grid
+geometry rather than by physics. Boundary edges must be reassigned to the faster side, and this is
+the most likely place for a multi-rate scheme to lose mass or stall a front.
+
+**Missed-time accounting.** `last_simulated_ticks` already exists for exactly this and is described
+in HANDOVER §11 as the mechanism "to let a block know how much simulated time it missed". An
+underclocked block's solver step must integrate the elapsed simulated time, not one tick.
+
+**Unmeasured, and it decides affordability:** the distribution of `|grad P|` over blocks in a
+settling pile — i.e. what fraction genuinely wants `n_b > 1`. If it is a thin front, this is cheap
+and self-financing; if a whole pool wants it, it is not. Measurable at build step 2, where `P` exists
+but drives nothing.
+
 ## 8. Acceptance criteria
 
 Physics, in the user's words, all four required simultaneously:
