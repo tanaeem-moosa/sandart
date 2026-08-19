@@ -6,8 +6,7 @@ measured, which of that document's claims turned out to be wrong, and which of i
 the user has since settled.** Read the design's §9 build order alongside this — the step numbers
 below are its step numbers.
 
-**Nothing here is pushed.** `main` is a local bookmark at `94d7390`; `origin/main` is still
-`f73fe1d`. Nothing is deployed, so nothing has been seen by the only visual instrument there is.
+**Nothing here is pushed.** `main` is a local bookmark; `origin/main` is still `f73fe1d`. Nothing is deployed, so nothing has been seen by the only visual instrument there is.
 
 ---
 
@@ -15,7 +14,7 @@ below are its step numbers.
 
 | step | what it is | status |
 |---|---|---|
-| 0 | Falsify §0.1 — does the coarse level pin at `o_max`? | **measured once, first pass partly wrong, re-run IN FLIGHT** (§4 below) |
+| 0 | Falsify §0.1 — does the coarse level pin at `o_max`? | **DONE.** Pins beyond ~300-400 rows; use the unbounded coarse law (§4.3) |
 | 1 | Coarse geometry: `open_cells`, `capacity`, `k[e]`, connectivity test | **DONE, verified, committed `e50c0bc`** |
 | — | LOD block resized to `grid/64` (not in the original build order; the user directed it) | **DONE, verified, committed `94d7390`** |
 | 2 | Restriction + instrumentation (`A`, `M`, `P`/`eta`, `Delta`), no coupling | not started |
@@ -145,9 +144,9 @@ All six integration suites pass, `perfect_simulation_determinism` included, plus
   equilibrium condition being satisfied, so it is also evidence the coarse interior converged.)
 - **Coarse relaxation is diffusion (§10).** Sweeps-to-settle 114 / 430 / 1598 / 5848 for chain
   length 8 / 16 / 32 / 64; fitted exponent **1.89**. Real, and affordable for the reason in §2.2.
-- **The unbounded coarse law works.** It reaches an exact analytic hydrostatic profile at
-  `o = 1.36`, well past the bounded law's `o_max = 0.90` ceiling — so the coarse level *can*
-  represent depth the fine level structurally cannot.
+- **The unbounded coarse law works, and §4.3 says it is the one to use.** It reaches an exact
+  analytic hydrostatic profile at `o = 1.36`, well past the bounded law's `o_max = 0.90` ceiling —
+  so the coarse level *can* represent depth the fine level structurally cannot.
 - **The diagonal-neck hazard (§4) is a non-issue.** Two cells touching only at a corner give
   `k = 0` on both shared edges, and they are not in the same 4-connected flood-fill component
   either, so `k = 0` is correct. Checked, not assumed.
@@ -169,42 +168,63 @@ All six integration suites pass, `perfect_simulation_determinism` included, plus
   (22% -> 67% for Water). Shipped — under 2 ms absolute, and 128 is a diagnostic resolution — but
   it is a cost the design did not distinguish.
 
-### 4.3 IN FLIGHT — step 0's re-run
+### 4.3 Step 0 — DONE, and it decides the coarse pressure law
 
-The first step 0 pass reported "the coarse relaxation never converges to any equilibrium, at any
-sweep count", which would have been close to fatal. **That conclusion is contradicted by its own
-Q2 number** (§4.1 above) and was sent back. Two corrections were requested:
+**The bounded law pins, as §0.1 predicted, and the pinning depth is the number this step existed to
+produce.** Measured at 512 with `t = 8`, sweeping the pool's nominal fill depth:
 
-1. **The residual metric was wrong.** It used `max|stress|`, whose worst edge was an *empty donor
-   above a wet receiver*. That edge carries unsatisfiable stress in the existing **fine** solver
-   too, at every free surface, on every tick: `phi(empty) + base_head - phi(partial) > 0` demands a
-   transfer from a cell with nothing to give, the transfer returns 0, and the sim is nonetheless at
-   rest. **Unsatisfiable stress at a free surface is what rest looks like in this model.** The
-   re-run uses the largest realised transfer magnitude instead — mass that has stopped moving is the
-   definition of settled.
-2. **The pool was ~200 fine rows, not the 300 §0.1 names.** The equilibrium demand is
-   `unit * (o + o^2/o_max) = D * base_head`, i.e. `125 * (o + o^2/0.9) = D` at 512. At `D = 200`
-   that solves to `o = 0.815` — **exactly** the measured value, which independently confirms the
-   interior reached equilibrium. At `D = 300` it solves to `o = 1.07`, **above the ceiling**. So the
-   bounded law very likely does pin, just deeper than was tested. The re-run sweeps pool depth
-   (150 / 200 / 250 / 300 / 400 fine rows) to find the pinning depth.
+| nominal fill | `max(o)` | tiles pinned | interior residual | verdict |
+|---|---|---|---|---|
+| 300 rows | 0.80 | 0 of 1860 | 5e-4 | converges, thin headroom against `o_max = 0.90` |
+| 400 rows | **0.9000 exactly** | **240 (12.9%)** | **stuck at exactly 8.0** | pinned: `P` genuinely flat, the literal §0.1 signature |
 
-Also requested: ticks-to-settle for the 64-cell chain at `N` = 8 / 16 / 32 / 64 / 128 sweeps per
-tick with `M` persisting, which is the number that sizes `N` for the real build and is the honest
-version of §2's speedup table.
+A residual stuck at exactly `base_head_coarse = 8.0` is the pathology stated in words: the
+compression can no longer grow, so `P[C] - P[D] = 0` and **the coarse driving force vanishes at
+exactly the depth it exists to supply.**
 
-**The pinning depth is the decision this step exists to produce**: it says whether the coarse level
-uses the shipped bounded overfill law or an unbounded one.
+**Recommendation: the coarse level uses the UNBOUNDED compression law** (§4.1's Q4 result — exact
+analytic hydrostatic profile at `o = 1.36`, well past the bounded ceiling). A container at 512 that
+is mostly full is ~450 fine rows, which is past the measured pinning depth, so the bounded law fails
+in the production case rather than in a contrived one. `M` is not real mass and carries no
+conservation obligation (I6), so the coarse level is free to use a law the fine level cannot.
 
-Instrument: `sandart-sim/examples/diag_coarse_step0.rs` (uncommitted, agent still editing).
-Report: `artifacts/design/STEP0-MEASUREMENTS.md` (uncommitted; **its Q1 verdict and its "boundary
-lock" section are the parts under correction — do not cite them as they currently stand**).
+Why 300 rows converged when a naive reading of the demand law says it should not: compression is
+**self-limiting**. `125 * (o + o^2/0.9) = D` uses the *occupied* depth, and compressing the column
+shortens it, which lowers the demand. That feedback is why the pinning depth is ~400 nominal rows
+rather than ~300.
+
+**The "boundary lock" is retracted.** Under the corrected residual (largest realised transfer, not
+largest stress) the interior converges cleanly — residual 5e-4, `eta` flat to four decimals through
+the whole wet column. The original worst edge was a free-surface/vacuum pair, which carries
+unsatisfiable stress in the existing **fine** solver too, on every tick. That section of
+`STEP0-MEASUREMENTS.md` has been corrected in place.
+
+**Ticks-to-settle for a cold 64-cell chain**, with `M` persisting across ticks and no anchor:
+
+| `N` sweeps/tick | ticks to settle | per-tick cost, in fine sweeps @512 |
+|---|---|---|
+| 8 | 900 | 0.125 |
+| 16 | 450 | 0.25 |
+| 32 | 225 | 0.50 |
+| **64** | **113** | **1.00** |
+| 128 | 57 | 2.00 |
+
+Total work is **~constant across `N`** (~113 fine-sweep-equivalents): batching more sweeps per tick
+redistributes the same work across fewer ticks, it does not reduce it. So `N` is a latency dial, not
+an efficiency one, and the design's §2 speedup table should be read that way. At the design's
+proposed `N = 8`, a cold chain takes 900 ticks — probably too slow to look right; `N = 64` costs one
+fine sweep per tick and settles in 113.
+
+Instrument: `sandart-sim/examples/diag_coarse_step0.rs`. Report:
+`artifacts/design/STEP0-MEASUREMENTS.md` (corrected in place, not appended — the old Q1 verdict and
+boundary-lock narrative are gone rather than contradicted).
 
 ---
 
 ## 5. What to do next
 
-**First, finish step 0** and record the pinning depth. Then step 2, which is where the design's
+**Step 0 is done (§4.3); its output is "use the unbounded coarse law".** Next is step 2, which is
+where the design's
 remaining open questions get decided against numbers rather than argued:
 
 - **The restriction cost (§5 step 1).** `A[C]` cannot piggyback on COLLECT, for four reasons the
