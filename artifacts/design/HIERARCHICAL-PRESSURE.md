@@ -65,6 +65,64 @@ direction, and it is the only part of that work this design reuses.
 
 ---
 
+## 0.3 What `eta` is, in this codebase's terms
+
+Used throughout below, and assumed rather than defined in the first draft.
+
+The vertical equilibrium condition the solver already enforces is
+`phi_below = phi_above + base_head`, with `base_head = gravity_dir.y * GRAVITY_HEAD_SCALE` = 1.0 per
+row at the shipped gravity. Define
+
+```
+eta(cell) = phi(cell) - y * base_head          // y = row index, increasing downward
+```
+
+Substituting: `eta_{y+1} = phi_y + base_head - (y+1)*base_head = eta_y`. **`eta` is constant down a
+column at rest** — it is `phi` with the elevation term netted out.
+
+The intuitive reading: **`eta` is the level the water would stand at.** At a free surface `p = 0`, so
+`eta` there is just the surface elevation; since `eta` is constant through a connected body, `eta`
+*is* that body's surface level. Two U-tube arms at rest have equal `eta`; one arm standing higher has
+higher `eta`, and the difference is exactly what should drive flow. `grad eta = 0` means "the surface
+is level".
+
+Both of this design's uses follow from that one property:
+
+- **Coupling.** Add `eta[tile]` to `phi`. For two cells in the SAME tile the term is identical and
+  cancels from `phi_a - phi_b`, so the fine `base_head` applies alone — correct. For two cells across
+  a tile seam the extra term is `eta_D - eta_C`, which is **0 at rest**, not `t * base_head`. That is
+  §0.2's sawtooth, gone.
+- **Scheduling.** `grad eta = 0` at rest, so the clock signal vanishes when nothing needs to happen
+  (G1). `grad p` cannot do this: pressure grows with depth by definition, so it is nonzero in every
+  resting pool.
+
+**This is the same QUANTITY as the parked head field (#55), not the same MECHANISM.** #55 computed it
+per fine cell by memoryless max-propagation, which is what made it brittle to transient defects. Here
+it is computed by overfill compression on a coarse grid, with memory. Reusing the variable is not
+reusing the approach, and the objections that parked #55 do not transfer automatically — but they
+should be re-checked against whatever is built, not assumed inapplicable.
+
+## 0.4 What happens when the fine level cannot follow
+
+The anchor (§5 step 2) already is the answer: `M += lambda * (A - M)`. If the fine level cannot
+follow, `A` does not move, and the anchor drags the coarse state back toward reality. Nothing extra is
+needed, and this is the grounding mechanism — the coarse level cannot run away from the mass.
+
+That gives `lambda` a physical meaning better than "damping constant": **`1/lambda` is how long the
+coarse level is allowed to believe something the fine level has not confirmed.** Too fast and it can
+never hold a profile the fine level has not yet reached, which is the entire point of having it; too
+slow and it keeps pushing against an obstruction for many ticks, accumulating a phantom head that
+drives nothing but does raise the clock rate — paying for work that cannot happen.
+
+**Known limitation: the anchor cannot distinguish "cannot" from "has not yet".** A tile blocked by a
+wall the coarse grid failed to resolve and a tile that merely needs more ticks both present a
+persistent `Delta`. The blocked case is really a geometry error (`k[e]` should have been near zero)
+and the anchor papers over it instead of reporting it. A derivative-modulated anchor (decay `M`
+faster when `A` is static despite large `Delta`, hold `M` when `A` is moving toward it) would
+separate them, at the cost of a second feedback loop. **Measure whether the plain anchor suffices
+first** — a persistent `Delta` with static `A` is also a useful diagnostic for unresolved geometry,
+and worth logging at build step 2 regardless.
+
 ## 1. The invariant that forces the design
 
 For the overfill model, with `base_head` the gravity head per row
