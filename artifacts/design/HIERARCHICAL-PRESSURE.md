@@ -104,7 +104,26 @@ should be re-checked against whatever is built, not assumed inapplicable.
 
 ## 0.4 What happens when the fine level cannot follow
 
-The anchor (§5 step 2) already is the answer: `M += lambda * (A - M)`. If the fine level cannot
+**First, what is and is not recomputed.** `A[C]` — the aggregated fine mass — is recomputed every
+tick, but it is an *observation* (a sum over the tile), not a model: it can be stale, never wrong.
+`M[C]` — the coarse state — is **never rebuilt**. It persists across ticks, nudged toward the
+observation by `lambda` and then relaxed by its own dynamics. The memory lives in `M`.
+
+**`lambda` therefore decides whether the coarse level exists at all.** At `lambda = 1`, `M = A` and
+the coarse level collapses to a plain downsampling of the fine state — memoryless, incapable of
+holding any structure the fine level has not already reached, and so unable to tell the fine level
+anything it does not know. Everything the coarse level is FOR comes from `lambda < 1`: that is what
+lets `M` carry a hydrostatic profile `A` would otherwise take ~34,000 ticks to earn (§1).
+
+This is also the exact difference from the parked head field. HANDOVER §3 states its rule as "cold
+seed every tick, never history — the field is a pure function of mask + heightmap + material", i.e.
+`lambda = 1` by construction, forced by max-propagation being monotone (reading the previous tick's
+value would ratchet upward and never fall). Memorylessness is the diagnosed source of its brittleness
+to transient defects; `lambda < 1` is available here only because the coarse level uses compression
+dynamics rather than a max rule.
+
+The anchor (§5 step 2) is also the answer to what happens when the fine level cannot follow:
+`M += lambda * (A - M)`. If the fine level cannot
 follow, `A` does not move, and the anchor drags the coarse state back toward reality. Nothing extra is
 needed, and this is the grounding mechanism — the coarse level cannot run away from the mass.
 
