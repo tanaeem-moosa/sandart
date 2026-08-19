@@ -483,7 +483,7 @@ the granular case is designed deliberately.
 **I8 — The LOD scheduler must see `P`.** A settled pile is exactly the case where blocks go
 Inactive, and block activation is driven by last tick's displacement and head difference with no `P`
 term. Without this, `P` builds in the coarse field while the fine cells that should respond are
-asleep, waking only via the 30-tick staleness path. A coarse tile whose `|grad eta|` exceeds a threshold must mark its block active (G1).
+asleep, waking only via the 30-tick staleness path. A coarse tile whose `|Delta|` exceeds a threshold must mark its block active (G1).
 
 **I6 — Conservation is untouched.** Real mass moves only through the fine edge solver, which is
 conservative by construction. `M` is a modelling variable. No reconciliation pass, no fixups.
@@ -558,8 +558,8 @@ answer to "how many sub-steps", which HANDOVER §11 never had: enough to cross a
 The LOD scheduler is *reactive* — a block is admitted on what moved LAST tick
 (`last_displacements`), which is why 100% of material-bearing blocks were measured sitting in the
 MUST tier. A coarse pressure gradient is a **predictive** signal: it knows where mass wants to go
-before the fine level has moved any. So sub-step only the blocks whose tile shows a large `|grad eta|`
-(head, NOT pressure — see G1 below) and leave the rest at one step.
+before the fine level has moved any. So sub-step only the blocks whose tile shows a large `|Delta|`
+(coarse-fine disagreement — see G1 below) and leave the rest at one step.
 
 This makes the selector for adaptive overclocking fall out of the physics instead of being a
 heuristic, and it is also the fix for I8 (the scheduler otherwise cannot see `P` at all, so a
@@ -574,11 +574,11 @@ it at build step 2, where `P` exists but drives nothing.
 
 Overclocking spends budget; **underclocking is what pays for it**, and today nothing can safely say
 "this block needs less" — the scheduler only knows what moved last tick, which is why 100% of
-material-bearing blocks were measured in the MUST tier. A coarse `|grad eta|` is a continuous per-block
-*demand*, so it assigns a rate rather than an admission:
+material-bearing blocks were measured in the MUST tier. Coarse-fine disagreement `|Delta|` is a continuous per-block
+*demand* (see G1), so it assigns a rate rather than an admission:
 
 ```
-n_b = clamp( quantise( |grad eta|_b / eta_ref ), 1/8 .. 8 )   // powers of two only
+n_b = clamp( quantise( |Delta|_b / Delta_ref ), 1/8 .. 8 )    // powers of two only
 ```
 
 and `budget_n` stops being a block count. The frame's cost is `sum(n_b)`, so the frame-time governor
@@ -613,12 +613,12 @@ the most likely place for a multi-rate scheme to lose mass or stall a front.
 in HANDOVER §11 as the mechanism "to let a block know how much simulated time it missed". An
 underclocked block's solver step must integrate the elapsed simulated time, not one tick.
 
-**Unmeasured, and it decides affordability:** the distribution of `|grad eta|` over blocks in a
+**Unmeasured, and it decides affordability:** the distribution of `|Delta|` over blocks in a
 settling pile — i.e. what fraction genuinely wants `n_b > 1`. If it is a thin front, this is cheap
 and self-financing; if a whole pool wants it, it is not. Measurable at build step 2, where `P` exists
 but drives nothing.
 
-### G1 — The scheduler must key on HEAD, not pressure, or it activates everything
+### G1 — Drive on `eta`, SCHEDULE on coarse-fine disagreement
 
 The existing wake mechanism is safe against runaway for a reason worth stating, because the coarse
 field does not inherit it: **a wake is emitted by mass MOVEMENT, not by activation.**
@@ -635,14 +635,40 @@ wrong field** — hydrostatic pressure has a gradient of one `base_head` per row
 domain. That is exactly the degenerate state measured today, where 100% of material-bearing blocks
 sit in the MUST tier, re-created by a new mechanism.
 
-**Head is the right field.** A connected body at rest has `eta = z + p/(rho g) = constant`, so
-`grad eta = 0` at equilibrium and nonzero only where there is genuine disequilibrium. The signal
-vanishes at rest, which is the self-correction property required of anything with memory.
+**`eta` is the right field to DRIVE with**, for §0.2's reason: elevation must be stated once, and
+`eta` has it netted out. That is settled.
 
-This is the same variable change §0.2 demands to avoid double-counting elevation. **The two arguments
-are independent and reach the same conclusion**, which is the strongest reason to believe it:
-elevation must be stated once (§0.2), and the scheduler's signal must vanish at rest (G1). Both are
-satisfied by the coarse level carrying `eta` and the fine cell reading `eta[tile] - z_fine`.
+**But `grad eta` is the wrong field to SCHEDULE on**, and this only shows up by following the tick
+through. The coarse field relaxes fast — that is what `N` sweeps are for — so it reaches *its own*
+equilibrium quickly, `eta` goes flat across the connected body, and `grad eta -> 0` **while the fine
+level has not moved at all**. A clock keyed on `grad eta` would idle everything at exactly the moment
+the fine level has the most outstanding work.
+
+**Schedule on `|Delta| = |M - A|`, the coarse-fine disagreement.** It is literally "work the fine
+level has not done yet":
+
+| state | `grad eta` | `\|Delta\|` |
+|---|---|---|
+| global rest, coarse and fine agree | 0 | **0** |
+| coarse resolved, fine lagging | ~0 | **large** |
+| settled interior, nothing to do | 0 | **0** |
+
+It vanishes at rest, it is self-correcting in the scheduler sense (running a block reduces its own
+`Delta`, which lowers its rate — F3's hysteresis still required), and it costs nothing new: §5 step 4
+already produces it.
+
+So the two jobs take different quantities, and conflating them was an error in the first draft:
+
+| job | quantity | why |
+|---|---|---|
+| driving term in `phi` | `eta` | elevation stated once (§0.2) |
+| per-block clock rate `n_b` | `\|Delta\|` | measures outstanding work, not instantaneous forcing |
+
+**Inherited hazard, now with a price.** §0.4's "cannot vs has not yet" ambiguity previously only
+accumulated phantom head; keyed to the clock it also burns budget — a tile blocked by unresolved
+geometry (`k[e]` wrong) shows a permanent `Delta` and would be permanently overclocked while
+achieving nothing. **Persistent `Delta` with static `A` should therefore be detected and reported,
+not merely tolerated: it is a geometry-error alarm.**
 
 ### The floor: underclocked must mean "rarely", never "not at all"
 
@@ -680,8 +706,8 @@ setting.
 in effective timestep. This is S1's nesting argument in time rather than space, and it has the same
 justification: adjacent-in-time rates that are not powers of two apart beat.
 
-**F3 — Hysteresis, because the scheduler itself can oscillate.** `n_b` derived from `|grad eta|`, where
-running the block *reduces* `|grad eta|`, is a feedback loop: speed up, resolve the gradient, slow
+**F3 — Hysteresis, because the scheduler itself can oscillate.** `n_b` derived from `|Delta|`, where
+running the block *reduces* `|Delta|`, is a feedback loop: speed up, resolve the gradient, slow
 down, gradient rebuilds, speed up. That is a limit cycle in the scheduler rather than the physics —
 the same failure mode, one level up, and exactly what the "design it self-correcting or it
 oscillates" rule is warning about. Different thresholds for speeding up and slowing down, and the
