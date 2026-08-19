@@ -4006,6 +4006,19 @@ pub fn settle_tick(
     // bound `Delta` can change sign and the loop rings (§6's account of the pre-#70 failure mode,
     // one level up).
     coarse_delta: &[f32],
+    // Step 3-adaptive fix (STEP3-ADAPTIVE-COARSE.md, incremental restriction): output-only.
+    // `Some(buf)` resizes `buf` to `expected_len` (one bool per block, same indexing as
+    // `active_blocks`) and fills it with this tick's final `modified[]` -- true iff the block was
+    // either simulated (`will_simulate[b]`) or received flux from a running neighbour
+    // (`activate_neighbor`/`flux_edge_apply` marking a non-simulated block `modified`, existing
+    // machinery, see those functions). This is the EXACT set of blocks whose fine heights could
+    // possibly have changed this tick -- a block absent from this set has bit-identically the
+    // same heights it had when last observed, so `CoarseState::restrict_incremental` can safely
+    // skip re-aggregating it. `None` costs nothing (skips the clone). Since `block_size ==
+    // grid/64 == COARSE_GRID` at every coupled resolution, block index and coarse tile index are
+    // the same integer -- see that invariant asserted in `coarse.rs`'s own incremental-restrict
+    // test.
+    touched_out: Option<&mut Vec<bool>>,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -6302,6 +6315,15 @@ pub fn settle_tick(
     }
     *last_displacements = next_displacements;
 
+    // STEP3-ADAPTIVE-COARSE.md: hand back the final `modified[]` for this tick, unchanged by
+    // anything below this point, so `CoarseState::restrict_incremental` (next tick, before this
+    // tick's *own* settle_tick runs — see the caller) knows exactly which blocks' fine heights
+    // could have moved since it last aggregated them.
+    if let Some(out) = touched_out {
+        out.clear();
+        out.extend_from_slice(&modified);
+    }
+
     // Clear the external-mass-exchange buffer now that this tick's per-cell loop (section 2
     // above, which is the only reader — see `column_depth`'s `resting_above` computation) has
     // consumed it. This must happen exactly once per tick, after that loop and not before it: a
@@ -6550,6 +6572,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
             self.tick_count += 1;
             flow
@@ -6881,6 +6904,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -6955,6 +6979,7 @@ mod tests {
             0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
             &[], &[],
+            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -7036,6 +7061,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -7144,6 +7170,7 @@ mod tests {
             0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
             &[], &[],
+            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -7456,6 +7483,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -7557,6 +7585,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -7612,6 +7641,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -7688,6 +7718,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -7795,6 +7826,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -10970,6 +11002,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -11088,6 +11121,7 @@ mod tests {
                     0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                     OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                    None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
                 );
             }
 
@@ -11190,6 +11224,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -11280,6 +11315,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -11369,6 +11405,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -11621,6 +11658,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -11804,6 +11842,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
 
@@ -11949,6 +11988,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             ) as f64;
         }
 
@@ -12195,6 +12235,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -12735,6 +12776,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();

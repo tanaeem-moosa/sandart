@@ -411,6 +411,26 @@ pub struct DrawingSimulation {
     /// pressure P, and coarse-fine disagreement Delta.
     pub coarse_state: CoarseState,
 
+    /// STEP3-ADAPTIVE-COARSE.md (incremental restriction): per-BLOCK "did this block's fine
+    /// heights possibly change this tick" flags, filled by `settle_tick`'s `touched_out`
+    /// parameter at the end of whichever tick most recently actually ran the fine solver. Read
+    /// by the FOLLOWING tick's `coarse_state.tick(..., Some(&self.blocks_touched))` -- the
+    /// ordering is deliberate: `coarse_state.tick()` runs at the top of `update()`, before this
+    /// tick's own `settle_tick` call, so it is observing heights as they stood at the end of the
+    /// PREVIOUS tick, which is exactly what the previous tick's `touched_out` describes.
+    /// Block index and coarse tile index coincide (`block_size == grid/64 == COARSE_GRID`), so
+    /// this is indexed identically to `coarse_state.a_mass` -- see `coarse::CoarseState::
+    /// restrict_incremental`'s doc comment for the exactness argument.
+    ///
+    /// Starts empty (`Vec::new()`), which `restrict_incremental` treats as "cannot vouch for
+    /// this, do a full rebuild" via a length mismatch -- correct for the first tick after
+    /// construction or after `generate_shape_mask` rebuilds `coarse`/`coarse_state` (both clear
+    /// this field for the same reason: a stale touched set from a different mask/shape is not
+    /// safe to trust). When `has_active` is false this tick (settle_tick does not run at all),
+    /// explicitly cleared to all-`false` rather than left stale, since nothing could have
+    /// changed.
+    pub blocks_touched: Vec<bool>,
+
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
     /// Max displacement observed in each block during the last time it was simulated.
@@ -842,6 +862,7 @@ impl DrawingSimulation {
             // meaningful to build from yet.
             coarse: CoarseGeometry::empty(grid_size),
             coarse_state: CoarseState::new(COARSE_GRID),
+            blocks_touched: Vec::new(),
             active_blocks,
             last_displacements,
             last_simulated_ticks,
@@ -918,6 +939,10 @@ impl DrawingSimulation {
         // site to remember, never a separate staleness window.
         self.coarse = coarse::CoarseGeometry::build(&self.shape_mask, &self.cell_props, w);
         self.coarse_state = coarse::CoarseState::new(self.coarse.coarse_n);
+        // A touched set from before this rebuild refers to a possibly different mask/block
+        // layout; clearing forces the next `restrict_incremental` call to fall back to a full
+        // rebuild (length mismatch), which is always correct.
+        self.blocks_touched.clear();
     }
 
     /// Return a pointer to the shape mask data for WASM/GPU access.
@@ -1681,7 +1706,7 @@ impl DrawingSimulation {
             let base_head = (self.gravity_dir.y * physics::GRAVITY_HEAD_SCALE).max(0.0);
             let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / self.heightmap.width as f32;
             let unit = (physics::GRAVITY_HEAD_SCALE / depth_scale) * self.overfill_stiffness;
-            self.coarse_state.tick(&self.heightmap.data, &self.shape_mask, &self.cell_props, base_head, &self.coarse, unit);
+            self.coarse_state.tick(&self.heightmap.data, &self.shape_mask, &self.cell_props, base_head, &self.coarse, unit, Some(&self.blocks_touched));
         }
 
         // Run the gravity-driven settling cellular automata tick
@@ -1753,10 +1778,15 @@ impl DrawingSimulation {
                     // Same emptiness contract, for I4's per-tile flux budget (§6): `|Delta[C]|`
                     // per tile, consumed by `coarse_delta_eta_budgeted` in physics.rs.
                     if self.coarse.available { &self.coarse_state.delta } else { &[] },
+                    Some(&mut self.blocks_touched),
                 );
             }
         } else {
             self.active_bounds.active = false;
+            // Nothing ran, so no block's fine heights could have changed -- see
+            // `blocks_touched`'s own doc comment for why stale content here (rather than
+            // all-false) would be merely wasteful, not incorrect, but is cleared anyway.
+            self.blocks_touched.iter_mut().for_each(|v| *v = false);
         }
 
         self.tick_count = self.tick_count.wrapping_add(1);

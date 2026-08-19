@@ -286,8 +286,40 @@ impl CoarseGeometry {
 
 /// Default anchoring rate lambda for pulling M towards A: 0.10 (§5 step 2).
 pub const COARSE_DEFAULT_LAMBDA: f32 = 0.10;
-/// Default relaxation sweeps per tick on the 64x64 coarse grid: 16 sweeps (§5 step 3).
-pub const COARSE_DEFAULT_SWEEPS: usize = 16;
+
+/// Sweep-count CEILING per tick (see `CoarseState::relax`), spent adaptively rather than run in
+/// full every tick.
+///
+/// **The coarse level is a SIMULATION, not a solver iterated to convergence** (user directive,
+/// STEP3-ADAPTIVE-COARSE.md): `M` persists across ticks (§0.4 -- "`M[C]` is never rebuilt. It
+/// persists across ticks... The memory lives in `M`"), so it does not need to converge WITHIN a
+/// tick, only to advance, exactly like the fine level advances one step per tick. §10 says as
+/// much independently: a 64-cell coarse chain needs ~4000 sweeps to fully settle (it is
+/// nonlinear diffusion, O(N^2)), so no per-tick sweep count this design can afford reaches
+/// convergence in one tick regardless -- settling instead happens over ~500 ticks via
+/// persistence. Spending 16 (the previous default, unjustified beyond "a previous agent picked
+/// it") or even the design's own budgeted 8 sweeps chasing intra-tick convergence that cannot
+/// happen is therefore mostly wasted work.
+///
+/// So: sweep 1 is mandatory every tick (`relax`'s own baseline pass) -- the floor is exactly 1,
+/// per the user's reframing. Sweeps 2 through `COARSE_DEFAULT_SWEEPS` are spent ONLY on tiles
+/// with outstanding coarse-fine disagreement `|Delta| = |M-A|` (G1: "work the fine level has not
+/// done yet"; it vanishes at rest, unlike `grad P` which is nonzero in any resting pool by
+/// construction -- see `relax`'s own doc comment for the per-region mechanism). A settled region
+/// earns zero extra sweeps; an active front earns up to this ceiling.
+///
+/// `8` is not a fresh tuning constant -- it is the design's own already-derived ceiling
+/// (`HIERARCHICAL-PRESSURE.md` §8: "at 64x64 with N=8 the sweep arithmetic is `8*4096/262144 =
+/// 12.5%` of one fine sweep", the largest N the design itself budgets against the 15%-of-tick
+/// acceptance criterion).
+pub const COARSE_DEFAULT_SWEEPS: usize = 8;
+
+/// Relative tolerance, against a tile's own `capacity`, below which `|Delta| = |M-A|` is treated
+/// as numerically settled (no outstanding coarse-fine disagreement, so the tile earns no extra
+/// adaptive sweep) rather than as a freshly invented threshold: it reuses the same 1e-4 relative
+/// tolerance `restriction_preserves_total_mass` (this file's own test, below) already uses to
+/// call floating-point aggregation error negligible against real physical disagreement.
+pub const ACTIVE_DELTA_REL_TOL: f32 = 1e-4;
 
 /// Unbounded potential function for coarse compression (§4.3 / Step 0 recommendation).
 /// Below capacity (h <= cap): phi = h / cap in [0, 1].
@@ -431,6 +463,80 @@ impl CoarseState {
         }
     }
 
+    /// Incremental version of `restrict`, exact rather than approximate: a block that was
+    /// neither simulated nor received flux this tick has bit-identically the same fine heights
+    /// it had when `A[C]`/`support_mass[C]` were last aggregated for it, so re-summing it is
+    /// provably a no-op -- it can simply be skipped. `restrict`'s own full-grid scan measured
+    /// ~7.8ms of fixed per-tick cost at grid 512 (STEP3-FIXES.md's "found beyond the three
+    /// defects"); this touches only the tiles that could possibly have changed.
+    ///
+    /// `touched[b]`: one bool per BLOCK, `true` iff block `b` was simulated
+    /// (`will_simulate[b]`) or marked `modified` by flux from a running neighbour
+    /// (`activate_neighbor`/`flux_edge_apply` -- existing, load-bearing scheduler machinery, see
+    /// `physics.rs::settle_tick`'s `touched_out` parameter, which is exactly this array).
+    /// **Block index and coarse tile index are the same integer**: `block_size == grid_size/64
+    /// == COARSE_GRID` at every resolution where the coarse level is available (both require
+    /// exact division by 64), so a block's `(bx, by)` and a coarse tile's `(cx, cy)` coincide
+    /// one-to-one -- no partial-tile bookkeeping, per the task's own framing. Verified bit-exact
+    /// against a full `restrict` over a long run of every shipped shape by
+    /// `incremental_restrict_is_bit_exact_to_full_rebuild` below.
+    ///
+    /// Falls back to a full `restrict` if `touched.len()` does not match `coarse_n * coarse_n`
+    /// (e.g. the very first tick after construction/a mask rebuild, before any `settle_tick` has
+    /// run to populate a real touched set -- see `DrawingSimulation::blocks_touched`'s own doc
+    /// comment for when that happens) -- correctness over the optimisation whenever the caller
+    /// cannot vouch for the touched set.
+    pub fn restrict_incremental(
+        &mut self,
+        heights: &[f32],
+        shape_mask: &[u8],
+        cell_props: &[f32],
+        geo: &CoarseGeometry,
+        touched: &[bool],
+    ) {
+        if !geo.available || heights.len() != geo.grid_size * geo.grid_size || shape_mask.len() != heights.len()
+            || cell_props.len() != heights.len() * 4 {
+            return;
+        }
+        if touched.len() != self.a_mass.len() {
+            self.restrict(heights, shape_mask, cell_props, geo);
+            return;
+        }
+        let t = geo.t;
+        let n = self.coarse_n;
+        let g = geo.grid_size;
+        for cy in 0..n {
+            let y0 = cy * t;
+            let y1 = ((cy + 1) * t).min(g);
+            for cx in 0..n {
+                let ci = cy * n + cx;
+                if !touched[ci] {
+                    continue;
+                }
+                let x0 = cx * t;
+                let x1 = ((cx + 1) * t).min(g);
+                let mut a = 0.0f32;
+                let mut sup = 0.0f32;
+                for fy in y0..y1 {
+                    let row = fy * g;
+                    for fx in x0..x1 {
+                        let fi = row + fx;
+                        if shape_mask[fi] != MASK_OUTSIDE {
+                            let h = heights[fi];
+                            a += h;
+                            let cap = cell_capacity_for(cell_props[fi * 4 + PROP_WETNESS]);
+                            if h > cap {
+                                sup += h - cap;
+                            }
+                        }
+                    }
+                }
+                self.a_mass[ci] = a;
+                self.support_mass[ci] = sup;
+            }
+        }
+    }
+
     /// Step 2 of §5: Anchor M toward A by lambda: M += lambda * (A - M).
     pub fn anchor(&mut self, geo: &CoarseGeometry) {
         if !geo.available {
@@ -446,62 +552,115 @@ impl CoarseState {
         }
     }
 
-    /// Step 3 of §5: Relax M across the coarse graph for N sweeps.
-    pub fn relax(&mut self, sweeps: usize, base_head: f32, geo: &CoarseGeometry, unit: f32) {
-        if !geo.available {
+    /// Step 3 of §5: Relax M across the coarse graph, up to `max_sweeps` sweeps, spent
+    /// adaptively. See `COARSE_DEFAULT_SWEEPS`'s doc comment for the full derivation; summary:
+    ///
+    /// - **Sweep 1 is mandatory and touches every tile.** The coarse level is a simulation
+    ///   advancing one step per tick (like the fine level), not a solver run to convergence, so
+    ///   this is the only sweep that always happens regardless of demand.
+    /// - **Sweeps 2..=`max_sweeps` are per-region.** After each sweep, a tile is flagged "active"
+    ///   iff it has outstanding coarse-fine disagreement (`|M-A| > capacity * ACTIVE_DELTA_REL_TOL`,
+    ///   G1's clock signal -- see that constant's doc comment for why this, not `grad eta`, is
+    ///   the right quantity: it vanishes at rest). Only edges touching at least one active tile
+    ///   are swept ("either side", not "both": mass must still be able to flow INTO an active
+    ///   tile from an inactive neighbour, matching G1's own S2 -- "underclocked means does not
+    ///   sweep its own interior, not frozen"). If no tile is active, the loop exits early --
+    ///   there is nothing left this tick's coarse relax can do.
+    pub fn relax(&mut self, max_sweeps: usize, base_head: f32, geo: &CoarseGeometry, unit: f32) {
+        if !geo.available || max_sweeps == 0 {
             return;
         }
         let n = self.coarse_n;
         let base_head_coarse = base_head * geo.t as f32;
-
         let mut delta_v = vec![0.0f32; n * n];
-        for _ in 0..sweeps {
-            delta_v.iter_mut().for_each(|v| *v = 0.0);
 
-            // Vertical edges (y-direction, gravity-aligned)
-            for cy in 0..n.saturating_sub(1) {
-                for cx in 0..n {
-                    let a = cy * n + cx;
-                    let b = (cy + 1) * n + cx;
-                    let k = geo.k_y_at(cx, cy);
-                    if k <= 0.0 || geo.capacity[a] <= 0.0 || geo.capacity[b] <= 0.0 {
-                        continue;
-                    }
-                    let d = k * coarse_unbounded_transfer(
-                        self.m_mass[a], geo.capacity[a],
-                        self.m_mass[b], geo.capacity[b],
-                        base_head_coarse, unit,
-                    );
-                    delta_v[a] -= d;
-                    delta_v[b] += d;
-                }
-            }
-            for i in 0..n * n {
-                self.m_mass[i] += delta_v[i];
-            }
+        // Sweep 1: mandatory, whole grid.
+        self.relax_sweep(&mut delta_v, base_head_coarse, geo, unit, None);
 
-            delta_v.iter_mut().for_each(|v| *v = 0.0);
-            // Horizontal edges (x-direction, no gravity)
-            for cy in 0..n {
-                for cx in 0..n.saturating_sub(1) {
-                    let a = cy * n + cx;
-                    let b = cy * n + cx + 1;
-                    let k = geo.k_x_at(cx, cy);
-                    if k <= 0.0 || geo.capacity[a] <= 0.0 || geo.capacity[b] <= 0.0 {
-                        continue;
-                    }
-                    let d = k * coarse_unbounded_transfer(
-                        self.m_mass[a], geo.capacity[a],
-                        self.m_mass[b], geo.capacity[b],
-                        0.0, unit,
-                    );
-                    delta_v[a] -= d;
-                    delta_v[b] += d;
+        // Sweeps 2..max_sweeps: adaptive, per-region.
+        let mut active = vec![false; n * n];
+        for _ in 1..max_sweeps {
+            let mut any = false;
+            for c in 0..n * n {
+                let is_active = geo.inside[c]
+                    && geo.capacity[c] > 0.0
+                    && (self.m_mass[c] - self.a_mass[c]).abs() > geo.capacity[c] * ACTIVE_DELTA_REL_TOL;
+                active[c] = is_active;
+                any |= is_active;
+            }
+            if !any {
+                break;
+            }
+            self.relax_sweep(&mut delta_v, base_head_coarse, geo, unit, Some(&active));
+        }
+    }
+
+    /// One vertical+horizontal sweep of the existing overfill equilibrium transfer over the
+    /// coarse graph -- the body of the old unconditional `relax` loop, factored out so the
+    /// mandatory sweep and the adaptive per-region sweeps in `relax` share one implementation.
+    /// `active`: `None` sweeps every edge (the mandatory baseline sweep); `Some(mask)` skips an
+    /// edge unless at least one incident tile is flagged active.
+    fn relax_sweep(
+        &mut self,
+        delta_v: &mut [f32],
+        base_head_coarse: f32,
+        geo: &CoarseGeometry,
+        unit: f32,
+        active: Option<&[bool]>,
+    ) {
+        let n = self.coarse_n;
+        let touches = |a: usize, b: usize| active.map_or(true, |m| m[a] || m[b]);
+
+        delta_v.iter_mut().for_each(|v| *v = 0.0);
+        // Vertical edges (y-direction, gravity-aligned)
+        for cy in 0..n.saturating_sub(1) {
+            for cx in 0..n {
+                let a = cy * n + cx;
+                let b = (cy + 1) * n + cx;
+                if !touches(a, b) {
+                    continue;
                 }
+                let k = geo.k_y_at(cx, cy);
+                if k <= 0.0 || geo.capacity[a] <= 0.0 || geo.capacity[b] <= 0.0 {
+                    continue;
+                }
+                let d = k * coarse_unbounded_transfer(
+                    self.m_mass[a], geo.capacity[a],
+                    self.m_mass[b], geo.capacity[b],
+                    base_head_coarse, unit,
+                );
+                delta_v[a] -= d;
+                delta_v[b] += d;
             }
-            for i in 0..n * n {
-                self.m_mass[i] += delta_v[i];
+        }
+        for i in 0..n * n {
+            self.m_mass[i] += delta_v[i];
+        }
+
+        delta_v.iter_mut().for_each(|v| *v = 0.0);
+        // Horizontal edges (x-direction, no gravity)
+        for cy in 0..n {
+            for cx in 0..n.saturating_sub(1) {
+                let a = cy * n + cx;
+                let b = cy * n + cx + 1;
+                if !touches(a, b) {
+                    continue;
+                }
+                let k = geo.k_x_at(cx, cy);
+                if k <= 0.0 || geo.capacity[a] <= 0.0 || geo.capacity[b] <= 0.0 {
+                    continue;
+                }
+                let d = k * coarse_unbounded_transfer(
+                    self.m_mass[a], geo.capacity[a],
+                    self.m_mass[b], geo.capacity[b],
+                    0.0, unit,
+                );
+                delta_v[a] -= d;
+                delta_v[b] += d;
             }
+        }
+        for i in 0..n * n {
+            self.m_mass[i] += delta_v[i];
         }
     }
 
@@ -644,11 +803,27 @@ impl CoarseState {
     }
 
     /// Full tick update (Step 1 -> Step 2 -> Step 3 -> Step 4).
-    pub fn tick(&mut self, heights: &[f32], shape_mask: &[u8], cell_props: &[f32], base_head: f32, geo: &CoarseGeometry, unit: f32) {
+    ///
+    /// `touched`: `Some(blocks)` uses `restrict_incremental` (see that method's doc comment for
+    /// the exactness argument and the block/tile index correspondence); `None` always does a
+    /// full `restrict` (used by callers, e.g. tests, that have no touched set to vouch for).
+    pub fn tick(
+        &mut self,
+        heights: &[f32],
+        shape_mask: &[u8],
+        cell_props: &[f32],
+        base_head: f32,
+        geo: &CoarseGeometry,
+        unit: f32,
+        touched: Option<&[bool]>,
+    ) {
         if !geo.available {
             return;
         }
-        self.restrict(heights, shape_mask, cell_props, geo);
+        match touched {
+            Some(t) => self.restrict_incremental(heights, shape_mask, cell_props, geo, t),
+            None => self.restrict(heights, shape_mask, cell_props, geo),
+        }
         self.compute_grounded(geo);
         self.anchor(geo);
         self.relax(self.sweeps_n, base_head, geo, unit);
@@ -1193,5 +1368,52 @@ mod tests {
             state.p_coarse[idx_bot] > 0.0,
             "bottom tile should have positive hydrostatic pressure"
         );
+    }
+
+    /// STEP3-ADAPTIVE-COARSE.md: `restrict_incremental` must be EXACT, never an approximation
+    /// (task requirement). Drives the real production path -- `DrawingSimulation::update()`,
+    /// which calls `CoarseState::tick` with `Some(&self.blocks_touched)` every tick -- for every
+    /// shipped shape, and after every tick recomputes a FULL `restrict` from a snapshot of the
+    /// exact fine state (`heightmap`/`shape_mask`/`cell_props`) taken immediately before that
+    /// tick's `update()` call (the same state `coarse_state.tick()` itself reads, since it runs
+    /// before `settle_tick` mutates heights -- see `lib.rs`'s call ordering), asserting
+    /// `a_mass`/`support_mass` match the incremental result bit-for-bit (`==`, not a tolerance).
+    #[test]
+    fn incremental_restrict_is_bit_exact_to_full_rebuild() {
+        let grid = 128usize;
+        let ticks = 300usize;
+        let targets = [None; 5];
+
+        for &shape in &all_shapes() {
+            let mut sim = DrawingSimulation::new_with_size(grid);
+            sim.sandbox_shape = shape;
+            sim.gravity_dir = glam::Vec2::new(0.0, 0.04);
+            sim.apply_preset(crate::MaterialMode::Water);
+            sim.overfill_pressure = true;
+            // Self-sufficient (regenerates the mask) and generic across shapes: seeds material
+            // at the top so restriction has real, changing mass to track, not an empty grid.
+            sim.initialize_hourglass();
+            assert!(sim.coarse.available, "{shape:?}: coarse should be available at grid {grid}");
+
+            for tick in 0..ticks {
+                let heights_before = sim.heightmap.data.clone();
+                let mask_before = sim.shape_mask.clone();
+                let props_before = sim.cell_props.clone();
+
+                sim.update(0.016, &targets, 0.08, crate::MaterialMode::Water, shape, 16.0, 16.0);
+
+                let mut full = CoarseState::new(sim.coarse.coarse_n);
+                full.restrict(&heights_before, &mask_before, &props_before, &sim.coarse);
+
+                assert_eq!(
+                    sim.coarse_state.a_mass, full.a_mass,
+                    "{shape:?} tick {tick}: incremental A[C] diverged from a full rebuild"
+                );
+                assert_eq!(
+                    sim.coarse_state.support_mass, full.support_mass,
+                    "{shape:?} tick {tick}: incremental support_mass[C] diverged from a full rebuild"
+                );
+            }
+        }
     }
 }

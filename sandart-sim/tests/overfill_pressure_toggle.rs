@@ -1139,7 +1139,7 @@ fn diag_task70_exact_solver_vs_bisection_sweep() {
                             let exact = sandart_sim::physics::overfill_equilibrium_transfer(
                                 h_a, 1.0, h_b, 1.0,
                                 2.0, 2.0,
-                                1.0, tau, 1.0, 1.0,
+                                1.0, 0.0, tau, 1.0, 1.0,
                                 ratio, unit, tension,
                             );
 
@@ -1187,7 +1187,7 @@ fn diag_task70_exact_solver_vs_bisection_sweep() {
                                 let exact = sandart_sim::physics::overfill_equilibrium_transfer(
                                     h_a, 1.0, h_b, 1.0,
                                     2.0, 2.0,
-                                    0.02, tau, gain, gain,
+                                    0.02, 0.0, tau, gain, gain,
                                     ratio, unit, tension,
                                 );
 
