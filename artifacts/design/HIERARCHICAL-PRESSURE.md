@@ -760,6 +760,24 @@ Mechanical:
 
 ---
 
+## 8b. The instruments already exist
+
+Committed as `sandart-sim/examples/diag_*.rs`. These produced every measurement in this document, so
+the build steps below start from working code rather than from scratch.
+
+| example | what it answers | used by |
+|---|---|---|
+| `diag_coarse <grid> <tiles> <ticks> [utube]` | aggregates fine mass into coarse tiles; how many falling-dominated tiles reach capacity | §3, and **build step 0** — this is §0.1's instrument, extend it to print `max(o)` per tile |
+| `diag_ceiling <grid> <ticks> <stiff> [ceiling]` | compression profile by depth; how far a pool gets toward hydrostatic | §1's 24%/13%/6%, and the "raising the ceiling does nothing" result |
+| `diag_resolution [ticks]` | drain rate and pool-levelling time at 128/256/512, normalised | §1's `1/w` degradation and the `N^2` levelling; **acceptance criterion 1's baseline** |
+| `diag_support <grid> <ticks>` | does falling material carry pressure, one-cell vs transitive support | §3's 0-of-9,647; **acceptance criterion 4's instrument** |
+| `diag_saturation` | per-edge transfer vs saturation, stiffness and resolution | §1's `R * tau = o_max` table |
+| `diag_blocks --budget N --ticks N [--substeps N] [--material m]` | ms/tick, block tier counts, drain, mass error | general perf/behaviour probe; the sub-step cost numbers in §7b |
+| `diag_solver_exactness` | `overfill_equilibrium_transfer` against a 200-iteration reference over 600k cases | regression guard on the solver, which has been rewritten five times |
+
+None of these is a test — they print, they do not assert. They are measuring instruments, and the
+numbers they produce are expected to move when the physics does.
+
 ## 9. Build order
 
 Each step is separately measurable and separately revertible. Do not proceed past a step whose
