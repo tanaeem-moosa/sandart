@@ -2,7 +2,7 @@
 @group(0) @binding(1) var heightmap_sampler: sampler;
 @group(0) @binding(4) var colormap_tex: texture_2d<f32>;
 @group(0) @binding(5) var shape_mask_tex: texture_2d<u32>;
-// Block-simulation heat-map debug overlay. Always a fixed 32x32 texels (see `HEAT_GRID_SIZE` in
+// Block-simulation heat-map debug overlay. Always a fixed 64x64 texels (see `HEAT_GRID_SIZE` in
 // sandart-render/src/lib.rs) regardless of `uniforms.grid_size` -- the LOD scheduler's block
 // grid doesn't scale with resolution. Read via `textureLoad` (integer block coords), same as
 // `shape_mask_tex`, so no sampler binding is needed for it.
@@ -815,11 +815,13 @@ fn fs_main(
     // tints actual sand/table, never the casing or a marble, and `heatmap_enabled == 0u` (the
     // default) skips this whole block, costing nothing.
     if (uniforms.heatmap_enabled != 0u) {
-        // The block grid is a fixed 32x32 regardless of `uniforms.grid_size` (see
-        // `block_heat_tex`'s binding comment), so the block a fragment falls in is just its UV
-        // scaled directly by 32, not by the cell-resolution `grid_size`.
-        let heat_block_coord = vec2<i32>(vec2<f32>(uv.x, uv.y) * 32.0);
-        let heat = textureLoad(block_heat_tex, clamp(heat_block_coord, vec2<i32>(0), vec2<i32>(31)), 0).r;
+        // The block grid is a fixed 64x64 regardless of `uniforms.grid_size` (see
+        // `block_heat_tex`'s binding comment -- HEAT_GRID_SIZE in sandart-render/src/lib.rs, was
+        // 32 before the LOD block became grid_size/64 instead of grid_size/32), so the block a
+        // fragment falls in is just its UV scaled directly by 64, not by the cell-resolution
+        // `grid_size`.
+        let heat_block_coord = vec2<i32>(vec2<f32>(uv.x, uv.y) * 64.0);
+        let heat = textureLoad(block_heat_tex, clamp(heat_block_coord, vec2<i32>(0), vec2<i32>(63)), 0).r;
 
         // Cold -> hot ramp: dark blue, through teal-green, to a bright orange-red at 1.0. Picked
         // over a single-hue (e.g. all-red) ramp because this overlay sits on top of BOTH the
@@ -851,7 +853,7 @@ fn fs_main(
     // costing nothing.
     if (uniforms.pressure_heatmap_enabled != 0u) {
         // Unlike `heat_block_coord` above, this texture IS sized `grid_size` x `grid_size` (one
-        // texel per simulation cell, not per 32x32 LOD block -- see `pressure_heat_tex`'s binding
+        // texel per simulation cell, not per 64x64 LOD block -- see `pressure_heat_tex`'s binding
         // comment), so the coordinate is the fragment's cell index, same math as `mask_coord`
         // near the top of this function.
         let grid_size_i2 = i32(uniforms.grid_size);

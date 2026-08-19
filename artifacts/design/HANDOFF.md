@@ -83,7 +83,9 @@ This is the OTHER HALF of #55's elliptic solve. The solve supplies propagation, 
 ## Standing rules
 
 - Never weaken, #[ignore], re-tune or retitle `test_water_blob_stays_left_right_symmetric_under_gravity`.
-- Do not change `block_size` or the 32x32 tiling (lib.rs:444-451).
+- ~~Do not change `block_size` or the 32x32 tiling (lib.rs:444-451).~~ **SUPERSEDED 2026-08-18**:
+  `block_size` is now `grid_size / 64` so the LOD block and the coarse pressure tile are the same
+  object. See `artifacts/design/BLOCK-RESIZE.md`.
 - Do not alter web colour-scheme `<option>` VALUES; do not hand-add `<option>` to the material select.
 - `syncSettings()` pushes the whole panel on every control change — nothing on that path may reset the sim. (A bug of exactly this kind was fixed in b28ff5a.)
 - Delegate implementation to Sonnet subagents; keep verification in the main thread.

@@ -10,14 +10,19 @@
 //!
 //! The design's §2 ("The LOD block and the pressure cell are the same object") anticipates
 //! `block_size` changing from `grid_size/32` to `grid_size/64` in a *separate, later* change, at
-//! which point the LOD block and this module's coarse tile become the same footprint. This module
-//! is deliberately built with NO reference to `block_size` — `COARSE_GRID` below is an independent
-//! constant, not derived from it — because that hard constraint (don't touch `block_size` or the
-//! 32x32 tiling) is still in force for this step. `COARSE_GRID = 64` was chosen to match the
-//! design's stated target so that when `block_size` does become `grid_size/64`, `t` here and the
-//! future block edge length become numerically identical without any change to the tiling math in
-//! this file — only the wiring (and likely de-duplication of the `grid/64` arithmetic between the
-//! two subsystems) would need revisiting at that point.
+//! which point the LOD block and this module's coarse tile become the same footprint. **That later
+//! change has now happened** (see `DrawingSimulation::new_with_size`'s `block_size` doc comment
+//! and `artifacts/design/BLOCK-RESIZE.md`): `block_size` is `grid_size/64` (floored at 1, not 2 —
+//! a different floor decision from this module's `available` flag below, for reasons given at the
+//! `block_size` site). This module still has NO reference to `block_size` — `COARSE_GRID` below
+//! remains an independent constant, and the two subsystems' `t`/`block_size` arithmetic is
+//! duplicated rather than shared. They are numerically identical at every resolution where both
+//! are defined (`t` here and `block_size` there both equal `grid_size/64` for grid_size >= 128),
+//! but diverge exactly at grid 64: this module reports `available = false` (disabled) while the
+//! LOD scheduler still produces a working `block_size = 1`, since the scheduler has no
+//! double-counting constraint forcing it to disable. The de-duplication this comment originally
+//! deferred is still deferred — nothing here reads `block_size`, and nothing in the LOD scheduler
+//! reads `COARSE_GRID` — until the coupling in §5 of the design is actually built.
 
 use crate::physics::cell_capacity_for;
 use crate::{MASK_OUTSIDE, PROP_WETNESS};

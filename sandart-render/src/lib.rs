@@ -6,11 +6,15 @@ use wgpu;
 /// different size (tests, the desktop app).
 pub const GRID_SIZE: usize = 512;
 
-/// The LOD scheduler's block grid edge length -- always 32x32 blocks regardless of simulation
+/// The LOD scheduler's block grid edge length -- always 64x64 blocks regardless of simulation
 /// resolution (see `sandart-sim`'s `DrawingSimulation::new_with_size` doc comment on
-/// `block_size`). The block-simulation heat-map overlay's texture is sized to this, not to
-/// `GRID_SIZE`/the current resolution.
-pub const HEAT_GRID_SIZE: usize = 32;
+/// `block_size`; the resolution-invariance is load-bearing there specifically because this
+/// texture's upload, `update_block_heat` below, assumes an exact `HEAT_GRID_SIZE * HEAT_GRID_SIZE`
+/// source length with no bounds check). The block-simulation heat-map overlay's texture is sized
+/// to this, not to `GRID_SIZE`/the current resolution. Was 32 (32x32 = 1024 blocks);
+/// `sandart-sim`'s `block_size` moved from `grid_size/32` to `grid_size/64` so the LOD block
+/// matches `coarse::CoarseGeometry`'s pressure tile (HIERARCHICAL-PRESSURE.md §2).
+pub const HEAT_GRID_SIZE: usize = 64;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -115,14 +119,14 @@ pub struct HeightmapRenderer {
     pub heightmap_texture: wgpu::Texture,
     pub colormap_texture: wgpu::Texture,
     pub shape_mask_texture: wgpu::Texture,
-    /// Block-simulation heat-map debug overlay texture. Fixed 32x32 (`HEAT_GRID_SIZE`) rather
+    /// Block-simulation heat-map debug overlay texture. Fixed 64x64 (`HEAT_GRID_SIZE`) rather
     /// than `grid_size` x `grid_size` like the textures above -- the LOD scheduler's block grid
-    /// is always exactly 32x32 regardless of simulation resolution (see the `block_size`
+    /// is always exactly 64x64 regardless of simulation resolution (see the `block_size`
     /// derivation note in sandart-sim's `DrawingSimulation::new_with_size`), so this is the one
     /// GPU resource in this struct that does NOT need rebuilding when resolution changes.
     pub block_heat_texture: wgpu::Texture,
     /// Per-cell pressure-field debug overlay texture. Unlike `block_heat_texture` above, this IS
-    /// sized `grid_size` x `grid_size` (one texel per simulation cell, not per 32x32 LOD block --
+    /// sized `grid_size` x `grid_size` (one texel per simulation cell, not per 64x64 LOD block --
     /// see `set_grid_size`'s doc comment in sandart-wasm for why grid_size can be 64/128/256/512),
     /// so it must be rebuilt on a resolution change along with `heightmap_texture` et al., not
     /// left alone the way `block_heat_texture` is. R8Unorm holding the log-compressed,
@@ -249,7 +253,7 @@ impl HeightmapRenderer {
         // Create block-simulation heat-map texture (HEAT_GRID_SIZE x HEAT_GRID_SIZE R8Unorm).
         // R8Unorm (not R8Uint like shape_mask_texture) because the shader reads it as a
         // normalised [0,1] intensity to feed straight into a colour ramp, not as a small set of
-        // discrete tags to branch on. Sized to the fixed 32x32 block grid, not `texture_size`
+        // discrete tags to branch on. Sized to the fixed 64x64 block grid, not `texture_size`
         // (which scales with `grid_size`) -- see `HEAT_GRID_SIZE`'s doc comment.
         let heat_texture_size = wgpu::Extent3d {
             width: HEAT_GRID_SIZE as u32,
@@ -272,7 +276,7 @@ impl HeightmapRenderer {
 
         // Create per-cell pressure-field heat-map texture (grid_size x grid_size R8Unorm).
         // Sized to `texture_size` (tracks `grid_size`), unlike `block_heat_texture` above which
-        // stays fixed at 32x32 -- this overlay tints individual simulation cells, not LOD blocks.
+        // stays fixed at 64x64 -- this overlay tints individual simulation cells, not LOD blocks.
         // R8Unorm for the same reason as `block_heat_texture`: the shader reads it as a
         // normalised [0,1] intensity to feed a colour ramp, not as discrete tags.
         let pressure_heat_texture = device.create_texture(&wgpu::TextureDescriptor {

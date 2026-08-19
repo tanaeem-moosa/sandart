@@ -15238,11 +15238,13 @@ mod tests {
     /// tracked both per-tick peak and cumulative over the run -- "interior void count, or a direct
     /// buffer diff, over a flip", per the task brief; this is the direct-buffer-diff form.
     ///
-    /// `budget_n = 256`, matching `DrawingSimulation`'s own shipped starting/floor budget (see
-    /// `lib.rs`'s `budget_n` initialisation) against this harness's `cols * rows = 32 * 32 = 1024`
-    /// blocks (the deliberate 32x32 tiling — see `lib.rs:444-451` — holds at every grid size, so
-    /// this ratio, a quarter of the domain, is representative of the shipped default regardless of
-    /// resolution). MEASURED: at `budget_n = usize::MAX` (never budget-starved) both `sim_before`
+    /// `budget_n = 256` against this harness's own `cols * rows = 32 * 32 = 1024` blocks (it
+    /// builds its block grid directly from `block_size = 2` on a 64x64 domain, it does NOT go
+    /// through `DrawingSimulation`), so the ratio under test is a quarter of the domain. That
+    /// quarter is what makes it representative of the shipped default, not the absolute 256:
+    /// `DrawingSimulation` now tiles into 64x64 = 4096 blocks and starts at `budget_n = 1024`,
+    /// the same quarter (see `lib.rs`'s `block_size` derivation, changed from `grid_size / 32` so
+    /// the LOD block matches the coarse pressure tile). MEASURED: at `budget_n = usize::MAX` (never budget-starved) both `sim_before`
     /// and `sim_after` track `sim_perfect` bit-for-bit over this scenario -- zero divergence either
     /// way -- because with the budget never binding, every block that receives so much as one
     /// `activate_neighbor`-style wake ends up simulated anyway; only once the budget is actually

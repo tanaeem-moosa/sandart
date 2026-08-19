@@ -88,7 +88,13 @@ now also has `workflow_dispatch` so a stalled deploy can be kicked from the Acti
 `rainbow_radial`). Do not hand-add `<option>` elements to the material `<select>` — it is populated
 from `list_materials()`. `syncSettings()` pushes the whole panel on every control change, so
 nothing on that path may reset the sim. `shader.wgsl` compiles at **runtime**, so a WGSL error is a
-blank canvas, not a build failure. Do not change `block_size` or the 32×32 block tiling.
+blank canvas, not a build failure. **The former rule "do not change `block_size` or the 32×32
+block tiling" is SUPERSEDED as of 2026-08-18** — the user directed that the LOD block become the
+same object as the coarse pressure tile, so `block_size` is now `grid_size / 64` (64×64 = 4096
+blocks). See `artifacts/design/BLOCK-RESIZE.md` for the measurements and §2 of
+`artifacts/design/HIERARCHICAL-PRESSURE.md` for why. What survives of the old rule is the reason
+behind it: the block count must stay resolution-invariant, because `sandart-render`'s
+`update_block_heat` uploads into a fixed `HEAT_GRID_SIZE²` texture with no bounds check.
 
 **New checkboxes need a listener.** `syncSettings()` reads every checkbox at once but does not
 subscribe itself; each control needs its own
@@ -113,7 +119,8 @@ A Rust/WASM sand-and-water simulator deployed to GitHub Pages. Workspace crates:
 
 The simulation is a per-edge, mass-conserving flux solver over a heightmap, run in two phases per
 tick (phase 0 vertical/gravity-aligned, phase 1 lateral), with an adaptive block scheduler that
-skips quiet 32×32 blocks. Key entry point is `physics::settle_tick`. `docs/ARCHITECTURE.md` covers
+skips quiet blocks (64×64 = 4096 of them; the tiling was 32×32 until 2026-08-18, see §1). Key
+entry point is `physics::settle_tick`. `docs/ARCHITECTURE.md` covers
 the broad shape; it predates the head-field work.
 
 **w=512 is the production resolution.** 64/128/256 are diagnostic instruments, not targets. Several
@@ -839,7 +846,11 @@ four points.
 `update`) is a frame-time governor: it starts at 256, steps down by 4 per frame while the EMA frame
 time exceeds `target * 1.05`, and creeps back up by 1. `BUDGET_MIN` is 32. `block_size` is
 `grid_size / 32`, so the block grid is **always 32x32 = 1024 blocks** at any resolution — that is
-deliberate, so `budget_n` means the same thing everywhere. Blocks carry a four-level
+deliberate, so `budget_n` means the same thing everywhere.
+**(Superseded 2026-08-18: `block_size` is now `grid_size / 64`, 64x64 = 4096 blocks, and every
+constant in this paragraph moved 4x with it — start 1024, `BUDGET_MIN` 128, step down 16, up 4.
+The resolution-invariance and the "`budget_n` means the same thing everywhere" reasoning are
+unchanged; only the numbers moved. See `artifacts/design/BLOCK-RESIZE.md`.)** Blocks carry a four-level
 `BlockActivity` (Inactive / Slow / Medium / Fast). Overclocking is the inverse operation on the same
 machinery; build it there, not beside it.
 

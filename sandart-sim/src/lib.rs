@@ -718,13 +718,47 @@ impl DrawingSimulation {
     /// resolution-selector plumbing in `sandart-wasm`.
     ///
     /// `block_size` (the LOD scheduler's block edge length in cells) scales with `grid_size`
-    /// rather than staying an absolute constant, specifically `(grid_size / 32).max(1)`, so the
-    /// grid is always tiled into the same 32x32 = 1024 blocks regardless of resolution. This
+    /// rather than staying an absolute constant, specifically `(grid_size / 64).max(1)`, so the
+    /// grid is always tiled into the same 64x64 = 4096 blocks regardless of resolution. This
     /// keeps `budget_n` (and `BUDGET_MIN`/`BUDGET_STEP_*` in `update`) meaningful as the *same
-    /// fraction* of the grid at every resolution. Keeping `block_size` absolute instead would
-    /// have made low resolutions (e.g. 64/16 = 4x4 = 16 total blocks) fall entirely under
-    /// `budget_n`'s minimum, disabling the LOD scheduler's throttling outright at low res and
-    /// making 64 behave differently from 512 for scheduling reasons unrelated to physics.
+    /// fraction* of the grid at every resolution, and it is load-bearing beyond that: the
+    /// block-simulation heat-map overlay (`sandart-render`'s `HEAT_GRID_SIZE`,
+    /// `update_block_heat`) uploads `block_heat_texels()` into a texture sized to a FIXED
+    /// `HEAT_GRID_SIZE x HEAT_GRID_SIZE` with no bounds check on the source slice's length, so if
+    /// the block count varied with resolution that upload would read out of bounds or corrupt the
+    /// image at whichever resolution the block grid was smaller. Keeping `block_size` absolute
+    /// instead of resolution-scaled would additionally have made low resolutions (e.g. 64/16 =
+    /// 4x4 = 16 total blocks) fall entirely under `budget_n`'s minimum, disabling the LOD
+    /// scheduler's throttling outright at low res and making 64 behave differently from 512 for
+    /// scheduling reasons unrelated to physics.
+    ///
+    /// **Was `grid_size / 32` (32x32 = 1024 blocks); changed to `/ 64` so the LOD block is the
+    /// same object as `coarse::CoarseGeometry`'s pressure tile** (`COARSE_GRID = 64` in
+    /// `coarse.rs`, HIERARCHICAL-PRESSURE.md §2 "The LOD block and the pressure cell are the same
+    /// object") — one restriction pass, one activity structure, once the coarse pressure level is
+    /// wired in. Nothing reads `coarse.rs`'s output yet, so today this is purely a scheduling
+    /// change: `budget_n` and the block-count constants below all had to move with it (see
+    /// `update`'s `BUDGET_MIN`/`BUDGET_STEP_*`, and the two `budget_n = 1024` sites), and wake
+    /// propagation (`activate_neighbor_upstream`/`_side` in `physics.rs`, which wake one adjacent
+    /// *block*) now covers half as many cells per tick since a block is half as wide — see
+    /// `artifacts/design/BLOCK-RESIZE.md` for the measurement.
+    ///
+    /// **The floor stays `.max(1)`, unchanged from before this change**, so grid 64 gets
+    /// `block_size = 1` — the LOD scheduler degenerates to one block per cell there. This is a
+    /// DIFFERENT decision from `coarse.rs`'s for the (currently unwired) pressure module, which
+    /// disables itself below `t = 2` rather than floor: that module needs `t` (fine cells per
+    /// coarse cell) to stay >= 2 so a coarse cell's own overfill pressure is never double-counted
+    /// against itself. The LOD scheduler has no such correctness constraint — a 1-cell block is
+    /// just the smallest possible scheduling unit, with no known wrong behaviour, only the loss of
+    /// LOD grouping benefit at a resolution too small for that benefit to matter (4,096 cells
+    /// total). Flooring at 2 instead was considered and rejected specifically because it would
+    /// have broken the resolution-invariant block count described above: grid 64 would then be
+    /// 32x32 = 1024 blocks while every other shipped resolution is 64x64 = 4096, and the heat-map
+    /// texture upload above has no path for a smaller source buffer. Grid 128 (block_size 2, the
+    /// smallest NON-degenerate case) is deliberately shipped without a floor even though
+    /// `physics.rs` documents a slab artifact at `block_size = 2` elsewhere
+    /// (`VERTICAL_PRESSURE_CAP_MULT`'s doc comment) — measured before shipping, see
+    /// `artifacts/design/BLOCK-RESIZE.md`.
     pub fn new_with_size(grid_size: usize) -> Self {
         let heightmap = generate_smooth_noise(12345u32, grid_size);
         let temp_heights = heightmap.data.clone();
@@ -750,14 +784,21 @@ impl DrawingSimulation {
         }
 
         // See the doc comment above: this scales with grid_size so the block-count (and
-        // therefore the meaning of budget_n) stays resolution-invariant.
-        let block_size = (grid_size / 32).max(1);
+        // therefore the meaning of budget_n, and the heat-map overlay's fixed-size texture
+        // upload) stays resolution-invariant. Floor stays `.max(1)`, unchanged from before this
+        // change -- see the doc comment for why grid 64's resulting block_size=1 is accepted
+        // rather than floored to 2.
+        let block_size = (grid_size / 64).max(1);
         let cols = (grid_size + block_size - 1) / block_size;
         let rows = (grid_size + block_size - 1) / block_size;
         let active_blocks = vec![BlockActivity::Inactive; cols * rows];
         let last_displacements = vec![0.0f32; cols * rows];
         let last_simulated_ticks = vec![0u32; cols * rows];
-        let budget_n = 256;
+        // 4x the pre-#(this task) value (256), matching the 4x block-count increase (1024 -> 4096
+        // blocks at grid >= 128) so this stays the same *fraction* of the block grid it always
+        // was. See `reset()` below for the other site, and `BUDGET_MIN`/`BUDGET_STEP_*` in
+        // `update` for the rest of the throttle that had to move with it.
+        let budget_n = 1024;
         let ema_frame_ms = 33.3;
 
         let mut sim = Self {
@@ -938,7 +979,8 @@ impl DrawingSimulation {
         self.active_blocks.fill(BlockActivity::Inactive);
         self.last_displacements.fill(0.0);
         self.last_simulated_ticks.fill(0);
-        self.budget_n = 256;
+        // Keep in sync with `new_with_size`'s `budget_n` initialisation above.
+        self.budget_n = 1024;
         self.ema_frame_ms = 33.3;
         self.tick_count = 0;
         self.block_heat_buckets.fill(0);
@@ -1758,9 +1800,14 @@ impl DrawingSimulation {
 
         // Update EMA of frame time and adjust budget_n
         const EMA_ALPHA: f32 = 0.1;
-        const BUDGET_MIN: usize = 32;
-        const BUDGET_STEP_DOWN: usize = 4;
-        const BUDGET_STEP_UP: usize = 1;
+        // 4x their pre-#(this task) values (32 / 4 / 1) — block counts quadrupled (1024 -> 4096
+        // at grid >= 128, see `block_size`'s doc comment), and these are block-count throttles, so
+        // leaving them unscaled would have made the adaptive controller 4x tighter (floor) and 4x
+        // slower to respond (step) as a *fraction* of the block grid than it was before this
+        // change, with no corresponding change in actual physics cost per block.
+        const BUDGET_MIN: usize = 128;
+        const BUDGET_STEP_DOWN: usize = 16;
+        const BUDGET_STEP_UP: usize = 4;
 
         if last_frame_time_ms > 0.0 && target_frame_time_ms > 0.0 {
             self.ema_frame_ms = EMA_ALPHA * last_frame_time_ms + (1.0 - EMA_ALPHA) * self.ema_frame_ms;

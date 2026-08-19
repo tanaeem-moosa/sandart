@@ -27,7 +27,8 @@ fn main() {
         _ => MaterialMode::Water,
     };
     let overfill = get("--overfill").map(|v| v == "1").unwrap_or(true);
-    let mut sim = DrawingSimulation::new_with_size(512);
+    let grid: usize = get("--grid").map(|v| v.parse().unwrap()).unwrap_or(512);
+    let mut sim = DrawingSimulation::new_with_size(grid);
     sim.sandbox_shape = SandboxShape::Hourglass;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(mat);
@@ -61,9 +62,9 @@ fn main() {
     let m1: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
     let n = ticks as f64;
     println!(
-        "{:?} sub={} budget={:<4} ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
+        "grid={} block_size={} {:?} sub={} budget={:<4} ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
          com {:.5}->{:.5} (desc {:.5})  mass_err {:.2e}",
-        mat, sub, budget, ms,
+        grid, sim.block_size, mat, sub, budget, ms,
         f as f64 / n, m as f64 / n, s as f64 / n, (f + m + s) as f64 / n,
         c0, com(&sim), com(&sim) - c0, (m1 - m0).abs() / m0.max(1e-12)
     );

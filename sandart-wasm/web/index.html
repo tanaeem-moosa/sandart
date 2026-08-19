@@ -804,10 +804,10 @@
                  entirely (every block holding material simulates every tick, not just the ones
                  that win the budget competition) -- it exists to A/B the scheduler's own
                  approximation against ground truth, and it is deliberately slow. The heat-map
-                 tints each 32x32 LOD block by how often it was actually simulated over roughly
+                 tints each 64x64 LOD block by how often it was actually simulated over roughly
                  the last 300 frames, cold = rarely, hot = every tick -- it shows exactly which
                  blocks the budget is skipping, with or without the toggle above switched on.
-                 "Pressure field heat-map" tints each individual grid CELL (not each 32x32 block,
+                 "Pressure field heat-map" tints each individual grid CELL (not each 64x64 block,
                  like the heat-map above) by a pressure-like value on a fixed log scale
                  (violet = low/void, magenta = mid, pale yellow = high). -->
             <div class="group">
@@ -1056,7 +1056,7 @@
             <div class="console-footer">
                 <div><b id="stat-fps">60</b><span>fps</span></div>
                 <div><b id="stat-render-time">--</b><span>ms/frame</span></div>
-                <div><b id="stat-blocks">1024</b><span>blocks</span></div>
+                <div><b id="stat-blocks">4096</b><span>blocks</span></div>
                 <!-- Populated from the wasm module at startup (see displayBuildStamp() in
                      demo.js) with the git SHA + build time baked in by sandart-wasm/build.rs.
                      Never hand-edit this value. -->
