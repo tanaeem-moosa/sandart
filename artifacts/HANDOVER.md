@@ -889,9 +889,14 @@ already exists to let a block know how much simulated time it missed.
 
 ### Hierarchical pressure — the current proposal for lateral movement at 512
 
-`artifacts/design/HIERARCHICAL-PRESSURE.md` (2026-08-18). Design only, nothing built, reviewed once
-and substantially revised — two of the first draft's three load-bearing claims were wrong and are
-marked as such in its §0.
+`artifacts/design/HIERARCHICAL-PRESSURE.md` (2026-08-18). Reviewed once and substantially revised —
+two of the first draft's three load-bearing claims were wrong and are marked as such in its §0.
+
+**No longer design-only. READ `artifacts/design/HIERARCHICAL-PRESSURE-PROGRESS.md` FIRST**, before
+the design itself: build steps 1 and the block resize are done, verified and committed; step 0 is
+mid-re-run; and the user has since settled two questions the design left open, one of which the
+design contradicts outright. That file also lists the design's numbers that measurement corrected,
+so reading the design cold will now mislead you.
 
 The measurement that motivates it: at 512 a settled pool carries **6% of its own hydrostatic
 pressure** after 1500 ticks (24% at 128, 13% at 256), because in a penalty model pressure must be
