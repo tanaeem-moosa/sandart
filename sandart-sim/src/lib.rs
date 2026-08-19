@@ -1,7 +1,9 @@
+pub mod coarse;
 pub mod grid;
 pub mod physics;
 pub mod quantiles;
 
+pub use coarse::{CoarseGeometry, COARSE_GRID};
 pub use grid::Heightmap;
 pub use physics::{ActiveBounds, displace_line, settle_tick};
 pub use quantiles::{
@@ -398,6 +400,14 @@ pub struct DrawingSimulation {
     /// the shape itself changes, which would silently discard an in-place mirror.
     pub flipped: bool,
 
+    /// Coarse pressure geometry (`sandart_sim::coarse`, HIERARCHICAL-PRESSURE.md §4, build
+    /// step 1). Rebuilt at the end of `generate_shape_mask` -- and ONLY there, so it is always
+    /// exactly as fresh as `shape_mask` itself, never staler and never rebuilt on some other
+    /// cadence. **Nothing in this build step reads it**: no solver, no scheduler, no overlay.
+    /// It exists so the geometry (open cells, per-tile capacity, per-edge conveyance) can be
+    /// built and tested standalone before anything is allowed to couple to it.
+    pub coarse: CoarseGeometry,
+
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
     /// Max displacement observed in each block during the last time it was simulated.
@@ -783,6 +793,10 @@ impl DrawingSimulation {
             shape_mask: vec![MASK_OUTSIDE; grid_size * grid_size],
             shape_mask_dirty: true,
             flipped: false,
+            // Placeholder until `generate_shape_mask()` below does the real build -- shape_mask
+            // is still all-MASK_OUTSIDE at this point in construction, so there is nothing
+            // meaningful to build from yet.
+            coarse: CoarseGeometry::empty(grid_size),
             active_blocks,
             last_displacements,
             last_simulated_ticks,
@@ -853,6 +867,11 @@ impl DrawingSimulation {
         }
 
         self.shape_mask_dirty = true;
+
+        // Coarse pressure geometry (build step 1, HIERARCHICAL-PRESSURE.md §4/§9): rebuilt here,
+        // and only here, so it is always exactly as fresh as shape_mask -- never a separate call
+        // site to remember, never a separate staleness window. Nothing reads `self.coarse` yet.
+        self.coarse = coarse::CoarseGeometry::build(&self.shape_mask, &self.cell_props, w);
     }
 
     /// Return a pointer to the shape mask data for WASM/GPU access.
