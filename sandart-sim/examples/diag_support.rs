@@ -7,8 +7,12 @@ use sandart_sim::physics::cell_capacity_for;
 fn main() {
     let grid: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(512);
     let ticks: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(400);
+    let shape = match std::env::args().nth(3).as_deref() {
+        Some("utube") => SandboxShape::UTubeFlowThrough,
+        _ => SandboxShape::Hourglass,
+    };
     let mut sim = DrawingSimulation::new_with_size(grid);
-    sim.sandbox_shape = SandboxShape::Hourglass;
+    sim.sandbox_shape = shape;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(MaterialMode::Water);
     sim.initialize_hourglass();
@@ -16,7 +20,7 @@ fn main() {
     let targets = [None; 5];
     for _ in 0..ticks {
         sim.budget_n = 1024;
-        sim.update(0.016, &targets, 0.08, MaterialMode::Water, SandboxShape::Hourglass, 0.0, 16.6);
+        sim.update(0.016, &targets, 0.08, MaterialMode::Water, shape, 0.0, 16.6);
     }
     let (w, h) = (grid, grid);
     // one-cell support test, the same shape `support_fraction` uses
@@ -53,7 +57,7 @@ fn main() {
             if o > 1e-4 { falling_with_pressure += 1; }
         }
     }
-    println!("hourglass {grid}x{grid}, {ticks} ticks\n");
+    println!("{shape:?} {grid}x{grid}, {ticks} ticks\n");
     println!("{:<34} {:>10} {:>14}", "classification", "cells", "mean overfill o");
     println!("{:<34} {:>10} {:>14.5}", "supported (one cell below)", n1, o1 / n1.max(1) as f64);
     println!("{:<34} {:>10} {:>14.5}", "unsupported (one cell below)", n0, o0 / n0.max(1) as f64);

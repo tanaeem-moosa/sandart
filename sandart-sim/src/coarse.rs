@@ -1,10 +1,25 @@
-//! Coarse pressure geometry — HIERARCHICAL-PRESSURE.md §4, build step 1.
+//! Coarse pressure geometry and state — HIERARCHICAL-PRESSURE.md, coupled into `settle_tick`
+//! since build step 3, rebuilt per STEP4-COARSE-IS-A-SIM.md (2026-08-19).
 //!
-//! **Nothing reads this module's output yet.** It exists standalone: a data structure derived
-//! once from `shape_mask` (and, for `capacity`, from `cell_props` wetness), rebuilt only where
+//! `CoarseGeometry` is a data structure derived once from `shape_mask` (and, for `capacity`/
+//! `avg_wetness`, from `cell_props` wetness), rebuilt only where
 //! `DrawingSimulation::generate_shape_mask` is rebuilt, tested against a flood fill of the fine
-//! mask. No coupling into `settle_tick`, no change to simulation behaviour. See the design doc's
-//! §9 build order — this is step 1 ("coarse geometry only").
+//! mask.
+//!
+//! `CoarseState` is the coarse level's own dynamics. Per the user's directive — *"let's just make
+//! coarse sim same is 64x64"* — those dynamics are now the SHIPPED solver, `physics::settle_tick`,
+//! run once per tick over a nested `coarse_n` x `coarse_n` grid (`NestedSim`, defined below;
+//! `advance_nested_sim` is the entry point). What is NOT run through the shipped solver — because
+//! it has no counterpart in a standalone simulation — is restriction (`A[C]`, aggregated from the
+//! fine grid every tick) and anchoring (`M[C] += lambda * (A[C] - M[C])`, §0.4's "the memory lives
+//! in `M`"); `NestedSim`'s own doc comment enumerates every further point where the coarse level
+//! cannot be made bit-identical to a real 64x64 `DrawingSimulation`, and why.
+//!
+//! Also per user directive (previously "adaptive": STEP3-ADAPTIVE-COARSE.md), the coarse level
+//! now runs exactly ONE step per tick, unconditionally — no sweep ceiling, no per-region adaptive
+//! sweeping. That reading was a misapplication of the user's "adaptive" ruling, which was about
+//! the FINE level's future over/underclocking, not the coarse level's own intra-tick iteration
+//! count.
 //!
 //! ## Relationship to `block_size` (forward-compatibility note, not implemented here)
 //!
@@ -24,8 +39,13 @@
 //! deferred is still deferred — nothing here reads `block_size`, and nothing in the LOD scheduler
 //! reads `COARSE_GRID` — until the coupling in §5 of the design is actually built.
 
-use crate::physics::cell_capacity_for;
-use crate::{MASK_OUTSIDE, PROP_WETNESS};
+use crate::grid::Heightmap;
+use crate::physics::{self, cell_capacity_for, overfill_pressure_val, ActiveBounds, ActiveMarbleInfo};
+use crate::{
+    BlockActivity, MASK_INSIDE, MASK_OUTSIDE, PROP_FLOW_RATE, PROP_GRAIN_SIZE, PROP_THRESHOLD,
+    PROP_WETNESS,
+};
+use glam::Vec2;
 
 /// Fixed coarse-grid resolution the hierarchical-pressure design settles on (§2): 64x64 coarse
 /// cells at every fine grid size, so the tile edge length `t = grid_size / COARSE_GRID` shrinks
@@ -77,6 +97,20 @@ pub struct CoarseGeometry {
     /// `capacity[C]`: sum of `cell_capacity_for(wetness)` over the same cells. THE ONE FIELD
     /// EXPECTED TO GO STALE ON ITS OWN — see `refresh_capacity`.
     pub capacity: Vec<f32>,
+    /// `avg_wetness[C]`: the arithmetic mean of `wetness` over the tile's open fine cells (0 for
+    /// an empty tile). STEP4-COARSE-IS-A-SIM.md's divergence: the coarse level's own dynamics now
+    /// run the real solver (`physics::settle_tick`) at 64x64, which derives a cell's capacity from
+    /// a single `wetness` property, not from an externally supplied sum. `avg_wetness[C]` is the
+    /// synthetic per-tile wetness handed to that nested solver so it can compute its own
+    /// `cell_capacity_for` internally, matching the real code path as closely as a *sum* of
+    /// (possibly heterogeneous) fine capacities can be represented by *one* wetness value.
+    /// `cell_capacity_for` is linear in `liquidity(wetness)` but `liquidity` itself is a nonlinear
+    /// (smoothstep) function of `wetness`, so `cell_capacity_for(avg_wetness[C])` equals
+    /// `capacity[C] / open_cells[C]` (the true mean per-cell capacity) EXACTLY whenever a tile's
+    /// fine cells share one wetness value (the common case — most scenes are single-material) and
+    /// only approximately at a material boundary that a tile straddles. Refreshed on the same
+    /// cadence as `capacity` (see that field's doc comment) since it comes from the same scan.
+    pub avg_wetness: Vec<f32>,
     /// `inside[C] = open_cells[C] > 0`.
     pub inside: Vec<bool>,
     /// `k[e]` for the x-direction edge between tile `(cx, cy)` and `(cx+1, cy)`. Row-major over
@@ -148,6 +182,7 @@ impl CoarseGeometry {
             available: false,
             open_cells: vec![0u32; coarse_n * coarse_n],
             capacity: vec![0.0f32; coarse_n * coarse_n],
+            avg_wetness: vec![0.0f32; coarse_n * coarse_n],
             inside: vec![false; coarse_n * coarse_n],
             k_x: vec![0.0f32; coarse_n.saturating_sub(1) * coarse_n],
             k_y: vec![0.0f32; coarse_n * coarse_n.saturating_sub(1)],
@@ -267,6 +302,7 @@ impl CoarseGeometry {
             return;
         }
         self.capacity.iter_mut().for_each(|v| *v = 0.0);
+        self.avg_wetness.iter_mut().for_each(|v| *v = 0.0);
         let t = self.t;
         let n = self.coarse_n;
         for fy in 0..self.grid_size {
@@ -278,7 +314,13 @@ impl CoarseGeometry {
                     let cx = (fx / t).min(n - 1);
                     let wetness = cell_props[fi * 4 + PROP_WETNESS];
                     self.capacity[cy * n + cx] += cell_capacity_for(wetness);
+                    self.avg_wetness[cy * n + cx] += wetness;
                 }
+            }
+        }
+        for c in 0..self.avg_wetness.len() {
+            if self.open_cells[c] > 0 {
+                self.avg_wetness[c] /= self.open_cells[c] as f32;
             }
         }
     }
@@ -287,87 +329,103 @@ impl CoarseGeometry {
 /// Default anchoring rate lambda for pulling M towards A: 0.10 (§5 step 2).
 pub const COARSE_DEFAULT_LAMBDA: f32 = 0.10;
 
-/// Sweep-count CEILING per tick (see `CoarseState::relax`), spent adaptively rather than run in
-/// full every tick.
+/// The coarse level's own dynamics — literally a persistent `coarse_n` x `coarse_n`
+/// `DrawingSimulation`-shaped sandbox, run one `physics::settle_tick` per coarse tick, per the
+/// user's directive (STEP4-COARSE-IS-A-SIM.md): *"let's just make coarse sim same is 64x64."*
 ///
-/// **The coarse level is a SIMULATION, not a solver iterated to convergence** (user directive,
-/// STEP3-ADAPTIVE-COARSE.md): `M` persists across ticks (§0.4 -- "`M[C]` is never rebuilt. It
-/// persists across ticks... The memory lives in `M`"), so it does not need to converge WITHIN a
-/// tick, only to advance, exactly like the fine level advances one step per tick. §10 says as
-/// much independently: a 64-cell coarse chain needs ~4000 sweeps to fully settle (it is
-/// nonlinear diffusion, O(N^2)), so no per-tick sweep count this design can afford reaches
-/// convergence in one tick regardless -- settling instead happens over ~500 ticks via
-/// persistence. Spending 16 (the previous default, unjustified beyond "a previous agent picked
-/// it") or even the design's own budgeted 8 sweeps chasing intra-tick convergence that cannot
-/// happen is therefore mostly wasted work.
+/// `settle_tick` is the shipped solver's entry point; nothing here reimplements the overfill law,
+/// the fill-fraction/pressure split, or the flux solver — this struct only owns the buffers that
+/// entry point needs, sized to the coarse grid instead of the fine one, and persistent across
+/// ticks exactly like `DrawingSimulation`'s own buffers are (this is what makes edge momentum
+/// (`edge_vel_h`/`edge_vel_v`) and the LOD scheduler's own bookkeeping carry over tick to tick,
+/// matching a *simulation* rather than a solve run fresh each time).
 ///
-/// So: sweep 1 is mandatory every tick (`relax`'s own baseline pass) -- the floor is exactly 1,
-/// per the user's reframing. Sweeps 2 through `COARSE_DEFAULT_SWEEPS` are spent ONLY on tiles
-/// with outstanding coarse-fine disagreement `|Delta| = |M-A|` (G1: "work the fine level has not
-/// done yet"; it vanishes at rest, unlike `grad P` which is nonzero in any resting pool by
-/// construction -- see `relax`'s own doc comment for the per-region mechanism). A settled region
-/// earns zero extra sweeps; an active front earns up to this ceiling.
+/// **Documented divergences from a real `DrawingSimulation` at `grid_size = coarse_n`** (per the
+/// task's own instruction: "every place you depart from that is a place you owe an explanation"):
 ///
-/// `8` is not a fresh tuning constant -- it is the design's own already-derived ceiling
-/// (`HIERARCHICAL-PRESSURE.md` §8: "at 64x64 with N=8 the sweep arithmetic is `8*4096/262144 =
-/// 12.5%` of one fine sweep", the largest N the design itself budgets against the 15%-of-tick
-/// acceptance criterion).
-pub const COARSE_DEFAULT_SWEEPS: usize = 8;
-
-/// Relative tolerance, against a tile's own `capacity`, below which `|Delta| = |M-A|` is treated
-/// as numerically settled (no outstanding coarse-fine disagreement, so the tile earns no extra
-/// adaptive sweep) rather than as a freshly invented threshold: it reuses the same 1e-4 relative
-/// tolerance `restriction_preserves_total_mass` (this file's own test, below) already uses to
-/// call floating-point aggregation error negligible against real physical disagreement.
-pub const ACTIVE_DELTA_REL_TOL: f32 = 1e-4;
-
-/// Unbounded potential function for coarse compression (§4.3 / Step 0 recommendation).
-/// Below capacity (h <= cap): phi = h / cap in [0, 1].
-/// Above capacity (h > cap): phi = h / cap + unit * (h - cap) / cap.
-#[inline]
-pub fn coarse_unbounded_phi(h: f32, cap: f32, unit: f32) -> f32 {
-    if cap <= 0.0 {
-        return 0.0;
-    }
-    let x = h / cap;
-    if x <= 1.0 {
-        x
-    } else {
-        x + unit * (x - 1.0)
-    }
+/// 1. **The height fed in and read back is an AVERAGE, not the tile's total mass.** `M[C]`
+///    (`CoarseState::m_mass`) is a SUM over the tile's `t x t` fine cells (restriction has no
+///    counterpart in a standalone sim — see `CoarseState::restrict`'s own doc comment) but
+///    `settle_tick`'s `cell_capacity_for` and overfill law are calibrated per FINE cell (capacity
+///    ~1.0-1.5). `advance_nested_sim` therefore feeds `M[C] / open_cells[C]` in and multiplies the
+///    result back out by `open_cells[C]` afterward — the nested sim's own cells behave exactly
+///    like real 64x64 cells; only the SCALE of the value handed to/from `CoarseState` differs.
+/// 2. **Capacity comes from one synthetic `wetness` per tile (`CoarseGeometry::avg_wetness`), not
+///    an externally injected capacity.** `settle_tick` derives a cell's capacity internally from
+///    its own `wetness` property; there is no parameter to hand it `capacity[C]` directly. See
+///    `avg_wetness`'s own doc comment for the exact/approximate cases.
+/// 3. **No LOD scheduling within the coarse tick.** `block_size` is set to the whole grid (one
+///    block) and that block's `last_displacements` is forced above the MUST-simulate threshold
+///    before every call, so every coarse cell gets a full step every coarse tick — matching the
+///    user's directive 1 ("one step per tick, not adaptive") and avoiding a second, nested LOD
+///    scheduler with its own staleness/budget semantics layered on top of the outer one.
+/// 4. **No marbles, no head-field toggle, no coarse-of-coarse coupling.** `active_marbles = &[]`,
+///    `head_field_transport`/`pressure_heatmap_head_field`/`pressure_sensitive_flow = false`, and
+///    `coarse_eta`/`coarse_delta = &[]` — the coarse level is not itself coupled to a third,
+///    still-coarser level. `fresh_pressure_field` is left `false` too (the production default),
+///    so the nested sim's `column_depth` behaviour matches the shipped, non-toggled fine sim.
+/// 5. **`cell_props`' non-wetness fields are fixed defaults** (`PROP_THRESHOLD = 0.08`,
+///    `PROP_FLOW_RATE = 0.25`, `PROP_GRAIN_SIZE = 0.45` — `DrawingSimulation::new_with_size`'s own
+///    defaults), not aggregated from the fine grid, since the overfill path this design couples
+///    through does not read them; they exist only so `settle_tick`'s legacy (non-overfill)
+///    branches see sane values if ever reached.
+#[derive(Debug, Clone)]
+struct NestedSim {
+    heightmap: Heightmap,
+    temp_heights: Vec<f32>,
+    cell_colors: Vec<u8>,
+    cell_props: Vec<f32>,
+    sliding: Vec<bool>,
+    active_bounds: ActiveBounds,
+    active_blocks: Vec<BlockActivity>,
+    last_displacements: Vec<f32>,
+    last_simulated_ticks: Vec<u32>,
+    edge_vel_h: Vec<f32>,
+    edge_vel_v: Vec<f32>,
+    column_depth: Vec<f32>,
+    head_field: Vec<f32>,
+    shape_mask: Vec<u8>,
+    tick_count: u32,
 }
 
-/// Solves `phi(h_a - d, cap_a) + g - phi(h_b + d, cap_b) = 0` for `d` under the unbounded law.
-#[inline]
-pub fn coarse_unbounded_transfer(h_a: f32, cap_a: f32, h_b: f32, cap_b: f32, g: f32, unit: f32) -> f32 {
-    if cap_a <= 0.0 || cap_b <= 0.0 {
-        return 0.0;
-    }
-    let lo = -h_b;
-    let hi = h_a;
-    if hi <= lo {
-        return 0.0;
-    }
-    let stress = |d: f32| {
-        coarse_unbounded_phi(h_a - d, cap_a, unit) + g - coarse_unbounded_phi(h_b + d, cap_b, unit)
-    };
-    if stress(hi) >= 0.0 {
-        return hi;
-    }
-    if stress(lo) <= 0.0 {
-        return lo;
-    }
-    let mut lo = lo;
-    let mut hi = hi;
-    for _ in 0..32 {
-        let mid = 0.5 * (lo + hi);
-        if stress(mid) > 0.0 {
-            lo = mid;
-        } else {
-            hi = mid;
+impl NestedSim {
+    fn new(coarse_n: usize) -> Self {
+        let size = coarse_n * coarse_n;
+        let mut cell_props = vec![0.0f32; size * 4];
+        for chunk in cell_props.chunks_exact_mut(4) {
+            chunk[PROP_WETNESS] = 0.0;
+            chunk[PROP_THRESHOLD] = 0.08;
+            chunk[PROP_FLOW_RATE] = 0.25;
+            chunk[PROP_GRAIN_SIZE] = 0.45;
+        }
+        Self {
+            heightmap: Heightmap::new(coarse_n, coarse_n, 0.0),
+            temp_heights: vec![0.0f32; size],
+            cell_colors: vec![0u8; size * 4],
+            cell_props,
+            sliding: vec![false; size],
+            active_bounds: ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false },
+            active_blocks: vec![BlockActivity::Inactive; 1],
+            last_displacements: vec![0.0f32; 1],
+            last_simulated_ticks: vec![0u32; 1],
+            edge_vel_h: vec![0.0f32; size],
+            edge_vel_v: vec![0.0f32; size],
+            column_depth: vec![0.0f32; size],
+            head_field: vec![0.0f32; size],
+            shape_mask: vec![MASK_OUTSIDE; size],
+            tick_count: 0,
         }
     }
-    0.5 * (lo + hi)
+
+    /// Resize every buffer to `coarse_n`, e.g. after a geometry rebuild that changes `coarse_n`
+    /// (production never does — `coarse_n` is always `COARSE_GRID` — but the unit tests below
+    /// build smaller geometries). A resize is a fresh start (zeroed state, `tick_count = 0`):
+    /// there is no meaningful way to resample a persistent simulation onto a differently-sized
+    /// grid, and this happens only via `CoarseState::new`, which is itself a fresh start for
+    /// everything else in `CoarseState` too.
+    fn resize(&mut self, coarse_n: usize) {
+        *self = Self::new(coarse_n);
+    }
 }
 
 /// Coarse simulation state (`sandart_sim::coarse`, HIERARCHICAL-PRESSURE.md §5, build step 2).
@@ -392,20 +450,12 @@ pub struct CoarseState {
     /// (`cell_capacity_for(wetness)`) the fine solver's own `o = (h - cap) / cap` uses. See §5
     /// step 5's deadband derivation on `update_head_and_disagreement` for what this gates and why.
     pub support_mass: Vec<f32>,
-    /// Grounded[C]: TRANSITIVE support -- true if tile C itself has `support_mass[C] > 0`, OR
-    /// rests directly on the floor/casing (no open tile below), OR sits on top of a grounded
-    /// tile (mass-connected via `k_y[e] > 0`). Computed by `compute_grounded` from
-    /// `support_mass` and the (static) coarse geometry, mirroring `diag_support.rs`'s own
-    /// `transitively_supported` fine-cell definition one level up. See the deadband derivation
-    /// on `update_head_and_disagreement` for why LOCAL `support_mass` alone is not enough to gate
-    /// on: it would also zero the eta signal for the un-compressed MIDDLE of a resting column
-    /// (only its base is ever pushed over capacity), breaking exactly the depth-pressure
-    /// propagation the coarse level exists to speed up.
-    pub grounded: Vec<bool>,
     /// Anchor strength lambda in (0, 1].
     pub lambda: f32,
-    /// Sweeps per tick.
-    pub sweeps_n: usize,
+    /// The coarse level's own dynamics, literally: a persistent nested 64x64 (or `coarse_n` x
+    /// `coarse_n`, for the smaller grids some unit tests build) simulation, run one
+    /// `physics::settle_tick` per coarse tick — see `NestedSim` and `advance_nested_sim`.
+    nested: NestedSim,
 }
 
 impl CoarseState {
@@ -419,9 +469,8 @@ impl CoarseState {
             p_coarse: vec![0.0; size],
             delta: vec![0.0; size],
             support_mass: vec![0.0; size],
-            grounded: vec![false; size],
             lambda: COARSE_DEFAULT_LAMBDA,
-            sweeps_n: COARSE_DEFAULT_SWEEPS,
+            nested: NestedSim::new(coarse_n),
         }
     }
 
@@ -552,208 +601,145 @@ impl CoarseState {
         }
     }
 
-    /// Step 3 of §5: Relax M across the coarse graph, up to `max_sweeps` sweeps, spent
-    /// adaptively. See `COARSE_DEFAULT_SWEEPS`'s doc comment for the full derivation; summary:
+    /// Step 3 of §5, rebuilt per STEP4-COARSE-IS-A-SIM.md (directives 1 and 2): advance the
+    /// coarse level's own state by running the SHIPPED solver, `physics::settle_tick`, once over
+    /// the nested `coarse_n` x `coarse_n` grid -- literally the same code path a real
+    /// `DrawingSimulation` at that size would call every tick, not a bespoke relaxation that
+    /// resembles it. See `NestedSim`'s doc comment for the exact, enumerated divergences (height
+    /// fed in as an average not a sum, capacity from one synthetic wetness, no LOD scheduling,
+    /// no marbles/head-field/deeper coupling).
     ///
-    /// - **Sweep 1 is mandatory and touches every tile.** The coarse level is a simulation
-    ///   advancing one step per tick (like the fine level), not a solver run to convergence, so
-    ///   this is the only sweep that always happens regardless of demand.
-    /// - **Sweeps 2..=`max_sweeps` are per-region.** After each sweep, a tile is flagged "active"
-    ///   iff it has outstanding coarse-fine disagreement (`|M-A| > capacity * ACTIVE_DELTA_REL_TOL`,
-    ///   G1's clock signal -- see that constant's doc comment for why this, not `grad eta`, is
-    ///   the right quantity: it vanishes at rest). Only edges touching at least one active tile
-    ///   are swept ("either side", not "both": mass must still be able to flow INTO an active
-    ///   tile from an inactive neighbour, matching G1's own S2 -- "underclocked means does not
-    ///   sweep its own interior, not frozen"). If no tile is active, the loop exits early --
-    ///   there is nothing left this tick's coarse relax can do.
-    pub fn relax(&mut self, max_sweeps: usize, base_head: f32, geo: &CoarseGeometry, unit: f32) {
-        if !geo.available || max_sweeps == 0 {
-            return;
-        }
-        let n = self.coarse_n;
-        let base_head_coarse = base_head * geo.t as f32;
-        let mut delta_v = vec![0.0f32; n * n];
-
-        // Sweep 1: mandatory, whole grid.
-        self.relax_sweep(&mut delta_v, base_head_coarse, geo, unit, None);
-
-        // Sweeps 2..max_sweeps: adaptive, per-region.
-        let mut active = vec![false; n * n];
-        for _ in 1..max_sweeps {
-            let mut any = false;
-            for c in 0..n * n {
-                let is_active = geo.inside[c]
-                    && geo.capacity[c] > 0.0
-                    && (self.m_mass[c] - self.a_mass[c]).abs() > geo.capacity[c] * ACTIVE_DELTA_REL_TOL;
-                active[c] = is_active;
-                any |= is_active;
-            }
-            if !any {
-                break;
-            }
-            self.relax_sweep(&mut delta_v, base_head_coarse, geo, unit, Some(&active));
-        }
-    }
-
-    /// One vertical+horizontal sweep of the existing overfill equilibrium transfer over the
-    /// coarse graph -- the body of the old unconditional `relax` loop, factored out so the
-    /// mandatory sweep and the adaptive per-region sweeps in `relax` share one implementation.
-    /// `active`: `None` sweeps every edge (the mandatory baseline sweep); `Some(mask)` skips an
-    /// edge unless at least one incident tile is flagged active.
-    fn relax_sweep(
+    /// **One call is one coarse tick (directive 1).** The previous adaptive/ceiling sweep
+    /// machinery (`COARSE_DEFAULT_SWEEPS`, `ACTIVE_DELTA_REL_TOL`, per-region active-tile
+    /// sweeping) is gone: the user's "adaptive" ruling was about the FINE level's future
+    /// over/underclocking, not the coarse level, which "we only need one... simulation per
+    /// tick" of (§0.4's own words: `M` persists, so it only needs to ADVANCE, not converge
+    /// within a tick -- exactly like the fine level advances one step per tick, no more).
+    ///
+    /// **`gravity_dir` is the real simulation's own gravity vector, unscaled.** This is
+    /// directive 2's dynamics fix: the coarse level's own per-row head is
+    /// `gravity_dir.y * GRAVITY_HEAD_SCALE`, computed internally by `settle_tick` exactly as the
+    /// fine level computes it -- "one row per row", not `base_head * t`. The previous bespoke
+    /// `base_head_coarse = base_head * geo.t` scaling (`t = 8` at grid 512) is what drove the
+    /// 9x over-drive this rebuild fixes; see `update_head_and_disagreement` for the matching
+    /// export-side fix and STEP4-COARSE-IS-A-SIM.md for the measurement.
+    pub fn advance_nested_sim(
         &mut self,
-        delta_v: &mut [f32],
-        base_head_coarse: f32,
         geo: &CoarseGeometry,
-        unit: f32,
-        active: Option<&[bool]>,
+        gravity_dir: Vec2,
+        overfill_ratio: f32,
+        underfill_tension: f32,
+        overfill_stiffness: f32,
     ) {
-        let n = self.coarse_n;
-        let touches = |a: usize, b: usize| active.map_or(true, |m| m[a] || m[b]);
-
-        delta_v.iter_mut().for_each(|v| *v = 0.0);
-        // Vertical edges (y-direction, gravity-aligned)
-        for cy in 0..n.saturating_sub(1) {
-            for cx in 0..n {
-                let a = cy * n + cx;
-                let b = (cy + 1) * n + cx;
-                if !touches(a, b) {
-                    continue;
-                }
-                let k = geo.k_y_at(cx, cy);
-                if k <= 0.0 || geo.capacity[a] <= 0.0 || geo.capacity[b] <= 0.0 {
-                    continue;
-                }
-                let d = k * coarse_unbounded_transfer(
-                    self.m_mass[a], geo.capacity[a],
-                    self.m_mass[b], geo.capacity[b],
-                    base_head_coarse, unit,
-                );
-                delta_v[a] -= d;
-                delta_v[b] += d;
-            }
-        }
-        for i in 0..n * n {
-            self.m_mass[i] += delta_v[i];
-        }
-
-        delta_v.iter_mut().for_each(|v| *v = 0.0);
-        // Horizontal edges (x-direction, no gravity)
-        for cy in 0..n {
-            for cx in 0..n.saturating_sub(1) {
-                let a = cy * n + cx;
-                let b = cy * n + cx + 1;
-                if !touches(a, b) {
-                    continue;
-                }
-                let k = geo.k_x_at(cx, cy);
-                if k <= 0.0 || geo.capacity[a] <= 0.0 || geo.capacity[b] <= 0.0 {
-                    continue;
-                }
-                let d = k * coarse_unbounded_transfer(
-                    self.m_mass[a], geo.capacity[a],
-                    self.m_mass[b], geo.capacity[b],
-                    0.0, unit,
-                );
-                delta_v[a] -= d;
-                delta_v[b] += d;
-            }
-        }
-        for i in 0..n * n {
-            self.m_mass[i] += delta_v[i];
-        }
-    }
-
-    /// Computes `grounded[C]` from `support_mass`: `grounded[C] = support_mass[C] > 0`, i.e. the
-    /// tile itself contains real local compression -- see §3's structural guarantee ("compression
-    /// is support") on `support_mass`'s own doc comment. Must run after `restrict` (needs fresh
-    /// `support_mass`) and before `update_head_and_disagreement` (which reads `grounded`).
-    ///
-    /// **Deliberately LOCAL ONLY -- every attempt to extend it past a tile's own boundary was
-    /// tried and measured WORSE**, on `diag_support --grid 512 --ticks 400` (hourglass, percent of
-    /// free-falling cells carrying nonzero pressure; the plain local-only rule below measures
-    /// 8.4%, the number every alternative here is compared against):
-    /// - Propagating through any geometrically open tile below (`k_y[e] > 0`, ignoring how full
-    ///   it is): 73.5%. An open neck lets "grounded" run straight up through a falling stream to
-    ///   whatever pool it feeds.
-    /// - Requiring the tile below to be "packed" (`a_mass/capacity >= 1 -
-    ///   SUPPORT_FRACTION_EPSILON`) before inheriting its grounding, unbounded chain: 63.5%.
-    /// - The same packed-below rule bounded to a single hop above a directly-compressed tile:
-    ///   63.9%.
-    /// - Treating direct floor/casing contact (no open tile below) as automatically grounded
-    ///   whenever the tile holds any mass, matching the fine model's own "resting on the casing"
-    ///   rule for `support_fraction`: 21.0%. Slanted hourglass walls put many tiles that are still
-    ///   mid-funnel, not resting on anything, in contact with a `MASK_OUTSIDE` tile below through
-    ///   no structural fault of their own.
-    ///
-    /// The common failure mode in all four: the tile immediately above (or beside, in the floor
-    /// case) a genuinely compressed tile is very often the SAME tile the falling stream is still
-    /// landing in (I5's "mixed tile... is the case that decides it"), and any rule that grants it
-    /// grounding via a NEIGHBOUR's state reproduces exactly the "upward excursion at impact"
-    /// acceptance criterion 4 forbids. Local-only gating cannot leak past a tile boundary by
-    /// construction, which is why it is what ships, despite giving up the multi-tile-column
-    /// speedup a transitive rule would have bought (§1's motivation) and despite an 8.4% residual
-    /// that is not itself zero -- see the doc comment on `update_head_and_disagreement` for that
-    /// residual and why it is the mixed-tile case, not a bug in this rule, and treat this as the
-    /// open problem the design itself flags it as (§10), not as resolved.
-    pub fn compute_grounded(&mut self, geo: &CoarseGeometry) {
         if !geo.available {
-            self.grounded.iter_mut().for_each(|v| *v = false);
             return;
         }
-        for c in 0..self.grounded.len() {
-            self.grounded[c] = geo.inside[c] && geo.capacity[c] > 0.0 && self.support_mass[c] > 0.0;
+        let n = self.coarse_n;
+        if self.nested.heightmap.width != n {
+            self.nested.resize(n);
+        }
+        // Geometry/wetness -> nested sim inputs. Rebuilt every call (cheap, <= COARSE_GRID^2 =
+        // 4096 cells) rather than cached against a geometry-change flag, for simplicity; nothing
+        // here is on a path sensitive enough to that cost to justify the extra invalidation
+        // bookkeeping.
+        for c in 0..n * n {
+            self.nested.shape_mask[c] = if geo.inside[c] { MASK_INSIDE } else { MASK_OUTSIDE };
+            self.nested.cell_props[c * 4 + PROP_WETNESS] = geo.avg_wetness[c];
+            // NestedSim divergence 1: M[C] is a SUM over the tile's fine cells; the nested sim's
+            // own cells behave like real per-fine-cell cells (capacity ~1.0-1.5), so the height
+            // fed in is the AVERAGE, converted back to a sum after the step below.
+            self.nested.heightmap.data[c] = if geo.open_cells[c] > 0 {
+                self.m_mass[c] / geo.open_cells[c] as f32
+            } else {
+                0.0
+            };
+        }
+        // NestedSim divergence 3: force the (single) block to MUST-simulate every call, so this
+        // one `settle_tick` call is a full, unconditional step over the whole coarse grid --
+        // directive 1's "one step per tick", not partial/adaptive.
+        self.nested.last_displacements.iter_mut().for_each(|v| *v = 1.0);
+        let block_size = n.max(1);
+        const NESTED_BUDGET_N: usize = 1_000_000;
+        physics::settle_tick(
+            &mut self.nested.heightmap,
+            &mut self.nested.temp_heights,
+            &mut self.nested.cell_colors,
+            &mut self.nested.cell_props,
+            &mut self.nested.sliding,
+            &mut self.nested.active_bounds,
+            &mut self.nested.active_blocks,
+            &mut self.nested.last_displacements,
+            &mut self.nested.last_simulated_ticks,
+            NESTED_BUDGET_N,
+            block_size,
+            &[] as &[ActiveMarbleInfo],
+            self.nested.tick_count,
+            &mut self.nested.edge_vel_h,
+            &mut self.nested.edge_vel_v,
+            &mut self.nested.column_depth,
+            &mut self.nested.head_field,
+            &self.nested.shape_mask,
+            self.nested.tick_count,
+            gravity_dir,
+            false, // fresh_pressure_field
+            false, // head_field_transport
+            false, // pressure_heatmap_head_field
+            false, // pressure_sensitive_flow
+            true,  // overfill_pressure -- the coarse level always runs #70's overfill law
+            overfill_ratio,
+            underfill_tension,
+            overfill_stiffness,
+            &[], // coarse_eta -- no coarse-of-coarse coupling
+            &[], // coarse_delta
+            None, // touched_out
+        );
+        self.nested.tick_count = self.nested.tick_count.wrapping_add(1);
+        // Read back: average -> sum (the inverse of the feed-in above).
+        for c in 0..n * n {
+            self.m_mass[c] = if geo.inside[c] {
+                self.nested.heightmap.data[c] * geo.open_cells[c] as f32
+            } else {
+                0.0
+            };
         }
     }
 
-    /// Step 4 of §5: Read back eta, P, and Delta.
+    /// Step 4 of §5: read back `eta`, `P`, and `Delta` from the nested sim's post-tick state.
     ///
-    /// **Deadband (I5, HIERARCHICAL-PRESSURE.md §6/§8): the coarse PRESSURE term (`phi`'s excess
-    /// above `x = M/cap` once `x > 1`) is withheld unless the tile is `grounded`** (see
-    /// `compute_grounded`: real local compression, `support_mass[C] > 0` -- deliberately NOT
-    /// transitive past the tile's own boundary; that doc comment records why every transitive
-    /// variant tried measured worse). The below-capacity fill-fraction term (`phi = x` for
-    /// `x <= 1`) is NEVER gated -- that is the harmless "water table" signal U-tube levelling
-    /// needs even between two arms neither of which is near capacity (§0.3).
+    /// **Rebuilt per STEP4-COARSE-IS-A-SIM.md.** The old I5 deadband (`support_mass`-gated
+    /// `grounded[C]`, withholding the pressure-excess term above capacity for an "ungrounded"
+    /// tile) is REMOVED: it existed only because the previous bespoke relax could develop
+    /// unsupported compression a hand-rolled rule had to suppress. `advance_nested_sim` now runs
+    /// the real overfill solver, which enforces "compression is support" (§3) the same way it
+    /// already does at the fine level -- structurally, via the flux solver itself, not a second
+    /// rule layered on top. `support_mass`/`restrict`'s aggregation of it is UNCHANGED (kept
+    /// per-task instruction, along with its bit-exactness test) but is no longer consumed here.
     ///
-    /// **The elevation term (`- cy * base_head_coarse`) is ALSO never gated, on either branch.**
-    /// A first version of this deadband zeroed `eta` outright for an ungrounded tile (both fill
-    /// and elevation together) and measured WORSE than not gating at all: 55.2% of free-falling
-    /// cells carrying nonzero pressure on `diag_support --grid 512 --ticks 400` (hourglass), up
-    /// from an un-gated baseline nowhere near that. Stripping the elevation term from only ONE
-    /// side of a grounded/ungrounded tile pair manufactures a spurious `delta_eta` from elevation
-    /// ALONE -- worse the deeper the pair sits (`cy` larger) -- which is exactly the sawtooth
-    /// §0.2 already solved once by insisting `eta`, not raw `phi`, is what crosses a tile seam.
-    /// Gating only the pressure EXCESS, as implemented, keeps `eta` elevation-consistent on both
-    /// sides of every edge regardless of grounding and measures 8.4%.
+    /// `phi`/`x` reuse the real solver's own function (`overfill_pressure_val`) rather than a
+    /// bespoke linear approximation (the old
+    /// `coarse_unbounded_phi`'s excess term was LINEAR in `x`; the real law is quadratic in the
+    /// overfill fraction via `overfill_ratio` -- see `overfill_pressure_val`'s doc comment). This
+    /// is computed from `cell_capacity_for(geo.avg_wetness[c])`, matching exactly what
+    /// `advance_nested_sim` fed the nested solver for that same cell, and `unit` is the FINE
+    /// grid's own `overfill_head_unit` (passed in by the caller, `DrawingSimulation::update`) so
+    /// the pressure-excess term this exports is in the SAME units the fine coupling
+    /// (`physics::coarse_delta_eta`) already expects -- unchanged from before this rebuild.
     ///
-    /// **Honest caveat: 8.4% is barely different from 8.3% measured with the deadband OFF
-    /// entirely** (excess unconditionally added, `grounded` short-circuited to always-true) on
-    /// the same `diag_support` run. The excess term this deadband withholds is a SMALL
-    /// contributor to this particular leak; the dominant one is the never-gated linear term
-    /// (`phi = x` below capacity), which by the elevation-consistency argument above cannot be
-    /// gated without reproducing the far worse (55.2%) failure. So this deadband is real and
-    /// correctly derived -- it removes the one component that CAN be safely withheld -- but it is
-    /// not, by itself, what gets `diag_support` close to zero. Report this residual honestly
-    /// rather than as a solved acceptance criterion 4.
-    ///
-    /// Derived, not fitted: `support_mass` is the EXACT aggregate of real fine overfill
-    /// (`sum((h_i - cap_i).max(0))`, computed straight from fine heights in `restrict`, using the
-    /// same per-cell capacity the fine solver's own `o = (h - cap) / cap` uses). No epsilon
-    /// constant anywhere in the decision -- the measured margin (worst falling-dominated tile at
-    /// 0.9809, §3) was already thinner than any fitted constant could safely cover.
-    ///
-    /// **Known residual, not fully closed: 8.4%, not 0%.** The mixed tile (part stream, part
-    /// pool) is the case I5 names as deciding this, and it is not fully solved here: as soon as
-    /// ANY fine cell in a tile is compressed, `grounded[C]` is true and the WHOLE tile's pressure
-    /// excess -- including whatever falling material shares that same tile, e.g. the impact zone
-    /// directly above a pool's surface -- unlocks. This is bounded to that one tile's footprint
-    /// (§7's potential coupling applies per tile, not per fine cell, so finer-than-a-tile
-    /// discrimination is not available without abandoning the tile-granular coupling itself) but
-    /// not eliminated. Treat
-    /// §10's "this is the single largest unaddressed risk" as still true for the mixed-tile case
-    /// specifically, and re-measure `diag_support` after any further change here.
-    pub fn update_head_and_disagreement(&mut self, base_head: f32, geo: &CoarseGeometry, unit: f32) {
+    /// **The elevation term is `- cy * base_head_coarse` with `base_head_coarse =
+    /// gravity_dir.y * GRAVITY_HEAD_SCALE` -- the SAME per-row head the nested sim's own vertical
+    /// pass just used, "one row per row" (directive 2), not `base_head * geo.t`.** This is the
+    /// fix for the over-drive: `eta` is `phi` with elevation netted out (§0.3: constant down a
+    /// resting column), and now the elevation it nets out is stated at the SAME scale the fine
+    /// level's own `base_head` uses, rather than at `t`x that scale. See
+    /// STEP4-COARSE-IS-A-SIM.md for the measured `delta_eta` this produces at a resting seam.
+    pub fn update_head_and_disagreement(
+        &mut self,
+        geo: &CoarseGeometry,
+        gravity_dir: Vec2,
+        overfill_ratio: f32,
+        underfill_tension: f32,
+        unit: f32,
+    ) {
         if !geo.available {
             self.eta.iter_mut().for_each(|v| *v = 0.0);
             self.p_coarse.iter_mut().for_each(|v| *v = 0.0);
@@ -761,36 +747,21 @@ impl CoarseState {
             return;
         }
         let n = self.coarse_n;
-        let base_head_coarse = base_head * geo.t as f32;
+        let base_head_coarse = gravity_dir.y * physics::GRAVITY_HEAD_SCALE;
 
         for cy in 0..n {
             for cx in 0..n {
                 let c = cy * n + cx;
-                let cap = geo.capacity[c];
-                let m = self.m_mass[c];
                 let a = self.a_mass[c];
-                self.delta[c] = m - a;
+                self.delta[c] = self.m_mass[c] - a;
+                let cap = cell_capacity_for(geo.avg_wetness[c]);
+                let h = self.nested.heightmap.data[c];
                 if cap > 0.0 && geo.inside[c] {
-                    let x = m / cap;
-                    // The elevation term (`- cy * base_head_coarse`) is NEVER gated, even for an
-                    // ungrounded tile: an earlier version zeroed `eta` outright when `!grounded`,
-                    // which measured WORSE (55.2%, up from 8.4%) than gating the pressure term
-                    // alone -- zeroing eta strips the elevation baseline too, so a grounded tile
-                    // deep in the grid (large `cy`, large `-cy*base_head_coarse`) sitting next to
-                    // an ungrounded one reads a huge SPURIOUS `delta_eta` from elevation ALONE,
-                    // worsening exactly at depth. Only `phi` -- the fill/pressure part -- is
-                    // gated, and even then only its excess-above-capacity component: below
-                    // capacity (`x <= 1`) `phi = x` unconditionally, since that is the harmless
-                    // "water table" term U-tube levelling needs (§0.3) even between two arms
-                    // neither of which is anywhere near capacity. Above capacity, an ungrounded
-                    // tile's `phi` is capped at its capacity ceiling (`1.0`, not `x`): the excess
-                    // pressure is exactly what the deadband exists to withhold.
-                    let phi = if x <= 1.0 {
+                    let x = h / cap;
+                    let phi = if x <= 1.0 || unit <= 0.0 {
                         x
-                    } else if self.grounded[c] {
-                        x + unit * (x - 1.0)
                     } else {
-                        1.0
+                        x + overfill_pressure_val(h, cap, overfill_ratio, unit, underfill_tension) / unit
                     };
                     self.eta[c] = phi - cy as f32 * base_head_coarse;
                     self.p_coarse[c] = (phi - x).max(0.0);
@@ -807,13 +778,24 @@ impl CoarseState {
     /// `touched`: `Some(blocks)` uses `restrict_incremental` (see that method's doc comment for
     /// the exactness argument and the block/tile index correspondence); `None` always does a
     /// full `restrict` (used by callers, e.g. tests, that have no touched set to vouch for).
+    ///
+    /// `gravity_dir`/`overfill_ratio`/`underfill_tension`/`overfill_stiffness` are the REAL
+    /// simulation's own settings, unmodified -- see `advance_nested_sim`'s doc comment for why
+    /// they are passed through as-is rather than rescaled for the coarse grid. `unit` is the
+    /// FINE grid's own `overfill_head_unit` (`(GRAVITY_HEAD_SCALE / depth_scale) *
+    /// overfill_stiffness`, computed by the caller from the FINE width), used only for
+    /// `update_head_and_disagreement`'s export-side pressure scaling.
+    #[allow(clippy::too_many_arguments)]
     pub fn tick(
         &mut self,
         heights: &[f32],
         shape_mask: &[u8],
         cell_props: &[f32],
-        base_head: f32,
         geo: &CoarseGeometry,
+        gravity_dir: Vec2,
+        overfill_ratio: f32,
+        underfill_tension: f32,
+        overfill_stiffness: f32,
         unit: f32,
         touched: Option<&[bool]>,
     ) {
@@ -824,10 +806,9 @@ impl CoarseState {
             Some(t) => self.restrict_incremental(heights, shape_mask, cell_props, geo, t),
             None => self.restrict(heights, shape_mask, cell_props, geo),
         }
-        self.compute_grounded(geo);
         self.anchor(geo);
-        self.relax(self.sweeps_n, base_head, geo, unit);
-        self.update_head_and_disagreement(base_head, geo, unit);
+        self.advance_nested_sim(geo, gravity_dir, overfill_ratio, underfill_tension, overfill_stiffness);
+        self.update_head_and_disagreement(geo, gravity_dir, overfill_ratio, underfill_tension, unit);
     }
 
     /// Reset coarse mass M to match current aggregated mass A (e.g. on flip or shape change).
@@ -1317,7 +1298,10 @@ mod tests {
         sim.generate_shape_mask();
 
         let mut state = CoarseState::new(sim.coarse.coarse_n);
-        let base_head = 1.0f32;
+        let gravity_dir = glam::Vec2::new(0.0, 0.04); // base_head = 0.04 * GRAVITY_HEAD_SCALE = 1.0
+        let overfill_ratio = 0.5f32;
+        let underfill_tension = 0.0f32;
+        let overfill_stiffness = crate::physics::OVERFILL_STIFFNESS_K;
         let unit = 50.0f32;
         let n = sim.coarse.coarse_n;
         let cx = n / 2;
@@ -1328,7 +1312,7 @@ mod tests {
             let idx = cy * n + cx;
             if sim.coarse.inside[idx] && sim.coarse.capacity[idx] > 0.0 {
                 cy_inside.push(cy);
-                state.m_mass[idx] = sim.coarse.capacity[idx]; // exactly 1.0 nominal fill
+                state.m_mass[idx] = sim.coarse.capacity[idx]; // exactly nominal (x=1) fill
             }
         }
         assert!(cy_inside.len() >= 4, "must have at least 4 inside tiles in column");
@@ -1337,21 +1321,18 @@ mod tests {
         let idx_top = cy_top * n + cx;
         let idx_bot = cy_bot * n + cx;
 
-        // This test drives `relax`/`update_head_and_disagreement` directly, bypassing `restrict`
-        // -- so `support_mass` (the I5 deadband's gate, see that field's doc comment) is never
-        // populated from real fine heights the way `tick()` would populate it. The bottom tile of
-        // a closed column IS genuinely supported (it rests on the container floor), so register
-        // that directly, mirroring what `restrict` would find if this were driven by real fine
-        // data resting at the base of the column.
-        state.support_mass[idx_bot] = 1.0;
-        state.compute_grounded(&sim.coarse);
-
         let m_top_initial = state.m_mass[idx_top];
         let m_bot_initial = state.m_mass[idx_bot];
 
-        // Relax for 64 sweeps
-        state.relax(64, base_head, &sim.coarse, unit);
-        state.update_head_and_disagreement(base_head, &sim.coarse, unit);
+        // This test drives `advance_nested_sim`/`update_head_and_disagreement` directly,
+        // bypassing `restrict`/`anchor` (there is no fine data here to restrict from) -- 64
+        // coarse ticks of the REAL nested solver, matching the old test's "relax for 64 sweeps"
+        // in spirit: the coarse level is a simulation that advances one step per tick (directive
+        // 1), so the equivalent of "let it relax" is "let it tick".
+        for _ in 0..64 {
+            state.advance_nested_sim(&sim.coarse, gravity_dir, overfill_ratio, underfill_tension, overfill_stiffness);
+        }
+        state.update_head_and_disagreement(&sim.coarse, gravity_dir, overfill_ratio, underfill_tension, unit);
 
         let m_top_after = state.m_mass[idx_top];
         let m_bot_after = state.m_mass[idx_bot];

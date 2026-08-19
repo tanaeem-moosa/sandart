@@ -1,4 +1,5 @@
 /// A 2D heightmap representing the sand bed.
+#[derive(Debug, Clone)]
 pub struct Heightmap {
     pub width: usize,
     pub height: usize,

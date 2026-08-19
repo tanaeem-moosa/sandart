@@ -1703,10 +1703,28 @@ impl DrawingSimulation {
         // Restricts fine mass into A, anchors M toward A, relaxes M across the coarse graph,
         // and updates coarse hydraulic head (eta), pressure (P), and coarse-fine disagreement (Delta).
         if self.coarse.available {
-            let base_head = (self.gravity_dir.y * physics::GRAVITY_HEAD_SCALE).max(0.0);
+            // STEP4-COARSE-IS-A-SIM.md: the coarse level's own dynamics now run the shipped
+            // solver over a nested grid (`CoarseState::advance_nested_sim`), so it needs the
+            // real `gravity_dir` (not a pre-scaled scalar `base_head`) and the real overfill
+            // settings, unmodified -- "the coarse sim IS a 64x64 sim" means it uses the same
+            // constants the fine level does, derived the same way. `unit` remains the FINE
+            // grid's own `overfill_head_unit`, used only for `eta`'s export-side pressure scaling
+            // (unchanged from before this rebuild).
             let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / self.heightmap.width as f32;
             let unit = (physics::GRAVITY_HEAD_SCALE / depth_scale) * self.overfill_stiffness;
-            self.coarse_state.tick(&self.heightmap.data, &self.shape_mask, &self.cell_props, base_head, &self.coarse, unit, Some(&self.blocks_touched));
+            let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
+            self.coarse_state.tick(
+                &self.heightmap.data,
+                &self.shape_mask,
+                &self.cell_props,
+                &self.coarse,
+                self.gravity_dir,
+                overfill_ratio,
+                self.underfill_tension,
+                self.overfill_stiffness,
+                unit,
+                Some(&self.blocks_touched),
+            );
         }
 
         // Run the gravity-driven settling cellular automata tick
