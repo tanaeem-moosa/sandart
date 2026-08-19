@@ -894,6 +894,46 @@ thread_local! {
     static LUT_CACHE: std::cell::RefCell<Option<((u32,u32,u32,u32), Box<[f32; EQUILIBRIUM_LUT_SIZE]>)>> =
         std::cell::RefCell::new(None);
 }
+
+thread_local! {
+    // §8 "No bang-bang transport" (HIERARCHICAL-PRESSURE.md): counts how often
+    // `overfill_equilibrium_transfer`'s `solve_forward` hits its `st(limit) >= tau` early return
+    // -- the full mass-limit branch that then meets `flux_edge_candidate`'s `.clamp(-1.0, 1.0)`
+    // and can saturate an edge -- specifically on edges where `coarse_head != 0.0` (i.e. the
+    // coarse coupling is what pushed the edge to the limit, not fine-level gravity alone). Reset
+    // with `reset_bang_bang_count`, read with `bang_bang_count`. Diagnostic-only: does not affect
+    // simulation output, cheap (one thread-local increment on an already-taken branch).
+    static COARSE_BANG_BANG_COUNT: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+/// See `COARSE_BANG_BANG_COUNT`'s doc comment.
+pub fn reset_bang_bang_count() {
+    COARSE_BANG_BANG_COUNT.with(|c| c.set(0));
+}
+
+/// See `COARSE_BANG_BANG_COUNT`'s doc comment.
+pub fn bang_bang_count() -> u64 {
+    COARSE_BANG_BANG_COUNT.with(|c| c.get())
+}
+
+thread_local! {
+    // §6 I4 ("per-tile flux budget"): counts how often `coarse_delta_eta_budgeted` actually
+    // scaled `delta_eta` down because an edge's coarse-attributable excess would otherwise have
+    // exceeded its tile's remaining `|Delta[C]|` budget. Reset with
+    // `reset_coarse_budget_clamp_count`, read with `coarse_budget_clamp_count`. A nonzero count
+    // is evidence the budget is doing real work, not a no-op; diagnostic-only.
+    static COARSE_BUDGET_CLAMP_COUNT: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+/// See `COARSE_BUDGET_CLAMP_COUNT`'s doc comment.
+pub fn reset_coarse_budget_clamp_count() {
+    COARSE_BUDGET_CLAMP_COUNT.with(|c| c.set(0));
+}
+
+/// See `COARSE_BUDGET_CLAMP_COUNT`'s doc comment.
+pub fn coarse_budget_clamp_count() -> u64 {
+    COARSE_BUDGET_CLAMP_COUNT.with(|c| c.get())
+}
 /// Cached rebuild: the table depends on the stiffness dial, gravity, overfill ratio and tension,
 /// all of which are runtime-settable, so it must be keyed on them and rebuilt when they move.
 #[inline]
@@ -927,6 +967,16 @@ pub fn overfill_equilibrium_transfer(
     cap_a_eff: f32,
     cap_b_eff: f32,
     gravity_head: f32,
+    // Step 3 fix (HIERARCHICAL-PRESSURE.md §8 "LUT thrashing"): the coarse coupling's head
+    // difference, kept SEPARATE from `gravity_head` rather than folded into it. `gravity_head`
+    // takes only the fixed small set of values the fine solver itself produces (`base_head`,
+    // `-base_head`, `0.0`, `dispersion`), which is what makes `cached_vertical_lut` a cache at
+    // all -- one rebuild per settings change, not per edge. `coarse_head` varies per inter-tile
+    // edge (`delta_eta`), so it must never enter the LUT's cache key. See the gate just below:
+    // whenever `coarse_head != 0.0` the fast path is skipped entirely and the exact closed-form
+    // `solve_forward` (already O(1), no bisection) computes the root directly -- the two terms
+    // simply add wherever `gravity_head` appears in the stress expression.
+    coarse_head: f32,
     yield_tau: f32,
     pressure_gain_a: f32,
     pressure_gain_b: f32,
@@ -940,7 +990,13 @@ pub fn overfill_equilibrium_transfer(
     let tau = yield_tau.max(0.0);
 
     // LUT path for the vertical liquid column, the case `build_vertical_equilibrium_lut` covers.
-    if gravity_head >= 0.5 && tau <= 0.0 && pressure_gain_a == 1.0 && pressure_gain_b == 1.0
+    // `coarse_head == 0.0` is REQUIRED here, not just checked: `coarse_head` varies per
+    // inter-tile edge (`delta_eta`), and `cached_vertical_lut` is a single-entry cache keyed on
+    // `gravity_head` -- letting a varying value reach that key rebuilds the whole 4096-entry
+    // table (each entry its own 64-step bisection) on every edge with a distinct `coarse_head`.
+    // Intra-tile edges (the large majority) keep `coarse_head == 0.0` and still hit the LUT.
+    if gravity_head >= 0.5 && coarse_head == 0.0 && tau <= 0.0
+        && pressure_gain_a == 1.0 && pressure_gain_b == 1.0
         && (cap_a - 1.0).abs() < 1e-5 && (cap_b - 1.0).abs() < 1e-5 {
         let h_a_star = cached_vertical_lut(overfill_ratio, unit, tension, gravity_head, h_a + h_b);
         let d = h_a - h_a_star;
@@ -999,7 +1055,16 @@ pub fn overfill_equilibrium_transfer(
                          g: f32, limit: f32| -> f32 {
         if limit <= 0.0 { return 0.0; }
         let st = |m: f32| phi(h_d - m, cap_d, gain_d) + g - phi(h_r + m, cap_r, gain_r);
-        if st(limit) >= tau { return limit; }
+        if st(limit) >= tau {
+            // §8 "No bang-bang transport": this is the full-mass-limit branch that then meets
+            // `flux_edge_candidate`'s `.clamp(-1.0, 1.0)` and can saturate the edge. Only counted
+            // when the coarse coupling is active on this edge (`coarse_head != 0.0`) -- see
+            // `COARSE_BANG_BANG_COUNT`'s doc comment.
+            if coarse_head != 0.0 {
+                COARSE_BANG_BANG_COUNT.with(|c| c.set(c.get() + 1));
+            }
+            return limit;
+        }
         let mut bp = [limit; 2];
         let mut n = 0usize;
         if h_d > cap_d {
@@ -1032,13 +1097,16 @@ pub fn overfill_equilibrium_transfer(
         limit
     };
 
-    let s0 = phi(h_a, cap_a, pressure_gain_a) + gravity_head - phi(h_b, cap_b, pressure_gain_b);
+    // The two head terms simply add here: `coarse_head` (the coarse coupling's delta_eta) enters
+    // the stress expression exactly like `gravity_head` does, wherever it appears below.
+    let g_total = gravity_head + coarse_head;
+    let s0 = phi(h_a, cap_a, pressure_gain_a) + g_total - phi(h_b, cap_b, pressure_gain_b);
     if s0 > tau {
         let limit = h_a.min((cap_b_eff - h_b).max(0.0));
-        solve_forward(h_a, cap_a, pressure_gain_a, h_b, cap_b, pressure_gain_b, gravity_head, limit)
+        solve_forward(h_a, cap_a, pressure_gain_a, h_b, cap_b, pressure_gain_b, g_total, limit)
     } else if s0 < -tau {
         let limit = h_b.min((cap_a_eff - h_a).max(0.0));
-        -solve_forward(h_b, cap_b, pressure_gain_b, h_a, cap_a, pressure_gain_a, -gravity_head, limit)
+        -solve_forward(h_b, cap_b, pressure_gain_b, h_a, cap_a, pressure_gain_a, -g_total, limit)
     } else {
         0.0
     }
@@ -3359,7 +3427,7 @@ const FRESH_OVERBURDEN_ROOM_EPSILON: f32 = 1e-3;
 /// scheduling -- small enough to catch genuine free space, comfortably above float noise. A
 /// fraction rather than an absolute height (unlike `FRESH_OVERBURDEN_ROOM_EPSILON`) because
 /// `support_fraction` is itself already normalised to `[0, 1]` by the cell-below's own capacity.
-const SUPPORT_FRACTION_EPSILON: f32 = 0.02;
+pub(crate) const SUPPORT_FRACTION_EPSILON: f32 = 0.02;
 
 /// Mark a neighbor block as modified (needing redraw/copy-back this frame) and bump its
 /// next-frame displacement estimate, without touching the buffer belonging to the block
@@ -3703,6 +3771,133 @@ mod solver_scratch {
     }
 }
 
+/// Coarse coupling (HIERARCHICAL-PRESSURE.md §5 step 5, build step 3): `delta_eta` between the
+/// coarse tiles containing fine cells `idx_a` and `idx_b`, or `0.0` when the two cells share a
+/// tile -- the common intra-tile case, where the coarse term is identical on both sides of
+/// `phi_a - phi_b` and cancels (§0.2). The caller is responsible for the actual "is the coarse
+/// level coupled this tick" decision: it must pass an EMPTY `coarse_eta` whenever
+/// `CoarseGeometry::available` is false, rather than relying on this function to infer
+/// availability from buffer length -- `CoarseState`'s buffers stay sized `COARSE_GRID *
+/// COARSE_GRID` even when the geometry is unavailable (e.g. grid 64, the degenerate `t == 1`
+/// case), so a length check alone cannot distinguish "coupled, all zero" from "not coupled".
+/// Uses `coarse::COARSE_GRID`, not a hardcoded `64`/`4096`, and `w / COARSE_GRID` for the tile
+/// size -- exactly how `CoarseGeometry::build_with_coarse_n` derives `t`, and exact (not
+/// truncated) whenever the caller's non-emptiness contract holds, since `build_with_coarse_n`
+/// only sets `available` when `t * coarse_n == grid_size` divides evenly.
+#[inline]
+fn coarse_delta_eta(coarse_eta: &[f32], w: usize, idx_a: usize, idx_b: usize) -> f32 {
+    const N: usize = crate::coarse::COARSE_GRID;
+    if coarse_eta.is_empty() || coarse_eta.len() != N * N {
+        return 0.0;
+    }
+    let t = (w / N).max(1);
+    let cx_a = ((idx_a % w) / t).min(N - 1);
+    let cy_a = ((idx_a / w) / t).min(N - 1);
+    let cx_b = ((idx_b % w) / t).min(N - 1);
+    let cy_b = ((idx_b / w) / t).min(N - 1);
+    let ca = cy_a * N + cx_a;
+    let cb = cy_b * N + cx_b;
+    if ca != cb {
+        coarse_eta[ca] - coarse_eta[cb]
+    } else {
+        0.0
+    }
+}
+
+/// Coarse tile indices `(ca, cb)` for fine cells `idx_a`/`idx_b`, or `None` when they share a
+/// tile (nothing for `coarse_delta_eta_budgeted`'s flux budget to attribute) or the coarse level
+/// is not coupled this tick. Same tile-size derivation as `coarse_delta_eta` -- kept as a
+/// separate small helper rather than folded in because the budgeted wrapper below needs the
+/// indices AND the head difference as two separate values, not just their difference.
+#[inline]
+fn coarse_tile_indices(coarse_eta_len: usize, w: usize, idx_a: usize, idx_b: usize) -> Option<(usize, usize)> {
+    const N: usize = crate::coarse::COARSE_GRID;
+    if coarse_eta_len != N * N {
+        return None;
+    }
+    let t = (w / N).max(1);
+    let cx_a = ((idx_a % w) / t).min(N - 1);
+    let cy_a = ((idx_a / w) / t).min(N - 1);
+    let cx_b = ((idx_b % w) / t).min(N - 1);
+    let cy_b = ((idx_b / w) / t).min(N - 1);
+    let ca = cy_a * N + cx_a;
+    let cb = cy_b * N + cx_b;
+    if ca != cb { Some((ca, cb)) } else { None }
+}
+
+/// Coarse-coupled `overfill_equilibrium_transfer`, with I4's per-tile flux budget enforced
+/// (HIERARCHICAL-PRESSURE.md §6 I4, §8 "no bang-bang transport" is the related but distinct
+/// per-EDGE saturation check -- this is the per-TILE aggregate cap across every edge the tile
+/// touches in one tick).
+///
+/// Solves the transfer TWICE when the coarse level is coupled on this edge: once with
+/// `coarse_head = 0` (`d_uncoupled`, what gravity alone would move) and once with the real
+/// `delta_eta` (`d_coupled`). `excess = d_coupled - d_uncoupled` is the mass the COARSE term
+/// alone is responsible for moving on this edge -- I4's "coarse term causes to leave a tile".
+/// The tile losing mass to that excess (`ca` if `excess > 0`, i.e. net a->b flow; `cb` if
+/// `excess < 0`) has its own remaining budget (initialised from `|Delta[C]|`, decremented as
+/// edges are visited) checked; if the excess would exceed it, `delta_eta` is scaled down (NOT
+/// clamped post-hoc -- the solver is nonlinear, so the transfer is RE-SOLVED with the scaled
+/// head) until the excess exactly exhausts what remains, and the tile's budget is zeroed.
+///
+/// **This bounds the CANDIDATE flux, before arbitration.** `flux_edge_apply`'s arbitration can
+/// only scale a candidate DOWN to resolve competing donors, never up (COLLECT produces
+/// single-edge-clamped candidates; ARBITRATE distributes each cell's actually-available mass
+/// among the candidates that want it -- see `settle_tick`'s own "three-pass structure" doc
+/// comment), so bounding the candidate is a sound upper bound on the REALISED, post-arbitration
+/// mass I4 actually cares about: realised <= candidate <= budget, for every tile, every tick.
+///
+/// Three solver calls in the worst case (uncoupled, coupled, rescaled), all the exact O(1)
+/// closed form (`solve_forward`/the LUT fast path) -- no bisection, no iteration, consistent with
+/// the LUT-thrashing fix this coupling already depends on.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn coarse_delta_eta_budgeted(
+    coarse_eta: &[f32],
+    coarse_budget: &mut [f32],
+    w: usize,
+    idx_a: usize,
+    idx_b: usize,
+    h_a: f32, cap_a: f32, h_b: f32, cap_b: f32,
+    cap_a_eff: f32, cap_b_eff: f32,
+    gravity_head: f32,
+    yield_tau: f32,
+    pressure_gain_a: f32,
+    pressure_gain_b: f32,
+    overfill_ratio: f32,
+    unit: f32,
+    tension: f32,
+) -> f32 {
+    let delta_eta = coarse_delta_eta(coarse_eta, w, idx_a, idx_b);
+    let solve = |ce: f32| overfill_equilibrium_transfer(
+        h_a, cap_a, h_b, cap_b, cap_a_eff, cap_b_eff,
+        gravity_head, ce, yield_tau, pressure_gain_a, pressure_gain_b,
+        overfill_ratio, unit, tension,
+    );
+    if delta_eta == 0.0 || coarse_budget.is_empty() {
+        return solve(delta_eta);
+    }
+    let d_coupled = solve(delta_eta);
+    let Some((ca, cb)) = coarse_tile_indices(coarse_eta.len(), w, idx_a, idx_b) else {
+        return d_coupled;
+    };
+    let d_uncoupled = solve(0.0);
+    let excess = d_coupled - d_uncoupled;
+    if excess == 0.0 {
+        return d_coupled;
+    }
+    let spender = if excess > 0.0 { ca } else { cb };
+    let remaining = coarse_budget[spender];
+    if excess.abs() <= remaining {
+        coarse_budget[spender] = remaining - excess.abs();
+        return d_coupled;
+    }
+    let scale = if excess.abs() > 1e-12 { (remaining / excess.abs()).clamp(0.0, 1.0) } else { 0.0 };
+    coarse_budget[spender] = 0.0;
+    COARSE_BUDGET_CLAMP_COUNT.with(|c| c.set(c.get() + 1));
+    solve(delta_eta * scale)
+}
+
 /// Perform a single gravity flow/settling iteration inside the active bounding box.
 pub fn settle_tick(
     heightmap: &mut Heightmap,
@@ -3795,12 +3990,39 @@ pub fn settle_tick(
     // which is what makes it safe to hand to a user at all. It now means exactly one thing: how
     // far a column compresses under its own weight.
     overfill_stiffness: f32,
+    // Step 3 (HIERARCHICAL-PRESSURE.md §5): coarse hydraulic head field eta[C], `COARSE_GRID *
+    // COARSE_GRID` cells. MUST be empty (`&[]`) when the coarse level is not coupled this tick
+    // (i.e. `CoarseGeometry::available` is false) -- see `coarse_delta_eta`'s doc comment for why
+    // buffer length alone cannot signal availability. When non-empty, inter-tile edges receive
+    // `delta_eta = eta[C_a] - eta[C_b]` as a SEPARATE `coarse_head` argument to
+    // `overfill_equilibrium_transfer`, never folded into `gravity_head` (§8 "LUT thrashing").
+    coarse_eta: &[f32],
+    // Step 3 fix (HIERARCHICAL-PRESSURE.md §6 I4, "per-tile flux budget"): `|Delta[C]|` per
+    // coarse tile, `COARSE_GRID * COARSE_GRID` cells, same emptiness contract as `coarse_eta`
+    // (MUST be empty when the coarse level is not coupled this tick). Consumed by
+    // `coarse_delta_eta_budgeted`: the total real mass the coarse term causes to leave any one
+    // tile in this tick is capped at that tile's own `|Delta[C]|`, so the fine level can never be
+    // pushed to move MORE than the coarse level's own disagreement says it should -- without this
+    // bound `Delta` can change sign and the loop rings (§6's account of the pre-#70 failure mode,
+    // one level up).
+    coarse_delta: &[f32],
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
     if w == 0 || h == 0 {
         return 0.0;
     }
+
+    // I4's per-tile flux budget (see `coarse_delta_eta_budgeted`'s doc comment): remaining
+    // `|Delta[C]|` budget per coarse tile, decremented as inter-tile edges are visited over the
+    // course of this tick. Freshly allocated (not pooled) each call -- `COARSE_GRID * COARSE_GRID`
+    // = 4096 floats is 16 KB, trivial next to everything else this function allocates per tick --
+    // and empty whenever the coarse level is not coupled, so it costs nothing when unused.
+    let mut coarse_budget: Vec<f32> = if !coarse_eta.is_empty() && coarse_delta.len() == coarse_eta.len() {
+        coarse_delta.iter().map(|d| d.abs()).collect()
+    } else {
+        Vec::new()
+    };
 
     // Safety checks to prevent panics if heights or sliding buffer are resized
     if temp_heights.len() != heightmap.data.len() {
@@ -4512,7 +4734,15 @@ pub fn settle_tick(
                             // exactly on equilibrium. See `overfill_equilibrium_transfer` for why
                             // the potential form was unstable at any stiffness worth having.
                             let _ = (p_a, p_b);
-                            let d = overfill_equilibrium_transfer(
+                            // §8 "LUT thrashing" fix: the coarse head enters as its OWN parameter
+                            // (`coarse_head`), never folded into `gravity_head`/`base_head`. That
+                            // keeps `base_head` itself constant across every intra-tile edge (7
+                            // of 8 vertical edges at grid 512), so those still hit
+                            // `cached_vertical_lut`'s fast path; only the inter-tile minority
+                            // fall through to the exact closed-form solve. §6 I4's per-tile flux
+                            // budget is enforced inside `coarse_delta_eta_budgeted`.
+                            let d = coarse_delta_eta_budgeted(
+                                coarse_eta, &mut coarse_budget, w, center_idx, nb_idx,
                                 h_a, cap_a, h_b, cap_b,
                                 cell_overfill_capacity_for(wetness, overfill_ratio),
                                 cell_overfill_capacity_for(
@@ -5120,7 +5350,17 @@ pub fn settle_tick(
                             // material transmits only `k_of_liquidity` of its pressure sideways.
                             // `tau_eff` is consumed inside the solve, so the pair handed downstream
                             // carries no threshold of its own.
-                            let d = overfill_equilibrium_transfer(
+                            // §8 "LUT thrashing" fix, lateral case: the coarse head used to be
+                            // added directly into this term, so a large coarse head difference
+                            // could push it past the LUT gate's `gravity_head >= 0.5` and newly
+                            // route a LATERAL edge through the VERTICAL LUT. Passing it as the
+                            // separate `coarse_head` argument means the gate only ever sees
+                            // `gravity_dir.x * GRAVITY_HEAD_SCALE + dispersion`, which never
+                            // crosses 0.5 -- this branch never took the LUT path before and still
+                            // never does. §6 I4's per-tile flux budget is enforced inside
+                            // `coarse_delta_eta_budgeted`, shared with the vertical pass above.
+                            let d = coarse_delta_eta_budgeted(
+                                coarse_eta, &mut coarse_budget, w, center_idx, nb_idx,
                                 h_a_live, cell_capacity, h_b_live, cap_b,
                                 cap_a_eff, cap_b_eff,
                                 gravity_dir.x * GRAVITY_HEAD_SCALE + dispersion,
@@ -6309,6 +6549,7 @@ mod tests {
                 self.overfill_ratio,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
             self.tick_count += 1;
             flow
@@ -6639,6 +6880,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -6712,6 +6954,7 @@ mod tests {
             false, false, false, 0.50,
             0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+            &[], &[],
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -6792,6 +7035,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -6899,6 +7143,7 @@ mod tests {
             false, false, false, 0.50,
             0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+            &[], &[],
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -7210,6 +7455,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -7310,6 +7556,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -7364,6 +7611,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -7439,6 +7687,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -7545,6 +7794,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -10719,6 +10969,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -10836,6 +11087,7 @@ mod tests {
                     false, false, false, 0.50,
                     0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                     OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
                 );
             }
 
@@ -10937,6 +11189,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -11026,6 +11279,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -11114,6 +11368,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -11365,6 +11620,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -11547,6 +11803,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
 
@@ -11691,6 +11948,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             ) as f64;
         }
 
@@ -11936,6 +12194,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -12475,6 +12734,7 @@ mod tests {
                 false, false, false, 0.50,
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
+                &[], &[],
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();

@@ -64,7 +64,7 @@ fn main() {
         let cap_a_eff = cap_a * (1.0 + overfill_ratio);
         let cap_b_eff = cap_b * (1.0 + overfill_ratio);
         overfill_equilibrium_transfer(
-            h_a, cap_a, h_b, cap_b, cap_a_eff, cap_b_eff, g, 0.0, 1.0, 1.0, overfill_ratio,
+            h_a, cap_a, h_b, cap_b, cap_a_eff, cap_b_eff, g, 0.0, 0.0, 1.0, 1.0, overfill_ratio,
             overfill_head_unit, underfill_tension,
         )
     };
@@ -191,7 +191,7 @@ fn main() {
         let cap_a_eff = cap_a * (1.0 + overfill_ratio);
         let cap_b_eff = cap_b * (1.0 + overfill_ratio);
         overfill_equilibrium_transfer(
-            h_a, cap_a, h_b, cap_b, cap_a_eff, cap_b_eff, g, 0.0, 1.0, 1.0, overfill_ratio,
+            h_a, cap_a, h_b, cap_b, cap_a_eff, cap_b_eff, g, 0.0, 0.0, 1.0, 1.0, overfill_ratio,
             overfill_head_unit, 0.0,
         )
     };

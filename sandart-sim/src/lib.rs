@@ -3,7 +3,7 @@ pub mod grid;
 pub mod physics;
 pub mod quantiles;
 
-pub use coarse::{CoarseGeometry, COARSE_GRID};
+pub use coarse::{CoarseGeometry, CoarseState, COARSE_GRID};
 pub use grid::Heightmap;
 pub use physics::{ActiveBounds, displace_line, settle_tick};
 pub use quantiles::{
@@ -403,10 +403,13 @@ pub struct DrawingSimulation {
     /// Coarse pressure geometry (`sandart_sim::coarse`, HIERARCHICAL-PRESSURE.md §4, build
     /// step 1). Rebuilt at the end of `generate_shape_mask` -- and ONLY there, so it is always
     /// exactly as fresh as `shape_mask` itself, never staler and never rebuilt on some other
-    /// cadence. **Nothing in this build step reads it**: no solver, no scheduler, no overlay.
-    /// It exists so the geometry (open cells, per-tile capacity, per-edge conveyance) can be
-    /// built and tested standalone before anything is allowed to couple to it.
+    /// cadence.
     pub coarse: CoarseGeometry,
+
+    /// Coarse simulation state (`sandart_sim::coarse`, HIERARCHICAL-PRESSURE.md §5, build
+    /// step 2). Holds restricted fine mass A, persistent coarse mass M, coarse head eta,
+    /// pressure P, and coarse-fine disagreement Delta.
+    pub coarse_state: CoarseState,
 
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
@@ -838,6 +841,7 @@ impl DrawingSimulation {
             // is still all-MASK_OUTSIDE at this point in construction, so there is nothing
             // meaningful to build from yet.
             coarse: CoarseGeometry::empty(grid_size),
+            coarse_state: CoarseState::new(COARSE_GRID),
             active_blocks,
             last_displacements,
             last_simulated_ticks,
@@ -911,8 +915,9 @@ impl DrawingSimulation {
 
         // Coarse pressure geometry (build step 1, HIERARCHICAL-PRESSURE.md §4/§9): rebuilt here,
         // and only here, so it is always exactly as fresh as shape_mask -- never a separate call
-        // site to remember, never a separate staleness window. Nothing reads `self.coarse` yet.
+        // site to remember, never a separate staleness window.
         self.coarse = coarse::CoarseGeometry::build(&self.shape_mask, &self.cell_props, w);
+        self.coarse_state = coarse::CoarseState::new(self.coarse.coarse_n);
     }
 
     /// Return a pointer to the shape mask data for WASM/GPU access.
@@ -1669,6 +1674,16 @@ impl DrawingSimulation {
             }
         }
 
+        // Coarse pressure state update (HIERARCHICAL-PRESSURE.md §5, build step 2 & 3).
+        // Restricts fine mass into A, anchors M toward A, relaxes M across the coarse graph,
+        // and updates coarse hydraulic head (eta), pressure (P), and coarse-fine disagreement (Delta).
+        if self.coarse.available {
+            let base_head = (self.gravity_dir.y * physics::GRAVITY_HEAD_SCALE).max(0.0);
+            let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / self.heightmap.width as f32;
+            let unit = (physics::GRAVITY_HEAD_SCALE / depth_scale) * self.overfill_stiffness;
+            self.coarse_state.tick(&self.heightmap.data, &self.shape_mask, &self.cell_props, base_head, &self.coarse, unit);
+        }
+
         // Run the gravity-driven settling cellular automata tick
         //
         // `perfect_sim_found_material` is OR'd in explicitly rather than relying on the injected
@@ -1730,11 +1745,20 @@ impl DrawingSimulation {
                     (self.overfill_capacity - 1.0).max(0.0),
                     self.underfill_tension,
                     self.overfill_stiffness,
+                    // Empty (not `&self.coarse_state.eta`) whenever the coarse level itself says
+                    // it is not coupled this tick -- `coarse_delta_eta` in physics.rs relies on
+                    // emptiness, not buffer length, to detect "not available", since
+                    // `CoarseState`'s buffers stay sized `COARSE_GRID * COARSE_GRID` regardless.
+                    if self.coarse.available { &self.coarse_state.eta } else { &[] },
+                    // Same emptiness contract, for I4's per-tile flux budget (§6): `|Delta[C]|`
+                    // per tile, consumed by `coarse_delta_eta_budgeted` in physics.rs.
+                    if self.coarse.available { &self.coarse_state.delta } else { &[] },
                 );
             }
         } else {
             self.active_bounds.active = false;
         }
+
         self.tick_count = self.tick_count.wrapping_add(1);
 
         // Block-simulation heat-map bookkeeping (debug overlay) — see `block_heat_buckets`'s

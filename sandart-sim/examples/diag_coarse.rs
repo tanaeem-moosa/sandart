@@ -19,7 +19,17 @@ fn main() {
     sim.initialize_hourglass();
     sim.overfill_pressure = true;
     let targets = [None; 5];
+    sandart_sim::physics::reset_bang_bang_count();
+    sandart_sim::physics::reset_coarse_budget_clamp_count();
     for _ in 0..ticks { sim.budget_n = 1024; sim.update(0.016, &targets, 0.08, MaterialMode::Water, shape, 0.0, 16.6); }
+    println!(
+        "§8 'no bang-bang transport': coarse-coupled edges hitting the full-mass-limit branch: {}",
+        sandart_sim::physics::bang_bang_count()
+    );
+    println!(
+        "§6 I4 flux budget: edges where delta_eta was scaled down to respect |Delta[C]|: {}",
+        sandart_sim::physics::coarse_budget_clamp_count()
+    );
 
     let (w, h) = (grid, grid);
     let t = grid / coarse; // fine cells per tile edge

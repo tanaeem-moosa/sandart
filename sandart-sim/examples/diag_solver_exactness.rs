@@ -35,7 +35,7 @@ fn main() {
             let g = if equal { (rnd() - 0.5) * 0.2 } else { (rnd() - 0.5) * 2.0 };
             let tau = if equal { 0.0 } else if rnd() < 0.5 { 0.0 } else { rnd() * 0.3 };
             let ga = rnd(); let gb = if equal { ga } else { rnd() };
-            let got = overfill_equilibrium_transfer(h_a, cap_a, h_b, cap_b, ca, cb, g, tau, ga, gb, ratio, unit, tension);
+            let got = overfill_equilibrium_transfer(h_a, cap_a, h_b, cap_b, ca, cb, g, 0.0, tau, ga, gb, ratio, unit, tension);
             let want = reference(h_a, cap_a, h_b, cap_b, ca, cb, g, tau, ga, gb, ratio, unit, tension);
             let e = (got - want).abs();
             if equal && e > worst_lat { worst_lat = e; }

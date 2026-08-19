@@ -284,6 +284,384 @@ impl CoarseGeometry {
     }
 }
 
+/// Default anchoring rate lambda for pulling M towards A: 0.10 (§5 step 2).
+pub const COARSE_DEFAULT_LAMBDA: f32 = 0.10;
+/// Default relaxation sweeps per tick on the 64x64 coarse grid: 16 sweeps (§5 step 3).
+pub const COARSE_DEFAULT_SWEEPS: usize = 16;
+
+/// Unbounded potential function for coarse compression (§4.3 / Step 0 recommendation).
+/// Below capacity (h <= cap): phi = h / cap in [0, 1].
+/// Above capacity (h > cap): phi = h / cap + unit * (h - cap) / cap.
+#[inline]
+pub fn coarse_unbounded_phi(h: f32, cap: f32, unit: f32) -> f32 {
+    if cap <= 0.0 {
+        return 0.0;
+    }
+    let x = h / cap;
+    if x <= 1.0 {
+        x
+    } else {
+        x + unit * (x - 1.0)
+    }
+}
+
+/// Solves `phi(h_a - d, cap_a) + g - phi(h_b + d, cap_b) = 0` for `d` under the unbounded law.
+#[inline]
+pub fn coarse_unbounded_transfer(h_a: f32, cap_a: f32, h_b: f32, cap_b: f32, g: f32, unit: f32) -> f32 {
+    if cap_a <= 0.0 || cap_b <= 0.0 {
+        return 0.0;
+    }
+    let lo = -h_b;
+    let hi = h_a;
+    if hi <= lo {
+        return 0.0;
+    }
+    let stress = |d: f32| {
+        coarse_unbounded_phi(h_a - d, cap_a, unit) + g - coarse_unbounded_phi(h_b + d, cap_b, unit)
+    };
+    if stress(hi) >= 0.0 {
+        return hi;
+    }
+    if stress(lo) <= 0.0 {
+        return lo;
+    }
+    let mut lo = lo;
+    let mut hi = hi;
+    for _ in 0..32 {
+        let mid = 0.5 * (lo + hi);
+        if stress(mid) > 0.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Coarse simulation state (`sandart_sim::coarse`, HIERARCHICAL-PRESSURE.md §5, build step 2).
+///
+/// Holds the restricted fine mass observation `A[C]`, persistent coarse mass state `M[C]`,
+/// coarse hydraulic head `eta[C]`, hydrostatic pressure `P[C]`, and signed disagreement `Delta[C]`.
+#[derive(Debug, Clone)]
+pub struct CoarseState {
+    pub coarse_n: usize,
+    /// A[C]: aggregated fine mass in tile C.
+    pub a_mass: Vec<f32>,
+    /// M[C]: persistent coarse mass in tile C across ticks.
+    pub m_mass: Vec<f32>,
+    /// eta[C]: coarse hydraulic head (phi_coarse - cy * base_head_coarse).
+    pub eta: Vec<f32>,
+    /// P[C]: coarse hydrostatic pressure (phi_coarse - M[C]/capacity[C]).
+    pub p_coarse: Vec<f32>,
+    /// Delta[C]: signed coarse-fine disagreement M[C] - A[C].
+    pub delta: Vec<f32>,
+    /// Support[C]: aggregated REAL fine overfill mass in tile C -- `sum((h_i - cap_i).max(0))`
+    /// over the tile's fine cells, using the SAME nominal per-cell capacity
+    /// (`cell_capacity_for(wetness)`) the fine solver's own `o = (h - cap) / cap` uses. See §5
+    /// step 5's deadband derivation on `update_head_and_disagreement` for what this gates and why.
+    pub support_mass: Vec<f32>,
+    /// Grounded[C]: TRANSITIVE support -- true if tile C itself has `support_mass[C] > 0`, OR
+    /// rests directly on the floor/casing (no open tile below), OR sits on top of a grounded
+    /// tile (mass-connected via `k_y[e] > 0`). Computed by `compute_grounded` from
+    /// `support_mass` and the (static) coarse geometry, mirroring `diag_support.rs`'s own
+    /// `transitively_supported` fine-cell definition one level up. See the deadband derivation
+    /// on `update_head_and_disagreement` for why LOCAL `support_mass` alone is not enough to gate
+    /// on: it would also zero the eta signal for the un-compressed MIDDLE of a resting column
+    /// (only its base is ever pushed over capacity), breaking exactly the depth-pressure
+    /// propagation the coarse level exists to speed up.
+    pub grounded: Vec<bool>,
+    /// Anchor strength lambda in (0, 1].
+    pub lambda: f32,
+    /// Sweeps per tick.
+    pub sweeps_n: usize,
+}
+
+impl CoarseState {
+    pub fn new(coarse_n: usize) -> Self {
+        let size = coarse_n * coarse_n;
+        Self {
+            coarse_n,
+            a_mass: vec![0.0; size],
+            m_mass: vec![0.0; size],
+            eta: vec![0.0; size],
+            p_coarse: vec![0.0; size],
+            delta: vec![0.0; size],
+            support_mass: vec![0.0; size],
+            grounded: vec![false; size],
+            lambda: COARSE_DEFAULT_LAMBDA,
+            sweeps_n: COARSE_DEFAULT_SWEEPS,
+        }
+    }
+
+    /// Step 1 of §5: Restrict fine heights into A[C] for inside cells. Also aggregates
+    /// `support_mass[C]` -- see that field's doc comment and the deadband derivation on
+    /// `update_head_and_disagreement`.
+    pub fn restrict(&mut self, heights: &[f32], shape_mask: &[u8], cell_props: &[f32], geo: &CoarseGeometry) {
+        if !geo.available || heights.len() != geo.grid_size * geo.grid_size || shape_mask.len() != heights.len()
+            || cell_props.len() != heights.len() * 4 {
+            return;
+        }
+        self.a_mass.iter_mut().for_each(|v| *v = 0.0);
+        self.support_mass.iter_mut().for_each(|v| *v = 0.0);
+        let t = geo.t;
+        let n = self.coarse_n;
+        let g = geo.grid_size;
+        for fy in 0..g {
+            let cy = (fy / t).min(n - 1);
+            let row = fy * g;
+            for fx in 0..g {
+                let fi = row + fx;
+                if shape_mask[fi] != MASK_OUTSIDE {
+                    let cx = (fx / t).min(n - 1);
+                    let ci = cy * n + cx;
+                    let h = heights[fi];
+                    self.a_mass[ci] += h;
+                    // I5's deadband derivation: a fine cell can only carry `h > cap` (be
+                    // compressed) if something stops its descent -- "compression is support"
+                    // (§3, structurally exact: 0 of 9,647 falling cells ever have o > 0). This is
+                    // the EXACT same per-cell capacity the fine solver's own `o = (h-cap)/cap`
+                    // uses, so summing its excess over the tile gives an exact (not fitted) "does
+                    // this tile contain any genuinely supported material" signal.
+                    let cap = cell_capacity_for(cell_props[fi * 4 + PROP_WETNESS]);
+                    if h > cap {
+                        self.support_mass[ci] += h - cap;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Step 2 of §5: Anchor M toward A by lambda: M += lambda * (A - M).
+    pub fn anchor(&mut self, geo: &CoarseGeometry) {
+        if !geo.available {
+            return;
+        }
+        let lambda = self.lambda.clamp(0.0, 1.0);
+        for i in 0..self.m_mass.len() {
+            if geo.inside[i] {
+                self.m_mass[i] += lambda * (self.a_mass[i] - self.m_mass[i]);
+            } else {
+                self.m_mass[i] = 0.0;
+            }
+        }
+    }
+
+    /// Step 3 of §5: Relax M across the coarse graph for N sweeps.
+    pub fn relax(&mut self, sweeps: usize, base_head: f32, geo: &CoarseGeometry, unit: f32) {
+        if !geo.available {
+            return;
+        }
+        let n = self.coarse_n;
+        let base_head_coarse = base_head * geo.t as f32;
+
+        let mut delta_v = vec![0.0f32; n * n];
+        for _ in 0..sweeps {
+            delta_v.iter_mut().for_each(|v| *v = 0.0);
+
+            // Vertical edges (y-direction, gravity-aligned)
+            for cy in 0..n.saturating_sub(1) {
+                for cx in 0..n {
+                    let a = cy * n + cx;
+                    let b = (cy + 1) * n + cx;
+                    let k = geo.k_y_at(cx, cy);
+                    if k <= 0.0 || geo.capacity[a] <= 0.0 || geo.capacity[b] <= 0.0 {
+                        continue;
+                    }
+                    let d = k * coarse_unbounded_transfer(
+                        self.m_mass[a], geo.capacity[a],
+                        self.m_mass[b], geo.capacity[b],
+                        base_head_coarse, unit,
+                    );
+                    delta_v[a] -= d;
+                    delta_v[b] += d;
+                }
+            }
+            for i in 0..n * n {
+                self.m_mass[i] += delta_v[i];
+            }
+
+            delta_v.iter_mut().for_each(|v| *v = 0.0);
+            // Horizontal edges (x-direction, no gravity)
+            for cy in 0..n {
+                for cx in 0..n.saturating_sub(1) {
+                    let a = cy * n + cx;
+                    let b = cy * n + cx + 1;
+                    let k = geo.k_x_at(cx, cy);
+                    if k <= 0.0 || geo.capacity[a] <= 0.0 || geo.capacity[b] <= 0.0 {
+                        continue;
+                    }
+                    let d = k * coarse_unbounded_transfer(
+                        self.m_mass[a], geo.capacity[a],
+                        self.m_mass[b], geo.capacity[b],
+                        0.0, unit,
+                    );
+                    delta_v[a] -= d;
+                    delta_v[b] += d;
+                }
+            }
+            for i in 0..n * n {
+                self.m_mass[i] += delta_v[i];
+            }
+        }
+    }
+
+    /// Computes `grounded[C]` from `support_mass`: `grounded[C] = support_mass[C] > 0`, i.e. the
+    /// tile itself contains real local compression -- see §3's structural guarantee ("compression
+    /// is support") on `support_mass`'s own doc comment. Must run after `restrict` (needs fresh
+    /// `support_mass`) and before `update_head_and_disagreement` (which reads `grounded`).
+    ///
+    /// **Deliberately LOCAL ONLY -- every attempt to extend it past a tile's own boundary was
+    /// tried and measured WORSE**, on `diag_support --grid 512 --ticks 400` (hourglass, percent of
+    /// free-falling cells carrying nonzero pressure; the plain local-only rule below measures
+    /// 8.4%, the number every alternative here is compared against):
+    /// - Propagating through any geometrically open tile below (`k_y[e] > 0`, ignoring how full
+    ///   it is): 73.5%. An open neck lets "grounded" run straight up through a falling stream to
+    ///   whatever pool it feeds.
+    /// - Requiring the tile below to be "packed" (`a_mass/capacity >= 1 -
+    ///   SUPPORT_FRACTION_EPSILON`) before inheriting its grounding, unbounded chain: 63.5%.
+    /// - The same packed-below rule bounded to a single hop above a directly-compressed tile:
+    ///   63.9%.
+    /// - Treating direct floor/casing contact (no open tile below) as automatically grounded
+    ///   whenever the tile holds any mass, matching the fine model's own "resting on the casing"
+    ///   rule for `support_fraction`: 21.0%. Slanted hourglass walls put many tiles that are still
+    ///   mid-funnel, not resting on anything, in contact with a `MASK_OUTSIDE` tile below through
+    ///   no structural fault of their own.
+    ///
+    /// The common failure mode in all four: the tile immediately above (or beside, in the floor
+    /// case) a genuinely compressed tile is very often the SAME tile the falling stream is still
+    /// landing in (I5's "mixed tile... is the case that decides it"), and any rule that grants it
+    /// grounding via a NEIGHBOUR's state reproduces exactly the "upward excursion at impact"
+    /// acceptance criterion 4 forbids. Local-only gating cannot leak past a tile boundary by
+    /// construction, which is why it is what ships, despite giving up the multi-tile-column
+    /// speedup a transitive rule would have bought (§1's motivation) and despite an 8.4% residual
+    /// that is not itself zero -- see the doc comment on `update_head_and_disagreement` for that
+    /// residual and why it is the mixed-tile case, not a bug in this rule, and treat this as the
+    /// open problem the design itself flags it as (§10), not as resolved.
+    pub fn compute_grounded(&mut self, geo: &CoarseGeometry) {
+        if !geo.available {
+            self.grounded.iter_mut().for_each(|v| *v = false);
+            return;
+        }
+        for c in 0..self.grounded.len() {
+            self.grounded[c] = geo.inside[c] && geo.capacity[c] > 0.0 && self.support_mass[c] > 0.0;
+        }
+    }
+
+    /// Step 4 of §5: Read back eta, P, and Delta.
+    ///
+    /// **Deadband (I5, HIERARCHICAL-PRESSURE.md §6/§8): the coarse PRESSURE term (`phi`'s excess
+    /// above `x = M/cap` once `x > 1`) is withheld unless the tile is `grounded`** (see
+    /// `compute_grounded`: real local compression, `support_mass[C] > 0` -- deliberately NOT
+    /// transitive past the tile's own boundary; that doc comment records why every transitive
+    /// variant tried measured worse). The below-capacity fill-fraction term (`phi = x` for
+    /// `x <= 1`) is NEVER gated -- that is the harmless "water table" signal U-tube levelling
+    /// needs even between two arms neither of which is near capacity (§0.3).
+    ///
+    /// **The elevation term (`- cy * base_head_coarse`) is ALSO never gated, on either branch.**
+    /// A first version of this deadband zeroed `eta` outright for an ungrounded tile (both fill
+    /// and elevation together) and measured WORSE than not gating at all: 55.2% of free-falling
+    /// cells carrying nonzero pressure on `diag_support --grid 512 --ticks 400` (hourglass), up
+    /// from an un-gated baseline nowhere near that. Stripping the elevation term from only ONE
+    /// side of a grounded/ungrounded tile pair manufactures a spurious `delta_eta` from elevation
+    /// ALONE -- worse the deeper the pair sits (`cy` larger) -- which is exactly the sawtooth
+    /// §0.2 already solved once by insisting `eta`, not raw `phi`, is what crosses a tile seam.
+    /// Gating only the pressure EXCESS, as implemented, keeps `eta` elevation-consistent on both
+    /// sides of every edge regardless of grounding and measures 8.4%.
+    ///
+    /// **Honest caveat: 8.4% is barely different from 8.3% measured with the deadband OFF
+    /// entirely** (excess unconditionally added, `grounded` short-circuited to always-true) on
+    /// the same `diag_support` run. The excess term this deadband withholds is a SMALL
+    /// contributor to this particular leak; the dominant one is the never-gated linear term
+    /// (`phi = x` below capacity), which by the elevation-consistency argument above cannot be
+    /// gated without reproducing the far worse (55.2%) failure. So this deadband is real and
+    /// correctly derived -- it removes the one component that CAN be safely withheld -- but it is
+    /// not, by itself, what gets `diag_support` close to zero. Report this residual honestly
+    /// rather than as a solved acceptance criterion 4.
+    ///
+    /// Derived, not fitted: `support_mass` is the EXACT aggregate of real fine overfill
+    /// (`sum((h_i - cap_i).max(0))`, computed straight from fine heights in `restrict`, using the
+    /// same per-cell capacity the fine solver's own `o = (h - cap) / cap` uses). No epsilon
+    /// constant anywhere in the decision -- the measured margin (worst falling-dominated tile at
+    /// 0.9809, §3) was already thinner than any fitted constant could safely cover.
+    ///
+    /// **Known residual, not fully closed: 8.4%, not 0%.** The mixed tile (part stream, part
+    /// pool) is the case I5 names as deciding this, and it is not fully solved here: as soon as
+    /// ANY fine cell in a tile is compressed, `grounded[C]` is true and the WHOLE tile's pressure
+    /// excess -- including whatever falling material shares that same tile, e.g. the impact zone
+    /// directly above a pool's surface -- unlocks. This is bounded to that one tile's footprint
+    /// (§7's potential coupling applies per tile, not per fine cell, so finer-than-a-tile
+    /// discrimination is not available without abandoning the tile-granular coupling itself) but
+    /// not eliminated. Treat
+    /// §10's "this is the single largest unaddressed risk" as still true for the mixed-tile case
+    /// specifically, and re-measure `diag_support` after any further change here.
+    pub fn update_head_and_disagreement(&mut self, base_head: f32, geo: &CoarseGeometry, unit: f32) {
+        if !geo.available {
+            self.eta.iter_mut().for_each(|v| *v = 0.0);
+            self.p_coarse.iter_mut().for_each(|v| *v = 0.0);
+            self.delta.iter_mut().for_each(|v| *v = 0.0);
+            return;
+        }
+        let n = self.coarse_n;
+        let base_head_coarse = base_head * geo.t as f32;
+
+        for cy in 0..n {
+            for cx in 0..n {
+                let c = cy * n + cx;
+                let cap = geo.capacity[c];
+                let m = self.m_mass[c];
+                let a = self.a_mass[c];
+                self.delta[c] = m - a;
+                if cap > 0.0 && geo.inside[c] {
+                    let x = m / cap;
+                    // The elevation term (`- cy * base_head_coarse`) is NEVER gated, even for an
+                    // ungrounded tile: an earlier version zeroed `eta` outright when `!grounded`,
+                    // which measured WORSE (55.2%, up from 8.4%) than gating the pressure term
+                    // alone -- zeroing eta strips the elevation baseline too, so a grounded tile
+                    // deep in the grid (large `cy`, large `-cy*base_head_coarse`) sitting next to
+                    // an ungrounded one reads a huge SPURIOUS `delta_eta` from elevation ALONE,
+                    // worsening exactly at depth. Only `phi` -- the fill/pressure part -- is
+                    // gated, and even then only its excess-above-capacity component: below
+                    // capacity (`x <= 1`) `phi = x` unconditionally, since that is the harmless
+                    // "water table" term U-tube levelling needs (§0.3) even between two arms
+                    // neither of which is anywhere near capacity. Above capacity, an ungrounded
+                    // tile's `phi` is capped at its capacity ceiling (`1.0`, not `x`): the excess
+                    // pressure is exactly what the deadband exists to withhold.
+                    let phi = if x <= 1.0 {
+                        x
+                    } else if self.grounded[c] {
+                        x + unit * (x - 1.0)
+                    } else {
+                        1.0
+                    };
+                    self.eta[c] = phi - cy as f32 * base_head_coarse;
+                    self.p_coarse[c] = (phi - x).max(0.0);
+                } else {
+                    self.eta[c] = 0.0;
+                    self.p_coarse[c] = 0.0;
+                }
+            }
+        }
+    }
+
+    /// Full tick update (Step 1 -> Step 2 -> Step 3 -> Step 4).
+    pub fn tick(&mut self, heights: &[f32], shape_mask: &[u8], cell_props: &[f32], base_head: f32, geo: &CoarseGeometry, unit: f32) {
+        if !geo.available {
+            return;
+        }
+        self.restrict(heights, shape_mask, cell_props, geo);
+        self.compute_grounded(geo);
+        self.anchor(geo);
+        self.relax(self.sweeps_n, base_head, geo, unit);
+        self.update_head_and_disagreement(base_head, geo, unit);
+    }
+
+    /// Reset coarse mass M to match current aggregated mass A (e.g. on flip or shape change).
+    pub fn reset_to_aggregated(&mut self) {
+        self.m_mass.copy_from_slice(&self.a_mass);
+        self.delta.iter_mut().for_each(|v| *v = 0.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,5 +1064,134 @@ mod tests {
 
         // A square inscribed the same way as the circle covers more area, so this should differ.
         assert_ne!(circle_open, square_open);
+    }
+
+    /// Step 2 unit test: restriction preserves total mass exactly across all tiles.
+    #[test]
+    fn restriction_preserves_total_mass() {
+        let grid = 128usize;
+        let mut sim = DrawingSimulation::new_with_size(grid);
+        sim.sandbox_shape = SandboxShape::Circle;
+        sim.generate_shape_mask();
+        assert!(sim.coarse.available);
+
+        // Fill circle with a gradient of fine mass
+        let mut fine_mass_total = 0.0f32;
+        for y in 0..grid {
+            for x in 0..grid {
+                let idx = y * grid + x;
+                if sim.shape_mask[idx] != MASK_OUTSIDE {
+                    let val = (x + y) as f32 * 0.01;
+                    sim.heightmap.data[idx] = val;
+                    fine_mass_total += val;
+                }
+            }
+        }
+
+        let mut state = CoarseState::new(sim.coarse.coarse_n);
+        state.restrict(&sim.heightmap.data, &sim.shape_mask, &sim.cell_props, &sim.coarse);
+
+        let coarse_mass_total: f32 = state.a_mass.iter().sum();
+        let diff = (fine_mass_total - coarse_mass_total).abs();
+        let rel_err = diff / fine_mass_total;
+        assert!(
+            rel_err < 1e-4,
+            "restriction lost mass: fine={fine_mass_total}, coarse={coarse_mass_total}, diff={diff}, rel_err={rel_err}"
+        );
+    }
+
+    /// Step 2 unit test: anchoring pulls M toward A by exactly lambda.
+    #[test]
+    fn anchor_pulls_coarse_mass_toward_fine_mass() {
+        let grid = 128usize;
+        let mut sim = DrawingSimulation::new_with_size(grid);
+        sim.sandbox_shape = SandboxShape::Square;
+        sim.generate_shape_mask();
+
+        let mut state = CoarseState::new(sim.coarse.coarse_n);
+        state.lambda = 0.25;
+
+        // Pick an inside tile
+        let target_idx = sim.coarse.idx(sim.coarse.coarse_n / 2, sim.coarse.coarse_n / 2);
+        assert!(sim.coarse.inside[target_idx], "target tile must be inside");
+
+        state.a_mass[target_idx] = 10.0;
+        state.m_mass[target_idx] = 0.0;
+
+        state.anchor(&sim.coarse);
+        assert!(
+            (state.m_mass[target_idx] - 2.5).abs() < 1e-5,
+            "M should be pulled to 2.5: got {}",
+            state.m_mass[target_idx]
+        );
+
+        state.anchor(&sim.coarse);
+        assert!(
+            (state.m_mass[target_idx] - 4.375).abs() < 1e-5,
+            "M should be pulled to 4.375: got {}",
+            state.m_mass[target_idx]
+        );
+    }
+
+    /// Step 2 unit test: coarse relaxation transfers mass downward under gravity and levels eta.
+    #[test]
+    fn coarse_relaxation_propagates_hydrostatic_head_downward() {
+        let grid = 128usize;
+        let mut sim = DrawingSimulation::new_with_size(grid);
+        sim.sandbox_shape = SandboxShape::Square;
+        sim.generate_shape_mask();
+
+        let mut state = CoarseState::new(sim.coarse.coarse_n);
+        let base_head = 1.0f32;
+        let unit = 50.0f32;
+        let n = sim.coarse.coarse_n;
+        let cx = n / 2;
+
+        // Find range of cy where tiles in column cx are inside
+        let mut cy_inside = Vec::new();
+        for cy in 0..n {
+            let idx = cy * n + cx;
+            if sim.coarse.inside[idx] && sim.coarse.capacity[idx] > 0.0 {
+                cy_inside.push(cy);
+                state.m_mass[idx] = sim.coarse.capacity[idx]; // exactly 1.0 nominal fill
+            }
+        }
+        assert!(cy_inside.len() >= 4, "must have at least 4 inside tiles in column");
+        let cy_top = *cy_inside.first().unwrap();
+        let cy_bot = *cy_inside.last().unwrap();
+        let idx_top = cy_top * n + cx;
+        let idx_bot = cy_bot * n + cx;
+
+        // This test drives `relax`/`update_head_and_disagreement` directly, bypassing `restrict`
+        // -- so `support_mass` (the I5 deadband's gate, see that field's doc comment) is never
+        // populated from real fine heights the way `tick()` would populate it. The bottom tile of
+        // a closed column IS genuinely supported (it rests on the container floor), so register
+        // that directly, mirroring what `restrict` would find if this were driven by real fine
+        // data resting at the base of the column.
+        state.support_mass[idx_bot] = 1.0;
+        state.compute_grounded(&sim.coarse);
+
+        let m_top_initial = state.m_mass[idx_top];
+        let m_bot_initial = state.m_mass[idx_bot];
+
+        // Relax for 64 sweeps
+        state.relax(64, base_head, &sim.coarse, unit);
+        state.update_head_and_disagreement(base_head, &sim.coarse, unit);
+
+        let m_top_after = state.m_mass[idx_top];
+        let m_bot_after = state.m_mass[idx_bot];
+
+        assert!(
+            m_bot_after > m_bot_initial,
+            "bottom tile mass should increase under gravity: initial={m_bot_initial}, after={m_bot_after}"
+        );
+        assert!(
+            m_top_after < m_top_initial,
+            "top tile mass should decrease under gravity: initial={m_top_initial}, after={m_top_after}"
+        );
+        assert!(
+            state.p_coarse[idx_bot] > 0.0,
+            "bottom tile should have positive hydrostatic pressure"
+        );
     }
 }

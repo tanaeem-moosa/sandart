@@ -14,7 +14,7 @@ fn main() {
             let ratio = (overfill_ceiling_for(stiff) - 1.0).max(0.0);
             let (cap, cap_eff) = (1.0f32, 1.0 * (1.0 + ratio));
             let t = |h_a: f32, h_b: f32| overfill_equilibrium_transfer(
-                h_a, cap, h_b, cap, cap_eff, cap_eff, g, 0.0, 1.0, 1.0, ratio, unit, 1.0);
+                h_a, cap, h_b, cap, cap_eff, cap_eff, g, 0.0, 0.0, 1.0, 1.0, ratio, unit, 1.0);
             let d_empty = t(1.0, 0.0);
             let d_half = t(1.0, 0.5);
             let d_full = t(1.0, 1.0);
@@ -32,7 +32,7 @@ fn main() {
             let ratio = (overfill_ceiling_for(stiff) - 1.0).max(0.0);
             let (cap, cap_eff) = (1.0f32, 1.0 * (1.0 + ratio));
             let t = |h_a: f32, h_b: f32| overfill_equilibrium_transfer(
-                h_a, cap, h_b, cap, cap_eff, cap_eff, 0.0, 0.0, 1.0, 1.0, ratio, unit, 1.0);
+                h_a, cap, h_b, cap, cap_eff, cap_eff, 0.0, 0.0, 0.0, 1.0, 1.0, ratio, unit, 1.0);
             println!("{:<10} {:>8.1} {:>14.5} {:>16.5}", w, stiff, t(1.01, 1.00), t(1.10, 1.00));
         }
     }
