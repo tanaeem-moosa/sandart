@@ -887,32 +887,17 @@ Guard rails that must hold throughout: mass conservation (asserted in several sp
 `cargo test -p sandart-sim --release --test perfect_simulation_determinism`. `last_simulated_ticks`
 already exists to let a block know how much simulated time it missed.
 
-### Hierarchical pressure — the current proposal for lateral movement at 512
+### Hierarchical multi-level simulation — lateral movement & adaptive clocking at 512
 
-`artifacts/design/HIERARCHICAL-PRESSURE.md` (2026-08-18). Reviewed once and substantially revised —
-two of the first draft's three load-bearing claims were wrong and are marked as such in its §0.
+`artifacts/design/HIERARCHICAL-PRESSURE.md` (2026-08-18). **READ `artifacts/design/HIERARCHICAL-PRESSURE-PROGRESS.md` FIRST** for live status and design evolution.
 
-**No longer design-only. READ `artifacts/design/HIERARCHICAL-PRESSURE-PROGRESS.md` FIRST**, before
-the design itself: build steps 1 and the block resize are done, verified and committed; step 0 is
-mid-re-run; and the user has since settled two questions the design left open, one of which the
-design contradicts outright. That file also lists the design's numbers that measurement corrected,
-so reading the design cold will now mislead you.
-
-The measurement that motivates it: at 512 a settled pool carries **6% of its own hydrostatic
-pressure** after 1500 ticks (24% at 128, 13% at 256), because in a penalty model pressure must be
-*earned* by mass transfer at `~1/unit` per tick while each row of depth *needs* `1/unit` of
-compression — the same constant on both sides. Establishing hydrostatic pressure costs ~125 ticks
-per row of depth at 512. That is the U-tube not rising and the pile not settling; it is neither the
-CFL clamp nor diffusion.
-
-The identity behind it, `R * tau = o_max` (representable depth x saturated transfer), is why the
-stiffness dial fails in both directions: depth and speed are the same budget. Read §1 before
-proposing any constant change.
-
-**Read §0 before doing anything with this.** One unresolved question — whether deep coarse tiles pin
-at the ceiling, which would make the coarse driving force vanish at exactly the depth it exists to
-supply — can kill the whole approach and is falsifiable offline with no new code paths (build
-step 0).
+**Current Build State (as of 2026-08-19):**
+- **Step 0 (Coarse Law Falsification):** Unbounded law validated (reaches hydrostatic profile at $o=1.36$ without pinning).
+- **Step 1 (Coarse Geometry):** Built on 64x64 grid (`CoarseGeometry`), committed (`e50c0bc`).
+- **LOD Block Resize:** Block resized to `grid_size / 64` (4096 blocks) so block and pressure tile are identical, committed (`94d7390`).
+- **Step 2 (Restriction & Coarse State):** `CoarseState` built with restriction $A[C]$, persistent coarse mass memory $M[C]$, anchoring $\lambda=0.10$, relaxation ($N=16$), hydraulic head $\eta[C]$, and disagreement $\Delta[C] = M[C] - A[C]$. Tested and instrumented (`diag_coarse_step2.rs`).
+- **Step 3 (Fine-Coarse Potential Coupling):** Coarse head $\eta$ coupled into fine liquid solver with unified material continuity across wetness (Mohr-Coulomb yield stress $\tau_{\text{eff}} = \mu \cdot P_{\text{normal}}$ preserves dry sand angle of repose; fluid equalizes U-tubes; LUT thrashing prevented via closed-form $O(1)$ solve). All integration tests in `overfill_pressure_toggle` pass!
+- **Step 4 (Next to Build):** Dynamic priority-based multi-rate block scheduling ($\text{Priority}(b) = |\Delta[b]| + f(\text{tick\_count} - \text{last\_simulated\_ticks}[b])$).
 
 ### Smaller things
 

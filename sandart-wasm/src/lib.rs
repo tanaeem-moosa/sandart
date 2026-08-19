@@ -369,6 +369,7 @@ impl WasmSimulationState {
         let overfill_capacity = self.sim.overfill_capacity;
         let overfill_stiffness = self.sim.overfill_stiffness;
         let pressure_heatmap_overlay = self.sim.pressure_heatmap_overlay;
+        let coarse_pressure_coupling = self.sim.coarse_pressure_coupling;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -400,6 +401,10 @@ impl WasmSimulationState {
         sim.overfill_pressure = overfill_pressure;
         sim.overfill_capacity = overfill_capacity;
         sim.overfill_stiffness = overfill_stiffness;
+        // Same reasoning again: a UI debug toggle, not simulation state -- must survive a
+        // resolution rebuild like its siblings above rather than reverting to the fresh sim's
+        // (also `true`) default and silently discarding an explicit user choice to turn it off.
+        sim.coarse_pressure_coupling = coarse_pressure_coupling;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -777,6 +782,17 @@ impl WasmSimulationState {
     /// "Per-cell overfill pressure simulation" toggle (task #70): forwarded straight to the sim.
     pub fn set_overfill_pressure(&mut self, enabled: bool) {
         self.sim.overfill_pressure = enabled;
+    }
+
+    /// "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md): forwarded straight to
+    /// the sim, a plain field write (same shape as `set_overfill_pressure` just above -- no
+    /// reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
+    /// `DrawingSimulation::coarse_pressure_coupling`'s doc comment in sandart-sim/src/lib.rs for
+    /// what it switches: `true` (default, unlike its sibling toggles) is today's shipped coarse
+    /// level, coupled into the fine solver; `false` disables both the coarse level's own per-tick
+    /// work AND its contribution to any fine edge, reproducing pre-coupling behaviour exactly.
+    pub fn set_coarse_pressure_coupling(&mut self, enabled: bool) {
+        self.sim.coarse_pressure_coupling = enabled;
     }
 
     /// "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.

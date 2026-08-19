@@ -827,6 +827,17 @@
                     <input type="checkbox" id="check-pressure-heatmap" checked>
                     <span class="checkmark"></span>
                 </label>
+                <!-- Coarse pressure coupling (HIERARCHICAL-PRESSURE.md): a background 64x64 tile
+                     level that supplies driving hydraulic head to the fine solver so distant
+                     material can equalise faster than the fine flux solver alone. On by default,
+                     unlike the other Debug toggles -- this is the feature being evaluated, so the
+                     deployed page should show it working. Turn off to A/B against the pre-coupling
+                     behaviour. -->
+                <label class="checkbox-container">
+                    Coarse pressure coupling
+                    <input type="checkbox" id="check-coarse-coupling" checked>
+                    <span class="checkmark"></span>
+                </label>
                 <!-- Legend for the overfill heat-map's decile colouring. Hidden unless that
                      colouring is actually what is on screen (overfill model on AND overlay on),
                      because under any other source the colours are an absolute scale and these

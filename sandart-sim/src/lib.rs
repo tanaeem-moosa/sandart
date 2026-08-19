@@ -411,6 +411,33 @@ pub struct DrawingSimulation {
     /// pressure P, and coarse-fine disagreement Delta.
     pub coarse_state: CoarseState,
 
+    /// "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md build step 3). Same
+    /// shape as `overfill_pressure`/`head_field_transport`/`pressure_sensitive_flow`/
+    /// `fresh_pressure_field` above: a plain UI-facing field, forwarded straight through, no
+    /// reset. **Defaults to `true`**, unlike its siblings -- this is the one debug toggle in the
+    /// group that ships ON, because the point of shipping it at all is for the coarse level to be
+    /// visible by default, with the toggle available to switch it back off for an A/B comparison.
+    ///
+    /// `true` (default): today's coupled behaviour, unchanged -- `update()` runs
+    /// `coarse_state.tick(...)` every tick (restrict / anchor / advance the nested coarse sim /
+    /// export eta+delta) and `settle_tick` receives `&coarse_state.eta` / `&coarse_state.delta`
+    /// whenever `coarse.available`, exactly as before this toggle existed.
+    ///
+    /// `false`: BOTH halves of the coupling are removed, not just one.
+    /// - `update()` skips the `coarse_state.tick(...)` call entirely -- restriction, anchoring,
+    ///   and the nested 64x64 solver step all stop running, so the toggle also measures the
+    ///   coarse level's own per-tick cost, not just its effect on the fine grid.
+    /// - `settle_tick` is called with empty `coarse_eta`/`coarse_delta` slices, the exact same
+    ///   "not coupled" signal `coarse.available == false` already produces (see
+    ///   `physics::coarse_delta_eta`'s doc comment) -- so `settle_tick` takes the identical
+    ///   code path it took before this coupling existed. `coarse_state`'s own buffers (`eta`,
+    ///   `delta`, `m_mass`, ...) are left exactly as they last were (frozen, not zeroed) while
+    ///   off; they resume from wherever they were the instant this is flipped back on.
+    ///
+    /// This makes the OFF path bit-identical to a build with the coupling removed: no coarse
+    /// contribution reaches any edge, and the coarse level's own state does not advance.
+    pub coarse_pressure_coupling: bool,
+
     /// STEP3-ADAPTIVE-COARSE.md (incremental restriction): per-BLOCK "did this block's fine
     /// heights possibly change this tick" flags, filled by `settle_tick`'s `touched_out`
     /// parameter at the end of whichever tick most recently actually ran the fine solver. Read
@@ -862,6 +889,9 @@ impl DrawingSimulation {
             // meaningful to build from yet.
             coarse: CoarseGeometry::empty(grid_size),
             coarse_state: CoarseState::new(COARSE_GRID),
+            // Defaults ON -- see this field's own doc comment for why it differs from every
+            // other debug toggle in the group, which default off.
+            coarse_pressure_coupling: true,
             blocks_touched: Vec::new(),
             active_blocks,
             last_displacements,
@@ -1702,7 +1732,7 @@ impl DrawingSimulation {
         // Coarse pressure state update (HIERARCHICAL-PRESSURE.md §5, build step 2 & 3).
         // Restricts fine mass into A, anchors M toward A, relaxes M across the coarse graph,
         // and updates coarse hydraulic head (eta), pressure (P), and coarse-fine disagreement (Delta).
-        if self.coarse.available {
+        if self.coarse.available && self.coarse_pressure_coupling {
             // STEP4-COARSE-IS-A-SIM.md: the coarse level's own dynamics now run the shipped
             // solver over a nested grid (`CoarseState::advance_nested_sim`), so it needs the
             // real `gravity_dir` (not a pre-scaled scalar `base_head`) and the real overfill
@@ -1792,10 +1822,13 @@ impl DrawingSimulation {
                     // it is not coupled this tick -- `coarse_delta_eta` in physics.rs relies on
                     // emptiness, not buffer length, to detect "not available", since
                     // `CoarseState`'s buffers stay sized `COARSE_GRID * COARSE_GRID` regardless.
-                    if self.coarse.available { &self.coarse_state.eta } else { &[] },
+                    // Also empty whenever the debug toggle is off (see `coarse_pressure_coupling`'s
+                    // own doc comment) -- same signal, same reason: `settle_tick` must take the
+                    // exact pre-coupling code path when the toggle is off.
+                    if self.coarse.available && self.coarse_pressure_coupling { &self.coarse_state.eta } else { &[] },
                     // Same emptiness contract, for I4's per-tile flux budget (§6): `|Delta[C]|`
                     // per tile, consumed by `coarse_delta_eta_budgeted` in physics.rs.
-                    if self.coarse.available { &self.coarse_state.delta } else { &[] },
+                    if self.coarse.available && self.coarse_pressure_coupling { &self.coarse_state.delta } else { &[] },
                     Some(&mut self.blocks_touched),
                 );
             }
