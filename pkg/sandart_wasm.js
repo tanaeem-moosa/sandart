@@ -75,6 +75,20 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * EARLY-STOP.md: `[executed_block_steps, block_count]` for the console footer's "steps"
+     * readout. `executed_block_steps` is `DrawingSimulation::last_frame_block_steps` -- the
+     * ACTUAL count of per-block interior sweeps the most recent `update()` call ran, summed
+     * across every repetition of its rep loop, not the rate-implied budget. `block_count` is
+     * `active_blocks.len()`, the fixed denominator the ratio is read against. Both are `i32`
+     * (never negative at these grid sizes) so the pair fits a plain `Int32Array`, same pattern as
+     * `get_active_block_counts` just above.
+     * @returns {Int32Array}
+     */
+    get_block_step_stats() {
+        const ret = wasm.wasmsimulationstate_get_block_step_stats(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @returns {number}
      */
     get_budget_n() {
