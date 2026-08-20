@@ -1,20 +1,25 @@
 //! Empirical proof of three things about the "coarse pressure coupling" debug toggle
-//! (`DrawingSimulation::coarse_pressure_coupling`, HIERARCHICAL-PRESSURE.md):
+//! (`DrawingSimulation::coarse_pressure_coupling`, HIERARCHICAL-PRESSURE.md, OVERCLOCKING.md):
 //!
-//! 1. Left at its default (`true`) is indistinguishable from explicitly setting it `true`.
-//! 2. Explicitly setting it `false` actually changes behaviour (the toggle is not a placebo).
+//! 1. Left at its default (`false`, since OVERCLOCKING.md split this toggle's meaning -- see the
+//!    field's own doc comment) is indistinguishable from explicitly setting it `false`.
+//! 2. Explicitly setting it `true` actually changes behaviour (the toggle is not a placebo).
 //! 3. Setting it `false` is BIT-IDENTICAL to the coarse level being structurally unavailable
 //!    (`CoarseGeometry::available == false`, the same "not coupled" signal grid 64 has always
 //!    produced, predating this toggle) -- the strongest evidence available from this crate's
-//!    public surface that the OFF path reproduces pre-coupling behaviour exactly, since
-//!    `coarse.available` gates the exact same two call sites in `DrawingSimulation::update` that
-//!    the toggle gates (see that field's own doc comment in `sandart-sim/src/lib.rs`), and both
-//!    are the ONLY two places anything in this crate reads `coarse.available` at all (verified by
-//!    `grep`, recorded in the design doc this test accompanies).
+//!    public surface that the OFF path reproduces pre-coupling behaviour exactly on the buffers
+//!    this checksum covers. This still holds even though the coarse level's OWN per-tick
+//!    dynamics (`coarse_state.tick`) now run unconditionally whenever `coarse.available` (no
+//!    longer gated by this toggle -- OVERCLOCKING.md, so the multi-rate scheduler can see
+//!    `|Delta|` regardless of whether the driving-potential coupling is on): that machinery only
+//!    ever writes into `coarse_state`'s own buffers, which this checksum does not cover, and it
+//!    reaches `heightmap`/`cell_colors`/`cell_props` (what IS checksummed) only via
+//!    `coarse_eta`/`coarse_delta` passed to `settle_tick`, which stay empty whenever
+//!    `coarse_pressure_coupling` is off.
 //!
 //! This mirrors `fresh_pressure_field_toggle.rs`/`overfill_pressure_toggle.rs`'s
-//! `*_left_untouched_matches_explicitly_disabled` / `*_enabled_diverges_from_default` pattern,
-//! flipped for a toggle that (deliberately, unlike its siblings) defaults ON.
+//! `*_left_untouched_matches_explicitly_disabled` / `*_enabled_diverges_from_default` pattern --
+//! now the same shape as its siblings, since this toggle no longer defaults ON.
 
 use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape};
 use glam::Vec2;
@@ -64,27 +69,28 @@ fn run(touch: impl FnOnce(&mut DrawingSimulation), ticks: usize) -> u64 {
 }
 
 #[test]
-fn coarse_pressure_coupling_left_untouched_matches_explicitly_enabled() {
+fn coarse_pressure_coupling_left_untouched_matches_explicitly_disabled() {
     let untouched = run(|_sim| {}, 500);
-    let explicitly_on = run(|sim| sim.coarse_pressure_coupling = true, 500);
+    let explicitly_off = run(|sim| sim.coarse_pressure_coupling = false, 500);
     assert_eq!(
-        untouched, explicitly_on,
+        untouched, explicitly_off,
         "never touching coarse_pressure_coupling must be indistinguishable from explicitly \
-         setting it true -- the field's default (set in DrawingSimulation::new_with_size) must be \
-         true, matching this toggle's deliberately-on-by-default contract"
+         setting it false -- the field's default (set in DrawingSimulation::new_with_size) must \
+         be false (OVERCLOCKING.md: 'let's leave the coupling behind a flag until we are happy \
+         with overclocking'), matching this toggle's now off-by-default contract"
     );
 }
 
 #[test]
-fn coarse_pressure_coupling_disabled_diverges_from_default() {
-    let default_on = run(|_sim| {}, 500);
-    let forced_off = run(|sim| sim.coarse_pressure_coupling = false, 500);
+fn coarse_pressure_coupling_enabled_diverges_from_default() {
+    let default_off = run(|_sim| {}, 500);
+    let forced_on = run(|sim| sim.coarse_pressure_coupling = true, 500);
     assert_ne!(
-        default_on, forced_off,
-        "coarse_pressure_coupling=false produced byte-identical output to the default coupled \
+        default_off, forced_on,
+        "coarse_pressure_coupling=true produced byte-identical output to the default uncoupled \
          path in a U-tube scenario over 500 ticks -- either the toggle isn't reaching \
-         DrawingSimulation::update's two gate sites, or this scenario happens not to exercise a \
-         tick where coarse.available is true (it should be, at grid 128)"
+         DrawingSimulation::update's coupling gate site, or this scenario happens not to exercise \
+         a tick where coarse.available is true (it should be, at grid 128)"
     );
 }
 
@@ -104,9 +110,11 @@ fn coarse_pressure_coupling_off_matches_coarse_geometry_forced_unavailable() {
     let toggle_off = run(|sim| sim.coarse_pressure_coupling = false, 500);
     let geometry_forced_unavailable = run(
         |sim| {
-            // Leave coarse_pressure_coupling at its default (true) -- the point is that
-            // coarse.available alone must be enough to reproduce the toggle-off output, proving
-            // the two conditions are truly redundant once either is false.
+            // Explicitly enable coarse_pressure_coupling (now off by default) so this exercises
+            // the interesting case: coupling WANTS to run, but coarse.available says the coarse
+            // level cannot supply anything this tick. coarse.available must be enough on its own
+            // to reproduce the toggle-off output regardless of the toggle's own value.
+            sim.coarse_pressure_coupling = true;
             sim.coarse.available = false;
         },
         500,

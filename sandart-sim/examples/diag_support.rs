@@ -11,12 +11,16 @@ fn main() {
         Some("utube") => SandboxShape::UTubeFlowThrough,
         _ => SandboxShape::Hourglass,
     };
+    // OVERCLOCKING.md criterion 4: does the multi-rate block scheduler let a falling stream
+    // acquire spurious pressure? 5th arg "overclock" turns it on; default off.
+    let overclock = std::env::args().nth(4).as_deref() == Some("overclock");
     let mut sim = DrawingSimulation::new_with_size(grid);
     sim.sandbox_shape = shape;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(MaterialMode::Water);
     sim.initialize_hourglass();
     sim.overfill_pressure = true;
+    sim.overclocking_enabled = overclock;
     let targets = [None; 5];
     for _ in 0..ticks {
         sim.budget_n = 1024;

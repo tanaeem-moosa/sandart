@@ -897,7 +897,11 @@ already exists to let a block know how much simulated time it missed.
 - **LOD Block Resize:** Block resized to `grid_size / 64` (4096 blocks) so block and pressure tile are identical, committed (`94d7390`).
 - **Step 2 (Restriction & Coarse State):** `CoarseState` built with restriction $A[C]$, persistent coarse mass memory $M[C]$, anchoring $\lambda=0.10$, relaxation ($N=16$), hydraulic head $\eta[C]$, and disagreement $\Delta[C] = M[C] - A[C]$. Tested and instrumented (`diag_coarse_step2.rs`).
 - **Step 3 (Fine-Coarse Potential Coupling):** Coarse head $\eta$ coupled into fine liquid solver with unified material continuity across wetness (Mohr-Coulomb yield stress $\tau_{\text{eff}} = \mu \cdot P_{\text{normal}}$ preserves dry sand angle of repose; fluid equalizes U-tubes; LUT thrashing prevented via closed-form $O(1)$ solve). All integration tests in `overfill_pressure_toggle` pass!
-- **Step 4 (Next to Build):** Dynamic priority-based multi-rate block scheduling ($\text{Priority}(b) = |\Delta[b]| + f(\text{tick\_count} - \text{last\_simulated\_ticks}[b])$).
+- **Step 4:** **DONE** (2026-08-19) -- dynamic priority-based multi-rate block scheduling, from
+  `|Delta[b]|` and `tick_count - last_simulated_ticks[b]`. See
+  `artifacts/design/OVERCLOCKING.md` for the design, measurements, and the `overclocking_enabled`
+  / `coarse_pressure_coupling` toggle split (the latter now defaults OFF, gating only the
+  driving-potential coupling; the coarse level's own tick runs unconditionally).
 
 ### Smaller things
 

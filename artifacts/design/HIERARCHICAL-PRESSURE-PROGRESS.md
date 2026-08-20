@@ -19,7 +19,7 @@ been seen running by the only visual instrument there is (the user).
 | 2 | Restriction + instrumentation (`A`, `M`, `eta`, `Delta`) | **DONE**, `f670cd48` |
 | 3 | Couple the coarse head into the fine solver | **DONE**, `f670cd48` + `409913bf` + `5893c6ae` |
 | — | Debug toggle + ON/OFF A/B | in flight |
-| 4 | Fine-level over/underclocking on `\|Delta\|` | **NOT STARTED** — the last unbuilt piece |
+| 4 | Fine-level over/underclocking on `\|Delta\|` | **DONE** (2026-08-19) — see `artifacts/design/OVERCLOCKING.md`. `overclocking_enabled` debug toggle, default off; `coarse_pressure_coupling` split (now gates only the driving-potential coupling, default off, coarse level's own tick runs unconditionally) |
 | 5 | Tune at scale | not started |
 
 **Acceptance criteria** (design §8), all four required simultaneously:

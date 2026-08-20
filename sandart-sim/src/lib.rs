@@ -46,6 +46,31 @@ pub const MASK_BOUNDARY: u8 = 2;
 /// up at all, not whether it's expected to move once it has.
 const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
 
+/// OVERCLOCKING.md: per-block clock rate is a power of two, `rate = 2^idx`, `idx` clamped to
+/// `[CLOCK_MIN_LOG2, CLOCK_MAX_LOG2]` -- i.e. rate in `[1/8, 8]`, per HIERARCHICAL-PRESSURE.md
+/// §7b's S1 ("powers of two, so clock domains nest instead of beating").
+const CLOCK_MIN_LOG2: i32 = -3;
+const CLOCK_MAX_LOG2: i32 = 3;
+
+/// The disagreement fraction (`|Delta[b]| / capacity[b]`, dimensionless) at which a block AT THE
+/// NEUTRAL 1x rate is judged to want to speed up. `update_block_clock_rates` scales this
+/// geometrically per level (doubling per octave up, per `2f32.powi(idx)`) so the same fractional
+/// rule applies at every rate, not just at 1x. Picked as a round, conservative number pending a
+/// larger tuning pass -- see OVERCLOCKING.md for the measured rate distribution this produces.
+const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
+
+/// F3 (hysteresis): the threshold to step a block's rate DOWN a level is this many octaves BELOW
+/// the threshold that would step it UP into that same level, so a single tick's fluctuation
+/// around one level's boundary can never bounce the rate back and forth -- see
+/// `update_block_clock_rates`'s doc comment for the exact bound.
+const CLOCK_HYSTERESIS_OCTAVES: i32 = 2;
+
+/// How strongly staleness (ticks since a block last ran) nudges its clock-rate signal upward.
+/// Deliberately only ever able to push a block toward a HIGHER rate (never suppress one) --
+/// "underclock conservatively" (HIERARCHICAL-PRESSURE.md §7b): a block that has gone a long time
+/// without running is treated as more urgent, not less.
+const CLOCK_STALENESS_WEIGHT: f32 = 0.03;
+
 /// Number of coarse time-buckets the block-simulation heat-map overlay's trailing window is
 /// divided into (see `DrawingSimulation::block_heat_buckets`). `HEAT_NUM_BUCKETS *
 /// HEAT_BUCKET_TICKS` is the ~300-tick window the task asked for.
@@ -434,9 +459,63 @@ pub struct DrawingSimulation {
     ///   `delta`, `m_mass`, ...) are left exactly as they last were (frozen, not zeroed) while
     ///   off; they resume from wherever they were the instant this is flipped back on.
     ///
-    /// This makes the OFF path bit-identical to a build with the coupling removed: no coarse
-    /// contribution reaches any edge, and the coarse level's own state does not advance.
+    /// "Coarse pressure coupling" debug toggle -- OVERCLOCKING.md split this field's meaning.
+    /// It now gates ONLY the driving-POTENTIAL half of the coupling: whether `settle_tick`
+    /// receives non-empty `coarse_eta`/`coarse_delta` (i.e. whether the coarse level's hydraulic
+    /// head reaches `phi`/`gravity_head` on any fine edge at all). It no longer gates the coarse
+    /// level's OWN per-tick dynamics -- `update()` now runs `coarse_state.tick(...)` (restrict /
+    /// anchor / advance the nested coarse sim / export eta+delta) unconditionally whenever
+    /// `coarse.available`, because the multi-rate block scheduler (`overclocking_enabled` below)
+    /// needs `|Delta|` regardless of whether the potential coupling is on. This also means the
+    /// coarse level's own per-tick cost is no longer part of what this toggle measures; it is now
+    /// a fixed cost whenever `coarse.available`.
+    ///
+    /// **Defaults to `false`** (changed from `true`) -- the user's own words: "let's leave the
+    /// coupling behind a flag until we are happy with overclocking." The coarse level runs and
+    /// its `|Delta|` drives the scheduler either way; only the driving-potential contribution to
+    /// the fine solver is gated by this flag, and that contribution ships off.
+    ///
+    /// `true`: `settle_tick` receives `&coarse_state.eta` / `&coarse_state.delta` whenever
+    /// `coarse.available`, exactly as before this split existed.
+    ///
+    /// `false`: `settle_tick` is called with empty `coarse_eta`/`coarse_delta` slices, the exact
+    /// same "not coupled" signal `coarse.available == false` already produces (see
+    /// `physics::coarse_delta_eta`'s doc comment) -- so `settle_tick` takes the identical code
+    /// path it took before this coupling existed. `coarse_state`'s own buffers (`eta`, `delta`,
+    /// `m_mass`, ...) keep advancing regardless (see above), so flipping this back on resumes
+    /// from a live, not frozen, state.
     pub coarse_pressure_coupling: bool,
+
+    /// OVERCLOCKING.md: the multi-rate block-scheduler debug toggle. Independent of
+    /// `coarse_pressure_coupling` above -- this consumes `|coarse_state.delta|` directly (never
+    /// `phi`/`gravity_head`), so it can be A/B'd on its own build regardless of whether the
+    /// driving-potential coupling is also on. Defaults `false`, like every other debug toggle
+    /// except `coarse_pressure_coupling`'s old default.
+    ///
+    /// `true`: `update()` derives a persistent per-block clock rate `block_clock_rate[b]` (a
+    /// power of two in `[1/8, 8]`) from `|Delta[b]|` and staleness (HIERARCHICAL-PRESSURE.md
+    /// §7b's "priority function based on amount of disagreement and last simulation time"), then
+    /// (a) skips a block whose rate is below 1x from the LOD scheduler's budget-tier competition
+    /// on ticks outside its own schedule (S2: MUST and STALE are never touched, so this can only
+    /// ever defer a low-priority sweep, never suppress a real one), and (b) for a block whose
+    /// rate is above 1x, runs `round(rate)` real sub-step repetitions of `settle_tick` this frame
+    /// instead of one (S1: powers of two nest; S3: every grid-neighbour of a forced block is
+    /// forced too, so a boundary edge is evaluated regardless of which side happens to own it by
+    /// grid index). Also repurposes `block_heat_texels()` to show clock rate instead of the
+    /// recent-activity heat -- see that function's doc comment.
+    ///
+    /// `false`: `block_clock_rate` is held at `1.0` everywhere and none of the above runs --
+    /// bit-identical to the tree before this toggle existed.
+    pub overclocking_enabled: bool,
+
+    /// OVERCLOCKING.md: persistent per-block clock rate, a power of two in `[1/8, 8]`, one entry
+    /// per LOD block -- same indexing as `active_blocks`/`last_displacements` (`cols * rows`,
+    /// `block_size == grid/64`). `1.0` (the neutral/default rate) everywhere while
+    /// `overclocking_enabled` is `false`. Persistent (not recomputed from scratch each tick)
+    /// because F2/F3 (one octave of change per tick, hysteresis) are properties of how this
+    /// value MOVES tick over tick, not of any single tick's inputs -- see
+    /// `update_block_clock_rates`'s doc comment.
+    pub block_clock_rate: Vec<f32>,
 
     /// STEP3-ADAPTIVE-COARSE.md (incremental restriction): per-BLOCK "did this block's fine
     /// heights possibly change this tick" flags, filled by `settle_tick`'s `touched_out`
@@ -891,7 +970,11 @@ impl DrawingSimulation {
             coarse_state: CoarseState::new(COARSE_GRID),
             // Defaults ON -- see this field's own doc comment for why it differs from every
             // other debug toggle in the group, which default off.
-            coarse_pressure_coupling: true,
+            // Defaults OFF -- see this field's own doc comment for why (OVERCLOCKING.md split
+            // it from the coarse level's own dynamics, which now run unconditionally).
+            coarse_pressure_coupling: false,
+            overclocking_enabled: false,
+            block_clock_rate: vec![1.0f32; cols * rows],
             blocks_touched: Vec::new(),
             active_blocks,
             last_displacements,
@@ -1039,6 +1122,10 @@ impl DrawingSimulation {
         self.active_blocks.fill(BlockActivity::Inactive);
         self.last_displacements.fill(0.0);
         self.last_simulated_ticks.fill(0);
+        // Simulation state, like the three buffers just above -- not a UI setting, so a reset
+        // clears it back to the neutral rate rather than carrying over whatever the scheduler
+        // had converged to before. `overclocking_enabled` itself (the debug toggle) is untouched.
+        self.block_clock_rate.fill(1.0);
         // Keep in sync with `new_with_size`'s `budget_n` initialisation above.
         self.budget_n = 1024;
         self.ema_frame_ms = 33.3;
@@ -1200,12 +1287,172 @@ impl DrawingSimulation {
         &self.quantile_targets
     }
 
+    /// OVERCLOCKING.md (HIERARCHICAL-PRESSURE.md §7b): update the persistent per-block clock rate
+    /// from coarse-fine disagreement and staleness -- the user's own words, "a priority function
+    /// based on amount of disagreement and last simulation time". Block index and coarse tile
+    /// index coincide (`block_size == grid/64 == COARSE_GRID`), so `coarse_state.delta[b]` and
+    /// `coarse.capacity[b]` are read directly at index `b`.
+    ///
+    /// F2 (at most one octave of rate change per tick) and F3 (hysteresis) both fall directly out
+    /// of this update rule, not out of a separate check:
+    /// - `idx` (the rate's log2) moves by at most `+/-1` per call -- F2 by construction.
+    /// - The threshold to move UP from level `idx` is `CLOCK_DELTA_REF_FRAC * 2^idx`; the
+    ///   threshold to move DOWN from level `idx` is `CLOCK_DELTA_REF_FRAC *
+    ///   2^(idx - CLOCK_HYSTERESIS_OCTAVES)`, i.e. `CLOCK_HYSTERESIS_OCTAVES` octaves lower. A
+    ///   signal that just crossed the up-threshold for level `idx+1` cannot immediately cross
+    ///   back down out of `idx+1` (its down-threshold is `2^CLOCK_HYSTERESIS_OCTAVES` = 4x
+    ///   smaller than what it just cleared), which is F3's hysteresis band.
+    ///
+    /// Staleness only ever pushes the signal UP (`1.0 + staleness * CLOCK_STALENESS_WEIGHT`,
+    /// never a divisor) -- "underclock conservatively" (§7b): a block that has not run in a while
+    /// is treated as more urgent to run, never less, since missed transport is lost, not deferred
+    /// (the `+/-1.0` clamp in `flux_edge_candidate` means a block cannot catch up on waking).
+    ///
+    /// Does nothing (leaves `block_clock_rate` at whatever it was) if the coarse level's buffers
+    /// are not sized to match -- the caller's `overclocking_enabled && coarse.available` guard is
+    /// the normal reason this would be skipped, this is a defensive fallback.
+    fn update_block_clock_rates(&mut self) {
+        let n = self.block_clock_rate.len();
+        if self.coarse_state.delta.len() != n || self.coarse.capacity.len() != n
+            || self.last_simulated_ticks.len() != n {
+            return;
+        }
+        for b in 0..n {
+            let cap = self.coarse.capacity[b].max(1e-6);
+            let delta_frac = (self.coarse_state.delta[b].abs() / cap).max(0.0);
+            let staleness = self.tick_count.wrapping_sub(self.last_simulated_ticks[b]).min(1000) as f32;
+            let signal = delta_frac * (1.0 + staleness * CLOCK_STALENESS_WEIGHT);
+
+            let cur_idx = (self.block_clock_rate[b].max(1e-6).log2().round() as i32)
+                .clamp(CLOCK_MIN_LOG2, CLOCK_MAX_LOG2);
+            let up_thresh = CLOCK_DELTA_REF_FRAC * 2f32.powi(cur_idx);
+            let down_thresh = CLOCK_DELTA_REF_FRAC * 2f32.powi(cur_idx - CLOCK_HYSTERESIS_OCTAVES);
+            let new_idx = if signal > up_thresh && cur_idx < CLOCK_MAX_LOG2 {
+                cur_idx + 1
+            } else if signal < down_thresh && cur_idx > CLOCK_MIN_LOG2 {
+                cur_idx - 1
+            } else {
+                cur_idx
+            };
+            self.block_clock_rate[b] = 2f32.powi(new_idx);
+        }
+    }
+
+    /// S2 (HIERARCHICAL-PRESSURE.md §7b: "underclocked means does not sweep its interior, NOT
+    /// frozen"). For a block whose rate is below 1x AND is not currently MUST-worthy
+    /// (`last_displacements[b] < MUST_SIMULATE_THRESHOLD` -- so this never touches a block with
+    /// real work to do), zero its recorded displacement on ticks outside its own schedule so
+    /// `settle_tick`'s classification loop (physics.rs) does not admit it into the budget-tier
+    /// `rest_candidates` this tick. MUST and STALE are never touched here -- the staleness floor
+    /// (`MAX_STALENESS` in physics.rs) stays the independent backstop the design requires, and
+    /// the existing `activate_neighbor` machinery (untouched) still lets a skipped block receive
+    /// mass from a running neighbour and be copied back. This is deliberately the ONLY mechanism
+    /// by which underclocking has any effect: it can defer a low-priority sweep, it can never
+    /// cancel a real one.
+    ///
+    /// `phase = b % period` spreads underclocked blocks' scheduled ticks across the period
+    /// instead of every block at a given rate waking on the same tick.
+    fn apply_underclock_skip(&mut self) {
+        let n = self.block_clock_rate.len().min(self.last_displacements.len());
+        for b in 0..n {
+            let rate = self.block_clock_rate[b];
+            if rate >= 1.0 {
+                continue;
+            }
+            if self.last_displacements[b] >= physics::MUST_SIMULATE_THRESHOLD {
+                continue;
+            }
+            let period = (1.0 / rate).round().max(1.0) as u32;
+            let phase = (b as u32) % period;
+            if self.tick_count % period != phase {
+                self.last_displacements[b] = 0.0;
+            }
+        }
+    }
+
+    /// S3 (HIERARCHICAL-PRESSURE.md §7b: "edge ownership must follow the FASTER block" -- "the
+    /// most likely place for a multi-rate scheme to lose mass or stall a front"). `update()`
+    /// calls `settle_tick` again within the SAME rendered frame for a block's extra sub-step
+    /// repetitions. Edges are owned by their lower-index cell (see physics.rs), so on a
+    /// repetition where a fast block runs but its slower neighbour does not, a boundary edge
+    /// whose owner happens to be that slower (non-running) neighbour would silently never be
+    /// evaluated this repetition -- chosen by grid geometry, not physics.
+    ///
+    /// Rather than tracking which side owns which specific edge, this forces EVERY grid-adjacent
+    /// neighbour of a block that is genuinely overclocked (`rate > 1`) and due to run this
+    /// repetition to also run this repetition, regardless of the neighbour's own rate or which
+    /// side owns the shared edge. This does strictly more work than the minimum fix (a forced
+    /// neighbour runs whether or not it actually owns the boundary edge) -- the simple,
+    /// conservative choice over a surgical per-edge one, matching "simplicity is now a feature".
+    ///
+    /// `rep` is the repetition index (0-based) within this frame; only blocks whose rate clears
+    /// `rep` (i.e. still have iterations left) are forced.
+    fn force_overclocked_blocks_active(&mut self, rep: u32) {
+        let n = self.block_clock_rate.len();
+        let cols = self.block_size_cols();
+        let rows = if cols > 0 { n / cols } else { 0 };
+        if cols == 0 || rows == 0 || cols * rows != n {
+            return;
+        }
+        let mut forced = vec![false; n];
+        for b in 0..n {
+            let rate = self.block_clock_rate[b];
+            if rate > 1.0 && (rate.round() as u32) > rep {
+                forced[b] = true;
+            }
+        }
+        let seed = forced.clone();
+        for b in 0..n {
+            if !seed[b] {
+                continue;
+            }
+            let bx = b % cols;
+            let by = b / cols;
+            if bx > 0 { forced[b - 1] = true; }
+            if bx + 1 < cols { forced[b + 1] = true; }
+            if by > 0 { forced[b - cols] = true; }
+            if by + 1 < rows { forced[b + cols] = true; }
+        }
+        for b in 0..n.min(self.last_displacements.len()) {
+            if forced[b] {
+                self.last_displacements[b] =
+                    self.last_displacements[b].max(physics::MUST_SIMULATE_THRESHOLD * 2.0);
+            }
+        }
+    }
+
+    /// The block grid's column count -- `(grid_width + block_size - 1) / block_size`, the same
+    /// arithmetic `update()`/`settle_tick` use, exposed here so the clock-rate helpers above can
+    /// map a flat block index back to `(bx, by)` without re-deriving it inline three times.
+    fn block_size_cols(&self) -> usize {
+        let w = self.heightmap.width;
+        if self.block_size == 0 { 0 } else { (w + self.block_size - 1) / self.block_size }
+    }
+
     /// Row-major block-heat texel bytes for the heat-map debug overlay, one byte per block
     /// (always a 32x32 grid — see `new_with_size`'s doc comment), ready for direct upload as an
     /// R8Unorm GPU texture: `byte = round((times_simulated_in_window / 300) * 255)`, clamped.
     /// See `block_heat_buckets` for exactly what "times simulated in window" means and the
     /// approximation it makes versus a true 300-tick trailing count.
+    ///
+    /// OVERCLOCKING.md: while `overclocking_enabled` is on, this is repurposed to show each
+    /// block's CLOCK RATE instead -- same texture, same upload path, no shader/render pipeline
+    /// changes, exactly the "existing block heat-map overlay path" the design asks for. Byte
+    /// value is `log2(rate)` (in `[-3, 3]`, i.e. rate in `[1/8, 8]`) linearly mapped onto
+    /// `[0, 255]`, so the neutral 1x rate sits at the mid-grey point (byte 127/128), underclocked
+    /// blocks read cold/dark and overclocked blocks read hot/bright on whatever colour ramp the
+    /// shader already applies to this texture.
     pub fn block_heat_texels(&self) -> Vec<u8> {
+        if self.overclocking_enabled && self.block_clock_rate.len() == self.active_blocks.len() {
+            return self
+                .block_clock_rate
+                .iter()
+                .map(|&r| {
+                    let log2r = r.max(1e-6).log2().clamp(-3.0, 3.0);
+                    (((log2r + 3.0) / 6.0) * 255.0).round() as u8
+                })
+                .collect();
+        }
         let num_blocks = self.block_heat_buckets.len() / HEAT_NUM_BUCKETS;
         (0..num_blocks)
             .map(|b| {
@@ -1909,7 +2156,14 @@ impl DrawingSimulation {
         // Coarse pressure state update (HIERARCHICAL-PRESSURE.md §5, build step 2 & 3).
         // Restricts fine mass into A, anchors M toward A, relaxes M across the coarse graph,
         // and updates coarse hydraulic head (eta), pressure (P), and coarse-fine disagreement (Delta).
-        if self.coarse.available && self.coarse_pressure_coupling {
+        //
+        // OVERCLOCKING.md: runs UNCONDITIONALLY now (no longer gated on `coarse_pressure_coupling`
+        // -- that flag now gates only the driving-potential coupling into the fine solver, below).
+        // The coarse level's own dynamics must keep running regardless: it produces `|Delta|`,
+        // the multi-rate scheduler's signal, and the scheduler must work even when the potential
+        // coupling is off (its shipped default, per the user's own words -- see
+        // `coarse_pressure_coupling`'s doc comment).
+        if self.coarse.available {
             // STEP4-COARSE-IS-A-SIM.md: the coarse level's own dynamics now run the shipped
             // solver over a nested grid (`CoarseState::advance_nested_sim`), so it needs the
             // real `gravity_dir` (not a pre-scaled scalar `base_head`) and the real overfill
@@ -1934,17 +2188,54 @@ impl DrawingSimulation {
             );
         }
 
+        // OVERCLOCKING.md (HIERARCHICAL-PRESSURE.md §7b): update the multi-rate block scheduler.
+        // Defensive resize first -- mirrors `settle_tick`'s own belt-and-suspenders pattern for
+        // `last_displacements`/`active_blocks`, in case the block grid ever changed shape without
+        // going through `new_with_size`/`reset()` (neither of which happens in production today).
+        let expected_block_len = self.active_blocks.len();
+        if self.block_clock_rate.len() != expected_block_len {
+            self.block_clock_rate.resize(expected_block_len, 1.0);
+        }
+        if self.overclocking_enabled && self.coarse.available {
+            self.update_block_clock_rates();
+            self.apply_underclock_skip();
+        } else if self.block_clock_rate.iter().any(|&r| r != 1.0) {
+            // Bit-identical to the toggle never having existed: no stale rate lingers on screen
+            // or in the scheduler while this is off.
+            self.block_clock_rate.fill(1.0);
+        }
+        // Number of EXTRA `settle_tick` repetitions this frame, beyond the normal one -- a block
+        // at rate `n` (n > 1) runs `n` real sub-steps total (S1: nested by construction, since
+        // every rate is a power of two -- see `force_overclocked_blocks_active`). "A block with
+        // rate n runs n steps. If that is n times the cost, that is fine and expected for now" --
+        // no attempt here to make sub-stepping cheaper than n full steps; that is later,
+        // separate performance work.
+        let extra_reps: u32 = if self.overclocking_enabled {
+            self.block_clock_rate
+                .iter()
+                .cloned()
+                .fold(1.0f32, f32::max)
+                .round()
+                .max(1.0) as u32
+                - 1
+        } else {
+            0
+        };
+
         // Run the gravity-driven settling cellular automata tick
         //
         // `perfect_sim_found_material` is OR'd in explicitly rather than relying on the injected
         // displacement value alone to trip the `> 3e-4` check just below: `settle_tick`'s own
         // MUST bar (`physics::MUST_SIMULATE_THRESHOLD` = 1e-4) sits below this gate's 3e-4 by
         // design (see that constant's doc comment), so a freshly-injected 1e-4 would silently
-        // fail to mark the tick active without this.
+        // fail to mark the tick active without this. `extra_reps > 0` is OR'd in for the same
+        // reason: overclocking can want extra sub-steps even on a frame where nothing has yet
+        // crossed the ordinary activity bars.
         let has_active = perfect_sim_found_material
             || self.last_displacements.iter().any(|&x| x > 3e-4)
             || self.marbles.iter().any(|m| m.was_active)
-            || self.gravity_dir.length_squared() > 1e-6;
+            || self.gravity_dir.length_squared() > 1e-6
+            || extra_reps > 0;
         if has_active {
             let mut active_marbles = [physics::ActiveMarbleInfo {
                 pos: Vec2::ZERO,
@@ -1964,8 +2255,33 @@ impl DrawingSimulation {
                 }
             }
 
-            let iterations = if self.gravity_dir.length_squared() > 1e-6 { 1 } else { 1 }; // STAGE3 PROBE
-            for iter in 0..iterations {
+            // OVERCLOCKING.md: `rep in 0..=extra_reps` runs the normal call (`rep == 0`,
+            // unchanged classification, exactly as before this feature existed when
+            // `extra_reps == 0`) plus one real `settle_tick` call per additional sub-step a
+            // genuinely overclocked block has earned. `self.tick_count` is passed UNCHANGED on
+            // every repetition (not `+ rep`) -- F1 (HIERARCHICAL-PRESSURE.md §7b): staleness
+            // (`MAX_STALENESS` in physics.rs) is counted in `tick_count`, and re-using the same
+            // value for every repetition within one rendered frame means a tick keeps meaning
+            // "one rendered frame" regardless of how many internal sub-steps ran this frame, so
+            // `MAX_STALENESS` means the same amount of simulated time at every clock setting.
+            // `time_seed` still varies per repetition so repeated sub-steps do not all draw the
+            // exact same jitter/parity.
+            //
+            // `touched_this_rep` (rather than passing `&mut self.blocks_touched` directly) and
+            // the OR-merge below are necessary once `extra_reps > 0`: `settle_tick`'s
+            // `touched_out` REPLACES its target's contents each call, so passing
+            // `self.blocks_touched` straight through would let the LAST repetition's touched set
+            // silently overwrite (not accumulate with) every earlier repetition's -- and
+            // `CoarseState::restrict_incremental` (next tick) trusts that set completely, so a
+            // block touched only in an earlier repetition would read as unchanged and never get
+            // re-aggregated into `A[C]`. Reduces to one call and one copy, bit-identical to
+            // before this feature existed, when `extra_reps == 0`.
+            let mut touched_accum: Vec<bool> = Vec::new();
+            for rep in 0..=extra_reps {
+                if rep > 0 {
+                    self.force_overclocked_blocks_active(rep);
+                }
+                let mut touched_this_rep: Vec<bool> = Vec::new();
                 settle_tick(
                     &mut self.heightmap,
                     &mut self.temp_heights,
@@ -1979,13 +2295,13 @@ impl DrawingSimulation {
                     self.budget_n,
                     self.block_size,
                     &active_marbles[..active_count],
-                    time_seed + iter as u32,
+                    time_seed.wrapping_add(rep.wrapping_mul(0x9E37_79B1)),
                     &mut self.edge_vel_h,
                     &mut self.edge_vel_v,
                     &mut self.column_depth,
                     &mut self.head_field,
                     &self.shape_mask,
-                    self.tick_count + iter as u32,
+                    self.tick_count,
                     self.gravity_dir,
                     self.fresh_pressure_field,
                     self.head_field_transport,
@@ -2006,9 +2322,16 @@ impl DrawingSimulation {
                     // Same emptiness contract, for I4's per-tile flux budget (§6): `|Delta[C]|`
                     // per tile, consumed by `coarse_delta_eta_budgeted` in physics.rs.
                     if self.coarse.available && self.coarse_pressure_coupling { &self.coarse_state.delta } else { &[] },
-                    Some(&mut self.blocks_touched),
+                    Some(&mut touched_this_rep),
                 );
+                if touched_accum.len() != touched_this_rep.len() {
+                    touched_accum.resize(touched_this_rep.len(), false);
+                }
+                for (acc, &t) in touched_accum.iter_mut().zip(touched_this_rep.iter()) {
+                    *acc |= t;
+                }
             }
+            self.blocks_touched = touched_accum;
         } else {
             self.active_bounds.active = false;
             // Nothing ran, so no block's fine heights could have changed -- see

@@ -28,12 +28,15 @@ fn main() {
     };
     let overfill = get("--overfill").map(|v| v == "1").unwrap_or(true);
     let grid: usize = get("--grid").map(|v| v.parse().unwrap()).unwrap_or(512);
+    // OVERCLOCKING.md: `--overclock 1` turns on the multi-rate block scheduler.
+    let overclock = get("--overclock").map(|v| v == "1").unwrap_or(false);
     let mut sim = DrawingSimulation::new_with_size(grid);
     sim.sandbox_shape = SandboxShape::Hourglass;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(mat);
     sim.initialize_hourglass();
     sim.overfill_pressure = overfill;
+    sim.overclocking_enabled = overclock;
     if let Some(t) = get("--tension") { sim.underfill_tension = t.parse().unwrap(); }
     let targets = [None; 5];
     for _ in 0..warm {
@@ -62,10 +65,27 @@ fn main() {
     let m1: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
     let n = ticks as f64;
     println!(
-        "grid={} block_size={} {:?} sub={} budget={:<4} ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
+        "grid={} block_size={} {:?} sub={} budget={:<4} overclock={} ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
          com {:.5}->{:.5} (desc {:.5})  mass_err {:.2e}",
-        grid, sim.block_size, mat, sub, budget, ms,
+        grid, sim.block_size, mat, sub, budget, overclock, ms,
         f as f64 / n, m as f64 / n, s as f64 / n, (f + m + s) as f64 / n,
         c0, com(&sim), com(&sim) - c0, (m1 - m0).abs() / m0.max(1e-12)
     );
+    if overclock {
+        // OVERCLOCKING.md: the rate distribution -- how many blocks sit at each power-of-two
+        // rate right now, and the mean -- is what says whether this is affordable.
+        let mut counts = [0u64; 7]; // idx 0 = 1/8 .. idx 6 = 8
+        let mut sum_rate = 0.0f64;
+        for &r in &sim.block_clock_rate {
+            let idx = (r.max(1e-6).log2().round() as i32).clamp(-3, 3) + 3;
+            counts[idx as usize] += 1;
+            sum_rate += r as f64;
+        }
+        let total = sim.block_clock_rate.len().max(1) as f64;
+        println!(
+            "  rate distribution (blocks): 1/8={} 1/4={} 1/2={} 1x={} 2x={} 4x={} 8x={}  mean_rate={:.3}",
+            counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6],
+            sum_rate / total
+        );
+    }
 }

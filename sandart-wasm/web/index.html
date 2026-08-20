@@ -847,15 +847,30 @@
                     <input type="checkbox" id="check-coarse-delta">
                     <span class="checkmark"></span>
                 </label>
-                <!-- Coarse pressure coupling (HIERARCHICAL-PRESSURE.md): a background 64x64 tile
-                     level that supplies driving hydraulic head to the fine solver so distant
-                     material can equalise faster than the fine flux solver alone. On by default,
-                     unlike the other Debug toggles -- this is the feature being evaluated, so the
-                     deployed page should show it working. Turn off to A/B against the pre-coupling
-                     behaviour. -->
+                <!-- Coarse pressure coupling (HIERARCHICAL-PRESSURE.md, split by
+                     OVERCLOCKING.md): a background 64x64 tile level that supplies driving
+                     hydraulic head to the fine solver so distant material can equalise faster
+                     than the fine flux solver alone. Off by default, like every other Debug
+                     toggle now -- "let's leave the coupling behind a flag until we are happy
+                     with overclocking" (the user). The coarse level's own dynamics (and the
+                     |Delta| the overclocking scheduler below reads) run regardless of this
+                     checkbox; this only gates whether that head also reaches the fine solver's
+                     potential. Turn on to A/B the driving-potential coupling itself. -->
                 <label class="checkbox-container">
                     Coarse pressure coupling
-                    <input type="checkbox" id="check-coarse-coupling" checked>
+                    <input type="checkbox" id="check-coarse-coupling">
+                    <span class="checkmark"></span>
+                </label>
+                <!-- OVERCLOCKING.md: the multi-rate block scheduler. Independent of the coupling
+                     checkbox above -- this derives a per-block clock rate from coarse-fine
+                     disagreement (|Delta|) regardless of whether that disagreement's HEAD also
+                     reaches the fine solver's potential. Off by default, like every other Debug
+                     toggle. While on, the block heat-map overlay above (if also enabled) shows
+                     per-block clock rate instead of recent-activity heat -- turn both on to see
+                     which blocks are running fast (bright) and slow (dark). -->
+                <label class="checkbox-container">
+                    Overclocking (multi-rate blocks)
+                    <input type="checkbox" id="check-overclocking">
                     <span class="checkmark"></span>
                 </label>
                 <!-- Legend for the overfill heat-map's decile colouring. Hidden unless that

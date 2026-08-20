@@ -79,9 +79,10 @@ pub struct WasmSimulationState {
     pressure_heatmap_enabled: bool,
     // Coarse-level `eta` (hydraulic head) debug overlay (see `set_coarse_eta_overlay`). Same
     // shape as `heatmap_enabled`/`pressure_heatmap_enabled` above -- a pure render-side toggle;
-    // the underlying `sim.coarse_state.eta` runs whenever `coarse_pressure_coupling` is on
-    // regardless of this flag, this only gates whether `render()` bothers uploading/tinting with
-    // it. Off by default, like every other Debug-group overlay.
+    // the underlying `sim.coarse_state.eta` runs unconditionally whenever `sim.coarse.available`
+    // (OVERCLOCKING.md: no longer gated on `coarse_pressure_coupling`, which now only gates the
+    // driving-potential coupling into the fine solver), this only gates whether `render()`
+    // bothers uploading/tinting with it. Off by default, like every other Debug-group overlay.
     coarse_eta_enabled: bool,
     // Coarse-fine disagreement (`Delta`) debug overlay (see `set_coarse_delta_overlay`). Same
     // shape as `coarse_eta_enabled` just above -- independent toggle, independent texture, so
@@ -382,6 +383,7 @@ impl WasmSimulationState {
         let overfill_stiffness = self.sim.overfill_stiffness;
         let pressure_heatmap_overlay = self.sim.pressure_heatmap_overlay;
         let coarse_pressure_coupling = self.sim.coarse_pressure_coupling;
+        let overclocking_enabled = self.sim.overclocking_enabled;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -417,6 +419,8 @@ impl WasmSimulationState {
         // resolution rebuild like its siblings above rather than reverting to the fresh sim's
         // (also `true`) default and silently discarding an explicit user choice to turn it off.
         sim.coarse_pressure_coupling = coarse_pressure_coupling;
+        // Same reasoning again: a UI debug toggle, not simulation state.
+        sim.overclocking_enabled = overclocking_enabled;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -796,15 +800,28 @@ impl WasmSimulationState {
         self.sim.overfill_pressure = enabled;
     }
 
-    /// "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md): forwarded straight to
-    /// the sim, a plain field write (same shape as `set_overfill_pressure` just above -- no
-    /// reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
-    /// `DrawingSimulation::coarse_pressure_coupling`'s doc comment in sandart-sim/src/lib.rs for
-    /// what it switches: `true` (default, unlike its sibling toggles) is today's shipped coarse
-    /// level, coupled into the fine solver; `false` disables both the coarse level's own per-tick
-    /// work AND its contribution to any fine edge, reproducing pre-coupling behaviour exactly.
+    /// "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md, split by
+    /// OVERCLOCKING.md): forwarded straight to the sim, a plain field write (same shape as
+    /// `set_overfill_pressure` just above -- no reset, no reinitialisation, safe to call every
+    /// frame from `syncSettings()`). See `DrawingSimulation::coarse_pressure_coupling`'s doc
+    /// comment in sandart-sim/src/lib.rs for what it switches: this now gates ONLY the
+    /// driving-potential coupling into the fine solver (`phi`/`gravity_head`) -- the coarse
+    /// level's own per-tick work runs unconditionally regardless of this flag, since the
+    /// scheduler (`set_overclocking`) needs `|Delta|` either way. **Defaults `false`**, per the
+    /// user's own words: "let's leave the coupling behind a flag until we are happy with
+    /// overclocking."
     pub fn set_coarse_pressure_coupling(&mut self, enabled: bool) {
         self.sim.coarse_pressure_coupling = enabled;
+    }
+
+    /// "Overclocking" (multi-rate block scheduler) debug toggle (OVERCLOCKING.md): forwarded
+    /// straight to the sim, a plain field write -- no reset, no reinitialisation, safe to call
+    /// every frame from `syncSettings()`, same shape as `set_coarse_pressure_coupling` above.
+    /// Independent of that toggle: this drives per-block clock rate from `|Delta|` regardless of
+    /// whether the driving-potential coupling is also on. See
+    /// `DrawingSimulation::overclocking_enabled`'s doc comment in sandart-sim/src/lib.rs.
+    pub fn set_overclocking(&mut self, enabled: bool) {
+        self.sim.overclocking_enabled = enabled;
     }
 
     /// "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.
@@ -852,10 +869,10 @@ impl WasmSimulationState {
 
     /// Coarse-level `eta` (hydraulic head) debug overlay: plumbed exactly like
     /// `set_heatmap_overlay` -- a plain field write, no reset/reinitialisation path. Purely a
-    /// render-side toggle; `sim.coarse_state.eta` is maintained by `sim.update()` whenever
-    /// `coarse_pressure_coupling` is on regardless of this flag (see that field's own doc
-    /// comment for what happens to it while coupling is off), this only gates whether `render()`
-    /// bothers uploading/tinting with it.
+    /// render-side toggle; `sim.coarse_state.eta` is maintained by `sim.update()` unconditionally
+    /// whenever `sim.coarse.available` (OVERCLOCKING.md: no longer tied to
+    /// `coarse_pressure_coupling`, see that field's own doc comment), this only gates whether
+    /// `render()` bothers uploading/tinting with it.
     pub fn set_coarse_eta_overlay(&mut self, enabled: bool) {
         self.coarse_eta_enabled = enabled;
     }
