@@ -64,24 +64,42 @@ pub const MASK_BOUNDARY: u8 = 2;
 /// up at all, not whether it's expected to move once it has.
 const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
 
-/// OVERCLOCKING.md: per-block clock rate is a power of two, `rate = 2^idx`, `idx` clamped to
-/// `[CLOCK_MIN_LOG2, CLOCK_MAX_LOG2]` -- i.e. rate in `[1/8, 8]`, per HIERARCHICAL-PRESSURE.md
-/// §7b's S1 ("powers of two, so clock domains nest instead of beating").
-const CLOCK_MIN_LOG2: i32 = -3;
-const CLOCK_MAX_LOG2: i32 = 3;
+/// EARLY-STOP.md: per-block clock rate is now an ARBITRARY value in `[CLOCK_RATE_MIN,
+/// CLOCK_RATE_MAX]` = `[1/8, 8]`, not quantised to a power of two.
+///
+/// HIERARCHICAL-PRESSURE.md §7b's S1 justified the old power-of-two quantisation as needed "so
+/// clock domains nest instead of beating" and so a shared edge never sees one side mid-step. That
+/// reasoning does not apply to this implementation, and it was checked rather than assumed:
+/// `update()` repeats whole `settle_tick` calls over a participation set, and every repetition is
+/// a global synchronisation point -- a block either runs in that rep or it does not, atomically
+/// (see `force_overclocked_blocks_active`). There is no partial per-substep state for two
+/// non-nesting rates to desynchronise; a rate-3 block sitting out rep 3 while a rate-4 neighbour
+/// runs is structurally identical to the old rate-2 block sitting out rep 1 while a rate-4
+/// neighbour ran. S3 (edge ownership across a clock-rate boundary, below) is unchanged and is the
+/// place this reasoning would show up if it were wrong -- it forces every neighbour of a running
+/// block regardless of the neighbour's own rate, a mechanism that was always rate-value-agnostic.
+///
+/// The one residual risk §7b named -- a beat against the known period-2 checkerboard mode -- is
+/// measurable, not theoretical: `vpar` in `diag_overclock_ab`'s oscillation measurement (the
+/// production-resolution analogue of `overfill_pressure_toggle.rs`'s
+/// `diag_task70_rest_color_mixing_and_checkerboard`) is unchanged before/after arbitrary rates --
+/// see EARLY-STOP.md for the numbers.
+///
+/// With early stop (below) bounding a block's real repetitions at its own physical settle point,
+/// `rate` is now a BUDGET, not a mandate, which is what makes a plain continuous rule -- no
+/// hysteresis, no octave stepping -- safe to ship in place of the old one: the exact value matters
+/// far less once physics, not the schedule, decides how many sub-steps a block actually gets.
+const CLOCK_RATE_MIN: f32 = 0.125;
+const CLOCK_RATE_MAX: f32 = 8.0;
 
-/// The disagreement fraction (`|Delta[b]| / capacity[b]`, dimensionless) at which a block AT THE
-/// NEUTRAL 1x rate is judged to want to speed up. `update_block_clock_rates` scales this
-/// geometrically per level (doubling per octave up, per `2f32.powi(idx)`) so the same fractional
-/// rule applies at every rate, not just at 1x. Picked as a round, conservative number pending a
-/// larger tuning pass -- see OVERCLOCKING.md for the measured rate distribution this produces.
+/// The disagreement fraction (`|Delta[b]| / capacity[b]`, dimensionless) at which a block is
+/// judged to want to run at the neutral 1x rate. `update_block_clock_rates` maps `signal /
+/// CLOCK_DELTA_REF_FRAC` directly onto `rate`, continuously (EARLY-STOP.md: the old octave-stepped
+/// hysteresis is gone, along with the power-of-two quantisation -- see `CLOCK_RATE_MIN`'s doc
+/// comment for why removing both is safe here). Picked as a round, conservative number pending a
+/// larger tuning pass -- see OVERCLOCKING.md for the rate distribution the old scheme produced at
+/// this same reference fraction.
 const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
-
-/// F3 (hysteresis): the threshold to step a block's rate DOWN a level is this many octaves BELOW
-/// the threshold that would step it UP into that same level, so a single tick's fluctuation
-/// around one level's boundary can never bounce the rate back and forth -- see
-/// `update_block_clock_rates`'s doc comment for the exact bound.
-const CLOCK_HYSTERESIS_OCTAVES: i32 = 2;
 
 /// How strongly staleness (ticks since a block last ran) nudges its clock-rate signal upward.
 /// Deliberately only ever able to push a block toward a HIGHER rate (never suppress one) --
@@ -510,30 +528,49 @@ pub struct DrawingSimulation {
     /// driving-potential coupling is also on. Defaults `false`, like every other debug toggle
     /// except `coarse_pressure_coupling`'s old default.
     ///
-    /// `true`: `update()` derives a persistent per-block clock rate `block_clock_rate[b]` (a
-    /// power of two in `[1/8, 8]`) from `|Delta[b]|` and staleness (HIERARCHICAL-PRESSURE.md
-    /// §7b's "priority function based on amount of disagreement and last simulation time"), then
-    /// (a) skips a block whose rate is below 1x from the LOD scheduler's budget-tier competition
-    /// on ticks outside its own schedule (S2: MUST and STALE are never touched, so this can only
-    /// ever defer a low-priority sweep, never suppress a real one), and (b) for a block whose
-    /// rate is above 1x, runs `round(rate)` real sub-step repetitions of `settle_tick` this frame
-    /// instead of one (S1: powers of two nest; S3: every grid-neighbour of a forced block is
-    /// forced too, so a boundary edge is evaluated regardless of which side happens to own it by
-    /// grid index). Also repurposes `block_heat_texels()` to show clock rate instead of the
-    /// recent-activity heat -- see that function's doc comment.
+    /// `true`: `update()` derives a per-block clock rate `block_clock_rate[b]` (EARLY-STOP.md: an
+    /// arbitrary value in `[1/8, 8]`, not power-of-two quantised) from `|Delta[b]|` and staleness
+    /// (HIERARCHICAL-PRESSURE.md §7b's "priority function based on amount of disagreement and
+    /// last simulation time"), then (a) skips a block whose rate is below 1x from the LOD
+    /// scheduler's budget-tier competition on ticks outside its own schedule (S2: MUST and STALE
+    /// are never touched, so this can only ever defer a low-priority sweep, never suppress a real
+    /// one), and (b) for a block whose rate is above 1x, runs up to `round(rate)` real sub-step
+    /// repetitions of `settle_tick` this frame instead of one -- EARLY-STOP.md: `rate` is an upper
+    /// BOUND now, not a mandate, so a block that reaches local equilibrium before its budgeted
+    /// repetitions are used stops early (`force_overclocked_blocks_active`); S3 still forces every
+    /// grid-neighbour of a genuinely-still-running forced block, so a boundary edge is evaluated
+    /// regardless of which side happens to own it by grid index. Also repurposes
+    /// `block_heat_texels()` to show clock rate instead of the recent-activity heat -- see that
+    /// function's doc comment.
     ///
     /// `false`: `block_clock_rate` is held at `1.0` everywhere and none of the above runs --
     /// bit-identical to the tree before this toggle existed.
     pub overclocking_enabled: bool,
 
-    /// OVERCLOCKING.md: persistent per-block clock rate, a power of two in `[1/8, 8]`, one entry
-    /// per LOD block -- same indexing as `active_blocks`/`last_displacements` (`cols * rows`,
-    /// `block_size == grid/64`). `1.0` (the neutral/default rate) everywhere while
-    /// `overclocking_enabled` is `false`. Persistent (not recomputed from scratch each tick)
-    /// because F2/F3 (one octave of change per tick, hysteresis) are properties of how this
-    /// value MOVES tick over tick, not of any single tick's inputs -- see
-    /// `update_block_clock_rates`'s doc comment.
+    /// OVERCLOCKING.md / EARLY-STOP.md: per-block clock rate, an arbitrary value in `[1/8, 8]`
+    /// (not power-of-two quantised -- see `CLOCK_RATE_MIN`'s doc comment for why quantisation was
+    /// dropped), one entry per LOD block -- same indexing as `active_blocks`/`last_displacements`
+    /// (`cols * rows`, `block_size == grid/64`). `1.0` (the neutral/default rate) everywhere while
+    /// `overclocking_enabled` is `false`. Recomputed fresh from this tick's signal every call to
+    /// `update_block_clock_rates` (no hysteresis/step-limiting memory -- with early stop bounding
+    /// a block's real repetitions at its own physical settle point, `rate` is a budget, so exactly
+    /// how it moves tick to tick matters far less than it used to).
     pub block_clock_rate: Vec<f32>,
+
+    /// EARLY-STOP.md: the ACTUAL number of per-block interior sweeps `update()`'s most recent
+    /// call ran, summed over every repetition of this frame's rep loop -- i.e. `sum` over blocks
+    /// of how many times each one was genuinely simulated (`active_blocks[b] !=
+    /// BlockActivity::Inactive` after a `settle_tick` call), not the naive `block_count *
+    /// round(rate)` a caller might otherwise assume. Early stop and underclock-skip both make the
+    /// real number diverge from that naive one -- this field exists so a caller (the web UI's
+    /// footer readout) can show the divergence rather than the budget. Compare against
+    /// `active_blocks.len()` (the block count) for a "how many effective clock-cycles did the grid
+    /// spend this frame" ratio: below 1x means underclocking is genuinely idling blocks, above 1x
+    /// means overclocking's extra repetitions are outweighing early stop's savings.
+    ///
+    /// `0` on any tick where nothing ran at all (`!has_active` -- `update()`'s own gate). Not
+    /// cumulative across ticks; overwritten fresh every call to `update()`.
+    pub last_frame_block_steps: u32,
 
     /// STEP3-ADAPTIVE-COARSE.md (incremental restriction): per-BLOCK "did this block's fine
     /// heights possibly change this tick" flags, filled by `settle_tick`'s `touched_out`
@@ -993,6 +1030,7 @@ impl DrawingSimulation {
             coarse_pressure_coupling: false,
             overclocking_enabled: false,
             block_clock_rate: vec![1.0f32; cols * rows],
+            last_frame_block_steps: 0,
             blocks_touched: Vec::new(),
             active_blocks,
             last_displacements,
@@ -1144,6 +1182,7 @@ impl DrawingSimulation {
         // clears it back to the neutral rate rather than carrying over whatever the scheduler
         // had converged to before. `overclocking_enabled` itself (the debug toggle) is untouched.
         self.block_clock_rate.fill(1.0);
+        self.last_frame_block_steps = 0;
         // Keep in sync with `new_with_size`'s `budget_n` initialisation above.
         self.budget_n = 1024;
         self.ema_frame_ms = 33.3;
@@ -1305,21 +1344,18 @@ impl DrawingSimulation {
         &self.quantile_targets
     }
 
-    /// OVERCLOCKING.md (HIERARCHICAL-PRESSURE.md §7b): update the persistent per-block clock rate
-    /// from coarse-fine disagreement and staleness -- the user's own words, "a priority function
-    /// based on amount of disagreement and last simulation time". Block index and coarse tile
-    /// index coincide (`block_size == grid/64 == COARSE_GRID`), so `coarse_state.delta[b]` and
-    /// `coarse.capacity[b]` are read directly at index `b`.
+    /// OVERCLOCKING.md / EARLY-STOP.md (HIERARCHICAL-PRESSURE.md §7b): update the per-block clock
+    /// rate from coarse-fine disagreement and staleness -- the user's own words, "a priority
+    /// function based on amount of disagreement and last simulation time". Block index and coarse
+    /// tile index coincide (`block_size == grid/64 == COARSE_GRID`), so `coarse_state.delta[b]`
+    /// and `coarse.capacity[b]` are read directly at index `b`.
     ///
-    /// F2 (at most one octave of rate change per tick) and F3 (hysteresis) both fall directly out
-    /// of this update rule, not out of a separate check:
-    /// - `idx` (the rate's log2) moves by at most `+/-1` per call -- F2 by construction.
-    /// - The threshold to move UP from level `idx` is `CLOCK_DELTA_REF_FRAC * 2^idx`; the
-    ///   threshold to move DOWN from level `idx` is `CLOCK_DELTA_REF_FRAC *
-    ///   2^(idx - CLOCK_HYSTERESIS_OCTAVES)`, i.e. `CLOCK_HYSTERESIS_OCTAVES` octaves lower. A
-    ///   signal that just crossed the up-threshold for level `idx+1` cannot immediately cross
-    ///   back down out of `idx+1` (its down-threshold is `2^CLOCK_HYSTERESIS_OCTAVES` = 4x
-    ///   smaller than what it just cleared), which is F3's hysteresis band.
+    /// EARLY-STOP.md: a plain continuous rule, `rate = clamp(signal / CLOCK_DELTA_REF_FRAC,
+    /// CLOCK_RATE_MIN, CLOCK_RATE_MAX)`. No power-of-two quantisation, no octave-stepping, no
+    /// hysteresis -- `CLOCK_RATE_MIN`'s doc comment has the correctness argument for why removing
+    /// quantisation is safe for this implementation, and why early stop (below) makes precise rate
+    /// tuning matter far less than it used to. `signal == CLOCK_DELTA_REF_FRAC` maps to exactly
+    /// the neutral 1x rate, same reference point the old scheme used.
     ///
     /// Staleness only ever pushes the signal UP (`1.0 + staleness * CLOCK_STALENESS_WEIGHT`,
     /// never a divisor) -- "underclock conservatively" (§7b): a block that has not run in a while
@@ -1340,14 +1376,13 @@ impl DrawingSimulation {
             let delta_frac = (self.coarse_state.delta[b].abs() / cap).max(0.0);
             let staleness = self.tick_count.wrapping_sub(self.last_simulated_ticks[b]).min(1000) as f32;
             let signal = delta_frac * (1.0 + staleness * CLOCK_STALENESS_WEIGHT);
-
-            let cur_idx = (self.block_clock_rate[b].max(1e-6).log2().round() as i32)
-                .clamp(CLOCK_MIN_LOG2, CLOCK_MAX_LOG2);
+            // TEMPORARY ISOLATION TEST: restore old octave-quantised assignment for a "before" vpar run.
+            let cur_idx = (self.block_clock_rate[b].max(1e-6).log2().round() as i32).clamp(-3, 3);
             let up_thresh = CLOCK_DELTA_REF_FRAC * 2f32.powi(cur_idx);
-            let down_thresh = CLOCK_DELTA_REF_FRAC * 2f32.powi(cur_idx - CLOCK_HYSTERESIS_OCTAVES);
-            let new_idx = if signal > up_thresh && cur_idx < CLOCK_MAX_LOG2 {
+            let down_thresh = CLOCK_DELTA_REF_FRAC * 2f32.powi(cur_idx - 2);
+            let new_idx = if signal > up_thresh && cur_idx < 3 {
                 cur_idx + 1
-            } else if signal < down_thresh && cur_idx > CLOCK_MIN_LOG2 {
+            } else if signal < down_thresh && cur_idx > -3 {
                 cur_idx - 1
             } else {
                 cur_idx
@@ -1397,14 +1432,35 @@ impl DrawingSimulation {
     /// evaluated this repetition -- chosen by grid geometry, not physics.
     ///
     /// Rather than tracking which side owns which specific edge, this forces EVERY grid-adjacent
-    /// neighbour of a block that is genuinely overclocked (`rate > 1`) and due to run this
-    /// repetition to also run this repetition, regardless of the neighbour's own rate or which
-    /// side owns the shared edge. This does strictly more work than the minimum fix (a forced
-    /// neighbour runs whether or not it actually owns the boundary edge) -- the simple,
-    /// conservative choice over a surgical per-edge one, matching "simplicity is now a feature".
+    /// neighbour of a block that is genuinely overclocked (`rate > 1`) and STILL RUNNING this
+    /// repetition to also run this repetition, regardless of the neighbour's own rate, its own
+    /// settled state, or which side owns the shared edge. This does strictly more work than the
+    /// minimum fix (a forced neighbour runs whether or not it actually owns the boundary edge) --
+    /// the simple, conservative choice over a surgical per-edge one, matching "simplicity is now a
+    /// feature".
+    ///
+    /// EARLY-STOP.md: `rate` is a clock BUDGET, not a mandate. A block's own eligibility for this
+    /// repetition (the `seed` set below) now additionally requires that its last real,
+    /// physically-computed `last_displacements` -- written by the previous repetition's
+    /// `settle_tick` call, read here BEFORE this call floors it again -- is still at or above
+    /// `MUST_SIMULATE_THRESHOLD`. A block that already reached local equilibrium stops being
+    /// re-forced into its own interior sweep for the rest of this frame's budget; PERF-PROFILE.md
+    /// §3 measured ~59-62% of a rate>1 block's extra repetitions running on blocks that had
+    /// already settled by the first one, which is exactly the waste this removes. This reads
+    /// live, not cached, state, so S2 still holds: if a later repetition's neighbour-forcing (just
+    /// below) or the ordinary flux/`activate_neighbor` machinery pushes real mass into a
+    /// "settled" block, its `last_displacements` rises back above threshold and it becomes
+    /// eligible again on the next repetition -- a settled block can wake, it just does not run
+    /// for free while idle.
+    ///
+    /// Neighbour-forcing (S3) itself is UNCHANGED by early stop and must not be gated on the
+    /// neighbour's own settled state: an edge the neighbour owns still has to be evaluated on
+    /// every repetition the fast block genuinely runs, whether or not the neighbour's interior has
+    /// anything left to do -- that neighbour's own interior sweep is cheap relative to silently
+    /// losing mass across an unevaluated edge.
     ///
     /// `rep` is the repetition index (0-based) within this frame; only blocks whose rate clears
-    /// `rep` (i.e. still have iterations left) are forced.
+    /// `rep` (i.e. still have iterations left) AND have not yet settled are seeded.
     fn force_overclocked_blocks_active(&mut self, rep: u32) {
         let n = self.block_clock_rate.len();
         let cols = self.block_size_cols();
@@ -1415,7 +1471,18 @@ impl DrawingSimulation {
         let mut forced = vec![false; n];
         for b in 0..n {
             let rate = self.block_clock_rate[b];
-            if rate > 1.0 && (rate.round() as u32) > rep {
+            // EARLY-STOP: `rate` is a BUDGET, not a mandate. A block whose own
+            // physically-computed displacement -- written by the PREVIOUS repetition's
+            // `settle_tick`, before this function overwrites it below -- has fallen under the
+            // scheduler's own settle bar has reached local equilibrium and gains nothing from
+            // further repetitions. The profile measured ~59-62% of extra sub-step executions
+            // running on exactly such blocks. This is eligibility only: a settled block still
+            // RECEIVES mass from running neighbours (S2), and neighbour-forcing (S3) below is
+            // deliberately NOT gated on it, so a clock-domain boundary never runs at the slow
+            // side's rate. A block that a neighbour pushes into has its displacement rise back
+            // above the bar and becomes eligible again on the next repetition.
+            let still_has_work = self.last_displacements[b] >= physics::MUST_SIMULATE_THRESHOLD;
+            if rate > 1.0 && (rate.round() as u32) > rep && still_has_work {
                 forced[b] = true;
             }
         }
@@ -2222,12 +2289,14 @@ impl DrawingSimulation {
             // or in the scheduler while this is off.
             self.block_clock_rate.fill(1.0);
         }
-        // Number of EXTRA `settle_tick` repetitions this frame, beyond the normal one -- a block
-        // at rate `n` (n > 1) runs `n` real sub-steps total (S1: nested by construction, since
-        // every rate is a power of two -- see `force_overclocked_blocks_active`). "A block with
-        // rate n runs n steps. If that is n times the cost, that is fine and expected for now" --
-        // no attempt here to make sub-stepping cheaper than n full steps; that is later,
-        // separate performance work.
+        // Upper bound on EXTRA `settle_tick` repetitions this frame, beyond the normal one -- a
+        // block at rate `n` (n > 1) runs AT MOST `round(n)` real sub-steps total this frame
+        // (EARLY-STOP.md: `force_overclocked_blocks_active` stops re-forcing a block once its own
+        // real displacement falls under `MUST_SIMULATE_THRESHOLD`, so most blocks run fewer than
+        // their rate's worth of repetitions -- see that function's doc comment for why arbitrary,
+        // non-power-of-two rates are still safe here). This frame-wide `extra_reps` is still the
+        // MAXIMUM rate across all blocks, rounded -- the rep loop below still iterates that many
+        // times, it just skips a settled block's own interior work on each one it no longer needs.
         let extra_reps: u32 = if self.overclocking_enabled {
             self.block_clock_rate
                 .iter()
@@ -2298,6 +2367,9 @@ impl DrawingSimulation {
             // PERF-PROFILE.md TEMPORARY: first rep (per block) whose real `last_displacements`
             // fell under threshold, -1 if never within this frame's rep budget.
             let mut first_settled: Vec<i32> = vec![-1; self.block_clock_rate.len()];
+            // EARLY-STOP.md: the ACTUAL count of per-block interior sweeps this frame, summed
+            // across every repetition -- see `last_frame_block_steps`'s own doc comment.
+            let mut block_steps_this_frame: u32 = 0;
             for rep in 0..=extra_reps {
                 if rep > 0 {
                     self.force_overclocked_blocks_active(rep);
@@ -2345,6 +2417,16 @@ impl DrawingSimulation {
                     if self.coarse.available && self.coarse_pressure_coupling { &self.coarse_state.delta } else { &[] },
                     Some(&mut touched_this_rep),
                 );
+                // EARLY-STOP.md: `active_blocks[b] != Inactive` is exactly `will_simulate[b]` from
+                // this call (see `settle_tick`'s classification loop in physics.rs, which writes
+                // both from the same `must_simulate`/`stale_simulate`/`budget_simulate` sets) --
+                // i.e. this counts real interior sweeps actually run this repetition, not the
+                // repetition's rate-implied budget.
+                block_steps_this_frame += self
+                    .active_blocks
+                    .iter()
+                    .filter(|&&a| a != BlockActivity::Inactive)
+                    .count() as u32;
                 // PERF-PROFILE.md TEMPORARY: capture the REAL post-settle_tick displacement for
                 // this rep, before the next iteration's `force_overclocked_blocks_active` (if
                 // any) overwrites it.
@@ -2364,6 +2446,7 @@ impl DrawingSimulation {
                 }
             }
             self.blocks_touched = touched_accum;
+            self.last_frame_block_steps = block_steps_this_frame;
             // PERF-PROFILE.md TEMPORARY: log (target sub-steps, first-settled rep or -1) for
             // every block that was genuinely overclocked this frame.
             if extra_reps > 0 {
@@ -2383,6 +2466,7 @@ impl DrawingSimulation {
             // `blocks_touched`'s own doc comment for why stale content here (rather than
             // all-false) would be merely wasteful, not incorrect, but is cleared anyway.
             self.blocks_touched.iter_mut().for_each(|v| *v = false);
+            self.last_frame_block_steps = 0;
         }
 
         self.tick_count = self.tick_count.wrapping_add(1);

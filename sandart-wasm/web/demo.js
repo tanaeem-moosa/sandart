@@ -315,7 +315,28 @@ function tick(now) {
         statBlocks.innerText = `${fast + medium + slow}`;
         statBlocks.parentElement.title =
             `must ${fast} · budgeted ${medium} · stale ${slow} · inactive ${inactive}`;
-        
+
+        // EARLY-STOP.md: total per-block interior sweeps the last frame ACTUALLY ran, summed
+        // across every under/overclocking repetition -- not the rate-implied budget. With early
+        // stop, most of a fast block's extra repetitions get skipped once it settles, and an
+        // underclocked block can sit out its own tick entirely, so this number legitimately drops
+        // BELOW the block count as well as rising above it (a settled scene reads close to or
+        // below 1x; an actively-overclocked draining scene reads well above). The multiplier is
+        // moved to the hover title, same "one number, detail on hover" pattern as the other three
+        // footer stats.
+        const statBlockSteps = document.getElementById('stat-block-steps');
+        if (statBlockSteps) {
+            const stepStats = state.get_block_step_stats(); // [executed, block_count]
+            const executedSteps = stepStats[0];
+            const totalBlocks = stepStats[1];
+            statBlockSteps.innerText = `${executedSteps}`;
+            const avgClock = totalBlocks > 0 ? executedSteps / totalBlocks : 0;
+            statBlockSteps.parentElement.title =
+                `${executedSteps} executed sub-steps / ${totalBlocks} blocks this frame · ` +
+                `${avgClock.toFixed(2)}x avg clock -- the ACTUAL work done after under/overclocking ` +
+                `and early stop, not the per-block rate budget`;
+        }
+
         // Update floating HUD stats
         const hudFps = document.getElementById('hud-fps');
         const hudTime = document.getElementById('hud-time');

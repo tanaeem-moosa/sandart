@@ -1434,6 +1434,19 @@ impl WasmSimulationState {
         js_sys::Int32Array::from(&[inactive, slow, medium, fast][..])
     }
 
+    /// EARLY-STOP.md: `[executed_block_steps, block_count]` for the console footer's "steps"
+    /// readout. `executed_block_steps` is `DrawingSimulation::last_frame_block_steps` -- the
+    /// ACTUAL count of per-block interior sweeps the most recent `update()` call ran, summed
+    /// across every repetition of its rep loop, not the rate-implied budget. `block_count` is
+    /// `active_blocks.len()`, the fixed denominator the ratio is read against. Both are `i32`
+    /// (never negative at these grid sizes) so the pair fits a plain `Int32Array`, same pattern as
+    /// `get_active_block_counts` just above.
+    pub fn get_block_step_stats(&self) -> js_sys::Int32Array {
+        let executed = self.sim.last_frame_block_steps as i32;
+        let block_count = self.sim.active_blocks.len() as i32;
+        js_sys::Int32Array::from(&[executed, block_count][..])
+    }
+
     pub fn get_budget_n(&self) -> usize {
         self.sim.budget_n
     }

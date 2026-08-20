@@ -500,7 +500,7 @@
             padding: 12px var(--pad);
             border-top: 1px solid var(--rule);
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(4, 1fr);
             gap: 8px;
             font-size: 10px;
             color: var(--label);
@@ -1103,6 +1103,12 @@
                 <div><b id="stat-fps">60</b><span>fps</span></div>
                 <div><b id="stat-render-time">--</b><span>ms/frame</span></div>
                 <div><b id="stat-blocks">4096</b><span>blocks</span></div>
+                <!-- EARLY-STOP.md: the ACTUAL number of per-block interior sweeps the last frame
+                     ran, summed across every under/overclocking repetition -- not the rate-implied
+                     budget. Below block count means underclocked blocks are genuinely sitting out;
+                     above means overclocking's extra repetitions outweigh early stop's savings.
+                     See updateBlockStepStats() in demo.js. -->
+                <div><b id="stat-block-steps">--</b><span>blk-steps</span></div>
                 <!-- Numeric readouts for the coarse overlay checkboxes above -- a colour ramp
                      alone can't tell the user "the field truly is flat" apart from "I can't
                      tell", so these print the raw numbers the ramp itself was built from. Hidden
