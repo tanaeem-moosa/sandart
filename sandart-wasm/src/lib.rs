@@ -77,6 +77,16 @@ pub struct WasmSimulationState {
     // underlying `sim.column_depth` it displays is always maintained regardless of whether this
     // is on; this field only gates whether `render()` bothers uploading/tinting with it).
     pressure_heatmap_enabled: bool,
+    // Coarse-level `eta` (hydraulic head) debug overlay (see `set_coarse_eta_overlay`). Same
+    // shape as `heatmap_enabled`/`pressure_heatmap_enabled` above -- a pure render-side toggle;
+    // the underlying `sim.coarse_state.eta` runs whenever `coarse_pressure_coupling` is on
+    // regardless of this flag, this only gates whether `render()` bothers uploading/tinting with
+    // it. Off by default, like every other Debug-group overlay.
+    coarse_eta_enabled: bool,
+    // Coarse-fine disagreement (`Delta`) debug overlay (see `set_coarse_delta_overlay`). Same
+    // shape as `coarse_eta_enabled` just above -- independent toggle, independent texture, so
+    // both can be viewed at once the same way the block and pressure heat-maps already can.
+    coarse_delta_enabled: bool,
     // Cache key for the per-cell pressure overlay upload below: the `(tick_count, source)` the
     // currently-uploaded texture was built from, or `None` if nothing has been uploaded yet.
     //
@@ -241,6 +251,8 @@ impl WasmSimulationState {
             quantile_mode: QuantileMode::Off,
             heatmap_enabled: false,
             pressure_heatmap_enabled: false,
+            coarse_eta_enabled: false,
+            coarse_delta_enabled: false,
             pressure_heat_cache_key: None,
             last_dt: 1.0 / 60.0,
             quantile_eased: [0.0; MAX_QUANTILE_LINES],
@@ -838,6 +850,50 @@ impl WasmSimulationState {
         self.sim.pressure_heatmap_overlay = enabled;
     }
 
+    /// Coarse-level `eta` (hydraulic head) debug overlay: plumbed exactly like
+    /// `set_heatmap_overlay` -- a plain field write, no reset/reinitialisation path. Purely a
+    /// render-side toggle; `sim.coarse_state.eta` is maintained by `sim.update()` whenever
+    /// `coarse_pressure_coupling` is on regardless of this flag (see that field's own doc
+    /// comment for what happens to it while coupling is off), this only gates whether `render()`
+    /// bothers uploading/tinting with it.
+    pub fn set_coarse_eta_overlay(&mut self, enabled: bool) {
+        self.coarse_eta_enabled = enabled;
+    }
+
+    /// Coarse-fine disagreement (`Delta`) debug overlay: plumbed exactly like
+    /// `set_coarse_eta_overlay` just above -- an independent toggle for an independent texture,
+    /// so both this and the `eta` overlay can be viewed at once.
+    pub fn set_coarse_delta_overlay(&mut self, enabled: bool) {
+        self.coarse_delta_enabled = enabled;
+    }
+
+    /// Numeric readout for the coarse `eta` overlay's console-footer entry: `[min, max, mean,
+    /// base_head_reference]` over `inside` coarse tiles, or empty when nothing is coarse-coupled
+    /// on screen (same empty-when-unavailable convention `get_saturation_deciles` already uses).
+    /// Exists because a colour ramp alone can't distinguish "the field truly is flat" from "I
+    /// can't tell" -- see `DrawingSimulation::coarse_eta_stats`'s doc comment for what each
+    /// element means, and `coarse_eta_texels`'s for why `base_head_reference` (not the frame's own
+    /// spread) is the scale the colour ramp itself is built against.
+    pub fn get_coarse_eta_stats(&self) -> Vec<f32> {
+        match self.sim.coarse_eta_stats() {
+            Some((min, max, mean, reference)) => vec![min, max, mean, reference],
+            None => Vec::new(),
+        }
+    }
+
+    /// Numeric readout for the coarse `Delta` overlay's console-footer entry: `[max(|Delta|)]` in
+    /// raw mass units over `inside` coarse tiles, or empty when nothing is coarse-coupled on
+    /// screen. Deliberately the plain absolute number, not normalised against anything -- the
+    /// point is to let the user read "how big is the worst disagreement right now" directly, which
+    /// is exactly the number `coarse_delta_texels`' per-tile `capacity[C]` normalisation does NOT
+    /// surface on its own.
+    pub fn get_coarse_delta_max_abs(&self) -> Vec<f32> {
+        match self.sim.coarse_delta_max_abs() {
+            Some(max_abs) => vec![max_abs],
+            None => Vec::new(),
+        }
+    }
+
     /// The overfill heat-map's legend: nine saturation decile boundaries (D1..D9), where
     /// saturation is `height / capacity`, so 1.0 is exactly full and above that is overfill.
     /// Empty until the overlay has been on long enough for the first refresh, and empty whenever
@@ -1211,7 +1267,8 @@ impl WasmSimulationState {
             marbles: current_marbles,
             heatmap_enabled: if self.heatmap_enabled { 1 } else { 0 },
             pressure_heatmap_enabled: if self.pressure_heatmap_enabled { 1 } else { 0 },
-            _pad_heatmap: [0; 2],
+            coarse_eta_enabled: if self.coarse_eta_enabled { 1 } else { 0 },
+            coarse_delta_enabled: if self.coarse_delta_enabled { 1 } else { 0 },
         };
         self.renderer.update_uniforms(&self.queue, &current_uniforms);
 
@@ -1240,6 +1297,21 @@ impl WasmSimulationState {
                 self.renderer.update_pressure_heat(&self.queue, &pressure_texels);
                 self.pressure_heat_cache_key = Some(cache_key);
             }
+        }
+
+        // Coarse-level debug overlays: same "costs nothing when disabled" contract as the two
+        // above. No cache key like the pressure heat-map's -- `coarse_eta_texels`/
+        // `coarse_delta_texels` are a single pass over the fixed 4096-tile coarse grid (same cost
+        // order as `block_heat_texels` above, which also uploads unconditionally every frame
+        // while on), not the per-cell `O(grid_size^2)` scan that made the pressure heat-map's
+        // cache worth having.
+        if self.coarse_eta_enabled {
+            let eta_texels = self.sim.coarse_eta_texels();
+            self.renderer.update_coarse_eta(&self.queue, &eta_texels);
+        }
+        if self.coarse_delta_enabled {
+            let delta_texels = self.sim.coarse_delta_texels();
+            self.renderer.update_coarse_delta(&self.queue, &delta_texels);
         }
 
         // Calculate view projection matrix

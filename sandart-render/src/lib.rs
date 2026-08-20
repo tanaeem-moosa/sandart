@@ -93,9 +93,20 @@ pub struct LightingUniforms {
     /// 0 = off (default). Repurposes one of `heatmap_enabled`'s three trailing pad slots below
     /// (the same move `grid_size` above made once already for a mid-struct gap -- see its doc
     /// comment) rather than growing the struct, so this costs no layout change and the
-    /// `size_of::<LightingUniforms>() == 240` assert further down stays untouched.
+    /// `size_of::<LightingUniforms>() == 240` assert further down stays untouched. The remaining
+    /// two slots are now `coarse_eta_enabled` and `coarse_delta_enabled` just below -- none of
+    /// `_pad_heatmap`'s original slack is left as actual padding any more.
     pub pressure_heatmap_enabled: u32,
-    pub _pad_heatmap: [u32; 2],
+    /// Coarse-level `eta` (hydraulic head) debug overlay: 1 = draw it, 0 = off (default).
+    /// Repurposes one of `_pad_heatmap`'s two slots (see `pressure_heatmap_enabled`'s doc comment
+    /// just above for why that slack existed and the precedent for spending it) rather than
+    /// growing the struct, so this and `coarse_delta_enabled` below cost no layout change and the
+    /// `size_of::<LightingUniforms>() == 240` assert further down stays untouched.
+    pub coarse_eta_enabled: u32,
+    /// Coarse-fine disagreement (`Delta`) debug overlay: 1 = draw it, 0 = off (default). The last
+    /// of the four trailing `u32` flags this struct was left room for; a fifth debug overlay
+    /// would need to grow the struct rather than repurpose padding.
+    pub coarse_delta_enabled: u32,
 }
 
 #[repr(C, align(16))]
@@ -134,6 +145,18 @@ pub struct HeightmapRenderer {
     /// `sandart_sim::DrawingSimulation::pressure_field_texels` -- see that function's doc comment
     /// for the scaling rationale.
     pub pressure_heat_texture: wgpu::Texture,
+    /// Coarse-level `eta` (hydraulic head) debug overlay texture. Same fixed 64x64
+    /// (`HEAT_GRID_SIZE`) shape and R8Unorm upload path as `block_heat_texture` above, NOT
+    /// `pressure_heat_texture`'s `grid_size`-scaled one -- the coarse grid IS the LOD block grid
+    /// (`coarse::CoarseGeometry`'s `t = grid_size / 64` in sandart-sim), so it needs no rebuilding
+    /// on a resolution change either. See `update_coarse_eta`'s doc comment for the upload
+    /// contract and `sandart_sim::DrawingSimulation::coarse_eta_texels` for what it holds.
+    pub coarse_eta_texture: wgpu::Texture,
+    /// Coarse-fine disagreement (`Delta = M - A`) debug overlay texture. Same shape as
+    /// `coarse_eta_texture` just above; the two are separate textures (not one texture with a
+    /// mode flag) so both can be toggled and read independently, the same way
+    /// `block_heat_texture` and `pressure_heat_texture` already coexist as independent overlays.
+    pub coarse_delta_texture: wgpu::Texture,
     pub bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
     pub camera_buffer: wgpu::Buffer,
@@ -293,6 +316,38 @@ impl HeightmapRenderer {
         let pressure_heat_texture_view =
             pressure_heat_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Create the two coarse-overlay textures (HEAT_GRID_SIZE x HEAT_GRID_SIZE R8Unorm) --
+        // same size/format/usage as `block_heat_texture` above, not `pressure_heat_texture`'s
+        // `texture_size`, since the coarse grid IS the LOD block grid (`t = grid_size / 64` in
+        // sandart-sim's `coarse::CoarseGeometry`). Two separate textures rather than one texture
+        // plus a mode flag, so `eta` and `delta` can each be toggled and viewed independently --
+        // the same relationship `block_heat_texture`/`pressure_heat_texture` already have.
+        let coarse_eta_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("coarse_eta_texture"),
+            size: heat_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let coarse_eta_texture_view =
+            coarse_eta_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let coarse_delta_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("coarse_delta_texture"),
+            size: heat_texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let coarse_delta_texture_view =
+            coarse_delta_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         // 2. Create heightmap sampler (using Nearest filtering for portable R32Float manual bilinear interpolation in shader)
         let heightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("heightmap_sampler"),
@@ -410,6 +465,27 @@ impl HeightmapRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        // Read via `textureLoad`, same as `block_heat_tex`/`pressure_heat_tex`.
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -449,6 +525,14 @@ impl HeightmapRenderer {
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&pressure_heat_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&coarse_eta_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&coarse_delta_texture_view),
                 },
             ],
         });
@@ -508,6 +592,8 @@ impl HeightmapRenderer {
             shape_mask_texture,
             block_heat_texture,
             pressure_heat_texture,
+            coarse_eta_texture,
+            coarse_delta_texture,
             bind_group,
             uniform_buffer,
             camera_buffer,
@@ -605,6 +691,124 @@ impl HeightmapRenderer {
             queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.block_heat_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &padded,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_bytes_per_row),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    /// Upload the coarse-level `eta` (hydraulic head) debug overlay (R8Unorm) to GPU. `data`
+    /// must be `HEAT_GRID_SIZE * HEAT_GRID_SIZE` bytes, row-major -- IDENTICAL shape and upload
+    /// path to `update_block_heat` just above (see `DrawingSimulation::coarse_eta_texels` in
+    /// sandart-sim, which produces exactly that -- the coarse grid IS the 64x64 LOD block grid,
+    /// so this is the same size, not `pressure_heat_texture`'s `grid_size`-scaled one).
+    /// `update_block_heat`'s "no bounds check on `data`'s length" contract applies here
+    /// unchanged: a short slice panics inside `write_texture`, a long one is silently truncated,
+    /// so callers must match `HEAT_GRID_SIZE * HEAT_GRID_SIZE` exactly. Same "only call while the
+    /// overlay is on" contract too -- gating the upload, not just the shader read, is half of
+    /// "costs nothing when off".
+    pub fn update_coarse_eta(&mut self, queue: &wgpu::Queue, data: &[u8]) {
+        let size = HEAT_GRID_SIZE as u32;
+        let aligned_bytes_per_row = (size + 255) & !255;
+        if aligned_bytes_per_row == size {
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.coarse_eta_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        } else {
+            let mut padded = vec![0u8; (aligned_bytes_per_row * size) as usize];
+            for y in 0..size as usize {
+                let src_start = y * size as usize;
+                let dst_start = y * aligned_bytes_per_row as usize;
+                padded[dst_start..dst_start + size as usize].copy_from_slice(&data[src_start..src_start + size as usize]);
+            }
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.coarse_eta_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &padded,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(aligned_bytes_per_row),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    /// Upload the coarse-fine disagreement (`Delta`) debug overlay (R8Unorm) to GPU. Same shape,
+    /// sizing, and upload-path contract as `update_coarse_eta` just above -- see that function's
+    /// doc comment, and `DrawingSimulation::coarse_delta_texels` in sandart-sim for what the bytes
+    /// mean.
+    pub fn update_coarse_delta(&mut self, queue: &wgpu::Queue, data: &[u8]) {
+        let size = HEAT_GRID_SIZE as u32;
+        let aligned_bytes_per_row = (size + 255) & !255;
+        if aligned_bytes_per_row == size {
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.coarse_delta_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                data,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        } else {
+            let mut padded = vec![0u8; (aligned_bytes_per_row * size) as usize];
+            for y in 0..size as usize {
+                let src_start = y * size as usize;
+                let dst_start = y * aligned_bytes_per_row as usize;
+                padded[dst_start..dst_start + size as usize].copy_from_slice(&data[src_start..src_start + size as usize]);
+            }
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.coarse_delta_texture,
                     mip_level: 0,
                     origin: wgpu::Origin3d::ZERO,
                     aspect: wgpu::TextureAspect::All,
@@ -908,7 +1112,8 @@ mod tests {
                 ],
                 heatmap_enabled: 0,
                 pressure_heatmap_enabled: 0,
-                _pad_heatmap: [0; 2],
+                coarse_eta_enabled: 0,
+                coarse_delta_enabled: 0,
             };
             resources.update_uniforms(&queue, &uniforms);
 
@@ -1190,7 +1395,8 @@ mod tests {
                     ],
                     heatmap_enabled: 0,
                     pressure_heatmap_enabled: 0,
-                    _pad_heatmap: [0; 2],
+                    coarse_eta_enabled: 0,
+                    coarse_delta_enabled: 0,
                 };
                 resources.update_uniforms(&queue, &uniforms);
 

@@ -3771,44 +3771,154 @@ mod solver_scratch {
     }
 }
 
-/// Coarse coupling (HIERARCHICAL-PRESSURE.md §5 step 5, build step 3): `delta_eta` between the
-/// coarse tiles containing fine cells `idx_a` and `idx_b`, or `0.0` when the two cells share a
-/// tile -- the common intra-tile case, where the coarse term is identical on both sides of
-/// `phi_a - phi_b` and cancels (§0.2). The caller is responsible for the actual "is the coarse
-/// level coupled this tick" decision: it must pass an EMPTY `coarse_eta` whenever
+/// Bilinear interpolation of the coarse hydraulic head field `eta[C]` onto ONE fine cell
+/// (SMOOTH-ETA.md, fixing the seam-locked sawtooth HIERARCHICAL-PRESSURE.md §0.2 predicted and the
+/// user visually confirmed on the deployed build). Previously `coarse_delta_eta` looked up each
+/// fine cell's own containing tile and returned `eta[tile]` verbatim -- a value CONSTANT across
+/// the whole tile, so the entire coarse gradient landed on the `1`-in-`t` fine edges that happen to
+/// cross a tile seam, and the `t-1` interior edges got nothing. This function instead samples the
+/// 4 coarse-cell centres surrounding the fine cell's position and blends them, so EVERY fine edge
+/// -- not just seam edges -- carries a share of the coarse gradient proportional to how far apart
+/// its two cells sit relative to the coarse grid.
+///
+/// **Sample positions.** Coarse cell `(cx, cy)` covers fine cells `[cx*t, (cx+1)*t)`, so its
+/// centre in fine-cell-continuous coordinates is `cx*t + t/2`. Converting a fine cell's own centre
+/// (`fx + 0.5`) into that same coarse-index space gives `fx_c = (fx + 0.5) / t - 0.5`: a fine cell
+/// sitting exactly on coarse cell `cx`'s centre maps to `fx_c = cx` exactly, and a fine cell
+/// exactly midway between two coarse centres maps to `fx_c = cx + 0.5`, i.e. an equal blend --
+/// which is the property the task asked for ("a fine cell midway between two coarse centres gets
+/// the average"). Floor/fract of `fx_c` (and `fy_c`) give the surrounding quad and the bilinear
+/// weights. At the domain edge `fx_c` can fall below `0` or above `N-1` (a fine cell in the outer
+/// half-tile has no coarse centre on the outside of it to interpolate toward); both the quad
+/// indices and the fractional weight are clamped to `[0, N-1]`, which is flat extrapolation from
+/// the outermost row/column of coarse centres -- the standard, least-surprising choice, and it
+/// only ever touches the outermost half-tile ring.
+///
+/// **Mask awareness (the task's flagged hazard).** A sample coarse cell can be `!inside[C]` --
+/// solid wall, material cannot cross it -- and `CoarseState::update_head_and_disagreement` marks
+/// exactly that case with `eta[C] = NaN` (see that function's doc comment for why NaN and not
+/// 0.0). This function filters NaN corners OUT of the blend and renormalises the bilinear weights
+/// over whichever corners remain valid, i.e. "weight by `inside[C]`" (the task's second offered
+/// option) implemented as "clamp/extrapolate from in-mask neighbours only" (the task's first) --
+/// they are the same operation here: dropping a NaN corner and renormalising IS extrapolating from
+/// the remaining in-mask corners. If all 4 corners are invalid (or `coarse_eta` is empty/wrongly
+/// sized -- the caller's "not coupled this tick" contract, see below), returns NaN; the caller
+/// (`coarse_delta_eta`) turns that into a 0.0 delta rather than ever handing NaN to the solver.
+///
+/// **What an empty-but-inside tile's `eta` means, interpolated.** A tile with `inside[C] = true`
+/// but zero mass gets `eta[C] = -cy * base_head_coarse` (elevation only, `x = h/cap = 0` since
+/// `h = 0`) -- the same "free surface at its own elevation" convention the fine solver already
+/// applies to a dry fine cell (`phi = 0` pressure term). This is DELIBERATELY interpolated exactly
+/// like any other tile's `eta`, with no separate "has mass" gate: an empty tile sitting next to a
+/// compressed one is precisely the case where a real fluid would want to flow downhill into it, and
+/// gating it out would delete that gradient at the one place it matters most -- the leading edge of
+/// a flow front. Excluding it would also reintroduce a version of the seam artifact this whole
+/// change removes, one tile-boundary earlier: a hard on/off step in the driving potential right at
+/// the first-mass/no-mass line instead of at the geometric tile seam.
+///
+/// Uses `coarse::COARSE_GRID`, not a hardcoded `64`/`4096`, and `w / COARSE_GRID` for the tile
+/// size -- exactly how `CoarseGeometry::build_with_coarse_n` derives `t`, exact (not truncated)
+/// whenever the caller's non-emptiness contract holds.
+#[inline]
+fn eta_fine_interp(coarse_eta: &[f32], w: usize, idx: usize) -> f32 {
+    const N: usize = crate::coarse::COARSE_GRID;
+    if coarse_eta.is_empty() || coarse_eta.len() != N * N {
+        return f32::NAN;
+    }
+    let t = (w / N).max(1) as f32;
+    let fx = (idx % w) as f32;
+    let fy = (idx / w) as f32;
+    let fx_c = (fx + 0.5) / t - 0.5;
+    let fy_c = (fy + 0.5) / t - 0.5;
+
+    let cx0i = fx_c.floor() as i32;
+    let cx0 = cx0i.clamp(0, N as i32 - 1) as usize;
+    let cx1 = (cx0i + 1).clamp(0, N as i32 - 1) as usize;
+    let tx = (fx_c - cx0i as f32).clamp(0.0, 1.0);
+
+    let cy0i = fy_c.floor() as i32;
+    let cy0 = cy0i.clamp(0, N as i32 - 1) as usize;
+    let cy1 = (cy0i + 1).clamp(0, N as i32 - 1) as usize;
+    let ty = (fy_c - cy0i as f32).clamp(0.0, 1.0);
+
+    let corners = [
+        (cy0 * N + cx0, (1.0 - tx) * (1.0 - ty)),
+        (cy0 * N + cx1, tx * (1.0 - ty)),
+        (cy1 * N + cx0, (1.0 - tx) * ty),
+        (cy1 * N + cx1, tx * ty),
+    ];
+    let mut sum_w = 0.0f32;
+    let mut sum_wv = 0.0f32;
+    for (ci, w_c) in corners {
+        let v = coarse_eta[ci];
+        if !v.is_nan() {
+            sum_w += w_c;
+            sum_wv += w_c * v;
+        }
+    }
+    if sum_w > 1e-6 {
+        sum_wv / sum_w
+    } else {
+        f32::NAN
+    }
+}
+
+/// Coarse coupling (HIERARCHICAL-PRESSURE.md §5 step 5, build step 3, rebuilt by SMOOTH-ETA.md):
+/// `delta_eta` between fine cells `idx_a` and `idx_b`, now the difference of two BILINEARLY
+/// INTERPOLATED `eta` samples (`eta_fine_interp`) rather than a lookup of each cell's own
+/// tile-constant `eta`. Every fine edge gets a share of the coarse gradient now, not just the
+/// `1`-in-`t` edges that cross a tile seam -- see `eta_fine_interp`'s doc comment for the full
+/// derivation and the mask-handling decision. The caller is responsible for the actual "is the
+/// coarse level coupled this tick" decision: it must pass an EMPTY `coarse_eta` whenever
 /// `CoarseGeometry::available` is false, rather than relying on this function to infer
 /// availability from buffer length -- `CoarseState`'s buffers stay sized `COARSE_GRID *
 /// COARSE_GRID` even when the geometry is unavailable (e.g. grid 64, the degenerate `t == 1`
 /// case), so a length check alone cannot distinguish "coupled, all zero" from "not coupled".
-/// Uses `coarse::COARSE_GRID`, not a hardcoded `64`/`4096`, and `w / COARSE_GRID` for the tile
-/// size -- exactly how `CoarseGeometry::build_with_coarse_n` derives `t`, and exact (not
-/// truncated) whenever the caller's non-emptiness contract holds, since `build_with_coarse_n`
-/// only sets `available` when `t * coarse_n == grid_size` divides evenly.
 #[inline]
 fn coarse_delta_eta(coarse_eta: &[f32], w: usize, idx_a: usize, idx_b: usize) -> f32 {
-    const N: usize = crate::coarse::COARSE_GRID;
-    if coarse_eta.is_empty() || coarse_eta.len() != N * N {
-        return 0.0;
-    }
-    let t = (w / N).max(1);
-    let cx_a = ((idx_a % w) / t).min(N - 1);
-    let cy_a = ((idx_a / w) / t).min(N - 1);
-    let cx_b = ((idx_b % w) / t).min(N - 1);
-    let cy_b = ((idx_b / w) / t).min(N - 1);
-    let ca = cy_a * N + cx_a;
-    let cb = cy_b * N + cx_b;
-    if ca != cb {
-        coarse_eta[ca] - coarse_eta[cb]
-    } else {
+    let ea = eta_fine_interp(coarse_eta, w, idx_a);
+    let eb = eta_fine_interp(coarse_eta, w, idx_b);
+    if ea.is_nan() || eb.is_nan() {
         0.0
+    } else {
+        ea - eb
     }
 }
 
-/// Coarse tile indices `(ca, cb)` for fine cells `idx_a`/`idx_b`, or `None` when they share a
-/// tile (nothing for `coarse_delta_eta_budgeted`'s flux budget to attribute) or the coarse level
-/// is not coupled this tick. Same tile-size derivation as `coarse_delta_eta` -- kept as a
-/// separate small helper rather than folded in because the budgeted wrapper below needs the
-/// indices AND the head difference as two separate values, not just their difference.
+/// Coarse HOME tile indices `(ca, cb)` for fine cells `idx_a`/`idx_b` -- i.e. the single tile each
+/// cell's fine position falls inside, NOT the (up to 4) coarse cells `eta_fine_interp` blends to
+/// produce that cell's interpolated `eta`. `None` when the two cells share a home tile, or the
+/// coarse level is not coupled this tick.
+///
+/// **Deliberately un-interpolated, and deliberately still gates on `ca == cb` (SMOOTH-ETA.md).**
+/// Before interpolation, `ca == cb` implied `delta_eta == 0` (the two cells' `eta` lookups were
+/// literally the same value), so this gate was moot -- the budgeted wrapper's `delta_eta == 0.0`
+/// fast path caught it first. After interpolation `delta_eta` is generally NONZERO even when
+/// `ca == cb`, because a fine cell's blended `eta` varies smoothly across a tile, not just at its
+/// boundary -- but I4's budget is specifically "the real mass the coarse term causes to LEAVE tile
+/// `C`" (§6), and an edge whose two fine cells share a home tile cannot move mass out of that tile
+/// by construction: both endpoints are counted in the same tile's `A[C]`, so any transfer across
+/// that edge nets to zero change in `A[C]` this tick. There is no tile for such an edge's excess to
+/// be attributed AGAINST, so `None` (no I4 budget consumption) is not a gap in the guard, it is the
+/// guard correctly recognising the mass never left anywhere. The per-EDGE saturation clamp
+/// (`flux_edge_candidate`'s `.clamp(-1.0, 1.0)`, §8 "no bang-bang transport") still applies to
+/// every edge unconditionally, intra-tile included -- that is the guard against a single
+/// interpolated intra-tile edge itself moving an unreasonable amount, and it needed no change here.
+///
+/// For a genuine inter-tile edge (`ca != cb`), attributing the budget to the two cells' HOME tiles
+/// rather than to whichever up-to-4 tiles their interpolated `eta` actually blended from is a
+/// deliberate approximation, not an oversight: `eta_fine_interp`'s dominant contributors for a
+/// fine cell adjacent to a seam are overwhelmingly its own home tile and the immediate neighbour
+/// across that seam (the other two corners are the SAME pair of tiles for both `idx_a` and
+/// `idx_b`, since they differ by one fine cell, so their contribution to `d_coupled - d_uncoupled`
+/// is small and mostly cancels). Exact per-corner attribution would need to split one edge's
+/// excess across up to 4 tiles' budgets with fractional weights, which is a real design question
+/// SMOOTH-ETA.md leaves open rather than answers by construction; report the flux-budget
+/// clamp-count measurement if this approximation turns out to matter.
+///
+/// Same tile-size derivation as `eta_fine_interp`'s own home-tile lookup -- kept as a separate
+/// small helper rather than folded in because the budgeted wrapper below needs the indices AND the
+/// head difference as two separate values, not just their difference.
 #[inline]
 fn coarse_tile_indices(coarse_eta_len: usize, w: usize, idx_a: usize, idx_b: usize) -> Option<(usize, usize)> {
     const N: usize = crate::coarse::COARSE_GRID;

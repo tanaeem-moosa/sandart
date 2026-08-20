@@ -1327,6 +1327,183 @@ impl DrawingSimulation {
         }
     }
 
+    /// Row-major coarse-level `eta` (hydraulic head) texels for the coarse-overlay debug
+    /// instrument, one byte per coarse tile, always `COARSE_GRID * COARSE_GRID` -- exactly
+    /// `HEAT_GRID_SIZE * HEAT_GRID_SIZE` in `sandart-render`, since the coarse grid IS the LOD
+    /// block grid (`coarse::CoarseGeometry`'s `t = grid_size / 64`). This is deliberately routed
+    /// through `HeightmapRenderer::update_coarse_eta`, the exact same fixed-64x64 R8Unorm upload
+    /// path `block_heat_texels` above already uses (including its "no bounds check, match the
+    /// size exactly" contract) -- there is no reason to invent a second shape for a texture that
+    /// is already the right size.
+    ///
+    /// `coarse_state.eta` is `CoarseState`'s own buffer regardless of whether the coarse level is
+    /// coupled into the fine solver THIS tick -- `coarse_state.tick(...)` (in `update()`, above
+    /// the fine `settle_tick` call) only runs while `coarse_pressure_coupling` is on, so with that
+    /// toggle off this overlay shows whatever `eta` last held (all zero if coupling has never run
+    /// since the shape was last generated). That is a property of the debug toggle, not a bug
+    /// here.
+    ///
+    /// SCALING: a FIXED physical reference, `base_head` -- "one row of gravity head" -- NOT the
+    /// frame's own min/max. Per-frame min/max was tried first and rejected: it stretches
+    /// whatever spread is on screen to the full ramp regardless of that spread's actual size, so
+    /// a field spanning 0.0001 and one spanning 10.0 render IDENTICALLY, and worse, a nearly-flat
+    /// field renders as dramatic, fully-saturated structure that is pure amplified noise. That
+    /// defeats the overlay's actual job, which is to answer "does the coarse level's `eta` have a
+    /// real gradient, or is it nearly flat" -- exactly the distinction per-frame normalisation
+    /// erases.
+    ///
+    /// `base_head = GRAVITY_HEAD_SCALE * gravity_dir.y.abs()` is the SAME quantity
+    /// `CoarseState::update_head_and_disagreement` (`coarse.rs`) nets out of `phi` to produce
+    /// `eta` in the first place, and the same scale `physics::coarse_delta_eta` drives fine edges
+    /// with -- "the scale at which `eta` differences matter" is not a free choice, it is this
+    /// number. A tile-to-tile difference of one `base_head` is large: it is the head drop across
+    /// one entire fine row, `coarse_delta_eta`'s standing scale for the term that drives real
+    /// mass across an edge. `HALF_RANGE_BASE_HEADS` below fixes how many `base_head`s the ramp's
+    /// half-width covers; this is a picked constant, not swept, and should be revisited once the
+    /// user has looked at real deployed data through it.
+    ///
+    /// The mapping re-centres each frame on the `inside` tiles' own MEAN, not their min/max --
+    /// this is not the rejected per-frame normalisation, because it only moves the ORIGIN, not
+    /// the GAIN. `eta` carries an arbitrary system-wide offset (`phi`'s zero is not physically
+    /// anchored), so displaying raw `eta` against an absolute zero would push an entire ordinary
+    /// scene off-scale into one saturated colour; centring on the mean removes that irrelevant
+    /// offset while a deviation of a given SIZE in `base_head` units always maps to the same
+    /// colour shift regardless of what else is on screen -- a tiny-spread field still collapses to
+    /// near-uniform grey, a genuinely sloped one still shows visible structure.
+    ///
+    /// Falls back to `1.0` -- the value `base_head` takes at the shipped default Sand-fall gravity
+    /// (`0.04`, documented on `GRAVITY_HEAD_SCALE` as making one row's head drop exactly `1.0`),
+    /// NOT an arbitrary number -- when `gravity_dir.y` is ~0 (Sandbox mode's `Phi == 0` regime),
+    /// where the live "one row" scale is itself degenerate.
+    ///
+    /// Tiles with `open_cells[C] == 0` (`inside[C] == false` -- dry land, the exterior, or the
+    /// whole grid when `coarse.available` is false at grid <= 64) are 0, the same "off/no data"
+    /// convention `block_heat_texels`/`pressure_field_texels` already use for their sequential
+    /// ramps.
+    pub fn coarse_eta_texels(&self) -> Vec<u8> {
+        const HALF_RANGE_BASE_HEADS: f32 = 1.0;
+        let n = COARSE_GRID * COARSE_GRID;
+        let eta = &self.coarse_state.eta;
+        let inside = &self.coarse.inside;
+        if eta.len() != n || inside.len() != n {
+            return vec![0u8; n];
+        }
+        let (mean, reference) = match self.coarse_eta_stats() {
+            Some((_, _, mean, reference)) => (mean, reference),
+            None => return vec![0u8; n],
+        };
+        let half_range = HALF_RANGE_BASE_HEADS * reference;
+        (0..n)
+            .map(|c| {
+                if !inside[c] {
+                    0u8
+                } else {
+                    let norm = 0.5 + 0.5 * ((eta[c] - mean) / half_range).clamp(-1.0, 1.0);
+                    (norm * 255.0).round() as u8
+                }
+            })
+            .collect()
+    }
+
+    /// `eta` statistics shared by `coarse_eta_texels` (above) and the web UI's numeric readout
+    /// (`sandart-wasm`'s `get_coarse_eta_stats`) -- ONE place computing min/max/mean/reference so
+    /// the readout the user reads a number off of can never drift from what the colour ramp
+    /// actually encoded. Returns `(min, max, mean, base_head_reference)` over `inside` tiles, or
+    /// `None` when there is no `inside` tile at all (nothing coarse-coupled is on screen). See
+    /// `coarse_eta_texels`'s doc comment for what `reference` means and why it is a fixed physical
+    /// scale rather than the frame's own spread.
+    pub fn coarse_eta_stats(&self) -> Option<(f32, f32, f32, f32)> {
+        let n = COARSE_GRID * COARSE_GRID;
+        let eta = &self.coarse_state.eta;
+        let inside = &self.coarse.inside;
+        if eta.len() != n || inside.len() != n {
+            return None;
+        }
+        let mut min_eta = f32::INFINITY;
+        let mut max_eta = f32::NEG_INFINITY;
+        let mut sum = 0.0f32;
+        let mut count = 0u32;
+        for c in 0..n {
+            if inside[c] {
+                min_eta = min_eta.min(eta[c]);
+                max_eta = max_eta.max(eta[c]);
+                sum += eta[c];
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+        let mean = sum / count as f32;
+        let base_head = physics::GRAVITY_HEAD_SCALE * self.gravity_dir.y.abs();
+        let reference = if base_head > 1e-3 { base_head } else { 1.0 };
+        Some((min_eta, max_eta, mean, reference))
+    }
+
+    /// Row-major coarse-fine disagreement (`Delta = M - A`) texels for the coarse-overlay debug
+    /// instrument. Same shape, sizing, and staleness contract as `coarse_eta_texels` just above
+    /// -- read that function's doc comment first, this one only covers what differs.
+    ///
+    /// SCALING DIFFERS FROM `eta` in kind (diverging, not sequential) but agrees with it on the
+    /// core fix: a FIXED, physically meaningful reference per tile, not a per-frame `max(|delta|)`
+    /// stretch -- the same "0.01 must not look like 10" argument applies here just as much as to
+    /// `eta`. The reference used is `capacity[C]`, THAT TILE's own nominal fill capacity (`M` and
+    /// `A` are each individually bounded near `capacity[C]`, so `Delta = M - A` naturally ranges
+    /// roughly `-capacity[C] .. +capacity[C]`): `norm = 0.5 + 0.5 * clamp(delta[C] / capacity[C],
+    /// -1, 1)`. This is NOT per-frame normalisation -- `capacity[C]` is fixed geometry, unchanged
+    /// tick to tick except when the shape itself is rebuilt, so a genuinely tiny disagreement
+    /// reads as near-grey regardless of what any other tile or any other frame shows, and a
+    /// disagreement approaching a full tile's holding capacity reads as fully saturated. 0.5
+    /// (mid-ramp) is ALWAYS zero disagreement, never rescaled away from centre.
+    ///
+    /// Tiles with `inside[C] == false` are mapped to 128 (mid-ramp, "no disagreement"), NOT 0 like
+    /// `eta`'s convention -- 0 is a real, strongly-coloured endpoint on a DIVERGING ramp (maximally
+    /// negative), so using it for "no data" would paint dry land and the exterior in the same hue
+    /// as the tile most starved by the coarse level, which is exactly backwards.
+    pub fn coarse_delta_texels(&self) -> Vec<u8> {
+        let n = COARSE_GRID * COARSE_GRID;
+        let delta = &self.coarse_state.delta;
+        let inside = &self.coarse.inside;
+        let capacity = &self.coarse.capacity;
+        if delta.len() != n || inside.len() != n || capacity.len() != n {
+            return vec![0u8; n];
+        }
+        (0..n)
+            .map(|c| {
+                if !inside[c] || capacity[c] < 1e-6 {
+                    128u8
+                } else {
+                    let norm = 0.5 + 0.5 * (delta[c] / capacity[c]).clamp(-1.0, 1.0);
+                    (norm * 255.0).round() as u8
+                }
+            })
+            .collect()
+    }
+
+    /// `max(|Delta|)` over `inside` tiles, in raw mass units -- for the web UI's numeric readout
+    /// (`sandart-wasm`'s `get_coarse_delta_max_abs`) ONLY. Not used by `coarse_delta_texels`
+    /// above, which normalises each tile against its OWN `capacity[C]` rather than a single
+    /// scene-wide number; this is a plain absolute figure so the user can read "how big is the
+    /// worst disagreement right now" directly, in the same units `Delta` itself is in. `None` when
+    /// there is no `inside` tile at all.
+    pub fn coarse_delta_max_abs(&self) -> Option<f32> {
+        let n = COARSE_GRID * COARSE_GRID;
+        let delta = &self.coarse_state.delta;
+        let inside = &self.coarse.inside;
+        if delta.len() != n || inside.len() != n {
+            return None;
+        }
+        let mut max_abs = 0.0f32;
+        let mut any = false;
+        for c in 0..n {
+            if inside[c] {
+                max_abs = max_abs.max(delta[c].abs());
+                any = true;
+            }
+        }
+        if any { Some(max_abs) } else { None }
+    }
+
     /// Recomputes `saturation_deciles` from the current heightmap. `O(n log n)` in the number of
     /// OCCUPIED cells, which is why it runs on a slow cadence (`SATURATION_DECILE_REFRESH_TICKS`)
     /// and only while the overlay is on.

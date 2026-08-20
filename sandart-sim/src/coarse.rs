@@ -766,7 +766,26 @@ impl CoarseState {
                     self.eta[c] = phi - cy as f32 * base_head_coarse;
                     self.p_coarse[c] = (phi - x).max(0.0);
                 } else {
-                    self.eta[c] = 0.0;
+                    // SMOOTH-ETA.md (build step, post-STEP4): `cap > 0.0` is unconditionally true
+                    // whenever `geo.inside[c]` (`cell_capacity_for` returns 1.0..=1.5 for every
+                    // wetness), so this branch is exactly `!geo.inside[c]` -- a coarse cell OUTSIDE
+                    // the sandbox geometry: solid wall, not a dry-but-reachable pocket (that case is
+                    // `inside[c] = true, h = 0`, handled above by the `x <= 1.0` branch with
+                    // `eta = -cy * base_head_coarse`, the same "free surface at its own elevation"
+                    // convention the fine solver already uses for a dry cell). Bilinear
+                    // interpolation of `eta` onto the fine grid (`physics::eta_fine_interp`) must
+                    // never blend a wall's `eta` into a wet cell's driving potential -- material
+                    // cannot cross that wall, so there is no physical quantity for `eta` to
+                    // represent there. NaN, not 0.0, marks this: 0.0 is a plausible genuine `eta`
+                    // reading (e.g. exactly at a free surface at row 0), so it cannot double as
+                    // "invalid" without silently corrupting a real one.
+                    // `eta_fine_interp` filters NaN samples out of its 4-corner blend and
+                    // renormalises weight over whatever in-mask corners remain; if every corner
+                    // within interpolation reach of a fine cell is NaN (a wall-locked pocket, not
+                    // reachable by any real fine cell in practice since a reachable fine cell's own
+                    // tile is always `inside`), it returns NaN itself and `coarse_delta_eta` treats
+                    // that as "no coupling on this edge" (delta 0.0), never propagating NaN further.
+                    self.eta[c] = f32::NAN;
                     self.p_coarse[c] = 0.0;
                 }
             }

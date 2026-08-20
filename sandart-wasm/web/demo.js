@@ -285,6 +285,7 @@ function tick(now) {
     frameCount++;
     if (now - fpsTime >= 1000) {
         updateSaturationDeciles();
+        updateCoarseOverlayStats();
         const avgStepTime = renderTimeCount > 0 ? (totalStepTime / renderTimeCount) : 0;
         const avgRenderTime = renderTimeCount > 0 ? (totalRenderTime / renderTimeCount) : 0;
         const avgTotalTime = avgStepTime + avgRenderTime;
@@ -852,6 +853,8 @@ function syncSettings() {
     state.set_heatmap_overlay(document.getElementById('check-heatmap').checked);
     state.set_fresh_pressure_field(false);
     state.set_pressure_heatmap_overlay(document.getElementById('check-pressure-heatmap').checked);
+    state.set_coarse_eta_overlay(document.getElementById('check-coarse-eta').checked);
+    state.set_coarse_delta_overlay(document.getElementById('check-coarse-delta').checked);
     state.set_pressure_heatmap_head_field(false);
     state.set_head_field_transport(false);
     state.set_pressure_sensitive_flow(false);
@@ -867,6 +870,7 @@ function syncSettings() {
         state.set_overfill_stiffness(stiffness);
     }
     updateSaturationDeciles();
+    updateCoarseOverlayStats();
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
@@ -995,6 +999,59 @@ function updateSaturationDeciles() {
         chip.title = `Band ${i + 1}: ${v.toFixed(2)} saturation (top ${(10 - i) * 10}% rank)`;
         out.appendChild(chip);
     });
+}
+
+// Numeric readouts for the two coarse overlay checkboxes -- module scope, same reason as
+// updateSaturationDeciles() above (see scripts/check_js.js). A colour ramp alone can't tell the
+// user "the eta field truly is flat" apart from "I can't tell it's not" (see
+// coarse_eta_texels'/coarse_eta_stats' doc comments in sandart-sim/src/lib.rs for the full
+// argument); these two rows print the raw numbers the ramp was built from, so there's no ambiguity
+// left for a colour to paper over. Each row hides itself unless its matching checkbox is on, same
+// as the saturation-deciles row above.
+function updateCoarseOverlayStats() {
+    if (!state) return;
+    const etaRow = document.getElementById('coarse-eta-stat-row');
+    const etaOut = document.getElementById('stat-coarse-eta');
+    const etaOn = document.getElementById('check-coarse-eta');
+    if (etaRow && etaOut) {
+        const active = !!etaOn && etaOn.checked;
+        etaRow.style.display = active ? '' : 'none';
+        if (active) {
+            const stats = state.get_coarse_eta_stats(); // [min, max, mean, base_head_reference]
+            if (stats && stats.length === 4) {
+                const [min, max, , reference] = stats;
+                const spreadRows = (max - min) / reference;
+                etaOut.innerText = spreadRows.toFixed(3);
+                etaOut.parentElement.title =
+                    `eta ${min.toFixed(3)} .. ${max.toFixed(3)} · one row = ${reference.toFixed(3)} -- ` +
+                    `spread expressed in rows of gravity head, NOT the frame's own min/max, so a ` +
+                    `nearly-flat field reads as a small number here even if the colour looks busy.`;
+            } else {
+                // Nothing coarse-coupled on screen yet (grid <= 64, or coupling just switched on).
+                etaOut.innerText = '--';
+                etaOut.parentElement.title = '';
+            }
+        }
+    }
+    const deltaRow = document.getElementById('coarse-delta-stat-row');
+    const deltaOut = document.getElementById('stat-coarse-delta');
+    const deltaOn = document.getElementById('check-coarse-delta');
+    if (deltaRow && deltaOut) {
+        const active = !!deltaOn && deltaOn.checked;
+        deltaRow.style.display = active ? '' : 'none';
+        if (active) {
+            const stats = state.get_coarse_delta_max_abs(); // [max_abs] or empty
+            if (stats && stats.length === 1) {
+                deltaOut.innerText = stats[0].toFixed(3);
+                deltaOut.parentElement.title =
+                    'Worst-case |M - A| across the coarse grid, in raw mass units -- the future ' +
+                    "scheduler's clock signal (HIERARCHICAL-PRESSURE.md build step 4).";
+            } else {
+                deltaOut.innerText = '--';
+                deltaOut.parentElement.title = '';
+            }
+        }
+    }
 }
 
 // The pressure heat-map's colour ramp, mirrored from sandart-render/src/shader.wgsl: deep violet
@@ -1277,6 +1334,8 @@ function setupPanelInput() {
     document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
     document.getElementById('check-heatmap').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
+    document.getElementById('check-coarse-eta').addEventListener('change', syncSettings);
+    document.getElementById('check-coarse-delta').addEventListener('change', syncSettings);
     document.getElementById('check-coarse-coupling').addEventListener('change', syncSettings);
     const overfillStiffSlider = document.getElementById('overfill-stiffness-slider');
     if (overfillStiffSlider) {

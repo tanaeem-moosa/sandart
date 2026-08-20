@@ -15,6 +15,19 @@
 // via `textureLoad` (integer cell coords), same as `shape_mask_tex`/`block_heat_tex`, so no
 // sampler binding is needed for it either.
 @group(0) @binding(7) var pressure_heat_tex: texture_2d<f32>;
+// Coarse-level `eta` (hydraulic head) debug overlay. Same fixed 64x64 shape as `block_heat_tex`
+// above, NOT `pressure_heat_tex`'s `uniforms.grid_size`-scaled one -- the coarse grid IS the LOD
+// block grid (`t = grid_size / 64` in sandart-sim's `coarse::CoarseGeometry`). Holds
+// `sandart_sim::DrawingSimulation::coarse_eta_texels`'s per-frame min/max-normalised [0,1] value
+// -- see that function's doc comment for why this is a floating per-frame scale rather than a
+// fixed one like `pressure_heat_tex` uses. Read via `textureLoad`, no sampler needed.
+@group(0) @binding(8) var coarse_eta_tex: texture_2d<f32>;
+// Coarse-fine disagreement (`Delta = M - A`) debug overlay. Same shape as `coarse_eta_tex` just
+// above. Holds `DrawingSimulation::coarse_delta_texels`'s output: a SYMMETRIC per-frame scale
+// where 0.5 is always exactly zero disagreement (see that function's doc comment) -- this is a
+// diverging quantity, not a sequential one like `coarse_eta_tex`/`block_heat_tex`, and its colour
+// ramp below reflects that.
+@group(0) @binding(9) var coarse_delta_tex: texture_2d<f32>;
 
 const PI: f32 = 3.14159265359;
 const Z_SCALE: f32 = 0.009; // Unified heightmap displacement scale
@@ -64,8 +77,14 @@ struct LightingUniforms {
     // `LightingUniforms::pressure_heatmap_enabled` in sandart-render/src/lib.rs exactly; see that
     // field's doc comment for why this must stay a bare `u32` at this exact offset.
     pressure_heatmap_enabled: u32,
-    _pad_heatmap0: u32,
-    _pad_heatmap1: u32,
+    // Coarse-level `eta` (hydraulic head) debug overlay: 1u = draw it, 0u = off (default).
+    // Repurposes one of the two remaining trailing pad scalars -- mirrors the Rust-side
+    // `LightingUniforms::coarse_eta_enabled` exactly; see that field's doc comment.
+    coarse_eta_enabled: u32,
+    // Coarse-fine disagreement (`Delta`) debug overlay: 1u = draw it, 0u = off (default). The
+    // last of the four trailing flags this struct has room for -- mirrors
+    // `LightingUniforms::coarse_delta_enabled` exactly.
+    coarse_delta_enabled: u32,
 };
 
 struct CameraUniforms {
@@ -884,6 +903,78 @@ fn fs_main(
         // instrument meant to be read at a glance, including over a genuinely-zero-pressure void
         // (pressure = 0.0), which needs to visibly differ from "no overlay at all".
         final_color = mix(final_color, pressure_color, 0.55);
+    }
+
+    // Coarse-level `eta` (hydraulic head) debug overlay. Same placement contract as the three
+    // overlays above: past the `in_casing` early-return and the marble-hit return, and
+    // `coarse_eta_enabled == 0u` (the default) skips this whole block, costing nothing. This
+    // answers "is the coarse level flat across a connected body" -- the whole point of the
+    // instrument -- so it must show STRUCTURE (a resting pool as one flat hue, a U-tube's two
+    // arms as two visibly different hues until they equalise), not a washed-out fixed scale.
+    if (uniforms.coarse_eta_enabled != 0u) {
+        // The coarse grid is a fixed 64x64 regardless of `uniforms.grid_size`, same block-coord
+        // math as `block_heat_tex` above -- the coarse tile IS the LOD block (`t = grid_size /
+        // 64`), not a texel-per-cell field like `pressure_heat_tex`.
+        let eta_block_coord = vec2<i32>(vec2<f32>(uv.x, uv.y) * 64.0);
+        let eta = textureLoad(coarse_eta_tex, clamp(eta_block_coord, vec2<i32>(0), vec2<i32>(63)), 0).r;
+
+        // Deep forest green -> mid green -> pale warm cream. A third, distinct hue arc (roughly
+        // 150deg -> 125deg -> 60deg) from BOTH sequential ramps already in this shader --
+        // `block_heat_tex`'s blue/teal/orange-red (230deg->160deg->20deg) and
+        // `pressure_heat_tex`'s violet/magenta/yellow (270deg->320deg->50deg) -- so this overlay
+        // is never confusable with either when flipping between debug instruments. Like those two
+        // it moves in both lightness and hue at once (dark, saturated green up to a pale, warm
+        // cream), so the low end still reads against pale sand and the high end still reads
+        // against the near-black casing/table.
+        let eta_cold = vec3<f32>(0.04, 0.22, 0.10);
+        let eta_mid = vec3<f32>(0.18, 0.55, 0.22);
+        let eta_hot = vec3<f32>(0.92, 0.95, 0.68);
+        var eta_color: vec3<f32>;
+        if (eta < 0.5) {
+            eta_color = mix(eta_cold, eta_mid, eta * 2.0);
+        } else {
+            eta_color = mix(eta_mid, eta_hot, (eta - 0.5) * 2.0);
+        }
+        // Same flat, strong blend as the other overlays, for the same reason: a debug instrument
+        // meant to be read at a glance, including over dry land / the exterior (eta = 0.0 there,
+        // see `coarse_eta_texels`'s doc comment), which needs to visibly differ from "no overlay
+        // at all".
+        final_color = mix(final_color, eta_color, 0.55);
+    }
+
+    // Coarse-fine disagreement (`Delta`) debug overlay. Same placement contract as the overlays
+    // above; `coarse_delta_enabled == 0u` (the default) skips this whole block. This answers "how
+    // much work has the fine level not done yet, and in which direction" -- the future
+    // scheduler's clock signal -- so unlike every other overlay in this shader it is DIVERGING,
+    // not sequential: zero disagreement is a real, meaningful value that must land on a fixed,
+    // recognisable point of the ramp, not an arbitrary end of it.
+    if (uniforms.coarse_delta_enabled != 0u) {
+        let delta_block_coord = vec2<i32>(vec2<f32>(uv.x, uv.y) * 64.0);
+        let delta = textureLoad(coarse_delta_tex, clamp(delta_block_coord, vec2<i32>(0), vec2<i32>(63)), 0).r;
+
+        // Vivid blue (coarse behind fine, M < A) -> neutral mid-grey (agreement, delta = 0, at
+        // EXACTLY 0.5) -> vivid orange (coarse ahead of fine, M > A). Structurally different from
+        // every sequential ramp in this shader (dark-to-pale) on purpose: a diverging quantity's
+        // zero must be visually distinct from BOTH its extremes, which a monotone-lightness ramp
+        // cannot do (its midpoint is just "medium", indistinguishable from a small nonzero
+        // reading). The neutral sits at MID lightness rather than white or near-black specifically
+        // so it keeps contrast against both the pale sand and the dark casing at once -- an
+        // all-white or all-black "zero" would vanish into one of the two backgrounds this overlay
+        // has to render over.
+        let delta_neg = vec3<f32>(0.15, 0.35, 0.85);
+        let delta_zero = vec3<f32>(0.50, 0.50, 0.53);
+        let delta_pos = vec3<f32>(0.95, 0.55, 0.10);
+        var delta_color: vec3<f32>;
+        if (delta < 0.5) {
+            delta_color = mix(delta_neg, delta_zero, delta * 2.0);
+        } else {
+            delta_color = mix(delta_zero, delta_pos, (delta - 0.5) * 2.0);
+        }
+        // Same flat, strong blend as the other overlays. Dry land / the exterior reads as 0.5,
+        // i.e. exactly the neutral "no disagreement" colour (see `coarse_delta_texels`'s doc
+        // comment) -- NOT one of the saturated extremes, which would otherwise falsely flag empty
+        // space as the tile most starved by the coarse level.
+        final_color = mix(final_color, delta_color, 0.55);
     }
 
     return vec4<f32>(final_color, 1.0);

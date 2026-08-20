@@ -827,6 +827,26 @@
                     <input type="checkbox" id="check-pressure-heatmap" checked>
                     <span class="checkmark"></span>
                 </label>
+                <!-- Coarse overlay (HIERARCHICAL-PRESSURE.md): tints each 64x64 coarse tile (the
+                     same tile the LOD block above uses) by the coarse level's own state. Two
+                     independent checkboxes rather than one selector, so both can be read at
+                     once -- they answer different questions. "eta" is the coarse hydraulic head:
+                     flat across a connected body at rest, so this is the instrument for "is the
+                     coarse level's own picture of the world sane" -- a settled pool should read
+                     as one uniform hue, a U-tube's two arms should visibly equalise. "delta" is
+                     the signed coarse-fine disagreement (M - A): zero where the two levels agree,
+                     so this is "how much work has the fine level not done yet, and in which
+                     direction" -- diverging colour, grey at zero, blue/orange at the two signs. -->
+                <label class="checkbox-container">
+                    Coarse overlay: eta (head)
+                    <input type="checkbox" id="check-coarse-eta">
+                    <span class="checkmark"></span>
+                </label>
+                <label class="checkbox-container">
+                    Coarse overlay: delta (disagreement)
+                    <input type="checkbox" id="check-coarse-delta">
+                    <span class="checkmark"></span>
+                </label>
                 <!-- Coarse pressure coupling (HIERARCHICAL-PRESSURE.md): a background 64x64 tile
                      level that supplies driving hydraulic head to the fine solver so distant
                      material can equalise faster than the fine flux solver alone. On by default,
@@ -1068,6 +1088,21 @@
                 <div><b id="stat-fps">60</b><span>fps</span></div>
                 <div><b id="stat-render-time">--</b><span>ms/frame</span></div>
                 <div><b id="stat-blocks">4096</b><span>blocks</span></div>
+                <!-- Numeric readouts for the coarse overlay checkboxes above -- a colour ramp
+                     alone can't tell the user "the field truly is flat" apart from "I can't
+                     tell", so these print the raw numbers the ramp itself was built from. Hidden
+                     unless the matching overlay checkbox is on (see updateCoarseOverlayStats() in
+                     demo.js), same pattern as #saturation-deciles-row below. "eta spread" is
+                     max-min over the coarse grid in the SAME units `stat-coarse-eta-ref` reports
+                     as one row of gravity head, so the two numbers together answer "is this
+                     spread big or small" without requiring the reader to already know the scale.
+                     "max |delta|" is `Delta`'s raw worst-case magnitude in mass units. -->
+                <div id="coarse-eta-stat-row" style="display: none;">
+                    <b id="stat-coarse-eta">--</b><span>eta spread (rows)</span>
+                </div>
+                <div id="coarse-delta-stat-row" style="display: none;">
+                    <b id="stat-coarse-delta">--</b><span>max |&Delta;|</span>
+                </div>
                 <!-- Populated from the wasm module at startup (see displayBuildStamp() in
                      demo.js) with the git SHA + build time baked in by sandart-wasm/build.rs.
                      Never hand-edit this value. -->
