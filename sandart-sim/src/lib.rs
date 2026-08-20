@@ -13,6 +13,24 @@ pub use quantiles::{
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
+// PERF-PROFILE.md MEASUREMENT INSTRUMENTATION. Retained deliberately: it is the instrument
+// that produced the "~59-62% of extra sub-steps run on already-settled blocks" finding, and
+// it is how the early-termination fix will be verified once built. Measured non-perturbing --
+// lib suite 102/10 unchanged, 115.6 ms/frame against 120.1 without it (noise), mass_err
+// 1.29e-9. DELETE IT once early termination lands and has been re-measured. Records, per
+// overclocked block per frame, (target sub-steps, first sub-step index at which the block's own
+// physically-computed `last_displacements` fell under `MUST_SIMULATE_THRESHOLD`, or -1 if it
+// never did). Read right after each `settle_tick` call, BEFORE `force_overclocked_blocks_active`
+// overwrites `last_displacements` for the next repetition, so this sees the real number, not the
+// forced floor. Answers Job 2 candidate 5's "how often does a block reach local equilibrium
+// before its n sub-steps are done".
+thread_local! {
+    static EARLY_TERM_LOG: std::cell::RefCell<Vec<(u32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+pub fn early_term_log_take() -> Vec<(u32, i32)> {
+    EARLY_TERM_LOG.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
 pub const GRID_SIZE: usize = 512;
 pub const DEFAULT_SAND_HEIGHT: f32 = 0.35;
 
@@ -2277,6 +2295,9 @@ impl DrawingSimulation {
             // re-aggregated into `A[C]`. Reduces to one call and one copy, bit-identical to
             // before this feature existed, when `extra_reps == 0`.
             let mut touched_accum: Vec<bool> = Vec::new();
+            // PERF-PROFILE.md TEMPORARY: first rep (per block) whose real `last_displacements`
+            // fell under threshold, -1 if never within this frame's rep budget.
+            let mut first_settled: Vec<i32> = vec![-1; self.block_clock_rate.len()];
             for rep in 0..=extra_reps {
                 if rep > 0 {
                     self.force_overclocked_blocks_active(rep);
@@ -2324,6 +2345,17 @@ impl DrawingSimulation {
                     if self.coarse.available && self.coarse_pressure_coupling { &self.coarse_state.delta } else { &[] },
                     Some(&mut touched_this_rep),
                 );
+                // PERF-PROFILE.md TEMPORARY: capture the REAL post-settle_tick displacement for
+                // this rep, before the next iteration's `force_overclocked_blocks_active` (if
+                // any) overwrites it.
+                for b in 0..self.block_clock_rate.len().min(self.last_displacements.len()) {
+                    if self.block_clock_rate[b] > 1.0
+                        && first_settled[b] < 0
+                        && self.last_displacements[b] < physics::MUST_SIMULATE_THRESHOLD
+                    {
+                        first_settled[b] = rep as i32;
+                    }
+                }
                 if touched_accum.len() != touched_this_rep.len() {
                     touched_accum.resize(touched_this_rep.len(), false);
                 }
@@ -2332,6 +2364,19 @@ impl DrawingSimulation {
                 }
             }
             self.blocks_touched = touched_accum;
+            // PERF-PROFILE.md TEMPORARY: log (target sub-steps, first-settled rep or -1) for
+            // every block that was genuinely overclocked this frame.
+            if extra_reps > 0 {
+                EARLY_TERM_LOG.with(|c| {
+                    let mut log = c.borrow_mut();
+                    for b in 0..self.block_clock_rate.len() {
+                        let rate = self.block_clock_rate[b];
+                        if rate > 1.0 {
+                            log.push((rate.round() as u32, first_settled[b]));
+                        }
+                    }
+                });
+            }
         } else {
             self.active_bounds.active = false;
             // Nothing ran, so no block's fine heights could have changed -- see

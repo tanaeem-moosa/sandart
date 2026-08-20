@@ -23,3 +23,15 @@ opt-level = 3
 
 [profile.dev.package.glam]
 opt-level = 3
+
+# PERF-PROFILE.md: fat LTO + codegen-units=1 (the shipped release profile) gives `pprof`/gimli
+# ambiguous symbol attribution -- MergeFunctions/aggressive cross-function inlining collapses
+# several distinct physics.rs helpers into address ranges the DWARF inline info resolves
+# inconsistently run-to-run (same binary, same workload, different leaf name each run; see
+# PERF-PROFILE.md's methodology note). This profile keeps opt-level=3 and debug info but drops
+# LTO/codegen-units=1 so `perf`/`pprof` symbolication is stable. Local-only, not for commit.
+[profile.profiling]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = true
