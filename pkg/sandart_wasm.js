@@ -246,6 +246,19 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
     }
     /**
+     * "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md): forwarded straight to
+     * the sim, a plain field write (same shape as `set_overfill_pressure` just above -- no
+     * reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
+     * `DrawingSimulation::coarse_pressure_coupling`'s doc comment in sandart-sim/src/lib.rs for
+     * what it switches: `true` (default, unlike its sibling toggles) is today's shipped coarse
+     * level, coupled into the fine solver; `false` disables both the coarse level's own per-tick
+     * work AND its contribution to any fine edge, reproducing pre-coupling behaviour exactly.
+     * @param {boolean} enabled
+     */
+    set_coarse_pressure_coupling(enabled) {
+        wasm.wasmsimulationstate_set_coarse_pressure_coupling(this.__wbg_ptr, enabled);
+    }
+    /**
      * @param {number} mode
      */
     set_color_mode(mode) {

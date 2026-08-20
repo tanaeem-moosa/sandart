@@ -804,10 +804,10 @@
                  entirely (every block holding material simulates every tick, not just the ones
                  that win the budget competition) -- it exists to A/B the scheduler's own
                  approximation against ground truth, and it is deliberately slow. The heat-map
-                 tints each 32x32 LOD block by how often it was actually simulated over roughly
+                 tints each 64x64 LOD block by how often it was actually simulated over roughly
                  the last 300 frames, cold = rarely, hot = every tick -- it shows exactly which
                  blocks the budget is skipping, with or without the toggle above switched on.
-                 "Pressure field heat-map" tints each individual grid CELL (not each 32x32 block,
+                 "Pressure field heat-map" tints each individual grid CELL (not each 64x64 block,
                  like the heat-map above) by a pressure-like value on a fixed log scale
                  (violet = low/void, magenta = mid, pale yellow = high). -->
             <div class="group">
@@ -825,6 +825,17 @@
                 <label class="checkbox-container">
                     Pressure field heat-map
                     <input type="checkbox" id="check-pressure-heatmap" checked>
+                    <span class="checkmark"></span>
+                </label>
+                <!-- Coarse pressure coupling (HIERARCHICAL-PRESSURE.md): a background 64x64 tile
+                     level that supplies driving hydraulic head to the fine solver so distant
+                     material can equalise faster than the fine flux solver alone. On by default,
+                     unlike the other Debug toggles -- this is the feature being evaluated, so the
+                     deployed page should show it working. Turn off to A/B against the pre-coupling
+                     behaviour. -->
+                <label class="checkbox-container">
+                    Coarse pressure coupling
+                    <input type="checkbox" id="check-coarse-coupling" checked>
                     <span class="checkmark"></span>
                 </label>
                 <!-- Legend for the overfill heat-map's decile colouring. Hidden unless that
@@ -1056,7 +1067,7 @@
             <div class="console-footer">
                 <div><b id="stat-fps">60</b><span>fps</span></div>
                 <div><b id="stat-render-time">--</b><span>ms/frame</span></div>
-                <div><b id="stat-blocks">1024</b><span>blocks</span></div>
+                <div><b id="stat-blocks">4096</b><span>blocks</span></div>
                 <!-- Populated from the wasm module at startup (see displayBuildStamp() in
                      demo.js) with the git SHA + build time baked in by sandart-wasm/build.rs.
                      Never hand-edit this value. -->

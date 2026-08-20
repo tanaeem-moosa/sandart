@@ -856,6 +856,7 @@ function syncSettings() {
     state.set_head_field_transport(false);
     state.set_pressure_sensitive_flow(false);
     state.set_overfill_pressure(true);
+    state.set_coarse_pressure_coupling(document.getElementById('check-coarse-coupling').checked);
     const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
     if (stiffnessSlider) {
         const stiffness = parseFloat(stiffnessSlider.value);
@@ -1276,6 +1277,7 @@ function setupPanelInput() {
     document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
     document.getElementById('check-heatmap').addEventListener('change', syncSettings);
     document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
+    document.getElementById('check-coarse-coupling').addEventListener('change', syncSettings);
     const overfillStiffSlider = document.getElementById('overfill-stiffness-slider');
     if (overfillStiffSlider) {
         overfillStiffSlider.addEventListener('input', syncSettings);
