@@ -82,6 +82,37 @@ export class WasmSimulationState {
         return ret >>> 0;
     }
     /**
+     * Numeric readout for the coarse `Delta` overlay's console-footer entry: `[max(|Delta|)]` in
+     * raw mass units over `inside` coarse tiles, or empty when nothing is coarse-coupled on
+     * screen. Deliberately the plain absolute number, not normalised against anything -- the
+     * point is to let the user read "how big is the worst disagreement right now" directly, which
+     * is exactly the number `coarse_delta_texels`' per-tile `capacity[C]` normalisation does NOT
+     * surface on its own.
+     * @returns {Float32Array}
+     */
+    get_coarse_delta_max_abs() {
+        const ret = wasm.wasmsimulationstate_get_coarse_delta_max_abs(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * Numeric readout for the coarse `eta` overlay's console-footer entry: `[min, max, mean,
+     * base_head_reference]` over `inside` coarse tiles, or empty when nothing is coarse-coupled
+     * on screen (same empty-when-unavailable convention `get_saturation_deciles` already uses).
+     * Exists because a colour ramp alone can't distinguish "the field truly is flat" from "I
+     * can't tell" -- see `DrawingSimulation::coarse_eta_stats`'s doc comment for what each
+     * element means, and `coarse_eta_texels`'s for why `base_head_reference` (not the frame's own
+     * spread) is the scale the colour ramp itself is built against.
+     * @returns {Float32Array}
+     */
+    get_coarse_eta_stats() {
+        const ret = wasm.wasmsimulationstate_get_coarse_eta_stats(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @returns {number}
      */
     get_ema_frame_ms() {
@@ -246,13 +277,37 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
     }
     /**
-     * "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md): forwarded straight to
-     * the sim, a plain field write (same shape as `set_overfill_pressure` just above -- no
-     * reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
-     * `DrawingSimulation::coarse_pressure_coupling`'s doc comment in sandart-sim/src/lib.rs for
-     * what it switches: `true` (default, unlike its sibling toggles) is today's shipped coarse
-     * level, coupled into the fine solver; `false` disables both the coarse level's own per-tick
-     * work AND its contribution to any fine edge, reproducing pre-coupling behaviour exactly.
+     * Coarse-fine disagreement (`Delta`) debug overlay: plumbed exactly like
+     * `set_coarse_eta_overlay` just above -- an independent toggle for an independent texture,
+     * so both this and the `eta` overlay can be viewed at once.
+     * @param {boolean} enabled
+     */
+    set_coarse_delta_overlay(enabled) {
+        wasm.wasmsimulationstate_set_coarse_delta_overlay(this.__wbg_ptr, enabled);
+    }
+    /**
+     * Coarse-level `eta` (hydraulic head) debug overlay: plumbed exactly like
+     * `set_heatmap_overlay` -- a plain field write, no reset/reinitialisation path. Purely a
+     * render-side toggle; `sim.coarse_state.eta` is maintained by `sim.update()` unconditionally
+     * whenever `sim.coarse.available` (OVERCLOCKING.md: no longer tied to
+     * `coarse_pressure_coupling`, see that field's own doc comment), this only gates whether
+     * `render()` bothers uploading/tinting with it.
+     * @param {boolean} enabled
+     */
+    set_coarse_eta_overlay(enabled) {
+        wasm.wasmsimulationstate_set_coarse_eta_overlay(this.__wbg_ptr, enabled);
+    }
+    /**
+     * "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md, split by
+     * OVERCLOCKING.md): forwarded straight to the sim, a plain field write (same shape as
+     * `set_overfill_pressure` just above -- no reset, no reinitialisation, safe to call every
+     * frame from `syncSettings()`). See `DrawingSimulation::coarse_pressure_coupling`'s doc
+     * comment in sandart-sim/src/lib.rs for what it switches: this now gates ONLY the
+     * driving-potential coupling into the fine solver (`phi`/`gravity_head`) -- the coarse
+     * level's own per-tick work runs unconditionally regardless of this flag, since the
+     * scheduler (`set_overclocking`) needs `|Delta|` either way. **Defaults `false`**, per the
+     * user's own words: "let's leave the coupling behind a flag until we are happy with
+     * overclocking."
      * @param {boolean} enabled
      */
     set_coarse_pressure_coupling(enabled) {
@@ -421,6 +476,18 @@ export class WasmSimulationState {
      */
     set_neck_width(width) {
         wasm.wasmsimulationstate_set_neck_width(this.__wbg_ptr, width);
+    }
+    /**
+     * "Overclocking" (multi-rate block scheduler) debug toggle (OVERCLOCKING.md): forwarded
+     * straight to the sim, a plain field write -- no reset, no reinitialisation, safe to call
+     * every frame from `syncSettings()`, same shape as `set_coarse_pressure_coupling` above.
+     * Independent of that toggle: this drives per-block clock rate from `|Delta|` regardless of
+     * whether the driving-potential coupling is also on. See
+     * `DrawingSimulation::overclocking_enabled`'s doc comment in sandart-sim/src/lib.rs.
+     * @param {boolean} enabled
+     */
+    set_overclocking(enabled) {
+        wasm.wasmsimulationstate_set_overclocking(this.__wbg_ptr, enabled);
     }
     /**
      * @param {number} capacity
