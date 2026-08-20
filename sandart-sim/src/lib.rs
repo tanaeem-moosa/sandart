@@ -2388,6 +2388,31 @@ impl DrawingSimulation {
             // EARLY-STOP.md: the ACTUAL count of per-block interior sweeps this frame, summed
             // across every repetition -- see `last_frame_block_steps`'s own doc comment.
             let mut block_steps_this_frame: u32 = 0;
+            // CLASSIFICATION-HOIST.md Stage 1: `fresh_overburden_must_blocks`/`support_fraction`
+            // classification was measured at ~54% of an overclocked frame (SCAFFOLDING-BREAKDOWN.md),
+            // paid identically on every one of this frame's `extra_reps + 1` `settle_tick` calls for
+            // an answer that barely changes rep-over-rep (the `needed[]` mask does not shrink
+            // materially -- same doc, and physics.rs's `compute_fresh_active` doc comment). Computed
+            // ONCE here, on the state as it stands before this frame's first `settle_tick` call
+            // (identical to what rep 0 would have computed live), and reused for every repetition.
+            // Safe by construction: the predicate "only ever adds indices to `must_simulate`; it
+            // never feeds a physics quantity" (physics.rs, `fresh_overburden_must_blocks`'s own doc
+            // comment) -- caching it changes WHICH blocks get scheduled, never what the physics
+            // computes. Verified against the defect this predicate exists to fix (Task #47 sand-slab
+            // divergence vs. perfect-sim) rather than assumed -- see CLASSIFICATION-HOIST.md.
+            let fresh_active = physics::compute_fresh_active(
+                w,
+                h,
+                block_size,
+                cols,
+                rows,
+                &self.shape_mask,
+                &self.heightmap.data,
+                &self.heightmap.external_mass_this_tick,
+                &self.cell_props,
+                &self.edge_vel_v,
+                &self.last_displacements,
+            );
             for rep in 0..=extra_reps {
                 if rep > 0 {
                     self.force_overclocked_blocks_active(rep);
@@ -2433,6 +2458,9 @@ impl DrawingSimulation {
                     // Same emptiness contract, for I4's per-tile flux budget (§6): `|Delta[C]|`
                     // per tile, consumed by `coarse_delta_eta_budgeted` in physics.rs.
                     if self.coarse.available && self.coarse_pressure_coupling { &self.coarse_state.delta } else { &[] },
+                    // CLASSIFICATION-HOIST.md Stage 1: the same frame-wide mask on every repetition
+                    // (see its own binding just above the `for rep` loop for why this is safe).
+                    Some(&fresh_active),
                     Some(&mut touched_this_rep),
                 );
                 // EARLY-STOP.md: `active_blocks[b] != Inactive` is exactly `will_simulate[b]` from

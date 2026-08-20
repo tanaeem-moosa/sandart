@@ -1173,6 +1173,7 @@ impl DynSim {
             crate::physics::OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
             &[],
             &[],
+            None, // precomputed_fresh_active (Stage 1 hoist): this harness recomputes internally, bit-identical to pre-hoist behaviour
             None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); this harness doesn't need it
         );
         self.tick_count += 1;

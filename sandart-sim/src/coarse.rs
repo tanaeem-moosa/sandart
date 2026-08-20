@@ -691,6 +691,7 @@ impl CoarseState {
             overfill_stiffness,
             &[], // coarse_eta -- no coarse-of-coarse coupling
             &[], // coarse_delta
+            None, // precomputed_fresh_active (Stage 1 hoist): the coarse level's own nested tick recomputes internally, not part of the fine-level overclocking loop
             None, // touched_out
         );
         self.nested.tick_count = self.nested.tick_count.wrapping_add(1);

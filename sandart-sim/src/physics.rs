@@ -1424,6 +1424,55 @@ pub(crate) enum FreshOverburdenVariant {
     UnsupportedAndRoom,
 }
 
+/// CLASSIFICATION-HOIST.md Stage 1: builds the `fresh_needed[]` mask and calls
+/// `fresh_overburden_must_blocks`, exactly as `settle_tick` used to do inline on every call. Pulled
+/// out to a standalone function so `settle_tick` (when `precomputed_fresh_active` is `None`) and
+/// `lib.rs`'s overclocking repetition loop (which calls this ONCE per frame, before `rep == 0`, and
+/// then passes `Some(&result)` to every repetition's `settle_tick` call) share exactly one
+/// implementation. `last_displacements` drives which blocks are worth scanning at all (see
+/// `fresh_overburden_must_blocks`'s own `needed` parameter doc) — indices beyond its length are
+/// treated as `0.0 < MUST_SIMULATE_THRESHOLD` (needed), the same as a freshly-resized buffer's
+/// default, so a caller computing this right after a grid resize is safe without its own defensive
+/// resize.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_fresh_active(
+    w: usize,
+    h: usize,
+    block_size: usize,
+    cols: usize,
+    rows: usize,
+    shape_mask: &[u8],
+    heightmap_data: &[f32],
+    external_mass_this_tick: &[f32],
+    cell_props: &[f32],
+    edge_vel_v: &[f32],
+    last_displacements: &[f32],
+) -> Vec<bool> {
+    let expected_len = cols * rows;
+    if fresh_overburden_gate::is_disabled() {
+        return vec![false; expected_len];
+    }
+    let mut fresh_needed = vec![false; expected_len];
+    for (b, needed) in fresh_needed.iter_mut().enumerate() {
+        let displacement = last_displacements.get(b).copied().unwrap_or(0.0);
+        *needed = displacement < MUST_SIMULATE_THRESHOLD;
+    }
+    fresh_overburden_must_blocks(
+        w,
+        h,
+        block_size,
+        cols,
+        rows,
+        shape_mask,
+        heightmap_data,
+        external_mass_this_tick,
+        cell_props,
+        edge_vel_v,
+        fresh_overburden_gate::variant(),
+        &fresh_needed,
+    )
+}
+
 /// Task #47 ("sand-slab" scheduling defect): the fresh-overburden MUST-simulate predicate,
 /// factored out to a standalone function so `settle_tick`'s call site and diagnostic/regression
 /// tests can share exactly one implementation rather than a test-only copy silently drifting from
@@ -4116,6 +4165,19 @@ pub fn settle_tick(
     // bound `Delta` can change sign and the loop rings (§6's account of the pre-#70 failure mode,
     // one level up).
     coarse_delta: &[f32],
+    // CLASSIFICATION-HOIST.md Stage 1: `Some(cached)` reuses a `fresh_active[]` mask computed
+    // once for the whole rendered frame (`compute_fresh_active`, called by `lib.rs`'s overclocking
+    // repetition loop before its first `settle_tick` call) instead of recomputing it -- ~54% of an
+    // overclocked frame, measured in SCAFFOLDING-BREAKDOWN.md -- on every one of that frame's up to
+    // 8 repetitions. `None` recomputes it here, live, exactly as before this parameter existed;
+    // every call site other than that one loop passes `None`. `cached.len()` MUST equal
+    // `cols * rows`; the one caller that passes `Some` guarantees this because both come from the
+    // same `block_size`/heightmap dimensions within one frame. This only ever changes WHICH blocks
+    // `settle_tick` schedules (see `fresh_overburden_must_blocks`'s own doc comment: "only ever
+    // adds indices to `must_simulate`; it never feeds a physics quantity"), so caching it cannot
+    // perturb any computed height/colour/property value -- only which blocks were classified MUST
+    // this repetition.
+    precomputed_fresh_active: Option<&[bool]>,
     // Step 3-adaptive fix (STEP3-ADAPTIVE-COARSE.md, incremental restriction): output-only.
     // `Some(buf)` resizes `buf` to `expected_len` (one bool per block, same indexing as
     // `active_blocks`) and fills it with this tick's final `modified[]` -- true iff the block was
@@ -4266,14 +4328,18 @@ pub fn settle_tick(
     // for the confirmed, unexplained standing-arch regression that toggle causes, which this
     // predicate must not inherit, and `support_fraction`'s own doc comment for why it is a
     // plausible candidate to replace `in_transit_at` there too, deliberately not done by this task.
-    let fresh_active = if fresh_overburden_gate::is_disabled() {
-        vec![false; expected_len]
-    } else {
-        let mut fresh_needed = vec![false; expected_len];
-        for b in 0..expected_len {
-            fresh_needed[b] = last_displacements[b] < MUST_SIMULATE_THRESHOLD;
-        }
-        fresh_overburden_must_blocks(
+    //
+    // CLASSIFICATION-HOIST.md Stage 1: this scan is ~54% of an overclocked frame (measured,
+    // SCAFFOLDING-BREAKDOWN.md) and used to run once per `settle_tick` CALL, i.e. once per
+    // overclocking repetition -- up to 8x/frame for barely-changing output (the `needed[]` mask
+    // does not shrink materially rep-over-rep, same doc). `precomputed_fresh_active` lets the
+    // caller compute this ONCE per rendered frame (via `compute_fresh_active` below, called from
+    // `lib.rs`'s repetition loop before `rep == 0`) and reuse the same answer for every repetition
+    // that frame. `None` reproduces the exact pre-hoist behaviour (recompute here, live, every
+    // call) -- every call site other than the overclocking loop passes `None`.
+    let fresh_active: Vec<bool> = match precomputed_fresh_active {
+        Some(cached) => cached.to_vec(),
+        None => compute_fresh_active(
             w,
             h,
             block_size,
@@ -4284,9 +4350,8 @@ pub fn settle_tick(
             &heightmap.external_mass_this_tick,
             cell_props,
             edge_vel_v,
-            fresh_overburden_gate::variant(),
-            &fresh_needed,
-        )
+            last_displacements,
+        ),
     };
 
     // Constants from the design doc. `MUST_SIMULATE_THRESHOLD` now lives at module scope (see
@@ -6682,6 +6747,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
             self.tick_count += 1;
@@ -7014,6 +7080,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
             if flow > 0.0 {
@@ -7089,6 +7156,7 @@ mod tests {
             0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
             &[], &[],
+            None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
             None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
         );
         assert_eq!(flow, 0.0);
@@ -7171,6 +7239,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
 
@@ -7280,6 +7349,7 @@ mod tests {
             0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
             OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
             &[], &[],
+            None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
             None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
         );
 
@@ -7593,6 +7663,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -7695,6 +7766,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -7751,6 +7823,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -7828,6 +7901,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -7936,6 +8010,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -11112,6 +11187,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -11231,6 +11307,7 @@ mod tests {
                     0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                     OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                    None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                     None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
                 );
             }
@@ -11334,6 +11411,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -11425,6 +11503,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -11515,6 +11594,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
             if i > 200 && flow == 0.0 {
@@ -11768,6 +11848,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -11952,6 +12033,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
@@ -12098,6 +12180,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             ) as f64;
         }
@@ -12345,6 +12428,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
 
@@ -12886,6 +12970,7 @@ mod tests {
                 0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
+                None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
             );
         }
