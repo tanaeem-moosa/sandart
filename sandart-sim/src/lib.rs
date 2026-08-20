@@ -1469,6 +1469,9 @@ impl DrawingSimulation {
             return;
         }
         let mut forced = vec![false; n];
+        // Blocks that are nominally scheduled this repetition, whether or not they still have work
+        // of their own -- these are what force neighbours (S3). See the comment below.
+        let mut seed = vec![false; n];
         for b in 0..n {
             let rate = self.block_clock_rate[b];
             // EARLY-STOP: `rate` is a BUDGET, not a mandate. A block whose own
@@ -1481,12 +1484,27 @@ impl DrawingSimulation {
             // deliberately NOT gated on it, so a clock-domain boundary never runs at the slow
             // side's rate. A block that a neighbour pushes into has its displacement rise back
             // above the bar and becomes eligible again on the next repetition.
+            // MASS-ERR-DIAGNOSIS.md: `still_has_work` gates whether a block sweeps its OWN
+            // interior. It must NOT also gate whether the block keeps acting as a neighbour-FORCER,
+            // and conflating the two was a real S3 violation with a measured spatial signature:
+            // a fast block at a clock-domain boundary that settled mid-frame stopped force-waking
+            // its slower neighbour, and that neighbour -- already zeroed by `apply_underclock_skip`
+            // on ticks outside its own schedule -- then had no route back into `will_simulate` for
+            // the rest of the frame, so its owned edge into the fast block went unevaluated.
+            // Measured as a REDISTRIBUTION (per-block excess summed to zero within 0.2%) localised
+            // to two bands one block-row apart with opposite signs and matched magnitudes.
+            //
+            // So: `scheduled` (nominal budget only) decides forcing; `scheduled && still_has_work`
+            // decides running. Early stop keeps its saving on interiors, S3 keeps its guarantee.
+            let scheduled = rate > 1.0 && (rate.round() as u32) > rep;
             let still_has_work = self.last_displacements[b] >= physics::MUST_SIMULATE_THRESHOLD;
-            if rate > 1.0 && (rate.round() as u32) > rep && still_has_work {
+            if scheduled && still_has_work {
                 forced[b] = true;
             }
+            if scheduled {
+                seed[b] = true;
+            }
         }
-        let seed = forced.clone();
         for b in 0..n {
             if !seed[b] {
                 continue;
