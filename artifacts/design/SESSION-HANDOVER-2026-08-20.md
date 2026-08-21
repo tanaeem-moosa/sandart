@@ -1,5 +1,10 @@
 # Session handover — two-level simulation, 2026-08-19/20
 
+> **Superseded for next steps by `SESSION-HANDOVER-2026-08-20-EVENING.md`.** §6 below is done or
+> overtaken: the clock rate now actually gates participation, block size was swept (8 is optimal),
+> and the vpar measurement §7 called for has been taken. §4 (the instrument problem) and §8
+> (process notes) still stand and are still worth reading first.
+
 Written to clear context. The design is `artifacts/design/HIERARCHICAL-PRESSURE.md`; read
 `HIERARCHICAL-PRESSURE-PROGRESS.md` for the build-order state, then this file for what changed
 since and what to do next.
