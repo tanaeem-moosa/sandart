@@ -880,6 +880,32 @@
                      the toggle off the rate range is never consulted at all and a live-looking
                      control that does nothing is worse than no control. 1.0 = no overclocking
                      (underclocking still active). -->
+                <!-- EARLY-STOP.md: how a block's disagreement becomes a clock rate. OFF is the
+                     absolute rule (threshold against a fixed reference fraction, so how many
+                     blocks get 8x depends on the scene). ON is the rank rule: sort every block by
+                     disagreement and fill a fixed ladder whose bands are sized 1/r, so the 8x band
+                     is 1/8 the size of the 1x band and the fractional bands below 1x pay for it.
+                     Same hidden-unless-overclocking reasoning as the slider below. -->
+                <div class="field row" id="rank-clock-rates-row" style="display: none;">
+                    <label class="checkbox-container" style="margin: 0;" title="Allocate clock rates by rank against a fixed ladder (a block's rate depends on its position among all blocks) instead of by absolute threshold. Keeps total work scene-independent: the 8x band is 1/8 the size of the 1x band, funded by the underclocked bands.">
+                        Rank-based clock allocation
+                        <input type="checkbox" id="check-rank-clock-rates" checked>
+                        <span class="checkmark"></span>
+                    </label>
+                </div>
+                <!-- EARLY-STOP.md: the gate. OFF means a clock rate only ever ADDS work -- every
+                     still-moving block is re-admitted by the ordinary MUST classification on every
+                     repetition, so "1x" really means "runs in all of them". ON means repetitions
+                     after the first run only the blocks whose rate still clears them, plus the
+                     neighbours they force for edge ownership. That is what makes the ladder a
+                     redistribution of a work budget rather than a multiplier on it. -->
+                <div class="field row" id="rate-gated-reps-row" style="display: none;">
+                    <label class="checkbox-container" style="margin: 0;" title="Repetitions after the first run only the blocks whose clock rate still clears them (plus forced neighbours), instead of re-running every still-moving block. Roughly halves frame time at the same clock ceiling.">
+                        Rates gate repetitions
+                        <input type="checkbox" id="check-rate-gated-reps" checked>
+                        <span class="checkmark"></span>
+                    </label>
+                </div>
                 <div class="field row" id="max-clock-rate-row" style="display: none;">
                     <label for="max-clock-rate-slider" title="Ceiling on how many extra physics sub-steps a single block may run in one frame. Higher settles faster and costs more per frame; 1.0 turns overclocking off without disabling the scheduler.">Max clock rate</label>
                     <span id="max-clock-rate-val" class="val-display">8.0</span>

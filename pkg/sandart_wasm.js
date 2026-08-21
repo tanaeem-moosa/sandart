@@ -624,6 +624,26 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_random_walk_params(this.__wbg_ptr, steps, step_size);
     }
     /**
+     * "Rank-based allocation" checkbox (EARLY-STOP.md): selects between allocating clock rates
+     * by absolute threshold and allocating them by rank against a fixed ladder. Plain field
+     * write, safe every frame; inert while the overclocking toggle is off. See
+     * `DrawingSimulation::rank_clock_rates`.
+     * @param {boolean} rank
+     */
+    set_rank_clock_rates(rank) {
+        wasm.wasmsimulationstate_set_rank_clock_rates(this.__wbg_ptr, rank);
+    }
+    /**
+     * "Rates gate repetitions" checkbox (EARLY-STOP.md): whether a block's clock rate decides
+     * who RUNS in the extra repetitions, or only who is force-woken on top of everyone else.
+     * Plain field write, safe every frame; inert while overclocking is off. See
+     * `DrawingSimulation::rate_gated_reps`.
+     * @param {boolean} gated
+     */
+    set_rate_gated_reps(gated) {
+        wasm.wasmsimulationstate_set_rate_gated_reps(this.__wbg_ptr, gated);
+    }
+    /**
      * @param {number} k
      */
     set_rose_k(k) {
