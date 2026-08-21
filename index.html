@@ -899,6 +899,19 @@
                      after the first run only the blocks whose rate still clears them, plus the
                      neighbours they force for edge ownership. That is what makes the ladder a
                      redistribution of a work budget rather than a multiplier on it. -->
+                <!-- EARLY-STOP.md: how steeply the rank ladder's bands shrink as the rate rises.
+                     OFF is n_r ∝ 1/r (equal work per band, but the 8x band is 1/127th of all
+                     blocks -- scattered singletons). ON is n_r ∝ 1/lg(1+r): ~3x wider fast bands,
+                     more likely to be contiguous, at ~1.7x the block-steps. Wider bands also mean
+                     fewer running/not-running seams, which is where boundary artifacts come
+                     from. -->
+                <div class="field row" id="clock-band-falloff-row" style="display: none;">
+                    <label class="checkbox-container" style="margin: 0;" title="Size the rate bands by 1/lg(1+r) instead of 1/r: about three times as many blocks get the high rates, and the fast regions are more contiguous, at roughly 1.7x the block-steps.">
+                        Gentle band falloff (1/lg k)
+                        <input type="checkbox" id="check-clock-band-falloff" checked>
+                        <span class="checkmark"></span>
+                    </label>
+                </div>
                 <div class="field row" id="rate-gated-reps-row" style="display: none;">
                     <label class="checkbox-container" style="margin: 0;" title="Repetitions after the first run only the blocks whose clock rate still clears them (plus forced neighbours), instead of re-running every still-moving block. Roughly halves frame time at the same clock ceiling.">
                         Rates gate repetitions
