@@ -30,7 +30,10 @@ fn main() {
     let grid: usize = get("--grid").map(|v| v.parse().unwrap()).unwrap_or(512);
     // OVERCLOCKING.md: `--overclock 1` turns on the multi-rate block scheduler.
     let overclock = get("--overclock").map(|v| v == "1").unwrap_or(false);
-    let mut sim = DrawingSimulation::new_with_size(grid);
+    // BLOCK-SIZE-SWEEP.md: `--blockdiv 64` (default) is the shipped geometry, block == coarse
+    // tile. Smaller divisor, bigger blocks.
+    let blockdiv: usize = get("--blockdiv").map(|v| v.parse().unwrap()).unwrap_or(64);
+    let mut sim = DrawingSimulation::new_with_block_divisor(grid, blockdiv);
     sim.sandbox_shape = SandboxShape::Hourglass;
     sim.gravity_dir = Vec2::new(0.0, 0.04);
     sim.apply_preset(mat);

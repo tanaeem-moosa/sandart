@@ -118,6 +118,11 @@ const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
 /// frame's whole block-step count is `bands / Σ(1/r)` times the participating block count --
 /// 0.66x for the full ladder. That is the property that makes this a REPLACEMENT for a flat
 /// scheduler rather than an addition to one: the fractional bands fund the 8x band.
+/// The shipped LOD block geometry: `block_size = grid/64`, which makes a block and a coarse
+/// pressure tile the same square (`COARSE_GRID` is also 64). `new_with_block_divisor` exists to
+/// vary this for measurement -- see BLOCK-SIZE-SWEEP.md.
+const DEFAULT_BLOCK_DIVISOR: usize = 64;
+
 const CLOCK_RATE_LADDER: [f32; 11] =
     [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.25, 0.125];
 
@@ -1022,6 +1027,17 @@ impl DrawingSimulation {
     /// (`VERTICAL_PRESSURE_CAP_MULT`'s doc comment) — measured before shipping, see
     /// `artifacts/design/BLOCK-RESIZE.md`.
     pub fn new_with_size(grid_size: usize) -> Self {
+        Self::new_with_block_divisor(grid_size, DEFAULT_BLOCK_DIVISOR)
+    }
+
+    /// `new_with_size`, with the LOD block edge length left open: `block_size = grid/divisor`.
+    /// `DEFAULT_BLOCK_DIVISOR` (64) is the shipped geometry, where a block and a coarse tile are
+    /// the same square. A SMALLER divisor means BIGGER blocks (32 -> 16-cell blocks at grid 512,
+    /// 16 -> 32-cell blocks), which decouples the two: a block then covers several coarse tiles
+    /// and the scheduler aggregates their disagreement (see `update_block_clock_rates`), which is
+    /// the "each will have 4 disagreements to deal with" case. Exists so block size can be
+    /// MEASURED rather than argued about -- see BLOCK-SIZE-SWEEP.md.
+    pub fn new_with_block_divisor(grid_size: usize, divisor: usize) -> Self {
         let heightmap = generate_smooth_noise(12345u32, grid_size);
         let temp_heights = heightmap.data.clone();
         let sliding = vec![false; grid_size * grid_size];
@@ -1050,7 +1066,7 @@ impl DrawingSimulation {
         // upload) stays resolution-invariant. Floor stays `.max(1)`, unchanged from before this
         // change -- see the doc comment for why grid 64's resulting block_size=1 is accepted
         // rather than floored to 2.
-        let block_size = (grid_size / 64).max(1);
+        let block_size = (grid_size / divisor.max(1)).max(1);
         let cols = (grid_size + block_size - 1) / block_size;
         let rows = (grid_size + block_size - 1) / block_size;
         let active_blocks = vec![BlockActivity::Inactive; cols * rows];
@@ -1453,9 +1469,59 @@ impl DrawingSimulation {
     /// the normal reason this would be skipped, this is a defensive fallback.
     fn update_block_clock_rates(&mut self) {
         let n = self.block_clock_rate.len();
-        if self.coarse_state.delta.len() != n || self.coarse.capacity.len() != n
-            || self.last_simulated_ticks.len() != n {
+        let tiles = self.coarse_state.delta.len();
+        if self.coarse.capacity.len() != tiles || self.last_simulated_ticks.len() != n || tiles == 0
+        {
             return;
+        }
+        // Block and coarse tile are the same square only at the default block divisor. When
+        // blocks are bigger, a block covers several tiles and its disagreement is the MAX over
+        // them, not the sum: the signal is "how far out of agreement is this region", and one
+        // badly-out-of-agreement tile inside a block is a reason to run the whole block, while
+        // summing would let a big block's many quiet tiles dilute it. Cheap because it is one
+        // pass over tiles, not per block per tile.
+        let cols = self.block_size_cols();
+        let tile_n = COARSE_GRID;
+        let mut block_delta_frac = vec![0.0f32; n];
+        if tiles == n {
+            for b in 0..n {
+                let cap = self.coarse.capacity[b].max(1e-6);
+                block_delta_frac[b] = (self.coarse_state.delta[b].abs() / cap).max(0.0);
+            }
+        } else {
+            let g = self.heightmap.width;
+            let t = (g / tile_n).max(1);
+            let bs = self.block_size.max(1);
+            if cols == 0 {
+                return;
+            }
+            // Driven from the BLOCK side so both directions work: a block bigger than a tile takes
+            // the max over the tiles it covers, a block smaller than a tile takes the one tile it
+            // sits inside (its siblings inside that tile all read the same value, which is the
+            // honest answer -- the coarse level has no finer opinion to give).
+            for b in 0..n {
+                let bx = b % cols;
+                let by = b / cols;
+                let cx0 = (bx * bs) / t;
+                let cx1 = (((bx + 1) * bs - 1) / t).min(tile_n - 1);
+                let cy0 = (by * bs) / t;
+                let cy1 = (((by + 1) * bs - 1) / t).min(tile_n - 1);
+                let mut best = 0.0f32;
+                for cy in cy0..=cy1.max(cy0) {
+                    for cx in cx0..=cx1.max(cx0) {
+                        let c = cy * tile_n + cx;
+                        if c >= tiles {
+                            continue;
+                        }
+                        let cap = self.coarse.capacity[c].max(1e-6);
+                        let frac = (self.coarse_state.delta[c].abs() / cap).max(0.0);
+                        if frac > best {
+                            best = frac;
+                        }
+                    }
+                }
+                block_delta_frac[b] = best;
+            }
         }
         // Hoisted: the range is a per-frame setting, not per-block. `hi` is floored at 1.0 so a
         // slider dragged to its bottom end means "no overclocking", never "every block
@@ -1466,10 +1532,8 @@ impl DrawingSimulation {
         // The signal itself is the same under both rules -- only its mapping onto a rate differs.
         let mut signal = vec![0.0f32; n];
         for b in 0..n {
-            let cap = self.coarse.capacity[b].max(1e-6);
-            let delta_frac = (self.coarse_state.delta[b].abs() / cap).max(0.0);
             let staleness = self.tick_count.wrapping_sub(self.last_simulated_ticks[b]).min(1000) as f32;
-            signal[b] = delta_frac * (1.0 + staleness * CLOCK_STALENESS_WEIGHT);
+            signal[b] = block_delta_frac[b] * (1.0 + staleness * CLOCK_STALENESS_WEIGHT);
         }
 
         if !self.rank_clock_rates {
@@ -1668,6 +1732,54 @@ impl DrawingSimulation {
     /// The block grid's column count -- `(grid_width + block_size - 1) / block_size`, the same
     /// arithmetic `update()`/`settle_tick` use, exposed here so the clock-rate helpers above can
     /// map a flat block index back to `(bx, by)` without re-deriving it inline three times.
+    /// Map a per-BLOCK touched mask onto the per-TILE one `CoarseState::restrict_incremental`
+    /// expects. Returns the input unchanged (cloned) when the two grids already coincide, which
+    /// is the shipped case. A tile inherits the flag of the block containing its top-left cell;
+    /// when blocks are bigger than tiles this over-reports (every tile in a touched block is
+    /// marked), which costs re-aggregation work and can never miss a change -- the direction that
+    /// keeps `A[C]` correct.
+    fn expand_touched_to_tiles(
+        touched: &[bool],
+        grid: usize,
+        block_size: usize,
+    ) -> Option<Vec<bool>> {
+        let tile_n = COARSE_GRID;
+        let n = tile_n * tile_n;
+        // `None` means "the caller's own block mask is already tile-indexed, use it directly" --
+        // the shipped geometry, and the reason this costs nothing there.
+        if touched.len() == n || touched.is_empty() || block_size == 0 || grid == 0 {
+            return None;
+        }
+        let cols = (grid + block_size - 1) / block_size;
+        let rows = (touched.len() + cols.max(1) - 1) / cols.max(1);
+        let t = (grid / tile_n).max(1);
+        // Driven from the BLOCK side, ORing into every tile a touched block overlaps, so this is
+        // correct whether blocks are bigger than tiles (one block marks many) or smaller (many
+        // blocks share one tile and any of them marks it). Over-reporting is the safe direction:
+        // it costs re-aggregation, it cannot miss a change.
+        let mut out = vec![false; n];
+        for b in 0..touched.len() {
+            if !touched[b] {
+                continue;
+            }
+            let bx = b % cols;
+            let by = b / cols;
+            if by >= rows {
+                continue;
+            }
+            let cx0 = (bx * block_size) / t;
+            let cx1 = (((bx + 1) * block_size - 1) / t).min(tile_n - 1);
+            let cy0 = (by * block_size) / t;
+            let cy1 = (((by + 1) * block_size - 1) / t).min(tile_n - 1);
+            for cy in cy0..=cy1.max(cy0) {
+                for cx in cx0..=cx1.max(cx0) {
+                    out[cy * tile_n + cx] = true;
+                }
+            }
+        }
+        Some(out)
+    }
+
     fn block_size_cols(&self) -> usize {
         let w = self.heightmap.width;
         if self.block_size == 0 { 0 } else { (w + self.block_size - 1) / self.block_size }
@@ -2415,6 +2527,11 @@ impl DrawingSimulation {
             // constants the fine level does, derived the same way. `unit` remains the FINE
             // grid's own `overfill_head_unit`, used only for `eta`'s export-side pressure scaling
             // (unchanged from before this rebuild).
+            let expanded = Self::expand_touched_to_tiles(
+                &self.blocks_touched,
+                self.heightmap.width,
+                self.block_size,
+            );
             let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / self.heightmap.width as f32;
             let unit = (physics::GRAVITY_HEAD_SCALE / depth_scale) * self.overfill_stiffness;
             let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
@@ -2428,7 +2545,13 @@ impl DrawingSimulation {
                 self.underfill_tension,
                 self.overfill_stiffness,
                 unit,
-                Some(&self.blocks_touched),
+                // `restrict_incremental` indexes this by COARSE TILE, and at the default block
+                // divisor a block and a tile are the same square, so this is the identity and
+                // `expanded` stays `None` -- no clone on the shipped path. At any other divisor
+                // the mask is expanded rather than handed over at the wrong length, which
+                // `restrict_incremental` would (correctly but expensively) treat as "cannot
+                // vouch for this" and answer with a full restrict every tick.
+                Some(expanded.as_deref().unwrap_or(&self.blocks_touched)),
             );
         }
 
