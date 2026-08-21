@@ -618,22 +618,6 @@ pub struct DrawingSimulation {
     /// already run at most once per frame, and grading them would only ever raise them.
     pub grade_clock_rates: bool,
 
-    /// EARLY-STOP.md: the shape of the rank rule's band sizes.
-    ///
-    /// `false` — `n_r ∝ 1/r`, equal WORK per band. Mathematically tidy (every band costs the
-    /// same) but very aggressive: the 8x band is 1/127th of all blocks, so almost nothing gets
-    /// the fast treatment, and the fast blocks that do are scattered singletons rather than
-    /// contiguous regions.
-    ///
-    /// `true` — `n_r ∝ 1/lg(1+r)`, the user's proposal ("we are too aggressive. maybe instead of
-    /// 1/k we need 1/lgk"). The falloff from the 1x band to the 8x band is 3.2x instead of 8x, so
-    /// the fast bands are ~3x wider and far more likely to be spatially contiguous. Costs more:
-    /// total block-steps go from 0.66x the block count to 1.14x at a ceiling of 8. Contiguity is
-    /// not just aesthetic -- every boundary between a running and a non-running block is a place
-    /// where an owned edge can go unevaluated for a repetition, so fewer, larger fast regions
-    /// mean fewer such frontiers (see `last_frame_stalled_boundaries`).
-    pub clock_band_log_falloff: bool,
-
     /// EARLY-STOP.md: whether a block's clock rate GATES its participation in the extra
     /// repetitions, or merely adds to it.
     ///
@@ -709,10 +693,22 @@ pub struct DrawingSimulation {
     /// suspect first for a visible seam or hole along block edges.
     ///
     /// Counted per repetition and summed over the frame, so it is comparable against
-    /// `last_frame_block_steps`. Zero whenever gating is off, and it falls as the fast bands get
-    /// wider and more contiguous (`clock_band_log_falloff`), which is what makes it the number to
-    /// watch when trading allocation shape against artifacts.
+    /// `last_frame_block_steps`. Zero whenever gating is off, and it falls sharply under
+    /// `grade_clock_rates` (66-73% measured), which is what makes it the number to watch when
+    /// trading allocation shape against artifacts.
     pub last_frame_stalled_boundaries: u32,
+
+    /// EARLY-STOP.md: per block, how many `settle_tick` sweeps it ACTUALLY ran in the last frame
+    /// -- its executed sub-step count, summed over the repetition loop. `last_frame_block_steps`
+    /// is this vector's sum.
+    ///
+    /// This is the honest counterpart to `block_clock_rate`, which is only a BUDGET: early stop
+    /// lets a block stop short of its rate, `rate_gated_reps` keeps it out of repetitions it did
+    /// not earn, S3 forcing drags it into ones it did not ask for, and grading caps what it could
+    /// have wanted in the first place. Only this says what happened. It is what the block
+    /// heat-map overlay draws while overclocking is on, so the picture on screen is executed work
+    /// rather than the plan for it.
+    pub last_frame_block_substeps: Vec<u32>,
 
     /// STEP3-ADAPTIVE-COARSE.md (incremental restriction): per-BLOCK "did this block's fine
     /// heights possibly change this tick" flags, filled by `settle_tick`'s `touched_out`
@@ -1183,7 +1179,6 @@ impl DrawingSimulation {
             coarse_pressure_coupling: false,
             overclocking_enabled: false,
             rank_clock_rates: true,
-            clock_band_log_falloff: true,
             grade_clock_rates: true,
             rate_gated_reps: true,
             max_clock_rate: CLOCK_RATE_MAX,
@@ -1191,6 +1186,7 @@ impl DrawingSimulation {
             block_clock_rate: vec![1.0f32; cols * rows],
             last_frame_block_steps: 0,
             last_frame_stalled_boundaries: 0,
+            last_frame_block_substeps: vec![0u32; cols * rows],
             blocks_touched: Vec::new(),
             active_blocks,
             last_displacements,
@@ -1343,6 +1339,8 @@ impl DrawingSimulation {
         // had converged to before. `overclocking_enabled` itself (the debug toggle) is untouched.
         self.block_clock_rate.fill(1.0);
         self.last_frame_block_steps = 0;
+        self.last_frame_stalled_boundaries = 0;
+        self.last_frame_block_substeps.iter_mut().for_each(|v| *v = 0);
         // Keep in sync with `new_with_size`'s `budget_n` initialisation above.
         self.budget_n = 1024;
         self.ema_frame_ms = 33.3;
@@ -1634,15 +1632,12 @@ impl DrawingSimulation {
             .cloned()
             .filter(|&r| r <= hi + 1e-6 && r >= lo - 1e-6)
             .collect();
-        // Band WEIGHT, not band rate: `n_r ∝ weight(r)`. See `clock_band_log_falloff`.
-        let weight = |r: f32| -> f32 {
-            if self.clock_band_log_falloff {
-                1.0 / (1.0 + r).log2().max(1e-3)
-            } else {
-                1.0 / r
-            }
-        };
-        let inv_sum: f32 = ladder.iter().map(|&r| weight(r)).sum();
+        // Band sizes `n_r ∝ 1/r`: equal WORK per band, so the 8x band is an eighth of the 1x
+        // band and the fractional bands fund the fast ones. A gentler `1/lg(1+r)` falloff was
+        // tried and removed once grading landed -- grading already produces the wide, contiguous
+        // fast regions that falloff was widening the bands to get, and it does it by looking at
+        // the scene instead of by handing out more budget everywhere.
+        let inv_sum: f32 = ladder.iter().map(|&r| 1.0 / r).sum();
         let m = order.len();
         let mut start = 0usize;
         for (i, &rate) in ladder.iter().enumerate() {
@@ -1651,7 +1646,7 @@ impl DrawingSimulation {
             let count = if i + 1 == ladder.len() {
                 m - start
             } else {
-                ((m as f32) * weight(rate) / inv_sum).round() as usize
+                ((m as f32) * (1.0 / rate) / inv_sum).round() as usize
             };
             let end = (start + count).min(m);
             for &b in &order[start..end] {
@@ -1927,21 +1922,35 @@ impl DrawingSimulation {
     /// See `block_heat_buckets` for exactly what "times simulated in window" means and the
     /// approximation it makes versus a true 300-tick trailing count.
     ///
-    /// OVERCLOCKING.md: while `overclocking_enabled` is on, this is repurposed to show each
-    /// block's CLOCK RATE instead -- same texture, same upload path, no shader/render pipeline
-    /// changes, exactly the "existing block heat-map overlay path" the design asks for. Byte
-    /// value is `log2(rate)` (in `[-3, 3]`, i.e. rate in `[1/8, 8]`) linearly mapped onto
-    /// `[0, 255]`, so the neutral 1x rate sits at the mid-grey point (byte 127/128), underclocked
-    /// blocks read cold/dark and overclocked blocks read hot/bright on whatever colour ramp the
-    /// shader already applies to this texture.
+    /// OVERCLOCKING.md: while `overclocking_enabled` is on, this is repurposed -- same texture,
+    /// same upload path, no shader or pipeline changes -- to show per-block SUB-STEPS ACTUALLY
+    /// EXECUTED in the last frame (`last_frame_block_substeps`), not the clock rate it was
+    /// budgeted.
+    ///
+    /// It drew the planned rate until now. The two are very different pictures once early stop,
+    /// `rate_gated_reps`, S3 forcing and grading are all in play: a block can be budgeted 8x and
+    /// run twice, or be rated 1x and run four times because a fast neighbour kept forcing it. The
+    /// overlay exists to answer "where is the time going", and only the executed count answers
+    /// that.
+    ///
+    /// Byte value is `log2(1 + substeps) / log2(1 + ceiling)` mapped onto `[0, 255]`, with the
+    /// ceiling taken from `max_clock_rate` so the scale follows the slider rather than a constant:
+    /// a block that ran zero times is black, one sweep (the ordinary, unclocked amount) sits low
+    /// on the ramp, and only a block spending the whole budget reads hot. Log rather than linear
+    /// because the interesting range is 1-4 sweeps and a linear ramp against a ceiling of 16
+    /// would leave all of it in the bottom quarter.
     pub fn block_heat_texels(&self) -> Vec<u8> {
-        if self.overclocking_enabled && self.block_clock_rate.len() == self.active_blocks.len() {
+        if self.overclocking_enabled
+            && self.last_frame_block_substeps.len() == self.active_blocks.len()
+        {
+            let ceiling = self.max_clock_rate.clamp(1.0, CLOCK_RATE_MAX);
+            let denom = (1.0 + ceiling).log2().max(1e-6);
             return self
-                .block_clock_rate
+                .last_frame_block_substeps
                 .iter()
-                .map(|&r| {
-                    let log2r = r.max(1e-6).log2().clamp(-3.0, 3.0);
-                    (((log2r + 3.0) / 6.0) * 255.0).round() as u8
+                .map(|&s| {
+                    let v = (1.0 + s as f32).log2() / denom;
+                    (v.clamp(0.0, 1.0) * 255.0).round() as u8
                 })
                 .collect();
         }
@@ -2790,6 +2799,12 @@ impl DrawingSimulation {
             let mut block_steps_this_frame: u32 = 0;
             // EARLY-STOP.md: see `last_frame_stalled_boundaries`.
             let mut stalled_boundaries: u32 = 0;
+            // EARLY-STOP.md: see `last_frame_block_substeps`. Zeroed here, not in the per-rep
+            // loop, so it accumulates across every repetition of THIS frame and nothing else.
+            if self.last_frame_block_substeps.len() != self.active_blocks.len() {
+                self.last_frame_block_substeps.resize(self.active_blocks.len(), 0);
+            }
+            self.last_frame_block_substeps.iter_mut().for_each(|v| *v = 0);
             // CLASSIFICATION-HOIST.md Stage 1: `fresh_overburden_must_blocks`/`support_fraction`
             // classification was measured at ~54% of an overclocked frame (SCAFFOLDING-BREAKDOWN.md),
             // paid identically on every one of this frame's `extra_reps + 1` `settle_tick` calls for
@@ -2912,6 +2927,12 @@ impl DrawingSimulation {
                     .iter()
                     .filter(|&&a| a != BlockActivity::Inactive)
                     .count() as u32;
+                // Same predicate, per block rather than summed -- see `last_frame_block_substeps`.
+                for (b, &a) in self.active_blocks.iter().enumerate() {
+                    if a != BlockActivity::Inactive {
+                        self.last_frame_block_substeps[b] += 1;
+                    }
+                }
                 // Restore what was stashed above. `max()`, not assignment: a suppressed block can
                 // still RECEIVE mass from a running neighbour (S2), and that transfer writes a
                 // live displacement this must not overwrite with the stale snapshot. Taking the
@@ -2963,6 +2984,7 @@ impl DrawingSimulation {
             self.blocks_touched.iter_mut().for_each(|v| *v = false);
             self.last_frame_block_steps = 0;
             self.last_frame_stalled_boundaries = 0;
+            self.last_frame_block_substeps.iter_mut().for_each(|v| *v = 0);
         }
 
         self.tick_count = self.tick_count.wrapping_add(1);

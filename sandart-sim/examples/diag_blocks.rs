@@ -73,7 +73,6 @@ fn main() {
     // threshold.
     if let Some(v) = get("--rank") { sim.rank_clock_rates = v == "1"; }
     if let Some(v) = get("--gate") { sim.rate_gated_reps = v == "1"; }
-    if let Some(v) = get("--logfall") { sim.clock_band_log_falloff = v == "1"; }
     if let Some(v) = get("--grade") { sim.grade_clock_rates = v == "1"; }
     // COARSE-DRIFT: anchor strength. Lower lets the coarse level drift further from the fine one
     // before being pulled back, which is what grows |Delta| and therefore the clock signal.

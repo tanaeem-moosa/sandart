@@ -804,9 +804,11 @@
                  entirely (every block holding material simulates every tick, not just the ones
                  that win the budget competition) -- it exists to A/B the scheduler's own
                  approximation against ground truth, and it is deliberately slow. The heat-map
-                 tints each 64x64 LOD block by how often it was actually simulated over roughly
-                 the last 300 frames, cold = rarely, hot = every tick -- it shows exactly which
-                 blocks the budget is skipping, with or without the toggle above switched on.
+                 tints each LOD block by how often it was actually simulated over roughly the last
+                 300 frames, cold = rarely, hot = every tick -- it shows exactly which blocks the
+                 budget is skipping, with or without the toggle above switched on. With
+                 overclocking on it switches to a per-FRAME view of executed sub-steps instead;
+                 see the overclocking checkbox below.
                  "Pressure field heat-map" tints each individual grid CELL (not each 64x64 block,
                  like the heat-map above) by a pressure-like value on a fixed log scale
                  (violet = low/void, magenta = mid, pale yellow = high). -->
@@ -866,8 +868,12 @@
                      disagreement (|Delta|) regardless of whether that disagreement's HEAD also
                      reaches the fine solver's potential. Off by default, like every other Debug
                      toggle. While on, the block heat-map overlay above (if also enabled) shows
-                     per-block clock rate instead of recent-activity heat -- turn both on to see
-                     which blocks are running fast (bright) and slow (dark). -->
+                     per-block SUB-STEPS ACTUALLY EXECUTED last frame instead of recent-activity
+                     heat (EARLY-STOP.md) -- turn both on to see where the frame's work really
+                     went. Not the clock rate: a block budgeted 8x may run twice after early stop
+                     and gating, or a 1x block may run four times because a fast neighbour kept
+                     forcing it, and only the executed count says which. Black is a block that did
+                     not run at all; the ramp is log-scaled against the Max clock rate slider. -->
                 <label class="checkbox-container">
                     Overclocking (multi-rate blocks)
                     <input type="checkbox" id="check-overclocking">
@@ -899,32 +905,6 @@
                      after the first run only the blocks whose rate still clears them, plus the
                      neighbours they force for edge ownership. That is what makes the ladder a
                      redistribution of a work budget rather than a multiplier on it. -->
-                <!-- EARLY-STOP.md: how steeply the rank ladder's bands shrink as the rate rises.
-                     OFF is n_r ∝ 1/r (equal work per band, but the 8x band is 1/127th of all
-                     blocks -- scattered singletons). ON is n_r ∝ 1/lg(1+r): ~3x wider fast bands,
-                     more likely to be contiguous, at ~1.7x the block-steps. Wider bands also mean
-                     fewer running/not-running seams, which is where boundary artifacts come
-                     from. -->
-                <!-- EARLY-STOP.md: the 2:1 balance rule from adaptive mesh refinement, applied to
-                     clock rates instead of refinement levels -- adjacent blocks may differ by at
-                     most one repetition, enforced by pulling fast blocks DOWN to their neighbours
-                     (never by raising slow ones). A lone fast block becomes 2x; only a region wide
-                     enough to ramp can reach the ceiling. Cuts frame time and boundary seams by
-                     roughly two thirds at the cost of ~half the per-tick movement. -->
-                <div class="field row" id="grade-clock-rates-row" style="display: none;">
-                    <label class="checkbox-container" style="margin: 0;" title="Adjacent blocks may differ by at most one sub-step, enforced by slowing the fast block rather than speeding the slow one. Far fewer block-boundary seams; only wide contiguous regions reach the top rates.">
-                        Grade neighbouring rates (max 1 apart)
-                        <input type="checkbox" id="check-grade-clock-rates" checked>
-                        <span class="checkmark"></span>
-                    </label>
-                </div>
-                <div class="field row" id="clock-band-falloff-row" style="display: none;">
-                    <label class="checkbox-container" style="margin: 0;" title="Size the rate bands by 1/lg(1+r) instead of 1/r: about three times as many blocks get the high rates, and the fast regions are more contiguous, at roughly 1.7x the block-steps.">
-                        Gentle band falloff (1/lg k)
-                        <input type="checkbox" id="check-clock-band-falloff" checked>
-                        <span class="checkmark"></span>
-                    </label>
-                </div>
                 <div class="field row" id="rate-gated-reps-row" style="display: none;">
                     <label class="checkbox-container" style="margin: 0;" title="Repetitions after the first run only the blocks whose clock rate still clears them (plus forced neighbours), instead of re-running every still-moving block. Roughly halves frame time at the same clock ceiling.">
                         Rates gate repetitions

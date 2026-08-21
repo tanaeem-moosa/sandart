@@ -89,6 +89,35 @@ Lib suite 102 passed / 10 failed, the same ten named failures. All eight integra
 including `overclocking_toggle` and `perfect_simulation_determinism`, plus `sandart-render`, the
 wasm32 check, `cargo check -p sandart`, and `node scripts/check_js.js`.
 
+## Two checks, 2026-08-20 (late)
+
+**Gentle band falloff removed.** "gentle band falloff is not worth it, remove it now that we have
+grading" — agreed and done. Grading already produces the wide, contiguous fast regions the falloff
+was widening the bands to get, and it does so by reading the scene rather than by handing out more
+budget everywhere. Bands are `n_r ∝ 1/r` again (equal work per band); the toggle, the field, the
+wasm setter and the `--logfall` flag are gone rather than left inert.
+
+**The 30-tick floor already holds, and was verified rather than assumed.** "any block with material
+needs to be simulated once per 30 ticks". `MAX_STALENESS = 30` in physics.rs, and the STALE tier is
+unconditional — `total_always = must + stale`, so the budget only ever limits `rest_candidates`,
+never a stale block. The write side is guarded too: `last_simulated_ticks[b] = tick_count` happens
+only under `will_simulate[b]`, so the counter cannot be refreshed for a block that was classified
+and then skipped, which is what would have made the floor vacuous.
+
+Measured over 300 ticks at grid 512, DrySand hourglass, worst case over every block holding
+material (raw `tick_count - last_simulated_ticks`, unclamped):
+
+| configuration | worst staleness, blocks with material | block-ticks over 30 |
+|---|---|---|
+| clocking off | 30 | 0 |
+| clocking on (rank + gate + grading) | 30 | 0 |
+
+Exactly 30, never 31. Neither `apply_underclock_skip` nor `rate_gated_reps` can breach it: both
+work by zeroing `last_displacements`, which suppresses the MUST and BUDGET tiers only, while STALE
+is computed from `last_simulated_ticks` and is untouched by either. **No code was added** — the
+requirement was already met, and adding a second floor on top of a working one is how this project
+accumulated the six stabilisers it later deleted.
+
 ## Letting the coarse level drift from the fine one: checked, it does not help (2026-08-20)
 
 "I think we need to let coarse simulation to move a little further from fine simulation to force
