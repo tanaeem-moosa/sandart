@@ -23,6 +23,9 @@ fn main() {
     sim.initialize_hourglass();
     sim.overfill_pressure = true;
     sim.overclocking_enabled = true;
+    if let Some(v) = get("--rank") { sim.rank_clock_rates = v == "1"; }
+    if let Some(v) = get("--gate") { sim.rate_gated_reps = v == "1"; }
+    if let Some(v) = get("--maxrate") { sim.max_clock_rate = v.parse().unwrap(); }
     let targets = [None; 5];
     for _ in 0..warm {
         sim.budget_n = 256;
@@ -38,10 +41,12 @@ fn main() {
     }
     let ms = t0.elapsed().as_secs_f64() * 1000.0 / ticks as f64;
     println!(
-        "{:?} grid={} ticks={} block_count={} avg_block_steps/frame={:.1} (x{:.3} of block_count) ms/frame={:.2}",
-        mat, grid, ticks, block_count,
+        "{:?} grid={} ticks={} rank={} gate={} max={:.1} block_count={} avg_block_steps/frame={:.1} \
+         (x{:.3} of block_count) ms/frame={:.2} us/block_step={:.2}",
+        mat, grid, ticks, sim.rank_clock_rates, sim.rate_gated_reps, sim.max_clock_rate, block_count,
         sum_steps as f64 / ticks as f64,
         (sum_steps as f64 / ticks as f64) / block_count as f64,
-        ms
+        ms,
+        ms * 1000.0 / (sum_steps as f64 / ticks as f64).max(1.0)
     );
 }

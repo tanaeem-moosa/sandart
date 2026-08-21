@@ -887,6 +887,18 @@ function syncSettings() {
     // scheduler never reads the range then, so the slider would move without doing anything.
     // The value is still pushed to wasm in that case, so turning the toggle back on picks up
     // the slider position that is already on screen rather than the sim's own default.
+    const rankCheck = document.getElementById('check-rank-clock-rates');
+    if (rankCheck) {
+        const rankRow = document.getElementById('rank-clock-rates-row');
+        if (rankRow) rankRow.style.display = overclockOn ? '' : 'none';
+        state.set_rank_clock_rates(rankCheck.checked);
+    }
+    const gateCheck = document.getElementById('check-rate-gated-reps');
+    if (gateCheck) {
+        const gateRow = document.getElementById('rate-gated-reps-row');
+        if (gateRow) gateRow.style.display = overclockOn ? '' : 'none';
+        state.set_rate_gated_reps(gateCheck.checked);
+    }
     const maxRateSlider = document.getElementById('max-clock-rate-slider');
     if (maxRateSlider) {
         const maxRate = parseFloat(maxRateSlider.value);
@@ -1374,6 +1386,10 @@ function setupPanelInput() {
     document.getElementById('check-coarse-delta').addEventListener('change', syncSettings);
     document.getElementById('check-coarse-coupling').addEventListener('change', syncSettings);
     document.getElementById('check-overclocking').addEventListener('change', syncSettings);
+    const rankClockCheck = document.getElementById('check-rank-clock-rates');
+    if (rankClockCheck) rankClockCheck.addEventListener('change', syncSettings);
+    const gatedRepsCheck = document.getElementById('check-rate-gated-reps');
+    if (gatedRepsCheck) gatedRepsCheck.addEventListener('change', syncSettings);
     const maxClockRateSlider = document.getElementById('max-clock-rate-slider');
     if (maxClockRateSlider) {
         maxClockRateSlider.addEventListener('input', syncSettings);

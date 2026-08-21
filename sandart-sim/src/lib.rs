@@ -108,6 +108,19 @@ const CLOCK_RATE_MAX: f32 = 8.0;
 /// this same reference fraction.
 const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
 
+/// The rate ladder the RANK rule fills (see `rank_clock_rates`), highest first. Integer steps
+/// down to 1x and octaves below it: above 1x a rate IS a repetition count, so fractional values
+/// there only round back onto these anyway (`extra_reps` rounds), while below 1x a rate is a
+/// SKIP PERIOD, where octaves are the meaningful spacing.
+///
+/// Band sizes are `n_r ∝ 1/r`, normalised over whichever bands survive the
+/// `min_clock_rate`/`max_clock_rate` clip, so each band performs the same total work and the
+/// frame's whole block-step count is `bands / Σ(1/r)` times the participating block count --
+/// 0.66x for the full ladder. That is the property that makes this a REPLACEMENT for a flat
+/// scheduler rather than an addition to one: the fractional bands fund the 8x band.
+const CLOCK_RATE_LADDER: [f32; 11] =
+    [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.25, 0.125];
+
 /// How strongly staleness (ticks since a block last ran) nudges its clock-rate signal upward.
 /// Deliberately only ever able to push a block toward a HIGHER rate (never suppress one) --
 /// "underclock conservatively" (HIERARCHICAL-PRESSURE.md §7b): a block that has gone a long time
@@ -553,6 +566,45 @@ pub struct DrawingSimulation {
     /// `false`: `block_clock_rate` is held at `1.0` everywhere and none of the above runs --
     /// bit-identical to the tree before this toggle existed.
     pub overclocking_enabled: bool,
+
+    /// EARLY-STOP.md: which rule turns a block's disagreement signal into a clock rate.
+    ///
+    /// `false` — the ABSOLUTE rule: `rate = clamp(signal / CLOCK_DELTA_REF_FRAC, min, max)`. Every
+    /// block is judged against a fixed reference fraction, so the number of blocks asking for 8x
+    /// is whatever the scene happens to produce, and the frame's cost is unbounded from below by
+    /// anything except early stop.
+    ///
+    /// `true` — the RANK rule (the user's design): sort blocks by signal and hand out rates by
+    /// POSITION, filling a fixed ladder whose band sizes are inversely proportional to the rate
+    /// (`n_r ∝ 1/r`), so every band does the SAME total work and the whole frame's block-step
+    /// count is a constant fraction of the block count regardless of scene. Under this rule
+    /// underclocking is what pays for overclocking: the 8x band can only be 1/8 the size of the
+    /// 1x band, and the fractional bands below 1x are what free the budget for it. "I want to be
+    /// able to simulate at 8x ... maybe we just need to sort the differences and assign equal
+    /// slices" (the user).
+    ///
+    /// Both rules respect `min_clock_rate`/`max_clock_rate`; the ladder is clipped to that range.
+    pub rank_clock_rates: bool,
+
+    /// EARLY-STOP.md: whether a block's clock rate GATES its participation in the extra
+    /// repetitions, or merely adds to it.
+    ///
+    /// `false` (the behaviour through 0b8868c) — `force_overclocked_blocks_active` only ever
+    /// ADDS: it raises the displacement of fast blocks and their neighbours so they are certain
+    /// to run. Every other block is still admitted on its own merits by `settle_tick`'s ordinary
+    /// MUST classification, on EVERY repetition, because a block that moved in the previous
+    /// repetition is by definition above the MUST bar. So a rate of 1x does not mean "runs once
+    /// per frame" -- it means "runs in every repetition, like everything else", and the rates buy
+    /// extra work without ever redirecting any. Measured: with only 34 blocks at 8x, the extra
+    /// repetitions still ran ~370 blocks each.
+    ///
+    /// `true` — repetitions after the first run ONLY the participation set: blocks whose rate
+    /// still clears the repetition index, plus the S3 neighbours they force. Everything else has
+    /// its displacement stashed and zeroed for the duration of that `settle_tick` call, then
+    /// restored with `max()` so a block that RECEIVED mass while sitting out (S2) keeps the
+    /// larger, live value rather than the stale snapshot. This is what makes the ladder a
+    /// redistribution of a fixed work budget instead of a multiplier on it.
+    pub rate_gated_reps: bool,
 
     /// Upper end of the clock-rate range `update_block_clock_rates` clamps to -- the runtime,
     /// UI-adjustable form of `CLOCK_RATE_MAX` (which remains the default and the hard ceiling a
@@ -1055,6 +1107,8 @@ impl DrawingSimulation {
             // it from the coarse level's own dynamics, which now run unconditionally).
             coarse_pressure_coupling: false,
             overclocking_enabled: false,
+            rank_clock_rates: true,
+            rate_gated_reps: true,
             max_clock_rate: CLOCK_RATE_MAX,
             min_clock_rate: CLOCK_RATE_MIN,
             block_clock_rate: vec![1.0f32; cols * rows],
@@ -1378,12 +1432,16 @@ impl DrawingSimulation {
     /// tile index coincide (`block_size == grid/64 == COARSE_GRID`), so `coarse_state.delta[b]`
     /// and `coarse.capacity[b]` are read directly at index `b`.
     ///
-    /// EARLY-STOP.md: a plain continuous rule, `rate = clamp(signal / CLOCK_DELTA_REF_FRAC,
-    /// CLOCK_RATE_MIN, CLOCK_RATE_MAX)`. No power-of-two quantisation, no octave-stepping, no
-    /// hysteresis -- `CLOCK_RATE_MIN`'s doc comment has the correctness argument for why removing
-    /// quantisation is safe for this implementation, and why early stop (below) makes precise rate
-    /// tuning matter far less than it used to. `signal == CLOCK_DELTA_REF_FRAC` maps to exactly
-    /// the neutral 1x rate, same reference point the old scheme used.
+    /// Two mappings from that signal onto a rate, selected by `rank_clock_rates` (see its doc
+    /// comment for which is which and why the rank rule exists):
+    ///
+    /// - ABSOLUTE: `rate = clamp(signal / CLOCK_DELTA_REF_FRAC, min, max)`, continuous and
+    ///   memoryless. No power-of-two quantisation, no octave-stepping, no hysteresis --
+    ///   `CLOCK_RATE_MIN`'s doc comment has the correctness argument for why removing
+    ///   quantisation is safe here. `signal == CLOCK_DELTA_REF_FRAC` maps to exactly 1x.
+    /// - RANK: sort by signal, fill `CLOCK_RATE_LADDER` with band sizes `∝ 1/r`. The rate a block
+    ///   gets depends on its POSITION among its peers, not on an absolute threshold, so the
+    ///   frame's total block-step count is scene-independent.
     ///
     /// Staleness only ever pushes the signal UP (`1.0 + staleness * CLOCK_STALENESS_WEIGHT`,
     /// never a divisor) -- "underclock conservatively" (§7b): a block that has not run in a while
@@ -1404,15 +1462,70 @@ impl DrawingSimulation {
         // underclocked"; `lo` is then held at or below `hi` so the clamp can never invert.
         let hi = self.max_clock_rate.clamp(1.0, CLOCK_RATE_MAX);
         let lo = self.min_clock_rate.clamp(CLOCK_RATE_MIN, hi);
+
+        // The signal itself is the same under both rules -- only its mapping onto a rate differs.
+        let mut signal = vec![0.0f32; n];
         for b in 0..n {
             let cap = self.coarse.capacity[b].max(1e-6);
             let delta_frac = (self.coarse_state.delta[b].abs() / cap).max(0.0);
             let staleness = self.tick_count.wrapping_sub(self.last_simulated_ticks[b]).min(1000) as f32;
-            let signal = delta_frac * (1.0 + staleness * CLOCK_STALENESS_WEIGHT);
-            // The rule the doc comments above describe: continuous, memoryless, clamped. Reads
-            // only `signal`, never the previous rate -- there is no octave index to step and no
-            // hysteresis band, because `rate` is a budget early stop is free to underspend.
-            self.block_clock_rate[b] = (signal / CLOCK_DELTA_REF_FRAC).clamp(lo, hi);
+            signal[b] = delta_frac * (1.0 + staleness * CLOCK_STALENESS_WEIGHT);
+        }
+
+        if !self.rank_clock_rates {
+            for b in 0..n {
+                // The ABSOLUTE rule: continuous, memoryless, clamped. Reads only `signal`, never
+                // the previous rate -- no octave index to step, no hysteresis band, because
+                // `rate` is a budget early stop is free to underspend.
+                self.block_clock_rate[b] = (signal[b] / CLOCK_DELTA_REF_FRAC).clamp(lo, hi);
+            }
+            return;
+        }
+
+        // The RANK rule. A block with no disagreement at all is not ranked -- it goes straight to
+        // the bottom rate. Without this an empty or fully-settled scene would still hand its
+        // top 1/127th of blocks an 8x rate purely on floating-point dust, which is exactly the
+        // "spend the budget on blocks that do not need it" failure the rank rule exists to avoid.
+        self.block_clock_rate.iter_mut().for_each(|r| *r = lo);
+        let mut order: Vec<u32> = (0..n as u32).filter(|&b| signal[b as usize] > 0.0).collect();
+        if order.is_empty() {
+            return;
+        }
+        // Descending by signal. `partial_cmp` cannot see a NaN here (`delta` is finite and
+        // `capacity` is floored at 1e-6) but is handled rather than unwrapped, since a NaN would
+        // otherwise panic the whole frame over a scheduling hint.
+        order.sort_unstable_by(|&a, &b| {
+            signal[b as usize]
+                .partial_cmp(&signal[a as usize])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Ladder clipped to the live slider range. `hi >= 1.0` always, so 1x always survives and
+        // the ladder is never empty.
+        let ladder: Vec<f32> = CLOCK_RATE_LADDER
+            .iter()
+            .cloned()
+            .filter(|&r| r <= hi + 1e-6 && r >= lo - 1e-6)
+            .collect();
+        let inv_sum: f32 = ladder.iter().map(|&r| 1.0 / r).sum();
+        let m = order.len();
+        let mut start = 0usize;
+        for (i, &rate) in ladder.iter().enumerate() {
+            // `n_r ∝ 1/r`: equal work per band. The last band absorbs the rounding remainder so
+            // every ranked block is assigned exactly once.
+            let count = if i + 1 == ladder.len() {
+                m - start
+            } else {
+                ((m as f32) * (1.0 / rate) / inv_sum).round() as usize
+            };
+            let end = (start + count).min(m);
+            for &b in &order[start..end] {
+                self.block_clock_rate[b as usize] = rate;
+            }
+            start = end;
+            if start >= m {
+                break;
+            }
         }
     }
 
@@ -1486,12 +1599,14 @@ impl DrawingSimulation {
     ///
     /// `rep` is the repetition index (0-based) within this frame; only blocks whose rate clears
     /// `rep` (i.e. still have iterations left) AND have not yet settled are seeded.
-    fn force_overclocked_blocks_active(&mut self, rep: u32) {
+    fn force_overclocked_blocks_active(&mut self, rep: u32) -> Vec<bool> {
         let n = self.block_clock_rate.len();
         let cols = self.block_size_cols();
         let rows = if cols > 0 { n / cols } else { 0 };
         if cols == 0 || rows == 0 || cols * rows != n {
-            return;
+            // An all-true mask, not an empty one: the caller uses this to decide who may SIT OUT,
+            // and a degenerate block grid must not be read as "nobody may run".
+            return vec![true; n];
         }
         let mut forced = vec![false; n];
         // Blocks that are nominally scheduled this repetition, whether or not they still have work
@@ -1547,6 +1662,7 @@ impl DrawingSimulation {
                     self.last_displacements[b].max(physics::MUST_SIMULATE_THRESHOLD * 2.0);
             }
         }
+        forced
     }
 
     /// The block grid's column count -- `(grid_width + block_size - 1) / block_size`, the same
@@ -2439,8 +2555,24 @@ impl DrawingSimulation {
                 &self.last_displacements,
             );
             for rep in 0..=extra_reps {
+                // EARLY-STOP.md: blocks sitting out this repetition under `rate_gated_reps`, as
+                // `(block, displacement before it was zeroed)`. Restored after the call.
+                let mut stashed: Vec<(usize, f32)> = Vec::new();
                 if rep > 0 {
-                    self.force_overclocked_blocks_active(rep);
+                    let participating = self.force_overclocked_blocks_active(rep);
+                    if self.rate_gated_reps {
+                        // Zeroing the displacement is the same lever `apply_underclock_skip`
+                        // uses: it is what keeps a block out of `settle_tick`'s MUST and budget
+                        // tiers. STALE is deliberately still reachable -- `MAX_STALENESS` is the
+                        // independent backstop and gating it on a clock rate would remove the one
+                        // mechanism that catches a wrongly-suppressed block.
+                        for b in 0..participating.len().min(self.last_displacements.len()) {
+                            if !participating[b] && self.last_displacements[b] != 0.0 {
+                                stashed.push((b, self.last_displacements[b]));
+                                self.last_displacements[b] = 0.0;
+                            }
+                        }
+                    }
                 }
                 let mut touched_this_rep: Vec<bool> = Vec::new();
                 settle_tick(
@@ -2498,6 +2630,15 @@ impl DrawingSimulation {
                     .iter()
                     .filter(|&&a| a != BlockActivity::Inactive)
                     .count() as u32;
+                // Restore what was stashed above. `max()`, not assignment: a suppressed block can
+                // still RECEIVE mass from a running neighbour (S2), and that transfer writes a
+                // live displacement this must not overwrite with the stale snapshot. Taking the
+                // larger of the two can only ever schedule a block MORE eagerly, which is the
+                // safe direction -- the failure this guards against is a block that moved being
+                // recorded as settled.
+                for &(b, prev) in &stashed {
+                    self.last_displacements[b] = self.last_displacements[b].max(prev);
+                }
                 // PERF-PROFILE.md TEMPORARY: capture the REAL post-settle_tick displacement for
                 // this rep, before the next iteration's `force_overclocked_blocks_active` (if
                 // any) overwrites it.

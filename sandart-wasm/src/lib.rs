@@ -385,6 +385,8 @@ impl WasmSimulationState {
         let coarse_pressure_coupling = self.sim.coarse_pressure_coupling;
         let overclocking_enabled = self.sim.overclocking_enabled;
         let max_clock_rate = self.sim.max_clock_rate;
+        let rank_clock_rates = self.sim.rank_clock_rates;
+        let rate_gated_reps = self.sim.rate_gated_reps;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -424,6 +426,10 @@ impl WasmSimulationState {
         sim.overclocking_enabled = overclocking_enabled;
         // Same reasoning again: a UI slider position, not simulation state.
         sim.max_clock_rate = max_clock_rate;
+        // Same reasoning again: a UI toggle, not simulation state.
+        sim.rank_clock_rates = rank_clock_rates;
+        // Same reasoning again: a UI toggle, not simulation state.
+        sim.rate_gated_reps = rate_gated_reps;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -825,6 +831,22 @@ impl WasmSimulationState {
     /// `DrawingSimulation::overclocking_enabled`'s doc comment in sandart-sim/src/lib.rs.
     pub fn set_overclocking(&mut self, enabled: bool) {
         self.sim.overclocking_enabled = enabled;
+    }
+
+    /// "Rank-based allocation" checkbox (EARLY-STOP.md): selects between allocating clock rates
+    /// by absolute threshold and allocating them by rank against a fixed ladder. Plain field
+    /// write, safe every frame; inert while the overclocking toggle is off. See
+    /// `DrawingSimulation::rank_clock_rates`.
+    pub fn set_rank_clock_rates(&mut self, rank: bool) {
+        self.sim.rank_clock_rates = rank;
+    }
+
+    /// "Rates gate repetitions" checkbox (EARLY-STOP.md): whether a block's clock rate decides
+    /// who RUNS in the extra repetitions, or only who is force-woken on top of everyone else.
+    /// Plain field write, safe every frame; inert while overclocking is off. See
+    /// `DrawingSimulation::rate_gated_reps`.
+    pub fn set_rate_gated_reps(&mut self, gated: bool) {
+        self.sim.rate_gated_reps = gated;
     }
 
     /// "Max clock rate" slider (EARLY-STOP.md): the ceiling of the per-block clock-rate range,

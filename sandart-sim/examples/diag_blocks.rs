@@ -42,6 +42,11 @@ fn main() {
     // without touching overclocking, which is the control run for "what is underclocking buying".
     if let Some(v) = get("--maxrate") { sim.max_clock_rate = v.parse().unwrap(); }
     if let Some(v) = get("--minrate") { sim.min_clock_rate = v.parse().unwrap(); }
+    // `--rank 0` selects the absolute signal/CLOCK_DELTA_REF_FRAC rule instead of the default
+    // rank-ladder allocation -- the A/B for whether allocating by position beats allocating by
+    // threshold.
+    if let Some(v) = get("--rank") { sim.rank_clock_rates = v == "1"; }
+    if let Some(v) = get("--gate") { sim.rate_gated_reps = v == "1"; }
     if let Some(t) = get("--tension") { sim.underfill_tension = t.parse().unwrap(); }
     let targets = [None; 5];
     for _ in 0..warm {
@@ -70,9 +75,10 @@ fn main() {
     let m1: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
     let n = ticks as f64;
     println!(
-        "grid={} block_size={} {:?} sub={} budget={:<4} overclock={} rate[{:.2},{:.2}] ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
+        "grid={} block_size={} {:?} sub={} budget={:<4} overclock={} rank={} rate[{:.2},{:.2}] ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
          com {:.5}->{:.5} (desc {:.5})  mass_err {:.2e}",
-        grid, sim.block_size, mat, sub, budget, overclock, sim.min_clock_rate, sim.max_clock_rate, ms,
+        grid, sim.block_size, mat, sub, budget, overclock, sim.rank_clock_rates,
+        sim.min_clock_rate, sim.max_clock_rate, ms,
         f as f64 / n, m as f64 / n, s as f64 / n, (f + m + s) as f64 / n,
         c0, com(&sim), com(&sim) - c0, (m1 - m0).abs() / m0.max(1e-12)
     );
