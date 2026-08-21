@@ -15,6 +15,29 @@ fn com(sim: &DrawingSimulation) -> f64 {
     num / den / (h - 1) as f64
 }
 
+/// Mass-weighted horizontal spread (std-dev of x, in cells) over the BOTTOM QUARTER of the
+/// vessel. Descent measures how far material fell; this measures how far it spread sideways once
+/// it landed, which is the quantity "lack of sideways movement" is about. Restricted to the bottom
+/// quarter so that mass arriving from the upper chamber does not dominate the statistic.
+fn spread(sim: &DrawingSimulation) -> f64 {
+    let w = sim.heightmap.width;
+    let h = sim.heightmap.height;
+    let y0 = h - h / 4;
+    let (mut m, mut mx, mut mxx) = (0.0f64, 0.0f64, 0.0f64);
+    for y in y0..h {
+        for x in 0..w {
+            let v = sim.heightmap.data[y * w + x] as f64;
+            if v <= 0.0 { continue; }
+            m += v;
+            mx += v * x as f64;
+            mxx += v * (x * x) as f64;
+        }
+    }
+    if m <= 0.0 { return 0.0; }
+    let mean = mx / m;
+    (mxx / m - mean * mean).max(0.0).sqrt()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let get = |n: &str| args.iter().position(|a| a == n).and_then(|i| args.get(i + 1)).cloned();
@@ -52,6 +75,12 @@ fn main() {
     if let Some(v) = get("--gate") { sim.rate_gated_reps = v == "1"; }
     if let Some(v) = get("--logfall") { sim.clock_band_log_falloff = v == "1"; }
     if let Some(v) = get("--grade") { sim.grade_clock_rates = v == "1"; }
+    // COARSE-DRIFT: anchor strength. Lower lets the coarse level drift further from the fine one
+    // before being pulled back, which is what grows |Delta| and therefore the clock signal.
+    if let Some(v) = get("--lambda") { sim.coarse_state.lambda = v.parse().unwrap(); }
+    // Without this the coarse level's head never reaches the fine solver, so drifting the coarse
+    // state changes only the SCHEDULING signal, not the driving force.
+    if let Some(v) = get("--coupling") { sim.coarse_pressure_coupling = v == "1"; }
     if let Some(t) = get("--tension") { sim.underfill_tension = t.parse().unwrap(); }
     let targets = [None; 5];
     for _ in 0..warm {
@@ -63,6 +92,7 @@ fn main() {
     let (mut f, mut m, mut s) = (0u64, 0u64, 0u64);
     let t0 = Instant::now();
     let (mut stalls, mut steps) = (0u64, 0u64);
+    let spread0 = spread(&sim);
     for _ in 0..ticks {
         for _ in 0..sub {
             sim.budget_n = budget;
@@ -84,12 +114,13 @@ fn main() {
     let n = ticks as f64;
     println!(
         "grid={} block_size={} {:?} sub={} budget={:<4} overclock={} rank={} rate[{:.2},{:.2}] ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
-         com {:.5}->{:.5} (desc {:.5})  mass_err {:.2e}  steps {:.0}  stalled_edges {:.0}",
+         com {:.5}->{:.5} (desc {:.5})  mass_err {:.2e}  steps {:.0}  stalled_edges {:.0}  spread {:.2}->{:.2} ({:+.2})",
         grid, sim.block_size, mat, sub, budget, overclock, sim.rank_clock_rates,
         sim.min_clock_rate, sim.max_clock_rate, ms,
         f as f64 / n, m as f64 / n, s as f64 / n, (f + m + s) as f64 / n,
         c0, com(&sim), com(&sim) - c0, (m1 - m0).abs() / m0.max(1e-12),
-        steps as f64 / n, stalls as f64 / n
+        steps as f64 / n, stalls as f64 / n,
+        spread0, spread(&sim), spread(&sim) - spread0
     );
     if overclock {
         // OVERCLOCKING.md: the rate distribution -- how many blocks fall in each octave BUCKET

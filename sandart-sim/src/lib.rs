@@ -65,7 +65,13 @@ pub const MASK_BOUNDARY: u8 = 2;
 const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
 
 /// EARLY-STOP.md: per-block clock rate is now an ARBITRARY value in `[CLOCK_RATE_MIN,
-/// CLOCK_RATE_MAX]` = `[1/8, 8]`, not quantised to a power of two.
+/// CLOCK_RATE_MAX]` = `[1/8, 16]`, not quantised to a power of two.
+///
+/// The ceiling was 8 until rate GRADING landed (`grade_clock_rates`). Grading makes a high
+/// ceiling self-limiting rather than dangerous: a block can only reach 16x if it sits in a fast
+/// region wide enough to ramp there one step at a time from its surroundings, so raising the
+/// ceiling grants headroom where the scene genuinely earns it instead of licensing isolated
+/// blocks to sprint away from their neighbours. Without grading, treat 8 as the practical limit.
 ///
 /// HIERARCHICAL-PRESSURE.md §7b's S1 justified the old power-of-two quantisation as needed "so
 /// clock domains nest instead of beating" and so a shared edge never sees one side mid-step. That
@@ -97,7 +103,7 @@ const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
 /// hysteresis, no octave stepping -- safe to ship in place of the old one: the exact value matters
 /// far less once physics, not the schedule, decides how many sub-steps a block actually gets.
 const CLOCK_RATE_MIN: f32 = 0.125;
-const CLOCK_RATE_MAX: f32 = 8.0;
+const CLOCK_RATE_MAX: f32 = 16.0;
 
 /// The disagreement fraction (`|Delta[b]| / capacity[b]`, dimensionless) at which a block is
 /// judged to want to run at the neutral 1x rate. `update_block_clock_rates` maps `signal /
@@ -123,8 +129,9 @@ const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
 /// vary this for measurement -- see BLOCK-SIZE-SWEEP.md.
 const DEFAULT_BLOCK_DIVISOR: usize = 64;
 
-const CLOCK_RATE_LADDER: [f32; 11] =
-    [8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.25, 0.125];
+const CLOCK_RATE_LADDER: [f32; 15] = [
+    16.0, 14.0, 12.0, 10.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.25, 0.125,
+];
 
 /// How strongly staleness (ticks since a block last ran) nudges its clock-rate signal upward.
 /// Deliberately only ever able to push a block toward a HIGHER rate (never suppress one) --

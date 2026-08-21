@@ -89,6 +89,62 @@ Lib suite 102 passed / 10 failed, the same ten named failures. All eight integra
 including `overclocking_toggle` and `perfect_simulation_determinism`, plus `sandart-render`, the
 wasm32 check, `cargo check -p sandart`, and `node scripts/check_js.js`.
 
+## Letting the coarse level drift from the fine one: checked, it does not help (2026-08-20)
+
+"I think we need to let coarse simulation to move a little further from fine simulation to force
+more lateral movement. at least we should check if that param change anything" (the user).
+
+The parameter is `CoarseState::lambda`, the anchor strength in `M += lambda * (A - M)` — how hard
+the coarse mass is pulled back to the fine grid's aggregated mass every tick. Default 0.10. Lower
+means the coarse level is allowed to drift further before being re-grounded.
+
+A new metric was needed, because descent measures how far material FELL and the complaint is about
+how far it SPREAD: `spread` is the mass-weighted standard deviation of x over the bottom quarter of
+the vessel, in cells.
+
+DrySand, grid 512, `--ticks 300`, ceiling 16, grading on:
+
+| coupling | lambda | ms/frame | descent | spread |
+|---|---|---|---|---|
+| off | 0.10 (default) | 21.21 | 0.04389 | +11.25 |
+| off | 0.05           | 20.43 | 0.04011 | +11.34 |
+| off | 0.02           | 20.55 | 0.02297 | +10.57 |
+| off | 0.005          | 20.11 | 0.02598 | +10.05 |
+| on  | 0.10           | 28.80 | 0.04468 | +12.07 |
+| on  | 0.02           | 28.32 | 0.02342 | +10.83 |
+| on  | 0.005          | 26.87 | 0.02541 | +10.27 |
+
+**Drift makes it worse, not bolder, in both directions and with the coupling either way.** Spread
+falls monotonically as lambda drops (11.25 -> 10.05 uncoupled, 12.07 -> 10.27 coupled) and descent
+roughly halves. The first four rows also show WHY the uncoupled case could never have worked: with
+`coarse_pressure_coupling` off, `|Delta|` reaches only the SCHEDULER, never the solver, so drifting
+the coarse state changes which blocks get clock budget and adds no lateral driving force at all.
+
+With the coupling on, the coarse head does reach the fine solver, and there the honest result is:
+**+7% spread and +2% descent for +36% frame time**, at the DEFAULT anchor. Drifting from there
+degrades it.
+
+The interpretation that fits: the coarse level's opinion is useful because it is anchored. Loosen
+the anchor and `M` stops tracking real mass, so its head drives the fine solver toward a
+configuration the fine state is not in, and the clock signal it feeds starts reflecting accumulated
+drift rather than genuine local disagreement — which is consistent with the budget going to the
+wrong blocks and descent halving.
+
+**So the lateral-movement deficit is not caused by the coarse level being too tightly anchored.**
+The standing explanation from the previous section still fits the evidence: a pile above its angle
+of repose is a fine-scale instability the coarse level has no model of, so no amount of coarse
+freedom will schedule it. The untested proposal remains a fine-grid term in the clock signal.
+
+## Ceiling raised to 16
+
+`CLOCK_RATE_MAX` 8 -> 16, `CLOCK_RATE_LADDER` extended (16, 14, 12, 10, 8, ...), UI slider to 16.
+Safe specifically because grading landed first: a block can only reach 16x if it sits in a region
+wide enough to ramp there one step at a time, so the ceiling grants headroom where the scene earns
+it rather than licensing isolated blocks to sprint. Water, ceiling 8 -> 16 with grading on:
+descent 0.03029 -> 0.03253 (+7%), spread +12.31 -> +13.02 (+6%), frame 37.30 -> 43.06 ms (+15%),
+stalls 270 -> 360. Slightly negative per unit wall clock, positive per tick; without grading, treat
+8 as the practical limit.
+
 ## Rate grading: the 2:1 balance rule (2026-08-20)
 
 "we can't force blocks to simulate more. we are already too slow. we need to figure out how to sim
