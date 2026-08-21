@@ -3,6 +3,16 @@
 Supersedes `SESSION-HANDOVER-2026-08-20.md` for next steps; that file is still the record of the
 morning session and its §4 (the instrument problem) and §8 (process notes) still apply.
 
+> **§5 is itself now superseded by LATERAL-COARSE-CORRECTION.md (night session, `242c942`).** The
+> user proposed a different attack on lateral flow -- use the coarse level's own realised transport
+> to move more material than the fine level's local CFL bound allows -- and it landed. It measured
+> +41% lateral spread for +10% frame time on DrySand (against coarse coupling's +7% for +36%), and
+> it retires §5 item 2's blocker: that item wanted the RECONCILING flux, at ~1,220 SOR sweeps a
+> tick; the flux the coarse level ALREADY PERFORMED is the quantity the defect form needs and costs
+> an accumulator. §5 items 1, 3 and 4 are untouched and still stand -- item 4 (selective coupling)
+> is now cheap, because the ledger built for the correction is exactly the per-block directional
+> quantity it was waiting on.
+
 **Deployed:** `origin/main` = `17079b80`, confirmed serving from `gh-pages` (its tip names that
 sha). Live at <https://tanaeem-moosa.github.io/sandart/>. Nothing is unpushed.
 
