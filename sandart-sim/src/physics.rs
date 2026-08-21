@@ -965,6 +965,482 @@ fn flux_dir_record(mass: f32, horizontal: bool, cross_block: bool) {
     });
 }
 
+thread_local! {
+    // THE FLOW LEDGER (LATERAL-COARSE-CORRECTION.md). Signed mass flux per edge, recorded where
+    // the transfer actually happens (`flux_edge_apply`, past its `MIN_FLUX` cutoff) -- the input
+    // to the coarse-grid flow correction.
+    //
+    // Distinct from `FLUX_DIR_ACC` above, which is a diagnostic and records MAGNITUDES into eight
+    // global bins. This one keeps the SIGN and keeps a value PER EDGE, because a correction needs
+    // to know which way the mass should go and across which boundary. Positive is always toward
+    // increasing index -- left-to-right on the H buffers (`b_idx == a_idx + 1`), top-to-bottom on
+    // the V buffers (`b_idx == a_idx + w`) -- and each edge is filed under its LOWER-index
+    // endpoint, so an edge is named once and never twice.
+    //
+    // Two levels x two axes, the level selected by `LAT_LEDGER_COARSE` the same way
+    // `flux_dir_set_coarse` selects a bin, because both levels are recorded in the same tick from
+    // the same function:
+    //
+    // - COARSE, indexed by the coarse CELL index of the edge's lower endpoint. Every coarse cell
+    //   is a tile, so this is "signed flux across each tile face", in COARSE units (the coarse
+    //   level holds a tile height as an AVERAGE, so one unit here is `t*t` units of fine mass --
+    //   see `apply_coarse_flow_correction`, the only place that conversion is allowed to happen).
+    // - FINE, indexed by the LOD BLOCK index of the edge's lower endpoint, and only for edges that
+    //   actually cross a block boundary (`a_b != b_b`). So this is "how much mass the fine level
+    //   really moved across that face of the block this tick", in fine mass units, summed over
+    //   every repetition of the frame.
+    //
+    // OFF by default: this runs per edge per tick, so when disabled it is one predictable branch.
+    static LAT_LEDGER_ENABLED: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static LAT_LEDGER_COARSE: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static LAT_LEDGER_COARSE_H: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LAT_LEDGER_COARSE_V: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LAT_LEDGER_FINE_H: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LAT_LEDGER_FINE_V: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn lat_ledger_resize(key: &'static std::thread::LocalKey<std::cell::RefCell<Vec<f32>>>, len: usize) {
+    key.with(|c| {
+        let mut v = c.borrow_mut();
+        v.clear();
+        v.resize(len, 0.0);
+    });
+}
+
+fn lat_ledger_zero(key: &'static std::thread::LocalKey<std::cell::RefCell<Vec<f32>>>) {
+    key.with(|c| c.borrow_mut().iter_mut().for_each(|v| *v = 0.0));
+}
+
+/// See `LAT_LEDGER_ENABLED`'s doc comment. Enables the ledger and sizes/zeroes all four buffers.
+/// `coarse_len` is the coarse cell count, `fine_len` the LOD block count.
+pub fn lat_ledger_enable(on: bool, coarse_len: usize, fine_len: usize) {
+    LAT_LEDGER_ENABLED.with(|c| c.set(on));
+    let (cl, fl) = if on { (coarse_len, fine_len) } else { (0, 0) };
+    lat_ledger_resize(&LAT_LEDGER_COARSE_H, cl);
+    lat_ledger_resize(&LAT_LEDGER_COARSE_V, cl);
+    lat_ledger_resize(&LAT_LEDGER_FINE_H, fl);
+    lat_ledger_resize(&LAT_LEDGER_FINE_V, fl);
+}
+
+/// See `LAT_LEDGER_ENABLED`'s doc comment. Which level subsequent flow is attributed to.
+pub fn lat_ledger_set_coarse(coarse: bool) {
+    LAT_LEDGER_COARSE.with(|c| c.set(coarse));
+}
+
+/// See `LAT_LEDGER_ENABLED`'s doc comment. Zeroes the FINE half only, leaving the coarse half
+/// intact -- the correction consumes one coarse tick against a whole frame of fine repetitions,
+/// and the two are recorded at different points in `update()`.
+pub fn lat_ledger_clear_fine() {
+    lat_ledger_zero(&LAT_LEDGER_FINE_H);
+    lat_ledger_zero(&LAT_LEDGER_FINE_V);
+}
+
+/// See `LAT_LEDGER_ENABLED`'s doc comment. Zeroes the COARSE half only.
+pub fn lat_ledger_clear_coarse() {
+    lat_ledger_zero(&LAT_LEDGER_COARSE_H);
+    lat_ledger_zero(&LAT_LEDGER_COARSE_V);
+}
+
+/// See `LAT_LEDGER_ENABLED`'s doc comment. Copies all four buffers out, without zeroing, as
+/// `(coarse_h, coarse_v, fine_h, fine_v)`.
+pub fn lat_ledger_snapshot() -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    (
+        LAT_LEDGER_COARSE_H.with(|c| c.borrow().clone()),
+        LAT_LEDGER_COARSE_V.with(|c| c.borrow().clone()),
+        LAT_LEDGER_FINE_H.with(|c| c.borrow().clone()),
+        LAT_LEDGER_FINE_V.with(|c| c.borrow().clone()),
+    )
+}
+
+/// See `LAT_LEDGER_ENABLED`'s doc comment. `a_b` is the lower-index endpoint's BLOCK index
+/// (ignored at the coarse level, which indexes by cell); `a_idx` that endpoint's CELL index;
+/// `cross_block` is `a_b != b_b`. `flux` is signed, positive meaning `a` -> `b`.
+#[inline]
+fn lat_ledger_record(flux: f32, horizontal: bool, a_b: usize, a_idx: usize, cross_block: bool) {
+    if !LAT_LEDGER_ENABLED.with(|c| c.get()) {
+        return;
+    }
+    let coarse = LAT_LEDGER_COARSE.with(|c| c.get());
+    let key = match (coarse, horizontal) {
+        (true, true) => &LAT_LEDGER_COARSE_H,
+        (true, false) => &LAT_LEDGER_COARSE_V,
+        (false, true) => &LAT_LEDGER_FINE_H,
+        (false, false) => &LAT_LEDGER_FINE_V,
+    };
+    if coarse {
+        key.with(|c| {
+            if let Some(slot) = c.borrow_mut().get_mut(a_idx) {
+                *slot += flux;
+            }
+        });
+    } else if cross_block {
+        key.with(|c| {
+            if let Some(slot) = c.borrow_mut().get_mut(a_b) {
+                *slot += flux;
+            }
+        });
+    }
+}
+
+#[inline]
+fn lat_ledger_add(
+    key: &'static std::thread::LocalKey<std::cell::RefCell<Vec<f32>>>,
+    idx: usize,
+    v: f32,
+) {
+    key.with(|c| {
+        if let Some(slot) = c.borrow_mut().get_mut(idx) {
+            *slot += v;
+        }
+    });
+}
+
+/// See `LAT_LEDGER_ENABLED`'s doc comment. The granular CA's counterpart to `lat_ledger_record`.
+///
+/// **This path is not optional bookkeeping.** Sand's angle of repose lives entirely in the
+/// granular CA's lateral flow, not in the flux solver, so a ledger that watched only
+/// `flux_edge_apply` would read DrySand's realised lateral transport as near zero and the
+/// correction would then "correct" a deficit that does not exist. The two transport paths must
+/// both be counted or neither is.
+///
+/// A CA move can be DIAGONAL, unlike a flux edge, so one move can cross both a column face and a
+/// row face. It is decomposed as a staircase -- horizontally first in the donor's row, then
+/// vertically in the destination's column -- and each component is filed under the lower-index
+/// block of the face it crosses. Any decomposition of a diagonal transfer into axis-aligned face
+/// crossings is a choice; this one is stated here so the ledger's meaning is unambiguous.
+#[inline]
+fn lat_ledger_record_ca(
+    flow: f32,
+    center_idx: usize,
+    neighbor_idx: usize,
+    w: usize,
+    block_size: usize,
+    cols: usize,
+) {
+    if !LAT_LEDGER_ENABLED.with(|c| c.get()) || flow == 0.0 || w == 0 || block_size == 0 {
+        return;
+    }
+    let (cx, cy) = (center_idx % w, center_idx / w);
+    let (nx, ny) = (neighbor_idx % w, neighbor_idx / w);
+    let coarse = LAT_LEDGER_COARSE.with(|c| c.get());
+    if nx != cx {
+        let left_x = cx.min(nx);
+        let signed = if nx > cx { flow } else { -flow };
+        if coarse {
+            lat_ledger_add(&LAT_LEDGER_COARSE_H, cy * w + left_x, signed);
+        } else if cx / block_size != nx / block_size {
+            lat_ledger_add(
+                &LAT_LEDGER_FINE_H,
+                (cy / block_size) * cols + (left_x / block_size),
+                signed,
+            );
+        }
+    }
+    if ny != cy {
+        let top_y = cy.min(ny);
+        let signed = if ny > cy { flow } else { -flow };
+        if coarse {
+            lat_ledger_add(&LAT_LEDGER_COARSE_V, top_y * w + nx, signed);
+        } else if cy / block_size != ny / block_size {
+            lat_ledger_add(
+                &LAT_LEDGER_FINE_V,
+                (top_y / block_size) * cols + (nx / block_size),
+                signed,
+            );
+        }
+    }
+}
+
+/// What one tick of `apply_coarse_flow_correction` did. All masses are in FINE mass units.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LateralCorrectionStats {
+    /// Sum of `|defect|` over every block face the correction looked at -- what the coarse level
+    /// asked for, after damping but before any limiting.
+    pub requested: f64,
+    /// Sum of mass actually moved. Equal to `requested` when nothing was limited; strictly less
+    /// when donors ran dry or acceptors filled up.
+    pub applied: f64,
+    /// Of `applied`, the part that crossed a LATERAL face. `applied - lateral_applied` is the
+    /// vertical part, which is zero unless the vertical axis is enabled.
+    pub lateral_applied: f64,
+    /// Block faces with a defect big enough to act on.
+    pub boundaries: u32,
+    /// Of those, how many were cut short by the availability/headroom limiter. A high fraction
+    /// means the coarse level is asking for transport the fine level physically cannot supply,
+    /// which is a finding, not a bug.
+    pub limited: u32,
+    /// Individual fine edges that carried some of the correction.
+    pub edges: u32,
+}
+
+/// Which faces `apply_coarse_flow_correction` is allowed to correct across.
+///
+/// **The default is `Lateral`, and that is a measured choice rather than a limitation of the
+/// formulation.** The defect argument below is entirely direction-agnostic and the vertical axis
+/// is implemented and selectable -- but the deficit FLOW-DIRECTION.md actually measured is
+/// lateral (the coarse level's flow is 2.2x more lateral than the fine level's on DrySand, 1.5x
+/// on Water), while downward transport at the fine level is already running at its structural
+/// ceiling of one cell per tick under gravity. Correcting the vertical axis also puts the coarse
+/// level -- which has no model of repose and no model of free fall -- directly in opposition to
+/// the two fine-level mechanisms that are working. `Both` exists so that is a measurement and not
+/// an assumption.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CorrectionAxes {
+    #[default]
+    Lateral,
+    Vertical,
+    Both,
+}
+
+impl CorrectionAxes {
+    pub fn lateral(self) -> bool {
+        matches!(self, CorrectionAxes::Lateral | CorrectionAxes::Both)
+    }
+    pub fn vertical(self) -> bool {
+        matches!(self, CorrectionAxes::Vertical | CorrectionAxes::Both)
+    }
+}
+
+/// THE COARSE-GRID FLOW CORRECTION (LATERAL-COARSE-CORRECTION.md).
+///
+/// The problem it exists to solve: the fine level's lateral edges move `c_sq * damping` of a
+/// height difference per tick -- ~6% for DrySand, ~23% for Water (`wave_params`) -- and those
+/// constants already sit at the CFL bound, so they cannot simply be raised. That bound is a
+/// LOCAL EXPLICIT-SCHEME STABILITY limit: it governs how fast local relaxation may propagate
+/// information. It is not a statement about how much mass may legally move; conservation is that
+/// statement, and the FCT limiter is what enforces it.
+///
+/// Local relaxation is a SMOOTHER. It kills short-wavelength error quickly and long-wavelength
+/// error at a rate that degrades as the wavelength grows. Spreading a pile sideways across many
+/// blocks is precisely the long-wavelength mode, which is why simply running more lateral
+/// sub-steps polishes the local repose angle and barely moves the pile. The coarse level is where
+/// that mode is solvable -- which is the whole reason multigrid exists, and it is what
+/// FLOW-DIRECTION.md measured.
+///
+/// So this is a coarse-grid correction, applied as a DEFECT, per block face:
+///
+/// ```text
+///   defect[face] = damping * ( coarse_flux[face] * t*t  -  fine_flux[face] )
+/// ```
+///
+/// `coarse_flux` is the signed flux the coarse sim really performed across that tile face this
+/// tick (`LAT_LEDGER_COARSE_H`/`_V`), converted from coarse units to fine mass units by `t*t` --
+/// the coarse level holds a tile's height as an AVERAGE over its `t*t` fine cells, so one unit of
+/// coarse height is `t*t` units of fine mass. `fine_flux` is the signed mass the fine level really
+/// moved across the same physical face, summed over every repetition of this frame.
+///
+/// Three properties, and they are the reason this is a correction rather than a fudge:
+///
+/// 1. **It is a flux.** Every transfer subtracts from one cell and adds the same amount to its
+///    neighbour, so mass is conserved exactly, by construction, in divergence form.
+/// 2. **It is a defect.** If the fine level already moved as much as the coarse level did, the
+///    correction is identically zero. There is no double counting.
+/// 3. **The existing limiter is the safety net.** Per edge, the transfer cannot exceed the donor's
+///    height or the acceptor's remaining headroom, so no cell can go negative or past capacity no
+///    matter what the coarse level asks for. The requested total is distributed over the face
+///    PROPORTIONAL TO that per-edge allowance, and scaled down as a whole if the face cannot
+///    supply it (recorded as `limited`).
+///
+/// Deliberately NOT clamped to the local half-difference. Exceeding what local relaxation could
+/// have moved is the entire point; conservation and the limiter are what keep it safe, not the
+/// stability bound.
+///
+/// **`damping` is why the coarse level's opinion is not taken at face value.** The coarse level is
+/// an approximation of the fine one -- a different grid, and with no model of repose at all -- so
+/// the correction is UNDER-RELAXED rather than applied whole. This is standard practice whenever
+/// the coarse operator is not a Galerkin projection of the fine one, which this one certainly is
+/// not. `1.0` means "trust the coarse level exactly"; `0.0` disables the correction. The known
+/// failure mode it guards against: the coarse level asks to flatten a granular pile below its
+/// angle of repose, the fine level pushes back on the next tick, and the flanks ring slowly.
+/// Damping trades how fast the correction acts against how hard it fights the fine level.
+/// **The shipped default is a starting value, not a measured optimum** -- see `diag_lateral_corr`,
+/// which sweeps it.
+///
+/// **Geometry requirement.** Runs only when a block IS a coarse tile
+/// (`block_size == width / coarse_n`), which is the shipped geometry and the same condition
+/// `update_block_clock_rates` special-cases. At any other block divisor a block face and a tile
+/// face are not the same line, and the coarse level has no opinion about the face being asked
+/// about; returns zeroed stats rather than guessing.
+///
+/// Writes `heightmap.data` directly. That is safe after `settle_tick` has returned because
+/// `settle_tick` re-seeds `temp_heights` from `heightmap.data` wholesale at the top of every call.
+/// Blocks it touches are marked in `blocks_touched` (so the coarse level's incremental restrict
+/// sees them next tick) and floored in `last_displacements` (so the scheduler does not read a
+/// block this just moved mass through as settled).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_coarse_flow_correction(
+    heightmap: &mut crate::grid::Heightmap,
+    cell_colors: &mut [u8],
+    cell_props: &mut [f32],
+    shape_mask: &[u8],
+    block_size: usize,
+    coarse_n: usize,
+    coarse_h: &[f32],
+    coarse_v: &[f32],
+    fine_h: &[f32],
+    fine_v: &[f32],
+    axes: CorrectionAxes,
+    overfill_ratio: f32,
+    damping: f32,
+    last_displacements: &mut [f32],
+    blocks_touched: &mut [bool],
+) -> LateralCorrectionStats {
+    let mut stats = LateralCorrectionStats::default();
+    let w = heightmap.width;
+    let h = heightmap.height;
+    if block_size == 0 || coarse_n == 0 || damping == 0.0 {
+        return stats;
+    }
+    // See the geometry requirement in the doc comment: a block must be exactly a coarse tile.
+    let t = w / coarse_n;
+    if t == 0 || t != block_size || w % coarse_n != 0 {
+        return stats;
+    }
+    let cols = w.div_ceil(block_size);
+    let rows = h.div_ceil(block_size);
+    let n_blocks = cols * rows;
+    for buf in [coarse_h, coarse_v, fine_h, fine_v] {
+        if buf.len() < n_blocks {
+            return stats;
+        }
+    }
+    // One unit of coarse height is `t*t` units of fine mass -- the coarse level stores a tile
+    // height as an AVERAGE, not a sum. This is the only place that conversion happens.
+    let coarse_to_fine = (t * t) as f32;
+    // Below this the transfer is f32 noise; the same reasoning as `flux_edge_apply`'s `MIN_FLUX`.
+    const MIN_CORRECTION: f32 = 1e-6;
+    let mut alloc: Vec<(usize, usize, f32)> = Vec::with_capacity(block_size);
+
+    for b in 0..n_blocks {
+        let bx = b % cols;
+        let by = b / cols;
+        for horizontal in [true, false] {
+            if horizontal && !axes.lateral() {
+                continue;
+            }
+            if !horizontal && !axes.vertical() {
+                continue;
+            }
+            // The far face only -- right for H, bottom for V. Every interior face is some block's
+            // far face exactly once, so this visits each face once and no face twice.
+            let neighbour = if horizontal {
+                if bx + 1 >= cols {
+                    continue;
+                }
+                b + 1
+            } else {
+                if by + 1 >= rows {
+                    continue;
+                }
+                b + cols
+            };
+            let (cf, ff) = if horizontal { (coarse_h, fine_h) } else { (coarse_v, fine_v) };
+            let defect = damping * (cf[b] * coarse_to_fine - ff[b]);
+            if defect.abs() < MIN_CORRECTION {
+                continue;
+            }
+            // Positive defect means the coarse level moved more mass toward the increasing index
+            // than the fine level did, so the fine level owes a transfer in that direction.
+            let forward = defect > 0.0;
+            let magnitude = defect.abs();
+
+            // The `block_size` fine edges that make up this face.
+            alloc.clear();
+            let mut available = 0.0f32;
+            for k in 0..block_size {
+                let (ia, ib) = if horizontal {
+                    let y = by * block_size + k;
+                    if y >= h {
+                        break;
+                    }
+                    let x_a = (bx + 1) * block_size - 1;
+                    if x_a + 1 >= w {
+                        break;
+                    }
+                    (y * w + x_a, y * w + x_a + 1)
+                } else {
+                    let x = bx * block_size + k;
+                    if x >= w {
+                        break;
+                    }
+                    let y_a = (by + 1) * block_size - 1;
+                    if y_a + 1 >= h {
+                        break;
+                    }
+                    (y_a * w + x, (y_a + 1) * w + x)
+                };
+                if shape_mask[ia] == crate::MASK_OUTSIDE || shape_mask[ib] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let (src, dst) = if forward { (ia, ib) } else { (ib, ia) };
+                let cap_dst =
+                    cell_overfill_capacity_for(cell_props[dst * 4 + PROP_WETNESS], overfill_ratio);
+                // The limiter, per edge: never more than the donor holds, never more than the
+                // acceptor can take. This is what makes exceeding the stability bound safe.
+                let allowance =
+                    heightmap.data[src].max(0.0).min((cap_dst - heightmap.data[dst]).max(0.0));
+                if allowance > 0.0 {
+                    alloc.push((src, dst, allowance));
+                    available += allowance;
+                }
+            }
+            if available <= 0.0 {
+                continue;
+            }
+            stats.requested += magnitude as f64;
+            stats.boundaries += 1;
+            // Proportional to allowance, scaled as a whole so the face never delivers more than
+            // was asked for OR more than it has.
+            let scale = (magnitude / available).min(1.0);
+            if magnitude > available {
+                stats.limited += 1;
+            }
+            // Largest single-edge transfer across this face, which is what the two blocks'
+            // displacement hints are set from below.
+            let mut applied_here = 0.0f32;
+            for &(src, dst, allowance) in &alloc {
+                let moved = allowance * scale;
+                if moved <= MIN_CORRECTION {
+                    continue;
+                }
+                advect_properties(cell_colors, cell_props, src, dst, moved, heightmap.data[dst]);
+                heightmap.data[src] -= moved;
+                heightmap.data[dst] += moved;
+                stats.applied += moved as f64;
+                if horizontal {
+                    stats.lateral_applied += moved as f64;
+                }
+                stats.edges += 1;
+                applied_here = applied_here.max(moved);
+            }
+            // Both sides moved mass, so neither may be read as settled next tick, and the coarse
+            // level's incremental restrict has to re-read both tiles.
+            //
+            // The displacement hint is the mass actually moved, NOT a flat bump to
+            // `MUST_SIMULATE_THRESHOLD` -- exactly what `activate_neighbor` does on the ordinary
+            // transport path, and for the same reason. A flat bump forces both blocks to simulate
+            // next tick however tiny the correction was, and since the NUMBER of faces carrying
+            // some correction is nearly independent of `damping` (measured: 844 faces at damping
+            // 0.05 and 796 at 1.0, on Water), that turned into a large, damping-independent
+            // frame-time cost -- +93% on Water even at a damping where the correction moved almost
+            // no mass at all. Scaling the hint by what actually moved means a correction too small
+            // to matter does not clear the MUST bar, and the scheduler treats corrected mass on
+            // exactly the same terms as mass the solver itself moved.
+            if applied_here > 0.0 {
+                for &nb in &[b, neighbour] {
+                    if let Some(d) = last_displacements.get_mut(nb) {
+                        *d = d.max(applied_here);
+                    }
+                    if let Some(tv) = blocks_touched.get_mut(nb) {
+                        *tv = true;
+                    }
+                }
+            }
+        }
+    }
+    stats
+}
+
 /// See `COARSE_BANG_BANG_COUNT`'s doc comment.
 pub fn reset_bang_bang_count() {
     COARSE_BANG_BANG_COUNT.with(|c| c.set(0));
@@ -1788,6 +2264,12 @@ fn flux_edge_apply(
     // `b_idx - a_idx == 1` is the horizontal neighbour; anything else is `+ width`, the vertical
     // one. See `FLUX_DIR_ACC`.
     let dir_horizontal = b_idx == a_idx + 1;
+    // THE FLOW LEDGER (see `LAT_LEDGER_ENABLED`). Signed, and recorded once for the edge rather
+    // than per branch, since the sign is the whole point. Same `MIN_FLUX` cutoff as the transfer
+    // itself, so the ledger records exactly the mass that moved.
+    if flux > MIN_FLUX || flux < -MIN_FLUX {
+        lat_ledger_record(flux, dir_horizontal, a_b, a_idx, a_b != b_b);
+    }
     if flux > MIN_FLUX {
         flux_dir_record(flux, dir_horizontal, a_b != b_b);
         activate_neighbor(a_b, flux, modified, next_displacements);
@@ -3697,6 +4179,10 @@ fn try_move(
     let nx = neighbor_idx % w;
     let ny = neighbor_idx / w;
     let neighbor_b = (ny / block_size) * cols + (nx / block_size);
+
+    // THE FLOW LEDGER (see `lat_ledger_record_ca`). The granular CA is the OTHER transport path,
+    // and for sand it is the one that carries lateral flow -- the ledger has to see both.
+    lat_ledger_record_ca(flow, center_idx, neighbor_idx, w, block_size, cols);
 
     activate_neighbor(b, flow, modified, next_displacements);
     activate_neighbor(neighbor_b, flow, modified, next_displacements);

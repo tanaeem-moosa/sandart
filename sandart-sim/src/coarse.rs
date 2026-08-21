@@ -831,7 +831,12 @@ impl CoarseState {
         // The nested sim runs the SAME `settle_tick`, so its flow lands in the same counters --
         // mark which level owns what while it runs. No-op unless the counters are enabled.
         crate::physics::flux_dir_set_coarse(true);
+        // Same reasoning for the flow ledger (LATERAL-COARSE-CORRECTION.md): the nested sim's
+        // transport is the coarse level's own opinion about where mass should go, and it has to
+        // be filed as such. No-op unless the ledger is enabled.
+        crate::physics::lat_ledger_set_coarse(true);
         self.advance_nested_sim(geo, gravity_dir, overfill_ratio, underfill_tension, overfill_stiffness);
+        crate::physics::lat_ledger_set_coarse(false);
         crate::physics::flux_dir_set_coarse(false);
         self.update_head_and_disagreement(geo, gravity_dir, overfill_ratio, underfill_tension, unit);
     }

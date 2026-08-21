@@ -389,6 +389,9 @@ impl WasmSimulationState {
         let liquid_fall_jitter = self.sim.liquid_fall_jitter;
         let rate_gated_reps = self.sim.rate_gated_reps;
         let grade_clock_rates = self.sim.grade_clock_rates;
+        let coarse_flow_correction = self.sim.coarse_flow_correction;
+        let coarse_correction_damping = self.sim.coarse_correction_damping;
+        let coarse_correction_axes = self.sim.coarse_correction_axes;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -437,6 +440,11 @@ impl WasmSimulationState {
         // Same reasoning again: a UI toggle, not simulation state.
         // Same reasoning again: a UI toggle, not simulation state.
         sim.grade_clock_rates = grade_clock_rates;
+        // Same reasoning again: UI debug settings, not simulation state -- the correction toggle,
+        // its damping slider and its axis selector must all survive a resolution rebuild.
+        sim.coarse_flow_correction = coarse_flow_correction;
+        sim.coarse_correction_damping = coarse_correction_damping;
+        sim.coarse_correction_axes = coarse_correction_axes;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -854,6 +862,56 @@ impl WasmSimulationState {
     /// `DrawingSimulation::rate_gated_reps`.
     pub fn set_rate_gated_reps(&mut self, gated: bool) {
         self.sim.rate_gated_reps = gated;
+    }
+
+    /// "Coarse flow correction" checkbox (LATERAL-COARSE-CORRECTION.md): after the frame's
+    /// sub-steps have run, the mass the coarse level actually moved across each tile face is
+    /// compared with the mass the fine level actually moved across the same face, and the
+    /// difference is applied as a limited flux. Exists because the fine level's lateral transport
+    /// is capped by a local CFL bound that the coarse level, being a coarser grid, is not subject
+    /// to. Plain field write, safe every frame; a no-op unless the coarse level is available.
+    /// See `DrawingSimulation::coarse_flow_correction`.
+    pub fn set_coarse_flow_correction(&mut self, enabled: bool) {
+        self.sim.coarse_flow_correction = enabled;
+    }
+
+    /// "Correction strength" slider (LATERAL-COARSE-CORRECTION.md): under-relaxation on the
+    /// coarse level's opinion, `0.0..=1.0`. The coarse level is an approximation with no model of
+    /// repose, so its correction is damped rather than applied whole; `0.0` is equivalent to the
+    /// toggle being off. Plain field write, safe every frame. See
+    /// `DrawingSimulation::coarse_correction_damping`.
+    pub fn set_coarse_correction_damping(&mut self, damping: f32) {
+        self.sim.coarse_correction_damping = damping.clamp(0.0, 1.0);
+    }
+
+    /// "Correct across" selector (LATERAL-COARSE-CORRECTION.md): which faces the correction may
+    /// act on -- `0` lateral (the default, and where the measured deficit is), `1` vertical,
+    /// `2` both. Anything else is treated as lateral rather than rejected, so a stale UI value
+    /// can never leave the sim in a state the panel is not showing. See
+    /// `physics::CorrectionAxes` for why lateral is the default.
+    pub fn set_coarse_correction_axes(&mut self, axes: u32) {
+        self.sim.coarse_correction_axes = match axes {
+            1 => sandart_sim::physics::CorrectionAxes::Vertical,
+            2 => sandart_sim::physics::CorrectionAxes::Both,
+            _ => sandart_sim::physics::CorrectionAxes::Lateral,
+        };
+    }
+
+    /// LATERAL-COARSE-CORRECTION.md: last frame's correction accounting, for the Debug panel --
+    /// `[requested, applied, lateral_applied, boundaries, limited, edges]`. All masses in fine
+    /// mass units. `applied / requested` well below 1 means the fine level physically could not
+    /// supply what the coarse level asked for, which is a finding about the two levels rather
+    /// than a fault.
+    pub fn coarse_correction_stats(&self) -> Vec<f32> {
+        let s = self.sim.last_frame_correction;
+        vec![
+            s.requested as f32,
+            s.applied as f32,
+            s.lateral_applied as f32,
+            s.boundaries as f32,
+            s.limited as f32,
+            s.edges as f32,
+        ]
     }
 
     /// "Falling liquid jitter" slider (STICKINESS.md): per-cell downward-flow jitter for

@@ -114,6 +114,21 @@ const CLOCK_RATE_MAX: f32 = 16.0;
 /// this same reference fraction.
 const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
 
+/// LATERAL-COARSE-CORRECTION.md: the shipped default for `coarse_correction_damping`.
+///
+/// **0.5, and this is a starting value rather than a measured optimum.** The reasoning for
+/// starting at a half rather than at 1.0: the defect formulation makes 1.0 the *natural* value
+/// ("the coarse level moved this much, the fine level moved that much, make up the difference"),
+/// but the coarse level is not a Galerkin projection of the fine one -- different grid, and no
+/// model of the angle of repose whatsoever -- so its answer carries real approximation error and
+/// under-relaxing a coarse-grid correction under exactly those conditions is standard rather than
+/// timid. A half also means an unstable interaction, if there is one, ratchets in over several
+/// ticks instead of arriving whole on the first, which is the difference between a visible artifact
+/// and a divergence.
+///
+/// `diag_lateral_corr` sweeps it. Whatever that sweep says should replace this number.
+const COARSE_CORRECTION_DEFAULT_DAMPING: f32 = 0.5;
+
 /// The rate ladder the RANK rule fills (see `rank_clock_rates`), highest first. Integer steps
 /// down to 1x and octaves below it: above 1x a rate IS a repetition count, so fractional values
 /// there only round back onto these anyway (`extra_reps` rounds), while below 1x a rate is a
@@ -649,6 +664,46 @@ pub struct DrawingSimulation {
     /// larger, live value rather than the stale snapshot. This is what makes the ladder a
     /// redistribution of a fixed work budget instead of a multiplier on it.
     pub rate_gated_reps: bool,
+
+    /// LATERAL-COARSE-CORRECTION.md: the coarse-grid flow correction, default **OFF**.
+    ///
+    /// `false`: bit-identical to the tree before this existed -- the ledger is not even enabled,
+    /// so `flux_edge_apply`/`try_move` pay one predictable branch and nothing else.
+    ///
+    /// `true`: after the frame's `settle_tick` repetitions have run, the mass the coarse level
+    /// actually moved across each tile face is compared with the mass the fine level actually
+    /// moved across the same face, and the DIFFERENCE is applied as a limited flux
+    /// (`physics::apply_coarse_flow_correction`). It exists because the fine level's lateral
+    /// transport is bounded by a local CFL condition that the coarse level, being a coarser grid,
+    /// is not subject to -- see that function's doc comment for the full argument and
+    /// `coarse_correction_damping` for why the coarse level's answer is not taken at face value.
+    ///
+    /// Requires the coarse level (`coarse.available`) and the shipped geometry where a block IS a
+    /// coarse tile; a no-op otherwise.
+    pub coarse_flow_correction: bool,
+
+    /// LATERAL-COARSE-CORRECTION.md: which faces `coarse_flow_correction` corrects across.
+    /// Defaults to `Lateral` -- see `physics::CorrectionAxes` for why that is a measured choice
+    /// about where the deficit is, not a limitation of the formulation.
+    pub coarse_correction_axes: physics::CorrectionAxes,
+
+    /// LATERAL-COARSE-CORRECTION.md: under-relaxation on the coarse-grid correction, in `[0, 1]`.
+    ///
+    /// The coarse level is an approximation of the fine one -- a different grid, and with no model
+    /// of repose at all -- so its answer is damped rather than applied whole. `1.0` means "trust
+    /// the coarse level exactly"; `0.0` disables the correction entirely and is equivalent to
+    /// `coarse_flow_correction: false` for physics purposes.
+    ///
+    /// **The default is a starting value, not a measured optimum.** The trade it controls: a high
+    /// damping acts fast but fights the fine level harder, and the specific failure to watch for
+    /// is the coarse level asking to flatten a granular pile below its angle of repose, the fine
+    /// level restoring it next tick, and the flanks ringing. `diag_lateral_corr` sweeps this.
+    pub coarse_correction_damping: f32,
+
+    /// LATERAL-COARSE-CORRECTION.md: last frame's correction statistics, for the Debug panel and
+    /// the diagnostics. Zeroed every tick the correction does not run, so a stale reading cannot
+    /// linger on screen after the toggle goes off.
+    pub last_frame_correction: physics::LateralCorrectionStats,
 
     /// Upper end of the clock-rate range `update_block_clock_rates` clamps to -- the runtime,
     /// UI-adjustable form of `CLOCK_RATE_MAX` (which remains the default and the hard ceiling a
@@ -1194,6 +1249,13 @@ impl DrawingSimulation {
             liquid_fall_jitter: 0.0,
             grade_clock_rates: true,
             rate_gated_reps: true,
+            // LATERAL-COARSE-CORRECTION.md. Default OFF, like every other debug toggle in this
+            // group. `COARSE_CORRECTION_DEFAULT_DAMPING` is a starting value, not a measured
+            // optimum -- see its own doc comment.
+            coarse_flow_correction: false,
+            coarse_correction_axes: physics::CorrectionAxes::Lateral,
+            coarse_correction_damping: COARSE_CORRECTION_DEFAULT_DAMPING,
+            last_frame_correction: physics::LateralCorrectionStats::default(),
             max_clock_rate: CLOCK_RATE_MAX,
             min_clock_rate: CLOCK_RATE_MIN,
             block_clock_rate: vec![1.0f32; cols * rows],
@@ -2677,6 +2739,23 @@ impl DrawingSimulation {
         // the multi-rate scheduler's signal, and the scheduler must work even when the potential
         // coupling is off (its shipped default, per the user's own words -- see
         // `coarse_pressure_coupling`'s doc comment).
+        // LATERAL-COARSE-CORRECTION.md: arm the flow ledger for this tick, BEFORE the coarse
+        // level runs, since the coarse tick is the first thing that will write to it. Sized every
+        // tick rather than on resize, because `lat_ledger_enable` is also what zeroes it -- one
+        // allocation-free pass over two small buffers, and it makes "the ledger holds exactly this
+        // tick" true by construction rather than by remembering to clear it somewhere else.
+        let correction_active = self.coarse_flow_correction
+            && self.coarse.available
+            && self.coarse_correction_damping > 0.0;
+        physics::lat_ledger_enable(
+            correction_active,
+            self.coarse_state.delta.len(),
+            self.active_blocks.len(),
+        );
+        if !correction_active {
+            self.last_frame_correction = physics::LateralCorrectionStats::default();
+        }
+
         if self.coarse.available {
             // STEP4-COARSE-IS-A-SIM.md: the coarse level's own dynamics now run the shipped
             // solver over a nested grid (`CoarseState::advance_nested_sim`), so it needs the
@@ -2711,6 +2790,9 @@ impl DrawingSimulation {
                 // vouch for this" and answer with a full restrict every tick.
                 Some(expanded.as_deref().unwrap_or(&self.blocks_touched)),
             );
+            // Everything the coarse level moved this tick is now in the ledger's COARSE half;
+            // everything the fine level moves below belongs in the FINE half.
+            physics::lat_ledger_set_coarse(false);
         }
 
         // OVERCLOCKING.md (HIERARCHICAL-PRESSURE.md §7b): update the multi-rate block scheduler.
@@ -2977,6 +3059,31 @@ impl DrawingSimulation {
             self.blocks_touched = touched_accum;
             self.last_frame_block_steps = block_steps_this_frame;
             self.last_frame_stalled_boundaries = stalled_boundaries;
+            // LATERAL-COARSE-CORRECTION.md: the coarse-grid correction, applied AFTER every
+            // repetition of this frame has run. The ordering is the whole design: the fine level
+            // gets its full, unmodified chance first, and only what it failed to deliver against
+            // the coarse level's own realised transport is made up here. Running it earlier would
+            // correct a deficit the fine level was about to close by itself.
+            if correction_active {
+                let (coarse_h, coarse_v, fine_h, fine_v) = physics::lat_ledger_snapshot();
+                self.last_frame_correction = physics::apply_coarse_flow_correction(
+                    &mut self.heightmap,
+                    &mut self.cell_colors,
+                    &mut self.cell_props,
+                    &self.shape_mask,
+                    self.block_size,
+                    self.coarse.coarse_n,
+                    &coarse_h,
+                    &coarse_v,
+                    &fine_h,
+                    &fine_v,
+                    self.coarse_correction_axes,
+                    (self.overfill_capacity - 1.0).max(0.0),
+                    self.coarse_correction_damping,
+                    &mut self.last_displacements,
+                    &mut self.blocks_touched,
+                );
+            }
             // PERF-PROFILE.md TEMPORARY: log (target sub-steps, first-settled rep or -1) for
             // every block that was genuinely overclocked this frame.
             if extra_reps > 0 {
