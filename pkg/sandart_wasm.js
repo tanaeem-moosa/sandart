@@ -150,6 +150,13 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * @returns {number}
+     */
+    get_max_clock_rate() {
+        const ret = wasm.wasmsimulationstate_get_max_clock_rate(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * Current `multistage_chambers` value, so the web UI can initialise its slider/readout
      * from the actual backing value rather than assuming its own hard-coded default matches.
      * @returns {number}
@@ -471,6 +478,19 @@ export class WasmSimulationState {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
+    }
+    /**
+     * "Max clock rate" slider (EARLY-STOP.md): the ceiling of the per-block clock-rate range,
+     * `1.0..=8.0`. A frame costs at most `round(max_clock_rate)` `settle_tick` repetitions, so
+     * this is the direct frame-time/settling-rate trade -- `1.0` is "no overclocking" while
+     * leaving underclocking in place, `8.0` is the default. Plain field write like
+     * `set_overclocking` above: no reset, no reinitialisation, safe to call every frame from
+     * `syncSettings()`. Has no effect while the overclocking toggle is off, since
+     * `update_block_clock_rates` does not run then.
+     * @param {number} rate
+     */
+    set_max_clock_rate(rate) {
+        wasm.wasmsimulationstate_set_max_clock_rate(this.__wbg_ptr, rate);
     }
     /**
      * The widest (top) tier's chamber count for `SandboxShape::MultiStageHourglass`'s
