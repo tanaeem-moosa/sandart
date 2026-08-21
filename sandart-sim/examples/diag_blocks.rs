@@ -51,6 +51,7 @@ fn main() {
     if let Some(v) = get("--rank") { sim.rank_clock_rates = v == "1"; }
     if let Some(v) = get("--gate") { sim.rate_gated_reps = v == "1"; }
     if let Some(v) = get("--logfall") { sim.clock_band_log_falloff = v == "1"; }
+    if let Some(v) = get("--grade") { sim.grade_clock_rates = v == "1"; }
     if let Some(t) = get("--tension") { sim.underfill_tension = t.parse().unwrap(); }
     let targets = [None; 5];
     for _ in 0..warm {

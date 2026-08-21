@@ -893,6 +893,12 @@ function syncSettings() {
         if (rankRow) rankRow.style.display = overclockOn ? '' : 'none';
         state.set_rank_clock_rates(rankCheck.checked);
     }
+    const gradeCheck = document.getElementById('check-grade-clock-rates');
+    if (gradeCheck) {
+        const gradeRow = document.getElementById('grade-clock-rates-row');
+        if (gradeRow) gradeRow.style.display = overclockOn ? '' : 'none';
+        state.set_grade_clock_rates(gradeCheck.checked);
+    }
     const falloffCheck = document.getElementById('check-clock-band-falloff');
     if (falloffCheck) {
         const falloffRow = document.getElementById('clock-band-falloff-row');
@@ -1394,6 +1400,8 @@ function setupPanelInput() {
     document.getElementById('check-overclocking').addEventListener('change', syncSettings);
     const rankClockCheck = document.getElementById('check-rank-clock-rates');
     if (rankClockCheck) rankClockCheck.addEventListener('change', syncSettings);
+    const gradeRatesCheck = document.getElementById('check-grade-clock-rates');
+    if (gradeRatesCheck) gradeRatesCheck.addEventListener('change', syncSettings);
     const bandFalloffCheck = document.getElementById('check-clock-band-falloff');
     if (bandFalloffCheck) bandFalloffCheck.addEventListener('change', syncSettings);
     const gatedRepsCheck = document.getElementById('check-rate-gated-reps');

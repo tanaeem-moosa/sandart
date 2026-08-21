@@ -89,6 +89,41 @@ Lib suite 102 passed / 10 failed, the same ten named failures. All eight integra
 including `overclocking_toggle` and `perfect_simulation_determinism`, plus `sandart-render`, the
 wasm32 check, `cargo check -p sandart`, and `node scripts/check_js.js`.
 
+## Rate grading: the 2:1 balance rule (2026-08-20)
+
+"we can't force blocks to simulate more. we are already too slow. we need to figure out how to sim
+blocks the right amount. maybe we need to align sub step counts nearby or don't let them be off
+more than 1" (the user). This is adaptive mesh refinement's 2:1 balance rule, applied to clock
+rates instead of refinement levels, and enforced DOWNWARD — a fast block is pulled to
+`min(neighbour) + 1`, iterated to a fixed point, never the reverse.
+
+Grid 512, `--ticks 300`, ceiling 8, 1/lg(1+r) bands:
+
+| material | grading | ms/frame | descent | block-steps | stalled edges | top rate reached |
+|---|---|---|---|---|---|---|
+| Water   | off | 62.92 | 0.06005 | 2549 | 791 | 8x (87 blocks) |
+| Water   | on  | 37.02 | 0.03029 | 1291 | 270 | 4x (0 at 8x)   |
+| DrySand | off | 41.09 | 0.07841 | 1951 | 765 | 8x (57 blocks) |
+| DrySand | on  | 18.13 | 0.04258 |  854 | 209 | 4x (0 at 8x)   |
+
+**Boundary stalls fall 66-73%** — the direct mechanical consequence: with a gradient of 1, two
+neighbours can mismatch on at most one repetition instead of up to seven. Frame time falls 41%
+(Water) and 56% (DrySand); block-steps roughly halve.
+
+Per unit wall clock it is close to a wash — Water 9.54e-4 -> 8.18e-4 movement per ms (-14%),
+DrySand 1.91e-3 -> 2.35e-3 (+23%). **So grading is not primarily a speed change; it is the same
+throughput bought with far fewer seams, at a much lower and steadier frame cost.**
+
+The most informative line is the rate distribution: with grading on, **no block reaches 8x at all**
+in either material. Nothing in this scene is a wide enough contiguous region to ramp there from its
+surroundings one step at a time. The ceiling slider is effectively topped out at 4 — which is the
+scheduler answering the question "how much does this block actually deserve" instead of being told.
+
+**Follow-up worth running**: raise `CLOCK_RATE_MAX` above 8 with grading on. Grading makes a high
+ceiling self-limiting (only genuinely wide fast regions can reach it), so a graded ceiling of 16
+might recover the movement that grading costs while keeping the seam count low. It cannot be tested
+without extending `CLOCK_RATE_LADDER` past 8.
+
 ## Band falloff, boundary stalls, and one failed fix (2026-08-20)
 
 The user, from the deployed build: "rank based allocation does not work. we are too aggressive.

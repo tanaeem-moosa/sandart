@@ -388,6 +388,7 @@ impl WasmSimulationState {
         let rank_clock_rates = self.sim.rank_clock_rates;
         let rate_gated_reps = self.sim.rate_gated_reps;
         let clock_band_log_falloff = self.sim.clock_band_log_falloff;
+        let grade_clock_rates = self.sim.grade_clock_rates;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -433,6 +434,8 @@ impl WasmSimulationState {
         sim.rate_gated_reps = rate_gated_reps;
         // Same reasoning again: a UI toggle, not simulation state.
         sim.clock_band_log_falloff = clock_band_log_falloff;
+        // Same reasoning again: a UI toggle, not simulation state.
+        sim.grade_clock_rates = grade_clock_rates;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -857,6 +860,13 @@ impl WasmSimulationState {
     /// `DrawingSimulation::clock_band_log_falloff`.
     pub fn set_clock_band_log_falloff(&mut self, log_falloff: bool) {
         self.sim.clock_band_log_falloff = log_falloff;
+    }
+
+    /// "Grade neighbouring rates" checkbox (EARLY-STOP.md): cap the rate field's GRADIENT so
+    /// adjacent blocks differ by at most one repetition, enforced by pulling fast blocks down.
+    /// See `DrawingSimulation::grade_clock_rates`.
+    pub fn set_grade_clock_rates(&mut self, grade: bool) {
+        self.sim.grade_clock_rates = grade;
     }
 
     /// "Max clock rate" slider (EARLY-STOP.md): the ceiling of the per-block clock-rate range,

@@ -591,6 +591,26 @@ pub struct DrawingSimulation {
     /// Both rules respect `min_clock_rate`/`max_clock_rate`; the ladder is clipped to that range.
     pub rank_clock_rates: bool,
 
+    /// EARLY-STOP.md: cap the GRADIENT of the rate field, not the rate. "maybe we need to align
+    /// sub step counts nearby or don't let them be off more than 1" (the user) -- the 2:1 balance
+    /// rule from adaptive mesh refinement, where neighbouring cells may differ by at most one
+    /// refinement level.
+    ///
+    /// Enforced DOWNWARD, by pulling fast blocks down to `min(neighbour) + 1`, iterated to a
+    /// fixed point -- never by raising slow ones, since "we can't force blocks to simulate more.
+    /// we are already too slow". So a lone 8x block surrounded by 1x neighbours becomes 2x, while
+    /// a wide contiguous fast region keeps its full rate: only a region big enough to ramp can
+    /// reach the ceiling.
+    ///
+    /// Two things follow. Work goes DOWN, because the ceiling is only reachable where the
+    /// scheduler wants a whole neighbourhood fast. And boundary stalls go down, because a seam
+    /// costs one repetition of mismatch per adjacent pair instead of up to seven: with a gradient
+    /// of 1, a block and its neighbour differ by at most one repetition of participation.
+    ///
+    /// Rates below 1x are left alone. They are skip PERIODS rather than repetition counts, they
+    /// already run at most once per frame, and grading them would only ever raise them.
+    pub grade_clock_rates: bool,
+
     /// EARLY-STOP.md: the shape of the rank rule's band sizes.
     ///
     /// `false` — `n_r ∝ 1/r`, equal WORK per band. Mathematically tidy (every band costs the
@@ -1157,6 +1177,7 @@ impl DrawingSimulation {
             overclocking_enabled: false,
             rank_clock_rates: true,
             clock_band_log_falloff: true,
+            grade_clock_rates: true,
             rate_gated_reps: true,
             max_clock_rate: CLOCK_RATE_MAX,
             min_clock_rate: CLOCK_RATE_MIN,
@@ -1577,6 +1598,7 @@ impl DrawingSimulation {
                 // `rate` is a budget early stop is free to underspend.
                 self.block_clock_rate[b] = (signal[b] / CLOCK_DELTA_REF_FRAC).clamp(lo, hi);
             }
+            self.grade_block_clock_rates();
             return;
         }
 
@@ -1631,6 +1653,71 @@ impl DrawingSimulation {
             start = end;
             if start >= m {
                 break;
+            }
+        }
+        self.grade_block_clock_rates();
+    }
+
+    /// See `grade_clock_rates`. Pulls every block down to at most one repetition above its
+    /// slowest grid neighbour, iterated until nothing changes.
+    ///
+    /// Works in REPETITION space (`round(rate)`), not rate space, because that is what a
+    /// boundary stall is counted in: block `b` participates in repetition `r` iff
+    /// `round(rate) > r`, so two neighbours differing by one repetition can mismatch on at most
+    /// one repetition. Sub-1x rates are floored at 1 for the comparison only and written back
+    /// untouched -- they are skip periods, not repetition counts.
+    ///
+    /// Terminates: every pass either changes nothing or lowers at least one block by at least
+    /// one whole repetition, and repetitions are bounded below by 1, so the loop is bounded by
+    /// `CLOCK_RATE_MAX` passes. The explicit cap is belt-and-braces against a future
+    /// non-monotone edit.
+    fn grade_block_clock_rates(&mut self) {
+        if !self.grade_clock_rates {
+            return;
+        }
+        let n = self.block_clock_rate.len();
+        let cols = self.block_size_cols();
+        if cols == 0 || n == 0 || n % cols != 0 {
+            return;
+        }
+        let rows = n / cols;
+        // Repetition count per block; sub-1x blocks read as 1 (they run at most once).
+        let mut reps: Vec<u32> = self
+            .block_clock_rate
+            .iter()
+            .map(|&r| if r < 1.0 { 1 } else { r.round().max(1.0) as u32 })
+            .collect();
+        for _ in 0..(CLOCK_RATE_MAX as u32 + 1) {
+            let mut changed = false;
+            for b in 0..n {
+                if reps[b] <= 1 {
+                    continue;
+                }
+                let bx = b % cols;
+                let by = b / cols;
+                let mut min_nb = u32::MAX;
+                if bx > 0 { min_nb = min_nb.min(reps[b - 1]); }
+                if bx + 1 < cols { min_nb = min_nb.min(reps[b + 1]); }
+                if by > 0 { min_nb = min_nb.min(reps[b - cols]); }
+                if by + 1 < rows { min_nb = min_nb.min(reps[b + cols]); }
+                if min_nb == u32::MAX {
+                    continue;
+                }
+                let capped = reps[b].min(min_nb.saturating_add(1));
+                if capped < reps[b] {
+                    reps[b] = capped;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for b in 0..n {
+            // Only ever written DOWN, and only for blocks that were overclocked to begin with:
+            // a sub-1x rate is left exactly as the allocator set it.
+            if self.block_clock_rate[b] >= 1.0 {
+                self.block_clock_rate[b] = self.block_clock_rate[b].min(reps[b] as f32);
             }
         }
     }
