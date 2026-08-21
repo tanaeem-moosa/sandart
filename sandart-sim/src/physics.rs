@@ -906,6 +906,65 @@ thread_local! {
     static COARSE_BANG_BANG_COUNT: std::cell::Cell<u64> = std::cell::Cell::new(0);
 }
 
+thread_local! {
+    // Realised mass flow per direction, split by whether the edge crosses an LOD BLOCK boundary --
+    // the instrument behind "in an hourglass simulation comparing coarse with fine, which
+    // direction do we have more flow disagreement? lateral or down?" (the user). Counted where the
+    // transfer actually happens (`flux_edge_apply`, past its MIN_FLUX cutoff), so it is mass that
+    // really moved, not a candidate, a velocity, or a reconstruction.
+    //
+    // Layout: `[level * 4 + k]`, level 0 = fine, level 1 = the coarse nested sim (the caller
+    // marks which with `flux_dir_set_coarse`). `k`: 0 = lateral total, 1 = downward total,
+    // 2 = lateral across a block boundary, 3 = downward across a block boundary. At the default
+    // geometry a block IS a coarse tile, so `k = 2, 3` at the fine level are exactly "flow between
+    // tiles", which is what the coarse level's every edge is.
+    //
+    // OFF by default and gated on `FLUX_DIR_ENABLED`, because this runs per edge per tick: one
+    // predictable branch when disabled.
+    static FLUX_DIR_ENABLED: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static FLUX_DIR_COARSE: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static FLUX_DIR_ACC: std::cell::Cell<[f64; 8]> = std::cell::Cell::new([0.0; 8]);
+}
+
+/// See `FLUX_DIR_ACC`'s doc comment. Enables the counters and zeroes them.
+pub fn flux_dir_enable(on: bool) {
+    FLUX_DIR_ENABLED.with(|c| c.set(on));
+    FLUX_DIR_ACC.with(|c| c.set([0.0; 8]));
+}
+
+/// See `FLUX_DIR_ACC`'s doc comment. Which level subsequent flow is attributed to.
+pub fn flux_dir_set_coarse(coarse: bool) {
+    FLUX_DIR_COARSE.with(|c| c.set(coarse));
+}
+
+/// See `FLUX_DIR_ACC`'s doc comment. Reads the counters and zeroes them.
+pub fn flux_dir_take() -> [f64; 8] {
+    FLUX_DIR_ACC.with(|c| {
+        let v = c.get();
+        c.set([0.0; 8]);
+        v
+    })
+}
+
+/// See `FLUX_DIR_ACC`'s doc comment. `horizontal` is decided by the caller, which knows the index
+/// stride; `cross_block` is `a_b != b_b`.
+#[inline]
+fn flux_dir_record(mass: f32, horizontal: bool, cross_block: bool) {
+    if !FLUX_DIR_ENABLED.with(|c| c.get()) {
+        return;
+    }
+    let base = if FLUX_DIR_COARSE.with(|c| c.get()) { 4 } else { 0 };
+    let k = if horizontal { 0 } else { 1 };
+    FLUX_DIR_ACC.with(|c| {
+        let mut v = c.get();
+        v[base + k] += mass as f64;
+        if cross_block {
+            v[base + 2 + k] += mass as f64;
+        }
+        c.set(v);
+    });
+}
+
 /// See `COARSE_BANG_BANG_COUNT`'s doc comment.
 pub fn reset_bang_bang_count() {
     COARSE_BANG_BANG_COUNT.with(|c| c.set(0));
@@ -1726,7 +1785,11 @@ fn flux_edge_apply(
     // Below this the transfer is pure f32 noise; skipping it is still exactly conservative
     // (nothing is added or removed), it just avoids an advect_properties call per edge per tick.
     const MIN_FLUX: f32 = 1e-7;
+    // `b_idx - a_idx == 1` is the horizontal neighbour; anything else is `+ width`, the vertical
+    // one. See `FLUX_DIR_ACC`.
+    let dir_horizontal = b_idx == a_idx + 1;
     if flux > MIN_FLUX {
+        flux_dir_record(flux, dir_horizontal, a_b != b_b);
         activate_neighbor(a_b, flux, modified, next_displacements);
         activate_neighbor(b_b, flux, modified, next_displacements);
         advect_properties(cell_colors, cell_props, a_idx, b_idx, flux, temp_heights[b_idx]);
@@ -1736,6 +1799,7 @@ fn flux_edge_apply(
         *flow_occurred = true;
     } else if flux < -MIN_FLUX {
         let mag = -flux;
+        flux_dir_record(mag, dir_horizontal, a_b != b_b);
         activate_neighbor(a_b, mag, modified, next_displacements);
         activate_neighbor(b_b, mag, modified, next_displacements);
         advect_properties(cell_colors, cell_props, b_idx, a_idx, mag, temp_heights[a_idx]);

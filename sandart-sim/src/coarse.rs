@@ -827,7 +827,11 @@ impl CoarseState {
             None => self.restrict(heights, shape_mask, cell_props, geo),
         }
         self.anchor(geo);
+        // The nested sim runs the SAME `settle_tick`, so its flow lands in the same counters --
+        // mark which level owns what while it runs. No-op unless the counters are enabled.
+        crate::physics::flux_dir_set_coarse(true);
         self.advance_nested_sim(geo, gravity_dir, overfill_ratio, underfill_tension, overfill_stiffness);
+        crate::physics::flux_dir_set_coarse(false);
         self.update_head_and_disagreement(geo, gravity_dir, overfill_ratio, underfill_tension, unit);
     }
 
