@@ -554,6 +554,25 @@ pub struct DrawingSimulation {
     /// bit-identical to the tree before this toggle existed.
     pub overclocking_enabled: bool,
 
+    /// Upper end of the clock-rate range `update_block_clock_rates` clamps to -- the runtime,
+    /// UI-adjustable form of `CLOCK_RATE_MAX` (which remains the default and the hard ceiling a
+    /// caller is expected to stay under). This is the single knob that sets how many
+    /// `settle_tick` repetitions a frame can cost: `update()`'s `extra_reps` is
+    /// `round(max rate over all blocks) - 1`, so a frame costs at most `round(max_clock_rate)`
+    /// repetitions no matter how far ahead the coarse level says a block is. Lowering it trades
+    /// settling rate for frame time directly, which is why it is exposed rather than tuned in
+    /// code -- see EARLY-STOP.md for the sweep. Values below `1.0` are clamped up: a "max" under
+    /// the neutral rate would mean no block may ever run at 1x, which is underclocking, not a
+    /// ceiling, and `min_clock_rate` is the control for that.
+    pub max_clock_rate: f32,
+
+    /// Lower end of the same range -- the runtime form of `CLOCK_RATE_MIN`. Set to `1.0` to
+    /// disable underclocking entirely (no block is ever asked to sit out a tick) while leaving
+    /// overclocking untouched; that is the control run that says what underclocking is actually
+    /// buying, since `apply_underclock_skip` can only defer a low-priority sweep, never cancel a
+    /// MUST one, and most blocks below 1x in a typical scene were not going to run anyway.
+    pub min_clock_rate: f32,
+
     /// OVERCLOCKING.md / EARLY-STOP.md: per-block clock rate, an arbitrary value in `[1/8, 8]`
     /// (not power-of-two quantised -- see `CLOCK_RATE_MIN`'s doc comment for why quantisation was
     /// dropped), one entry per LOD block -- same indexing as `active_blocks`/`last_displacements`
@@ -1036,6 +1055,8 @@ impl DrawingSimulation {
             // it from the coarse level's own dynamics, which now run unconditionally).
             coarse_pressure_coupling: false,
             overclocking_enabled: false,
+            max_clock_rate: CLOCK_RATE_MAX,
+            min_clock_rate: CLOCK_RATE_MIN,
             block_clock_rate: vec![1.0f32; cols * rows],
             last_frame_block_steps: 0,
             blocks_touched: Vec::new(),
@@ -1378,6 +1399,11 @@ impl DrawingSimulation {
             || self.last_simulated_ticks.len() != n {
             return;
         }
+        // Hoisted: the range is a per-frame setting, not per-block. `hi` is floored at 1.0 so a
+        // slider dragged to its bottom end means "no overclocking", never "every block
+        // underclocked"; `lo` is then held at or below `hi` so the clamp can never invert.
+        let hi = self.max_clock_rate.clamp(1.0, CLOCK_RATE_MAX);
+        let lo = self.min_clock_rate.clamp(CLOCK_RATE_MIN, hi);
         for b in 0..n {
             let cap = self.coarse.capacity[b].max(1e-6);
             let delta_frac = (self.coarse_state.delta[b].abs() / cap).max(0.0);
@@ -1386,8 +1412,7 @@ impl DrawingSimulation {
             // The rule the doc comments above describe: continuous, memoryless, clamped. Reads
             // only `signal`, never the previous rate -- there is no octave index to step and no
             // hysteresis band, because `rate` is a budget early stop is free to underspend.
-            self.block_clock_rate[b] =
-                (signal / CLOCK_DELTA_REF_FRAC).clamp(CLOCK_RATE_MIN, CLOCK_RATE_MAX);
+            self.block_clock_rate[b] = (signal / CLOCK_DELTA_REF_FRAC).clamp(lo, hi);
         }
     }
 

@@ -384,6 +384,7 @@ impl WasmSimulationState {
         let pressure_heatmap_overlay = self.sim.pressure_heatmap_overlay;
         let coarse_pressure_coupling = self.sim.coarse_pressure_coupling;
         let overclocking_enabled = self.sim.overclocking_enabled;
+        let max_clock_rate = self.sim.max_clock_rate;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -421,6 +422,8 @@ impl WasmSimulationState {
         sim.coarse_pressure_coupling = coarse_pressure_coupling;
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.overclocking_enabled = overclocking_enabled;
+        // Same reasoning again: a UI slider position, not simulation state.
+        sim.max_clock_rate = max_clock_rate;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -822,6 +825,21 @@ impl WasmSimulationState {
     /// `DrawingSimulation::overclocking_enabled`'s doc comment in sandart-sim/src/lib.rs.
     pub fn set_overclocking(&mut self, enabled: bool) {
         self.sim.overclocking_enabled = enabled;
+    }
+
+    /// "Max clock rate" slider (EARLY-STOP.md): the ceiling of the per-block clock-rate range,
+    /// `1.0..=8.0`. A frame costs at most `round(max_clock_rate)` `settle_tick` repetitions, so
+    /// this is the direct frame-time/settling-rate trade -- `1.0` is "no overclocking" while
+    /// leaving underclocking in place, `8.0` is the default. Plain field write like
+    /// `set_overclocking` above: no reset, no reinitialisation, safe to call every frame from
+    /// `syncSettings()`. Has no effect while the overclocking toggle is off, since
+    /// `update_block_clock_rates` does not run then.
+    pub fn set_max_clock_rate(&mut self, rate: f32) {
+        self.sim.max_clock_rate = rate;
+    }
+
+    pub fn get_max_clock_rate(&self) -> f32 {
+        self.sim.max_clock_rate
     }
 
     /// "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.

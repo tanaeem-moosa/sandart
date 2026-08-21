@@ -881,7 +881,21 @@ function syncSettings() {
     state.set_pressure_sensitive_flow(false);
     state.set_overfill_pressure(true);
     state.set_coarse_pressure_coupling(document.getElementById('check-coarse-coupling').checked);
-    state.set_overclocking(document.getElementById('check-overclocking').checked);
+    const overclockOn = document.getElementById('check-overclocking').checked;
+    state.set_overclocking(overclockOn);
+    // EARLY-STOP.md: clock-rate ceiling. The row is hidden while overclocking is off -- the
+    // scheduler never reads the range then, so the slider would move without doing anything.
+    // The value is still pushed to wasm in that case, so turning the toggle back on picks up
+    // the slider position that is already on screen rather than the sim's own default.
+    const maxRateSlider = document.getElementById('max-clock-rate-slider');
+    if (maxRateSlider) {
+        const maxRate = parseFloat(maxRateSlider.value);
+        const maxRateVal = document.getElementById('max-clock-rate-val');
+        if (maxRateVal) maxRateVal.innerText = maxRate.toFixed(1);
+        const maxRateRow = document.getElementById('max-clock-rate-row');
+        if (maxRateRow) maxRateRow.style.display = overclockOn ? '' : 'none';
+        state.set_max_clock_rate(maxRate);
+    }
     const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
     if (stiffnessSlider) {
         const stiffness = parseFloat(stiffnessSlider.value);
@@ -1360,6 +1374,11 @@ function setupPanelInput() {
     document.getElementById('check-coarse-delta').addEventListener('change', syncSettings);
     document.getElementById('check-coarse-coupling').addEventListener('change', syncSettings);
     document.getElementById('check-overclocking').addEventListener('change', syncSettings);
+    const maxClockRateSlider = document.getElementById('max-clock-rate-slider');
+    if (maxClockRateSlider) {
+        maxClockRateSlider.addEventListener('input', syncSettings);
+        maxClockRateSlider.addEventListener('change', syncSettings);
+    }
     const overfillStiffSlider = document.getElementById('overfill-stiffness-slider');
     if (overfillStiffSlider) {
         overfillStiffSlider.addEventListener('input', syncSettings);

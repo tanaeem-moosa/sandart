@@ -873,6 +873,18 @@
                     <input type="checkbox" id="check-overclocking">
                     <span class="checkmark"></span>
                 </label>
+                <!-- EARLY-STOP.md: the ceiling on the per-block clock rate, and the one knob that
+                     sets what an overclocked frame can cost -- a frame runs at most round(max)
+                     settle_tick repetitions. Straight frame-time/settling-rate trade, so it is a
+                     slider rather than a constant. Hidden unless overclocking is on, because with
+                     the toggle off the rate range is never consulted at all and a live-looking
+                     control that does nothing is worse than no control. 1.0 = no overclocking
+                     (underclocking still active). -->
+                <div class="field row" id="max-clock-rate-row" style="display: none;">
+                    <label for="max-clock-rate-slider" title="Ceiling on how many extra physics sub-steps a single block may run in one frame. Higher settles faster and costs more per frame; 1.0 turns overclocking off without disabling the scheduler.">Max clock rate</label>
+                    <span id="max-clock-rate-val" class="val-display">8.0</span>
+                    <input type="range" id="max-clock-rate-slider" min="1" max="8" step="0.5" value="8">
+                </div>
                 <!-- Legend for the overfill heat-map's decile colouring. Hidden unless that
                      colouring is actually what is on screen (overfill model on AND overlay on),
                      because under any other source the colours are an absolute scale and these

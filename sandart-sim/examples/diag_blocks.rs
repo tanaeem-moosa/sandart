@@ -37,6 +37,11 @@ fn main() {
     sim.initialize_hourglass();
     sim.overfill_pressure = overfill;
     sim.overclocking_enabled = overclock;
+    // EARLY-STOP.md: the clock-rate range, the same runtime knob the UI's "Max clock rate" slider
+    // drives. `--maxrate` bounds repetitions per frame; `--minrate 1` disables underclocking
+    // without touching overclocking, which is the control run for "what is underclocking buying".
+    if let Some(v) = get("--maxrate") { sim.max_clock_rate = v.parse().unwrap(); }
+    if let Some(v) = get("--minrate") { sim.min_clock_rate = v.parse().unwrap(); }
     if let Some(t) = get("--tension") { sim.underfill_tension = t.parse().unwrap(); }
     let targets = [None; 5];
     for _ in 0..warm {
@@ -65,9 +70,9 @@ fn main() {
     let m1: f64 = sim.heightmap.data.iter().map(|&v| v as f64).sum();
     let n = ticks as f64;
     println!(
-        "grid={} block_size={} {:?} sub={} budget={:<4} overclock={} ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
+        "grid={} block_size={} {:?} sub={} budget={:<4} overclock={} rate[{:.2},{:.2}] ms/frame {:>7.2}  must {:>6.1} budgeted {:>6.1} stale {:>5.1} run {:>6.1}  \
          com {:.5}->{:.5} (desc {:.5})  mass_err {:.2e}",
-        grid, sim.block_size, mat, sub, budget, overclock, ms,
+        grid, sim.block_size, mat, sub, budget, overclock, sim.min_clock_rate, sim.max_clock_rate, ms,
         f as f64 / n, m as f64 / n, s as f64 / n, (f + m + s) as f64 / n,
         c0, com(&sim), com(&sim) - c0, (m1 - m0).abs() / m0.max(1e-12)
     );

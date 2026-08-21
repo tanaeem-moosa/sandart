@@ -89,6 +89,67 @@ Lib suite 102 passed / 10 failed, the same ten named failures. All eight integra
 including `overclocking_toggle` and `perfect_simulation_determinism`, plus `sandart-render`, the
 wasm32 check, `cargo check -p sandart`, and `node scripts/check_js.js`.
 
+## The max-clock-rate sweep, and what underclocking is worth (2026-08-20)
+
+`diag_blocks --ticks 300 --overclock 1 --material water --maxrate N`, grid 512, continuous rates.
+`max_clock_rate` is now a runtime field with a UI slider ("Max clock rate", Debug panel, visible
+only while overclocking is on), so this is a knob the user can move, not a constant.
+
+| max rate | ms/frame | fps | descent (300 ticks) | descent per ms of wall clock |
+|---|---|---|---|---|
+| 1 (= off) | 22.57 |  44 | 0.00746 | 3.31e-4 |
+| 2         | 34.07 |  29 | 0.01647 | 4.83e-4 |
+| 3         | 47.14 |  21 | 0.02450 | 5.20e-4 |
+| 4         | 58.48 |  17 | 0.03192 | 5.46e-4 |
+| 6         | 78.95 |  13 | 0.04641 | 5.88e-4 |
+| 8         | 97.33 |  10 | 0.06053 | 6.22e-4 |
+
+**Movement per unit wall clock rises monotonically with the ceiling — there is no efficiency peak
+to find below 8.** Cutting the ceiling does not make the simulation cheaper per unit of settling;
+it makes each frame cheaper and settling proportionally (slightly worse than proportionally)
+slower. The scaffolding a frame pays regardless — classification, the coarse level, copy-back — is
+amortised over more useful sub-steps at a higher ceiling, which is why the trend runs this way.
+
+So the slider is an interactivity control, not an optimisation: **max 2 buys 29 fps at 2.2x the
+settling rate of no clocking at all**, which is the setting to try first if the drain has to look
+live. It is NOT the lever that gets 512 to 60 fps with fast settling; that needs the scaffolding
+share itself to come down (SESSION-HANDOVER §6 step 2, phase timers).
+
+### Underclocking is inert in this scene
+
+Control run, ceiling held at 8, floor moved from 1/8 to 1.0 (`--minrate 1`, which disables
+underclocking without touching overclocking):
+
+| rate range | ms/frame | blocks run | descent |
+|---|---|---|---|
+| [0.125, 8] (shipped) | 97.25 | 324.7 | 0.06053 |
+| [1.0, 8] (no underclocking) | 96.77 | 324.9 | 0.06054 |
+
+**Nothing. 0.5% on frame time, which is inside run-to-run noise, and the descent is identical to
+four decimals.** ~3,400 of 4,096 blocks sit below 1x and it buys nothing measurable, for a
+mechanical reason visible in the same output line: `budgeted 0.0`. `apply_underclock_skip` can
+only keep a block out of the BUDGET tier — it never touches MUST or STALE — and in the Water
+hourglass the budget tier is empty every tick. The blocks it defers were not going to run anyway;
+the real filter is MUST classification, which is already only admitting ~325 of 4,096.
+
+DrySand does have a non-empty budget tier (`budgeted 26.7`), so it was run as a second scene, and
+the answer there is the same:
+
+| rate range | ms/frame | blocks run | must | budgeted | descent |
+|---|---|---|---|---|---|
+| [0.125, 8] (shipped) | 65.32 | 256.0 | 229.3 | 26.7 | 0.07345 |
+| [1.0, 8] (no underclocking) | 64.99 | 256.0 | 228.5 | 27.5 | 0.07343 |
+
+Identical, and the reason is visible again in the same line: `run 256.0` is exactly `budget_n`.
+The per-tick block budget is already the binding constraint, so suppressing a block's budget-tier
+eligibility just hands the slot to the next candidate — the total does not move.
+
+**Conclusion: underclocking is currently buying nothing in either material.** It is not free
+either — it carries the S2 hazard (a skipped block must still be able to receive mass) and a code
+path. Not deleted here, because "inert in two scenes at one budget" is not "inert"; the case to
+check before deleting is a scene where `run` sits BELOW `budget_n`, since only there can deferring
+a sweep actually remove work. If none exists, delete it.
+
 ## Measured 2026-08-20, once the continuous rule actually shipped
 
 `vpar` and settled churn under unquantised rates, the run that had been killed three times.
