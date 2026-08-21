@@ -82,8 +82,15 @@ const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
 /// The one residual risk §7b named -- a beat against the known period-2 checkerboard mode -- is
 /// measurable, not theoretical: `vpar` in `diag_overclock_ab`'s oscillation measurement (the
 /// production-resolution analogue of `overfill_pressure_toggle.rs`'s
-/// `diag_task70_rest_color_mixing_and_checkerboard`) is unchanged before/after arbitrary rates --
-/// see EARLY-STOP.md for the numbers.
+/// `diag_task70_rest_color_mixing_and_checkerboard`) is the instrument. An earlier revision of
+/// this comment claimed it had been run under arbitrary rates; it had not (EARLY-STOP.md records
+/// that run being killed). It has now: `vpar` is -0.004 (Water) and -0.000 (DrySand) with
+/// clocking on, against -0.000 / -0.002 with it off -- no parity split, so the beat §7b feared
+/// does not appear. Settled CHURN is a separate reading and is NOT clean: Water churns
+/// 0.000271/cell/tick clocked against 0.000029 unclocked and a 0.000025 at-rest baseline
+/// (DrySand moves the other way, 0.000745 against 0.006274). That is measured under the
+/// continuous rule only, with no quantised-rule control, so it is not yet attributable to
+/// arbitrary rates -- and it is why `overclocking_enabled` stays default OFF.
 ///
 /// With early stop (below) bounding a block's real repetitions at its own physical settle point,
 /// `rate` is now a BUDGET, not a mandate, which is what makes a plain continuous rule -- no
@@ -1376,18 +1383,11 @@ impl DrawingSimulation {
             let delta_frac = (self.coarse_state.delta[b].abs() / cap).max(0.0);
             let staleness = self.tick_count.wrapping_sub(self.last_simulated_ticks[b]).min(1000) as f32;
             let signal = delta_frac * (1.0 + staleness * CLOCK_STALENESS_WEIGHT);
-            // TEMPORARY ISOLATION TEST: restore old octave-quantised assignment for a "before" vpar run.
-            let cur_idx = (self.block_clock_rate[b].max(1e-6).log2().round() as i32).clamp(-3, 3);
-            let up_thresh = CLOCK_DELTA_REF_FRAC * 2f32.powi(cur_idx);
-            let down_thresh = CLOCK_DELTA_REF_FRAC * 2f32.powi(cur_idx - 2);
-            let new_idx = if signal > up_thresh && cur_idx < 3 {
-                cur_idx + 1
-            } else if signal < down_thresh && cur_idx > -3 {
-                cur_idx - 1
-            } else {
-                cur_idx
-            };
-            self.block_clock_rate[b] = 2f32.powi(new_idx);
+            // The rule the doc comments above describe: continuous, memoryless, clamped. Reads
+            // only `signal`, never the previous rate -- there is no octave index to step and no
+            // hysteresis band, because `rate` is a budget early stop is free to underspend.
+            self.block_clock_rate[b] =
+                (signal / CLOCK_DELTA_REF_FRAC).clamp(CLOCK_RATE_MIN, CLOCK_RATE_MAX);
         }
     }
 

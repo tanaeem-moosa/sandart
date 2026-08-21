@@ -72,8 +72,11 @@ fn main() {
         c0, com(&sim), com(&sim) - c0, (m1 - m0).abs() / m0.max(1e-12)
     );
     if overclock {
-        // OVERCLOCKING.md: the rate distribution -- how many blocks sit at each power-of-two
-        // rate right now, and the mean -- is what says whether this is affordable.
+        // OVERCLOCKING.md: the rate distribution -- how many blocks fall in each octave BUCKET
+        // right now, and the mean -- is what says whether this is affordable. Rates themselves
+        // are continuous (EARLY-STOP.md); the buckets are this readout's binning, not the
+        // scheduler's, so a run whose rates are all powers of two and one whose rates are
+        // arbitrary print the same shape here. `mean_rate` is over the raw values.
         let mut counts = [0u64; 7]; // idx 0 = 1/8 .. idx 6 = 8
         let mut sum_rate = 0.0f64;
         for &r in &sim.block_clock_rate {

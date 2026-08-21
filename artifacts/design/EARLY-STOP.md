@@ -89,9 +89,26 @@ Lib suite 102 passed / 10 failed, the same ten named failures. All eight integra
 including `overclocking_toggle` and `perfect_simulation_determinism`, plus `sandart-render`, the
 wasm32 check, `cargo check -p sandart`, and `node scripts/check_js.js`.
 
-## Not measured
+## Measured 2026-08-20, once the continuous rule actually shipped
 
-`vpar` and settled churn under unquantised rates — the agent was killed during that run. §7b's
-residual concern about arbitrary rates is a beat against the known period-2 checkerboard mode, and
-`diag_task70_rest_color_mixing_and_checkerboard`'s `vpar` column is the direct read. **Worth doing
-before overclocking is ever defaulted on.**
+`vpar` and settled churn under unquantised rates, the run that had been killed three times.
+`diag_overclock_ab oscillation`, grid 512, Square, settle-then-measure:
+
+| overclock | material | churn/cell/tick | vpar |
+|---|---|---|---|
+| on  | water   | 0.000271 | -0.004 |
+| off | water   | 0.000029 | -0.000 |
+| on  | drysand | 0.000745 | -0.000 |
+| off | drysand | 0.006274 | -0.002 |
+
+At-rest baseline (task #70 fix, HANDOVER §9) is 0.000025 per cell per tick.
+
+**§7b's beat does not appear.** `vpar` stays within ±0.004 of zero in every configuration —
+arbitrary, non-nesting rates do not split the period-2 checkerboard parity, which was the specific
+theoretical objection to removing quantisation.
+
+**Settled churn is not clean, and this is the open item.** Water churns ~9x the at-rest baseline
+with clocking on (0.000271 vs 0.000025); DrySand moves the other way and churns ~8x LESS than
+unclocked. Measured under the continuous rule with **no quantised-rule control run**, so it is not
+attributable to arbitrary rates specifically — it may be overclocking's, and it may predate this
+change. **Run the quantised control before overclocking is ever defaulted on.**

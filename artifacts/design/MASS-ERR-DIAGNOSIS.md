@@ -12,13 +12,22 @@ This document runs it to completion. The result overturns the verdict.
 `main`/`origin/main`). Nothing here has been pushed. The unquantised-rates fix in `65d267b` is
 correct and independently reproduced below — it does not need redoing.
 
-## 1. What 65d267b got right (independently reproduced, not redone)
+## 1. What 65d267b got right — and the part of it that never shipped
+
+> **Correction, 2026-08-20 (later).** The paragraph below said `65d267b` fixed the quantisation.
+> It did not. `git show --stat 65d267b` is **one file, a design doc** — the code fix was measured
+> but never committed, so the octave-quantised assignment and its `// TEMPORARY ISOLATION TEST`
+> line survived into `37a1085` and into the deployed build. The same failure mode as `b5b23ee6`,
+> one level up: a commit whose message and docs described a change its diff did not contain.
+> Fixed for real in the commit carrying this correction; `CLOCK_RATE_MIN`/`CLOCK_RATE_MAX` are
+> now read by `update_block_clock_rates`, which is the dead-code tell that catches this class of
+> mistake — check it before believing either document.
 
 `b5b23ee6` claimed rates were unquantised; they were not — `update_block_clock_rates` still ran
 the old octave-quantised assignment behind a leftover `// TEMPORARY ISOLATION TEST` line.
-`65d267b` fixed this. I reached the identical finding independently before discovering `65d267b`
-(same dead-code tell: `CLOCK_RATE_MIN`/`CLOCK_RATE_MAX` unused under `b5b23ee6`). No further work
-needed here; `65d267b`'s fix stands.
+`65d267b` diagnosed this correctly. I reached the identical finding independently before
+discovering `65d267b` (same dead-code tell: `CLOCK_RATE_MIN`/`CLOCK_RATE_MAX` unused under
+`b5b23ee6`).
 
 ## 2. Where the two investigations agree
 
