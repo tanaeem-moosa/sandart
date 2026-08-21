@@ -1174,7 +1174,8 @@ impl DynSim {
             &[],
             &[],
             None, // precomputed_fresh_active (Stage 1 hoist): this harness recomputes internally, bit-identical to pre-hoist behaviour
-            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); this harness doesn't need it
+            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); this harness doesn't need it,
+            0.0,
         );
         self.tick_count += 1;
         flow

@@ -1921,6 +1921,58 @@ fn grain_jitter_strength(cell_props: &[f32], cell: usize) -> f32 {
     gran_s.max(0.05)
 }
 
+/// Per-cell downward-flow jitter for UNDERFULL liquid, the user's "make falling liquid a little
+/// more stochastic" (see STICKINESS.md). Returns a multiplier in `[1 - strength, 1]` for the
+/// vertical edge below cell `donor`.
+///
+/// Three properties, all deliberate:
+///
+/// - **Only ever reduces.** A multiplier above 1 could push a candidate past
+///   `flux_edge_candidate`'s one-cell-per-tick clamp and past the donor's available mass, and
+///   would then be corrected by arbitration rather than by construction. Scaling down is
+///   unconditionally safe: the FCT limiter, the availability mins and the clamp all still hold,
+///   and mass is conserved because a smaller transfer is still a transfer.
+/// - **Scaled by how UNDERFULL the donor is** (`1 - h/cap`). A full cell is not falling, it is
+///   part of a column, and jittering it would make settled liquid restless — which is the churn
+///   this project already watches for. A nearly-empty cell is the leading edge of a fall, and it
+///   is where a uniform front looks synthetic.
+/// - **Scaled by liquidity**, so granular material is untouched: it has `edge_share_jitter`
+///   already, keyed off grain size, and this is not that.
+///
+/// Stateless hash of `(time_seed, cell, salt)`, same shape as `edge_share_jitter` above, so it is
+/// reproducible within a tick and across the COLLECT/APPLY passes, and determinism holds.
+#[inline]
+fn fall_flow_jitter(
+    strength: f32,
+    h_donor: f32,
+    cap_donor: f32,
+    cell_props: &[f32],
+    donor: usize,
+    time_seed: u32,
+) -> f32 {
+    if strength <= 0.0 || cap_donor <= 0.0 {
+        return 1.0;
+    }
+    let liquid = liquidity(cell_props[donor * 4 + PROP_WETNESS]).clamp(0.0, 1.0);
+    if liquid <= 0.0 {
+        return 1.0;
+    }
+    let underfull = (1.0 - (h_donor / cap_donor)).clamp(0.0, 1.0);
+    if underfull <= 0.0 {
+        return 1.0;
+    }
+    let mut hsh = time_seed
+        ^ (donor as u32).wrapping_mul(0x9E37_79B1)
+        ^ 0x5F35_6495u32;
+    hsh ^= hsh >> 16;
+    hsh = hsh.wrapping_mul(0x7feb_352d);
+    hsh ^= hsh >> 15;
+    hsh = hsh.wrapping_mul(0x846c_a68b);
+    hsh ^= hsh >> 16;
+    let u = (hsh >> 8) as f32 / 16_777_216.0;
+    1.0 - strength * liquid * underfull * u
+}
+
 /// The per-edge multiplicative weight `r` this edge carries into arbitration, in `[0.05, 1.95]`.
 ///
 /// A stateless hash of `(time_seed, edge key, salt)` rather than a stored RNG stream — the same
@@ -4255,6 +4307,11 @@ pub fn settle_tick(
     // the same integer -- see that invariant asserted in `coarse.rs`'s own incremental-restrict
     // test.
     touched_out: Option<&mut Vec<bool>>,
+    // STICKINESS.md: strength of the per-cell downward-flow jitter applied to UNDERFULL liquid,
+    // in [0, 1]. 0.0 is bit-identical to before this parameter existed -- see `fall_flow_jitter`,
+    // which early-outs on it. The coarse nested sim passes 0.0: this is a look of the fine
+    // material, not a scheduling input.
+    fall_jitter: f32,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -5102,7 +5159,14 @@ pub fn settle_tick(
                             c_sq, damping, 0.0,
                             h_a, h_b,
                             max_accept_fwd, max_accept_bwd,
-                            pressure_weight,
+                            // STICKINESS.md: the `weight` slot is exactly where a per-edge
+                            // multiplier belongs -- it is applied after the availability and
+                            // acceptance mins inside `flux_edge_candidate`, and `fall_flow_jitter`
+                            // only ever returns <= 1, so no bound it just enforced is loosened.
+                            pressure_weight
+                                * fall_flow_jitter(
+                                    fall_jitter, h_a, cap_a_eff, cell_props, center_idx, time_seed,
+                                ),
                             prev_v,
                             edge_momentum_alpha(wetness, overfill_active),
                         );
@@ -5342,7 +5406,10 @@ pub fn settle_tick(
                                 c_sq, damping, 0.0,
                                 h_a, h_b,
                                 max_accept_fwd, max_accept_bwd,
-                                1.0,
+                                // See the other vertical site for why `weight` is the right slot.
+                                fall_flow_jitter(
+                                    fall_jitter, h_a, cap_c_eff, cell_props, center_idx, time_seed,
+                                ),
                                 edge_vel_v[center_idx],
                                 edge_momentum_alpha(wetness, overfill_active),
                             );
@@ -6812,7 +6879,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
             self.tick_count += 1;
             flow
@@ -7145,7 +7213,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -7221,7 +7290,8 @@ mod tests {
             OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
             &[], &[],
             None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+            0.0,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -7304,7 +7374,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -7414,7 +7485,8 @@ mod tests {
             OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
             &[], &[],
             None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+            0.0,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -7728,7 +7800,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -7831,7 +7904,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -7888,7 +7962,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -7966,7 +8041,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -8075,7 +8151,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -11252,7 +11329,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -11372,7 +11450,8 @@ mod tests {
                     OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                     None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                    None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                    None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                    0.0,
                 );
             }
 
@@ -11476,7 +11555,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -11568,7 +11648,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -11659,7 +11740,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -11913,7 +11995,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -12098,7 +12181,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
 
@@ -12245,7 +12329,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             ) as f64;
         }
 
@@ -12493,7 +12578,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -13035,7 +13121,8 @@ mod tests {
                 OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
                 &[], &[],
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
-                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it
+                None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); test call sites don't need it,
+                0.0,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();

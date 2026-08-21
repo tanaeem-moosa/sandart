@@ -618,6 +618,18 @@ pub struct DrawingSimulation {
     /// already run at most once per frame, and grading them would only ever raise them.
     pub grade_clock_rates: bool,
 
+    /// STICKINESS.md: strength of the per-cell downward-flow jitter applied to UNDERFULL liquid,
+    /// `0.0..=1.0`. `0.0` (the default) is bit-identical to before the feature existed.
+    ///
+    /// The user's ask was "reduce stickiness ... by making falling liquid a little more
+    /// stochastic", and their choice of quantity: per-cell downward flow, gated on the cell being
+    /// underfull. A cell at capacity is part of a column and is left alone -- jittering settled
+    /// liquid would produce churn at rest, which is a regression this project already watches.
+    /// A nearly-empty cell is the leading edge of a fall, where a perfectly uniform front is what
+    /// reads as synthetic. See `physics::fall_flow_jitter` for the multiplier and why it only
+    /// ever reduces.
+    pub liquid_fall_jitter: f32,
+
     /// EARLY-STOP.md: whether a block's clock rate GATES its participation in the extra
     /// repetitions, or merely adds to it.
     ///
@@ -1179,6 +1191,7 @@ impl DrawingSimulation {
             coarse_pressure_coupling: false,
             overclocking_enabled: false,
             rank_clock_rates: true,
+            liquid_fall_jitter: 0.0,
             grade_clock_rates: true,
             rate_gated_reps: true,
             max_clock_rate: CLOCK_RATE_MAX,
@@ -2916,6 +2929,7 @@ impl DrawingSimulation {
                     // (see its own binding just above the `for rep` loop for why this is safe).
                     Some(&fresh_active),
                     Some(&mut touched_this_rep),
+                    self.liquid_fall_jitter,
                 );
                 // EARLY-STOP.md: `active_blocks[b] != Inactive` is exactly `will_simulate[b]` from
                 // this call (see `settle_tick`'s classification loop in physics.rs, which writes

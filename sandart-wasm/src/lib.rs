@@ -386,6 +386,7 @@ impl WasmSimulationState {
         let overclocking_enabled = self.sim.overclocking_enabled;
         let max_clock_rate = self.sim.max_clock_rate;
         let rank_clock_rates = self.sim.rank_clock_rates;
+        let liquid_fall_jitter = self.sim.liquid_fall_jitter;
         let rate_gated_reps = self.sim.rate_gated_reps;
         let grade_clock_rates = self.sim.grade_clock_rates;
 
@@ -429,6 +430,8 @@ impl WasmSimulationState {
         sim.max_clock_rate = max_clock_rate;
         // Same reasoning again: a UI toggle, not simulation state.
         sim.rank_clock_rates = rank_clock_rates;
+        // Same reasoning again: a UI slider position, not simulation state.
+        sim.liquid_fall_jitter = liquid_fall_jitter;
         // Same reasoning again: a UI toggle, not simulation state.
         sim.rate_gated_reps = rate_gated_reps;
         // Same reasoning again: a UI toggle, not simulation state.
@@ -851,6 +854,13 @@ impl WasmSimulationState {
     /// `DrawingSimulation::rate_gated_reps`.
     pub fn set_rate_gated_reps(&mut self, gated: bool) {
         self.sim.rate_gated_reps = gated;
+    }
+
+    /// "Falling liquid jitter" slider (STICKINESS.md): per-cell downward-flow jitter for
+    /// UNDERFULL liquid, 0..=0.6. Plain field write, safe every frame. `0` is the pre-feature
+    /// behaviour exactly. See `DrawingSimulation::liquid_fall_jitter`.
+    pub fn set_liquid_fall_jitter(&mut self, jitter: f32) {
+        self.sim.liquid_fall_jitter = jitter;
     }
 
     /// "Max clock rate" slider (EARLY-STOP.md): the ceiling of the per-block clock-rate range,

@@ -949,6 +949,18 @@
                      be set below what the fluid demanded and pinned every cell against it. The
                      ceiling is now derived — see `overfill_ceiling_for`. LOW = soft/springy,
                      HIGH = near-incompressible. -->
+                <!-- STICKINESS.md: falling liquid descends as a perfectly uniform front, which
+                     reads as sticky and synthetic. This jitters each UNDERFULL liquid cell's
+                     downward flow by a per-cell random factor, so the leading edge of a fall goes
+                     ragged. Full cells are untouched -- they are column, not fall, and jittering
+                     them would make settled liquid churn. Only ever reduces a flux, so mass
+                     conservation and the one-cell-per-tick limit are untouched. 0 = off, exactly
+                     as before the feature existed. -->
+                <div class="field row" id="fall-jitter-row">
+                    <label for="fall-jitter-slider" title="Randomises how fast each partly-filled liquid cell drains downward, so a falling sheet stops descending as one flat front. Does not affect full cells or granular material.">Falling liquid jitter</label>
+                    <span id="fall-jitter-val" class="val-display">0.00</span>
+                    <input type="range" id="fall-jitter-slider" min="0" max="0.6" step="0.02" value="0">
+                </div>
                 <div class="field row" id="overfill-stiffness-row">
                     <label for="overfill-stiffness-slider" title="How hard the fluid resists being compressed under its own weight. Low is springy and compressible; high is nearly incompressible. The overfill ceiling follows this automatically.">Fluid stiffness</label>
                     <span id="overfill-stiffness-val" class="val-display">5.0</span>
