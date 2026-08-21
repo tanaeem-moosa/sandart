@@ -89,6 +89,82 @@ Lib suite 102 passed / 10 failed, the same ten named failures. All eight integra
 including `overclocking_toggle` and `perfect_simulation_determinism`, plus `sandart-render`, the
 wasm32 check, `cargo check -p sandart`, and `node scripts/check_js.js`.
 
+## Band falloff, boundary stalls, and one failed fix (2026-08-20)
+
+The user, from the deployed build: "rank based allocation does not work. we are too aggressive.
+maybe instead of 1/k we need 1/lgk"; and "seeing some holes with block boundaries. with rates gate
+repeatations. but I don't want to disable it. I don't see them at overclock maxed at 3."
+
+### The counter that made the artifact a number
+
+`last_frame_stalled_boundaries`: block-boundary edges left unevaluated because the block that OWNS
+them (left across a vertical seam, top across a horizontal one — edges belong to their lower-index
+cell) sat out a repetition its neighbour ran. Nothing is lost when this happens; mass simply cannot
+cross that seam for that repetition, and material piles against it. It tracks the user's report:
+
+| falloff | max rate | ms/frame | descent | block-steps | stalled edges | mass_err |
+|---|---|---|---|---|---|---|
+| 1/lg(1+r) | 8 | 67.11 | 0.06005 | 2549 | 791 | 2.09e-9 |
+| 1/r       | 8 | 48.81 | 0.04800 | 1692 | 537 | 7.45e-8 |
+| 1/lg(1+r) | 3 | 28.41 | 0.02054 |  884 | 187 | 2.63e-9 |
+| 1/r       | 3 | 29.48 | 0.01916 |  768 | 162 | 4.56e-9 |
+
+Stalled edges are 4x higher at a ceiling of 8 than at 3, which is exactly where the user sees the
+artifact appear and disappear.
+
+### 1/lg(1+r) is now the default
+
+Bands ~3x wider at the top of the ladder. At a ceiling of 8 it buys 25% more movement (0.04800 ->
+0.06005) for 37% more frame time, and — unexpectedly — takes `mass_err` from 7.45e-8 down to
+2.09e-9, a 35x improvement. The likely reason is contiguity rather than count: under 1/r the 8x
+band is 1/127th of all blocks and its members are scattered singletons, each an island of fast
+surrounded by slow, which is the worst case for edge ownership. Widening the bands makes fast
+regions coherent.
+
+### The obvious fix does NOT work — do not try it again
+
+Forcing the OWNER of every boundary edge (left and top neighbour of every participating block) to
+run alongside it. It should close the seam by construction. Measured, ceiling 8, 1/lg:
+
+| material | edge owners forced | ms/frame | block-steps | stalled edges | descent |
+|---|---|---|---|---|---|
+| Water   | no  | 71.50 | 2549 | 791 | 0.06005 |
+| Water   | yes | 75.34 | 3101 | 744 | 0.06011 |
+| DrySand | no  | 48.88 | 1951 | 765 | 0.07841 |
+| DrySand | yes | 58.13 | 2543 | 781 | 0.07844 |
+
+6% fewer stalls on Water, MORE on DrySand, for 22-30% more work and no change in descent. Widening
+the halo does not remove the frontier, it relocates it — every newly added block brings its own
+unevaluated left/top edge. The code was written, measured, and deleted rather than shipped as an
+inert knob.
+
+**The real fix is structural**: edge ownership must follow the faster block (§7b S3), or interface
+flux must be accumulated across the fast side's sub-steps and handed to the slow block when it runs
+(Osher-Sanders, ARBITRATION-AND-N-STEP.md §3). Both retire the stall by construction. Until one of
+them lands, the ceiling slider is the mitigation, and 3 is the value the user reports as clean.
+
+### Where the clock budget actually goes (DrySand hourglass, 400 ticks, blocks holding material)
+
+| block rows | blocks with mass | mean rate | rate >= 2 | rate < 1 |
+|---|---|---|---|---|
+| 8-15   | 139 | 1.018 | 29 | 108 |
+| 16-23  | 214 | 1.024 | 33 | 174 |
+| 24-31  | 133 | 1.254 | 27 |  95 |
+| 48-55  |  53 | 1.943 | 17 |  33 |
+| 56-63  |  37 | 1.226 |  8 |  28 |
+
+The pile bottom is not starved — rows 48-55 get the highest mean rate in the vessel. But 60-75% of
+blocks HOLDING MATERIAL are underclocked everywhere, including the pile flanks, and that is the
+answer to "still disappointed at the lack of sideways movement". The clock signal is coarse-fine
+disagreement, and a pile sitting above its angle of repose is a FINE-scale instability the coarse
+level has no model of: its tile masses agree perfectly while the slope is still wrong. The
+scheduler is blind to precisely the phenomenon lateral spreading consists of.
+
+**Proposal, untested**: add a fine-grid term to the clock signal — the block's own
+`last_displacements` (already computed, already per block) or a slope-excess-over-repose measure —
+so a block that is actively avalanching earns rate from its own behaviour rather than from the
+coarse level's opinion of it.
+
 ## The max-clock-rate sweep, and what underclocking is worth (2026-08-20)
 
 `diag_blocks --ticks 300 --overclock 1 --material water --maxrate N`, grid 512, continuous rates.

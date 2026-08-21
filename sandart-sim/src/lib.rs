@@ -591,6 +591,22 @@ pub struct DrawingSimulation {
     /// Both rules respect `min_clock_rate`/`max_clock_rate`; the ladder is clipped to that range.
     pub rank_clock_rates: bool,
 
+    /// EARLY-STOP.md: the shape of the rank rule's band sizes.
+    ///
+    /// `false` — `n_r ∝ 1/r`, equal WORK per band. Mathematically tidy (every band costs the
+    /// same) but very aggressive: the 8x band is 1/127th of all blocks, so almost nothing gets
+    /// the fast treatment, and the fast blocks that do are scattered singletons rather than
+    /// contiguous regions.
+    ///
+    /// `true` — `n_r ∝ 1/lg(1+r)`, the user's proposal ("we are too aggressive. maybe instead of
+    /// 1/k we need 1/lgk"). The falloff from the 1x band to the 8x band is 3.2x instead of 8x, so
+    /// the fast bands are ~3x wider and far more likely to be spatially contiguous. Costs more:
+    /// total block-steps go from 0.66x the block count to 1.14x at a ceiling of 8. Contiguity is
+    /// not just aesthetic -- every boundary between a running and a non-running block is a place
+    /// where an owned edge can go unevaluated for a repetition, so fewer, larger fast regions
+    /// mean fewer such frontiers (see `last_frame_stalled_boundaries`).
+    pub clock_band_log_falloff: bool,
+
     /// EARLY-STOP.md: whether a block's clock rate GATES its participation in the extra
     /// repetitions, or merely adds to it.
     ///
@@ -654,6 +670,22 @@ pub struct DrawingSimulation {
     /// `0` on any tick where nothing ran at all (`!has_active` -- `update()`'s own gate). Not
     /// cumulative across ticks; overwritten fresh every call to `update()`.
     pub last_frame_block_steps: u32,
+
+    /// EARLY-STOP.md: block-boundary edges that went UNEVALUATED this frame because the block
+    /// that OWNS them sat out a repetition its neighbour ran.
+    ///
+    /// Edges belong to their lower-index cell (physics.rs), so across a vertical block boundary
+    /// the LEFT block owns the shared edges and across a horizontal one the TOP block does. Under
+    /// `rate_gated_reps` a suppressed owner means those edges are simply not evaluated that
+    /// repetition: no mass moves across that seam, and material can pile against it. That is a
+    /// STALL, not a leak -- nothing is lost, it just does not flow -- and it is the mechanism to
+    /// suspect first for a visible seam or hole along block edges.
+    ///
+    /// Counted per repetition and summed over the frame, so it is comparable against
+    /// `last_frame_block_steps`. Zero whenever gating is off, and it falls as the fast bands get
+    /// wider and more contiguous (`clock_band_log_falloff`), which is what makes it the number to
+    /// watch when trading allocation shape against artifacts.
+    pub last_frame_stalled_boundaries: u32,
 
     /// STEP3-ADAPTIVE-COARSE.md (incremental restriction): per-BLOCK "did this block's fine
     /// heights possibly change this tick" flags, filled by `settle_tick`'s `touched_out`
@@ -1124,11 +1156,13 @@ impl DrawingSimulation {
             coarse_pressure_coupling: false,
             overclocking_enabled: false,
             rank_clock_rates: true,
+            clock_band_log_falloff: true,
             rate_gated_reps: true,
             max_clock_rate: CLOCK_RATE_MAX,
             min_clock_rate: CLOCK_RATE_MIN,
             block_clock_rate: vec![1.0f32; cols * rows],
             last_frame_block_steps: 0,
+            last_frame_stalled_boundaries: 0,
             blocks_touched: Vec::new(),
             active_blocks,
             last_displacements,
@@ -1571,7 +1605,15 @@ impl DrawingSimulation {
             .cloned()
             .filter(|&r| r <= hi + 1e-6 && r >= lo - 1e-6)
             .collect();
-        let inv_sum: f32 = ladder.iter().map(|&r| 1.0 / r).sum();
+        // Band WEIGHT, not band rate: `n_r ∝ weight(r)`. See `clock_band_log_falloff`.
+        let weight = |r: f32| -> f32 {
+            if self.clock_band_log_falloff {
+                1.0 / (1.0 + r).log2().max(1e-3)
+            } else {
+                1.0 / r
+            }
+        };
+        let inv_sum: f32 = ladder.iter().map(|&r| weight(r)).sum();
         let m = order.len();
         let mut start = 0usize;
         for (i, &rate) in ladder.iter().enumerate() {
@@ -1580,7 +1622,7 @@ impl DrawingSimulation {
             let count = if i + 1 == ladder.len() {
                 m - start
             } else {
-                ((m as f32) * (1.0 / rate) / inv_sum).round() as usize
+                ((m as f32) * weight(rate) / inv_sum).round() as usize
             };
             let end = (start + count).min(m);
             for &b in &order[start..end] {
@@ -2652,6 +2694,8 @@ impl DrawingSimulation {
             // EARLY-STOP.md: the ACTUAL count of per-block interior sweeps this frame, summed
             // across every repetition -- see `last_frame_block_steps`'s own doc comment.
             let mut block_steps_this_frame: u32 = 0;
+            // EARLY-STOP.md: see `last_frame_stalled_boundaries`.
+            let mut stalled_boundaries: u32 = 0;
             // CLASSIFICATION-HOIST.md Stage 1: `fresh_overburden_must_blocks`/`support_fraction`
             // classification was measured at ~54% of an overclocked frame (SCAFFOLDING-BREAKDOWN.md),
             // paid identically on every one of this frame's `extra_reps + 1` `settle_tick` calls for
@@ -2684,6 +2728,27 @@ impl DrawingSimulation {
                 if rep > 0 {
                     let participating = self.force_overclocked_blocks_active(rep);
                     if self.rate_gated_reps {
+                        // Count the seams this repetition's suppression creates BEFORE acting on
+                        // it: an edge whose owning block (left/top, since edges belong to their
+                        // lower-index cell) sits out while the far side runs cannot be evaluated
+                        // by anyone this repetition.
+                        let cols_b = self.block_size_cols();
+                        if cols_b > 0 {
+                            let rows_b = participating.len() / cols_b;
+                            for b in 0..participating.len() {
+                                let bx = b % cols_b;
+                                let by = b / cols_b;
+                                if participating[b] {
+                                    continue;
+                                }
+                                if bx + 1 < cols_b && participating[b + 1] {
+                                    stalled_boundaries += 1;
+                                }
+                                if by + 1 < rows_b && participating[b + cols_b] {
+                                    stalled_boundaries += 1;
+                                }
+                            }
+                        }
                         // Zeroing the displacement is the same lever `apply_underclock_skip`
                         // uses: it is what keeps a block out of `settle_tick`'s MUST and budget
                         // tiers. STALE is deliberately still reachable -- `MAX_STALENESS` is the
@@ -2782,6 +2847,7 @@ impl DrawingSimulation {
             }
             self.blocks_touched = touched_accum;
             self.last_frame_block_steps = block_steps_this_frame;
+            self.last_frame_stalled_boundaries = stalled_boundaries;
             // PERF-PROFILE.md TEMPORARY: log (target sub-steps, first-settled rep or -1) for
             // every block that was genuinely overclocked this frame.
             if extra_reps > 0 {
@@ -2802,6 +2868,7 @@ impl DrawingSimulation {
             // all-false) would be merely wasteful, not incorrect, but is cleared anyway.
             self.blocks_touched.iter_mut().for_each(|v| *v = false);
             self.last_frame_block_steps = 0;
+            self.last_frame_stalled_boundaries = 0;
         }
 
         self.tick_count = self.tick_count.wrapping_add(1);
