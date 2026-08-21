@@ -921,6 +921,42 @@ function syncSettings() {
         if (fallJitterVal) fallJitterVal.innerText = fallJitter.toFixed(2);
         state.set_liquid_fall_jitter(fallJitter);
     }
+    // LATERAL-COARSE-CORRECTION.md: the coarse-grid flow correction and its two settings. The
+    // damping slider and the axis selector are hidden while the correction is off -- the sim never
+    // reads them then, so they would move without doing anything.
+    const corrCheck = document.getElementById('check-coarse-flow-correction');
+    if (corrCheck) {
+        const corrOn = corrCheck.checked;
+        state.set_coarse_flow_correction(corrOn);
+        const dampRow = document.getElementById('coarse-correction-damping-row');
+        if (dampRow) dampRow.style.display = corrOn ? '' : 'none';
+        const axesRow = document.getElementById('coarse-correction-axes-row');
+        if (axesRow) axesRow.style.display = corrOn ? '' : 'none';
+        const statsRow = document.getElementById('coarse-correction-stats-row');
+        if (statsRow) statsRow.style.display = corrOn ? '' : 'none';
+        const dampSlider = document.getElementById('coarse-correction-damping-slider');
+        if (dampSlider) {
+            const damping = parseFloat(dampSlider.value);
+            const dampVal = document.getElementById('coarse-correction-damping-val');
+            if (dampVal) dampVal.innerText = damping.toFixed(2);
+            // Pushed even while the correction is off, so switching it on picks up the slider
+            // position already on screen rather than the sim's own default.
+            state.set_coarse_correction_damping(damping);
+        }
+        const axesSelect = document.getElementById('coarse-correction-axes-select');
+        if (axesSelect) state.set_coarse_correction_axes(parseInt(axesSelect.value, 10) || 0);
+        const statsVal = document.getElementById('coarse-correction-stats-val');
+        if (statsVal && corrOn) {
+            // [requested, applied, lateral_applied, boundaries, limited, edges] -- see
+            // `coarse_correction_stats` in sandart-wasm/src/lib.rs.
+            const st = state.coarse_correction_stats();
+            const pct = st[0] > 0 ? (st[1] / st[0]) * 100 : 0;
+            const limPct = st[3] > 0 ? (st[4] / st[3]) * 100 : 0;
+            statsVal.innerText =
+                `asked ${st[0].toFixed(1)}, moved ${st[1].toFixed(1)} (${pct.toFixed(0)}%), ` +
+                `${st[3].toFixed(0)} faces, ${limPct.toFixed(0)}% limited`;
+        }
+    }
     const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
     if (stiffnessSlider) {
         const stiffness = parseFloat(stiffnessSlider.value);

@@ -49,6 +49,20 @@ export class WasmSimulationState {
         return ret;
     }
     /**
+     * LATERAL-COARSE-CORRECTION.md: last frame's correction accounting, for the Debug panel --
+     * `[requested, applied, lateral_applied, boundaries, limited, edges]`. All masses in fine
+     * mass units. `applied / requested` well below 1 means the fine level physically could not
+     * supply what the coarse level asked for, which is a finding about the two levels rather
+     * than a fault.
+     * @returns {Float32Array}
+     */
+    coarse_correction_stats() {
+        const ret = wasm.wasmsimulationstate_coarse_correction_stats(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @param {string} canvas_id
      * @param {number} width
      * @param {number} height
@@ -298,6 +312,28 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
     }
     /**
+     * "Correct across" selector (LATERAL-COARSE-CORRECTION.md): which faces the correction may
+     * act on -- `0` lateral (the default, and where the measured deficit is), `1` vertical,
+     * `2` both. Anything else is treated as lateral rather than rejected, so a stale UI value
+     * can never leave the sim in a state the panel is not showing. See
+     * `physics::CorrectionAxes` for why lateral is the default.
+     * @param {number} axes
+     */
+    set_coarse_correction_axes(axes) {
+        wasm.wasmsimulationstate_set_coarse_correction_axes(this.__wbg_ptr, axes);
+    }
+    /**
+     * "Correction strength" slider (LATERAL-COARSE-CORRECTION.md): under-relaxation on the
+     * coarse level's opinion, `0.0..=1.0`. The coarse level is an approximation with no model of
+     * repose, so its correction is damped rather than applied whole; `0.0` is equivalent to the
+     * toggle being off. Plain field write, safe every frame. See
+     * `DrawingSimulation::coarse_correction_damping`.
+     * @param {number} damping
+     */
+    set_coarse_correction_damping(damping) {
+        wasm.wasmsimulationstate_set_coarse_correction_damping(this.__wbg_ptr, damping);
+    }
+    /**
      * Coarse-fine disagreement (`Delta`) debug overlay: plumbed exactly like
      * `set_coarse_eta_overlay` just above -- an independent toggle for an independent texture,
      * so both this and the `eta` overlay can be viewed at once.
@@ -317,6 +353,19 @@ export class WasmSimulationState {
      */
     set_coarse_eta_overlay(enabled) {
         wasm.wasmsimulationstate_set_coarse_eta_overlay(this.__wbg_ptr, enabled);
+    }
+    /**
+     * "Coarse flow correction" checkbox (LATERAL-COARSE-CORRECTION.md): after the frame's
+     * sub-steps have run, the mass the coarse level actually moved across each tile face is
+     * compared with the mass the fine level actually moved across the same face, and the
+     * difference is applied as a limited flux. Exists because the fine level's lateral transport
+     * is capped by a local CFL bound that the coarse level, being a coarser grid, is not subject
+     * to. Plain field write, safe every frame; a no-op unless the coarse level is available.
+     * See `DrawingSimulation::coarse_flow_correction`.
+     * @param {boolean} enabled
+     */
+    set_coarse_flow_correction(enabled) {
+        wasm.wasmsimulationstate_set_coarse_flow_correction(this.__wbg_ptr, enabled);
     }
     /**
      * "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md, split by
@@ -2401,17 +2450,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2110, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2112, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_afd3c11e77a262dc___convert__closures_____invoke___wasm_bindgen_afd3c11e77a262dc___JsValue__core_f0fd674eaa06beef___result__Result_____wasm_bindgen_afd3c11e77a262dc___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 62, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_afd3c11e77a262dc___convert__closures_____invoke___wasm_bindgen_afd3c11e77a262dc___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 62, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_afd3c11e77a262dc___convert__closures_____invoke___wasm_bindgen_afd3c11e77a262dc___JsValue______true__2);
             return ret;
         },

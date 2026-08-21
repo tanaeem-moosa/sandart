@@ -961,6 +961,51 @@
                     <span id="fall-jitter-val" class="val-display">0.00</span>
                     <input type="range" id="fall-jitter-slider" min="0" max="0.6" step="0.02" value="0">
                 </div>
+                <!-- LATERAL-COARSE-CORRECTION.md. The fine level's lateral edges move only a few
+                     percent of a height difference per tick, and those constants already sit at
+                     the CFL bound, so they cannot simply be raised. That bound is a LOCAL
+                     stability limit on relaxation, not a limit on how much mass may legally move
+                     -- conservation is that limit, and the flux limiter already enforces it. The
+                     coarse level runs on a grid 8x coarser and is not subject to the same bound;
+                     it moves material sideways at roughly twice the fine level's relative rate
+                     (FLOW-DIRECTION.md). This compares what each level actually moved across the
+                     same face and applies the DIFFERENCE as a limited flux, so it is a
+                     coarse-grid correction rather than an extra force: conservative by
+                     construction, zero wherever the fine level already kept up. -->
+                <label class="checkbox-container">
+                    Coarse flow correction
+                    <input type="checkbox" id="check-coarse-flow-correction">
+                    <span class="checkmark"></span>
+                </label>
+                <!-- Hidden unless the correction is on, the same reasoning as the clock-rate
+                     controls above: with the toggle off these are never read and a live-looking
+                     control that does nothing is worse than no control. -->
+                <div class="field row" id="coarse-correction-damping-row" style="display: none;">
+                    <label for="coarse-correction-damping-slider" title="How much of the coarse level's opinion to act on each tick. The coarse level is an approximation with no model of the angle of repose, so its correction is under-relaxed rather than applied whole. 0 = off. High acts faster but fights the fine level harder, which can make a granular pile's flanks ring.">Correction strength</label>
+                    <span id="coarse-correction-damping-val" class="val-display">0.50</span>
+                    <input type="range" id="coarse-correction-damping-slider" min="0" max="1" step="0.05" value="0.5">
+                </div>
+                <!-- The formulation is direction-agnostic, but the measured deficit is lateral,
+                     and downward transport at the fine level is already at its structural ceiling
+                     of one cell per tick. Vertical is selectable so that stays a measurement
+                     rather than an assumption. -->
+                <div class="field row" id="coarse-correction-axes-row" style="display: none;">
+                    <label for="coarse-correction-axes-select" title="Which faces the correction may move mass across. Lateral is the default: that is where the coarse and fine levels actually disagree. Vertical puts the coarse level, which models neither repose nor free fall, in opposition to the two fine-level mechanisms that already work.">Correct across</label>
+                    <select id="coarse-correction-axes-select">
+                        <option value="0" selected>Lateral faces</option>
+                        <option value="1">Vertical faces</option>
+                        <option value="2">Both</option>
+                    </select>
+                </div>
+                <!-- Reads out what the correction actually did last frame: how much transport the
+                     coarse level asked for, and how much survived the availability/headroom
+                     limiter. A delivered fraction well below 100% is not a fault -- it means the
+                     fine level physically cannot supply what the coarse level wants, which is a
+                     finding about the two levels. -->
+                <div id="coarse-correction-stats-row" style="display: none;">
+                    <div class="field-label">Correction (mass/frame)</div>
+                    <div id="coarse-correction-stats-val" class="val-display">—</div>
+                </div>
                 <div class="field row" id="overfill-stiffness-row">
                     <label for="overfill-stiffness-slider" title="How hard the fluid resists being compressed under its own weight. Low is springy and compressible; high is nearly incompressible. The overfill ceiling follows this automatically.">Fluid stiffness</label>
                     <span id="overfill-stiffness-val" class="val-display">5.0</span>
