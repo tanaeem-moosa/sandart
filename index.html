@@ -905,6 +905,19 @@
                      more likely to be contiguous, at ~1.7x the block-steps. Wider bands also mean
                      fewer running/not-running seams, which is where boundary artifacts come
                      from. -->
+                <!-- EARLY-STOP.md: the 2:1 balance rule from adaptive mesh refinement, applied to
+                     clock rates instead of refinement levels -- adjacent blocks may differ by at
+                     most one repetition, enforced by pulling fast blocks DOWN to their neighbours
+                     (never by raising slow ones). A lone fast block becomes 2x; only a region wide
+                     enough to ramp can reach the ceiling. Cuts frame time and boundary seams by
+                     roughly two thirds at the cost of ~half the per-tick movement. -->
+                <div class="field row" id="grade-clock-rates-row" style="display: none;">
+                    <label class="checkbox-container" style="margin: 0;" title="Adjacent blocks may differ by at most one sub-step, enforced by slowing the fast block rather than speeding the slow one. Far fewer block-boundary seams; only wide contiguous regions reach the top rates.">
+                        Grade neighbouring rates (max 1 apart)
+                        <input type="checkbox" id="check-grade-clock-rates" checked>
+                        <span class="checkmark"></span>
+                    </label>
+                </div>
                 <div class="field row" id="clock-band-falloff-row" style="display: none;">
                     <label class="checkbox-container" style="margin: 0;" title="Size the rate bands by 1/lg(1+r) instead of 1/r: about three times as many blocks get the high rates, and the fast regions are more contiguous, at roughly 1.7x the block-steps.">
                         Gentle band falloff (1/lg k)

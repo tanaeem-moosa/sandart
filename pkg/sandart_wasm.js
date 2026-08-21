@@ -361,6 +361,15 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_fresh_pressure_field(this.__wbg_ptr, enabled);
     }
     /**
+     * "Grade neighbouring rates" checkbox (EARLY-STOP.md): cap the rate field's GRADIENT so
+     * adjacent blocks differ by at most one repetition, enforced by pulling fast blocks down.
+     * See `DrawingSimulation::grade_clock_rates`.
+     * @param {boolean} grade
+     */
+    set_grade_clock_rates(grade) {
+        wasm.wasmsimulationstate_set_grade_clock_rates(this.__wbg_ptr, grade);
+    }
+    /**
      * @param {number} x
      * @param {number} y
      */
