@@ -298,15 +298,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
     }
     /**
-     * "Gentle band falloff" checkbox (EARLY-STOP.md): band sizes `∝ 1/lg(1+r)` instead of
-     * `∝ 1/r`, so the fast bands are ~3x wider and more likely to be contiguous. See
-     * `DrawingSimulation::clock_band_log_falloff`.
-     * @param {boolean} log_falloff
-     */
-    set_clock_band_log_falloff(log_falloff) {
-        wasm.wasmsimulationstate_set_clock_band_log_falloff(this.__wbg_ptr, log_falloff);
-    }
-    /**
      * Coarse-fine disagreement (`Delta`) debug overlay: plumbed exactly like
      * `set_coarse_eta_overlay` just above -- an independent toggle for an independent texture,
      * so both this and the `eta` overlay can be viewed at once.
@@ -359,15 +350,6 @@ export class WasmSimulationState {
      */
     set_fresh_pressure_field(enabled) {
         wasm.wasmsimulationstate_set_fresh_pressure_field(this.__wbg_ptr, enabled);
-    }
-    /**
-     * "Grade neighbouring rates" checkbox (EARLY-STOP.md): cap the rate field's GRADIENT so
-     * adjacent blocks differ by at most one repetition, enforced by pulling fast blocks down.
-     * See `DrawingSimulation::grade_clock_rates`.
-     * @param {boolean} grade
-     */
-    set_grade_clock_rates(grade) {
-        wasm.wasmsimulationstate_set_grade_clock_rates(this.__wbg_ptr, grade);
     }
     /**
      * @param {number} x
