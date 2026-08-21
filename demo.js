@@ -914,6 +914,13 @@ function syncSettings() {
         if (maxRateRow) maxRateRow.style.display = overclockOn ? '' : 'none';
         state.set_max_clock_rate(maxRate);
     }
+    const fallJitterSlider = document.getElementById('fall-jitter-slider');
+    if (fallJitterSlider) {
+        const fallJitter = parseFloat(fallJitterSlider.value);
+        const fallJitterVal = document.getElementById('fall-jitter-val');
+        if (fallJitterVal) fallJitterVal.innerText = fallJitter.toFixed(2);
+        state.set_liquid_fall_jitter(fallJitter);
+    }
     const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
     if (stiffnessSlider) {
         const stiffness = parseFloat(stiffnessSlider.value);
@@ -1402,6 +1409,11 @@ function setupPanelInput() {
     if (maxClockRateSlider) {
         maxClockRateSlider.addEventListener('input', syncSettings);
         maxClockRateSlider.addEventListener('change', syncSettings);
+    }
+    const fallJitterSliderEl = document.getElementById('fall-jitter-slider');
+    if (fallJitterSliderEl) {
+        fallJitterSliderEl.addEventListener('input', syncSettings);
+        fallJitterSliderEl.addEventListener('change', syncSettings);
     }
     const overfillStiffSlider = document.getElementById('overfill-stiffness-slider');
     if (overfillStiffSlider) {

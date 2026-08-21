@@ -446,6 +446,15 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_light_angle(this.__wbg_ptr, angle);
     }
     /**
+     * "Falling liquid jitter" slider (STICKINESS.md): per-cell downward-flow jitter for
+     * UNDERFULL liquid, 0..=0.6. Plain field write, safe every frame. `0` is the pre-feature
+     * behaviour exactly. See `DrawingSimulation::liquid_fall_jitter`.
+     * @param {number} jitter
+     */
+    set_liquid_fall_jitter(jitter) {
+        wasm.wasmsimulationstate_set_liquid_fall_jitter(this.__wbg_ptr, jitter);
+    }
+    /**
      * @param {number} a
      * @param {number} b
      */
