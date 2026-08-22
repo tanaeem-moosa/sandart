@@ -12,7 +12,7 @@
 //! A high limited fraction is the signal that the coarse level is asking for transport the fine
 //! level physically cannot supply, which is a finding about the two levels rather than a bug.
 use glam::Vec2;
-use sandart_sim::{physics::CorrectionAxes, DrawingSimulation, MaterialMode, SandboxShape};
+use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape};
 use std::time::Instant;
 
 /// Mass-weighted horizontal spread (std-dev of x, in cells) over the BOTTOM QUARTER -- the same
@@ -38,6 +38,65 @@ fn spread(sim: &DrawingSimulation) -> f64 {
     }
     let mean = mx / m;
     (mxx / m - mean * mean).max(0.0).sqrt()
+}
+
+/// SEAM METRIC. Mean absolute height step across cell boundaries that ARE block boundaries,
+/// divided by the same quantity across boundaries that are NOT. A value near 1.0 means block
+/// boundaries look like every other column/row; a value well above 1.0 means there is a
+/// discontinuity at the block grid -- which is what "I can see block edges" reports.
+///
+/// Returned as `(lateral_seam, vertical_seam)`: lateral compares column steps at `x % bs == bs-1`,
+/// vertical compares row steps at `y % bs == bs-1`. Only counts pairs where both cells hold
+/// material, so an empty region cannot dilute the statistic toward 1.0.
+fn seam_ratio(sim: &DrawingSimulation, bs: usize) -> (f64, f64) {
+    let w = sim.heightmap.width;
+    let h = sim.heightmap.height;
+    let d = &sim.heightmap.data;
+    let (mut b_sum, mut b_n, mut i_sum, mut i_n) = (0.0f64, 0u64, 0.0f64, 0u64);
+    for y in 0..h {
+        for x in 0..w - 1 {
+            let (a, b) = (d[y * w + x], d[y * w + x + 1]);
+            if a <= 1e-4 || b <= 1e-4 {
+                continue;
+            }
+            let step = (a - b).abs() as f64;
+            if x % bs == bs - 1 {
+                b_sum += step;
+                b_n += 1;
+            } else {
+                i_sum += step;
+                i_n += 1;
+            }
+        }
+    }
+    let lat = if b_n > 0 && i_n > 0 && i_sum > 0.0 {
+        (b_sum / b_n as f64) / (i_sum / i_n as f64)
+    } else {
+        0.0
+    };
+    let (mut b_sum, mut b_n, mut i_sum, mut i_n) = (0.0f64, 0u64, 0.0f64, 0u64);
+    for y in 0..h - 1 {
+        for x in 0..w {
+            let (a, b) = (d[y * w + x], d[(y + 1) * w + x]);
+            if a <= 1e-4 || b <= 1e-4 {
+                continue;
+            }
+            let step = (a - b).abs() as f64;
+            if y % bs == bs - 1 {
+                b_sum += step;
+                b_n += 1;
+            } else {
+                i_sum += step;
+                i_n += 1;
+            }
+        }
+    }
+    let vert = if b_n > 0 && i_n > 0 && i_sum > 0.0 {
+        (b_sum / b_n as f64) / (i_sum / i_n as f64)
+    } else {
+        0.0
+    };
+    (lat, vert)
 }
 
 /// Centre of mass, normalised to [0, 1] top to bottom -- descent.
@@ -69,6 +128,8 @@ struct Run {
     /// costs because it schedules more real physics" from "the correction costs because its own
     /// bookkeeping is expensive". If ms and block-steps rise together it is the former.
     steps: f64,
+    seam_lat: f64,
+    seam_vert: f64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -81,7 +142,6 @@ fn run(
     overclock: bool,
     on: bool,
     damping: f32,
-    axes: CorrectionAxes,
 ) -> Run {
     let mut sim = DrawingSimulation::new_with_size(grid);
     sim.sandbox_shape = SandboxShape::Hourglass;
@@ -92,7 +152,6 @@ fn run(
     sim.overclocking_enabled = overclock;
     sim.coarse_flow_correction = on;
     sim.coarse_correction_damping = damping;
-    sim.coarse_correction_axes = axes;
     let targets = [None; 5];
     for _ in 0..warm {
         sim.budget_n = budget;
@@ -130,6 +189,8 @@ fn run(
         limited_frac: if bnd > 0 { lim as f64 / bnd as f64 } else { 0.0 },
         boundaries: bnd as f64 / n,
         steps: steps as f64 / n,
+        seam_lat: seam_ratio(&sim, sim.block_size).0,
+        seam_vert: seam_ratio(&sim, sim.block_size).1,
     }
 }
 
@@ -152,7 +213,7 @@ fn print_row(
     println!(
         "{label:<26} ms {:>6.2} ({vms:>6})  spread {:>6.2}->{:>6.2} ({gain:+.2}, {vs:>7})  \
          desc {:+.5}  mass_err {:.2e}  req/tick {:>9.2}  applied {:>9.2} ({:>5.1}% of req, {:>5.1}% lateral)  \
-         faces {:>6.1}  limited {:>5.1}%  block_steps {:>7.0} ({})",
+         faces {:>6.1}  limited {:>5.1}%  block_steps {:>7.0} ({})  SEAM lat {:>5.2} vert {:>5.2}",
         r.ms,
         r.spread0,
         r.spread1,
@@ -169,6 +230,8 @@ fn print_row(
             Some(b) => format!("{:+.0}%", (r.steps - b) / b.max(1e-9) * 100.0),
             None => "base".into(),
         },
+        r.seam_lat,
+        r.seam_vert,
     );
 }
 
@@ -191,37 +254,23 @@ fn main() {
         Some(v) => v.split(',').map(|s| s.trim().parse().unwrap()).collect(),
         None => vec![0.25, 0.5, 1.0],
     };
-    let axes_arg = get("--axes").unwrap_or_else(|| "lateral".into());
-    let axes_list: Vec<(&str, CorrectionAxes)> = match axes_arg.as_str() {
-        "all" => vec![
-            ("lateral", CorrectionAxes::Lateral),
-            ("vertical", CorrectionAxes::Vertical),
-            ("both", CorrectionAxes::Both),
-        ],
-        "vertical" => vec![("vertical", CorrectionAxes::Vertical)],
-        "both" => vec![("both", CorrectionAxes::Both)],
-        _ => vec![("lateral", CorrectionAxes::Lateral)],
-    };
-
     println!(
         "grid={grid} ticks={ticks} warmup={warm} budget={budget} overclock={overclock}\n\
          spread = mass-weighted std-dev of x over the bottom quarter (cells). Higher is more lateral spread.\n"
     );
     for mat in mats {
         println!("=== {mat:?} ===");
-        let base = run(grid, mat, ticks, warm, budget, overclock, false, 0.0, CorrectionAxes::Lateral);
+        let base = run(grid, mat, ticks, warm, budget, overclock, false, 0.0);
         print_row("correction OFF", &base, None, None, None);
-        for (name, axes) in &axes_list {
-            for &d in &dampings {
-                let r = run(grid, mat, ticks, warm, budget, overclock, true, d, *axes);
-                print_row(
-                    &format!("{name} damping {d:.2}"),
-                    &r,
-                    Some(base.spread1),
-                    Some(base.ms),
-                    Some(base.steps),
-                );
-            }
+        for &d in &dampings {
+            let r = run(grid, mat, ticks, warm, budget, overclock, true, d);
+            print_row(
+                &format!("strength {d:.2}"),
+                &r,
+                Some(base.spread1),
+                Some(base.ms),
+                Some(base.steps),
+            );
         }
         println!();
     }

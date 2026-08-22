@@ -18,7 +18,7 @@
 //! pattern of `coarse_pressure_coupling_toggle.rs` and its siblings.
 
 use glam::Vec2;
-use sandart_sim::{physics::CorrectionAxes, DrawingSimulation, MaterialMode, SandboxShape};
+use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape};
 
 /// FNV-1a checksum over every buffer `update` can mutate -- same construction as the sibling
 /// toggle tests, sensitive enough that a single flipped bit anywhere changes it.
@@ -116,31 +116,71 @@ fn coarse_flow_correction_zero_damping_matches_disabled() {
     );
 }
 
-/// THE LOAD-BEARING TEST. The correction is allowed to move more mass than the fine level's local
-/// CFL bound permits precisely because it is a flux in divergence form; conservation is the whole
-/// safety argument. Run at damping 1.0 (the most aggressive setting) on both axes.
+/// THE LOAD-BEARING TEST, restated for the conveyance-boost design.
+///
+/// The correction no longer moves any mass itself -- it scales `c_sq`/`alpha`, the conveyance
+/// coefficients inside the existing FCT-limited solver, so conservation is inherited rather than
+/// re-argued. That makes this a regression test on the inheritance: if a boost could ever push a
+/// transfer past the solver's own availability/headroom limiter, mass would stop being conserved,
+/// and the `+/-1.0` clamp in `flux_edge_candidate` is what is supposed to make that impossible at
+/// any boost. Run at strength 1.0, the largest the UI allows.
 #[test]
-fn coarse_flow_correction_conserves_mass_on_both_axes() {
-    for axes in [CorrectionAxes::Lateral, CorrectionAxes::Vertical, CorrectionAxes::Both] {
-        let (_, before, after) = run(
-            |sim| {
-                sim.coarse_flow_correction = true;
-                sim.coarse_correction_damping = 1.0;
-                sim.coarse_correction_axes = axes;
-            },
-            200,
+fn coarse_flow_correction_conserves_mass_at_full_strength() {
+    let (_, before, after) = run(
+        |sim| {
+            sim.coarse_flow_correction = true;
+            sim.coarse_correction_damping = 1.0;
+        },
+        200,
+    );
+    let err = (after - before).abs() / before.max(1e-12);
+    // The same bar the shipped tree already meets without the correction (SESSION-HANDOVER
+    // 2026-08-20 evening §4 records 1.37e-9 to 7.45e-8 for the uncorrected solver), so this
+    // asserts the boost adds no conservation error of its own rather than asserting an absolute
+    // exactness the underlying f32 solver never had.
+    assert!(
+        err < 1e-6,
+        "the lateral conveyance boost lost or created mass: {before} -> {after} (relative error \
+         {err:.3e}). The boost only scales `c_sq`/`alpha` inside the existing FCT-limited solver, \
+         so a nonzero error here means a boosted candidate is escaping the availability/headroom \
+         limiter or the +/-1.0 clamp in `flux_edge_candidate`."
+    );
+}
+
+/// The boost must never make a block convey SLOWER than it would with the correction off --
+/// `compute_lateral_boost` returns multipliers floored at 1.0, and a value below 1.0 would be
+/// underclocking the solver on the strength of a coarse-level opinion, which is not what any of
+/// this is for.
+#[test]
+fn coarse_flow_correction_never_slows_the_solver() {
+    let mut sim = DrawingSimulation::new_with_size(128);
+    sim.sandbox_shape = SandboxShape::Hourglass;
+    sim.gravity_dir = Vec2::new(0.0, 0.04);
+    sim.apply_preset(MaterialMode::DrySand);
+    sim.overfill_pressure = true;
+    sim.initialize_hourglass();
+    sim.coarse_flow_correction = true;
+    sim.coarse_correction_damping = 1.0;
+    let targets = [None; 5];
+    for _ in 0..120 {
+        sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 0.0, 16.6);
+        let (bh, bv, _) = sandart_sim::physics::compute_lateral_boost(
+            sim.heightmap.width,
+            sim.heightmap.height,
+            sim.block_size,
+            sim.coarse.coarse_n,
+            &sandart_sim::physics::lat_ledger_snapshot().0,
+            &sandart_sim::physics::lat_ledger_snapshot().1,
+            &sandart_sim::physics::lat_ledger_snapshot().2,
+            &sandart_sim::physics::lat_ledger_snapshot().3,
+            1.0,
         );
-        let err = (after - before).abs() / before.max(1e-12);
-        // The same bar the shipped tree already meets without the correction (SESSION-HANDOVER
-        // 2026-08-20 evening §4 records 1.37e-9 to 7.45e-8 for the uncorrected solver), so this
-        // asserts the correction adds no conservation error of its own rather than asserting an
-        // absolute exactness the underlying f32 solver never had.
-        assert!(
-            err < 1e-6,
-            "coarse flow correction on {axes:?} lost or created mass: {before} -> {after} \
-             (relative error {err:.3e}). The correction is applied as a flux -- every transfer is \
-             `data[src] -= x; data[dst] += x` -- so a nonzero error here means a transfer is \
-             writing one side and not the other, or writing outside the shape mask."
-        );
+        for &f in bh.iter().chain(bv.iter()) {
+            assert!(
+                (1.0..=64.0).contains(&f),
+                "conveyance boost out of range: {f}. Must be >= 1.0 (never slower than the \
+                 uncorrected solver) and bounded above by 1 + LATERAL_BOOST_MAX."
+            );
+        }
     }
 }

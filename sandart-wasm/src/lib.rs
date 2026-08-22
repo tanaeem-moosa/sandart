@@ -391,7 +391,6 @@ impl WasmSimulationState {
         let grade_clock_rates = self.sim.grade_clock_rates;
         let coarse_flow_correction = self.sim.coarse_flow_correction;
         let coarse_correction_damping = self.sim.coarse_correction_damping;
-        let coarse_correction_axes = self.sim.coarse_correction_axes;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -444,7 +443,6 @@ impl WasmSimulationState {
         // its damping slider and its axis selector must all survive a resolution rebuild.
         sim.coarse_flow_correction = coarse_flow_correction;
         sim.coarse_correction_damping = coarse_correction_damping;
-        sim.coarse_correction_axes = coarse_correction_axes;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -882,19 +880,6 @@ impl WasmSimulationState {
     /// `DrawingSimulation::coarse_correction_damping`.
     pub fn set_coarse_correction_damping(&mut self, damping: f32) {
         self.sim.coarse_correction_damping = damping.clamp(0.0, 1.0);
-    }
-
-    /// "Correct across" selector (LATERAL-COARSE-CORRECTION.md): which faces the correction may
-    /// act on -- `0` lateral (the default, and where the measured deficit is), `1` vertical,
-    /// `2` both. Anything else is treated as lateral rather than rejected, so a stale UI value
-    /// can never leave the sim in a state the panel is not showing. See
-    /// `physics::CorrectionAxes` for why lateral is the default.
-    pub fn set_coarse_correction_axes(&mut self, axes: u32) {
-        self.sim.coarse_correction_axes = match axes {
-            1 => sandart_sim::physics::CorrectionAxes::Vertical,
-            2 => sandart_sim::physics::CorrectionAxes::Both,
-            _ => sandart_sim::physics::CorrectionAxes::Lateral,
-        };
     }
 
     /// LATERAL-COARSE-CORRECTION.md: last frame's correction accounting, for the Debug panel --

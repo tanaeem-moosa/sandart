@@ -876,7 +876,7 @@
                      not run at all; the ramp is log-scaled against the Max clock rate slider. -->
                 <label class="checkbox-container">
                     Overclocking (multi-rate blocks)
-                    <input type="checkbox" id="check-overclocking">
+                    <input type="checkbox" id="check-overclocking" checked>
                     <span class="checkmark"></span>
                 </label>
                 <!-- EARLY-STOP.md: the ceiling on the per-block clock rate, and the one knob that
@@ -981,21 +981,9 @@
                      controls above: with the toggle off these are never read and a live-looking
                      control that does nothing is worse than no control. -->
                 <div class="field row" id="coarse-correction-damping-row" style="display: none;">
-                    <label for="coarse-correction-damping-slider" title="How much of the coarse level's opinion to act on each tick. The coarse level is an approximation with no model of the angle of repose, so its correction is under-relaxed rather than applied whole. 0 = off. High acts faster but fights the fine level harder, which can make a granular pile's flanks ring.">Correction strength</label>
+                    <label for="coarse-correction-damping-slider" title="How much faster the fine solver may move material where the coarse level says transport is missing. It does not move any material itself and does not decide where anything goes -- the fine simulation still does that, per cell, with its own capacity and angle-of-repose logic. 0 = off.">Correction strength</label>
                     <span id="coarse-correction-damping-val" class="val-display">0.50</span>
                     <input type="range" id="coarse-correction-damping-slider" min="0" max="1" step="0.05" value="0.5">
-                </div>
-                <!-- The formulation is direction-agnostic, but the measured deficit is lateral,
-                     and downward transport at the fine level is already at its structural ceiling
-                     of one cell per tick. Vertical is selectable so that stays a measurement
-                     rather than an assumption. -->
-                <div class="field row" id="coarse-correction-axes-row" style="display: none;">
-                    <label for="coarse-correction-axes-select" title="Which faces the correction may move mass across. Lateral is the default: that is where the coarse and fine levels actually disagree. Vertical puts the coarse level, which models neither repose nor free fall, in opposition to the two fine-level mechanisms that already work.">Correct across</label>
-                    <select id="coarse-correction-axes-select">
-                        <option value="0" selected>Lateral faces</option>
-                        <option value="1">Vertical faces</option>
-                        <option value="2">Both</option>
-                    </select>
                 </div>
                 <!-- Reads out what the correction actually did last frame: how much transport the
                      coarse level asked for, and how much survived the availability/headroom

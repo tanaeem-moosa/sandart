@@ -682,11 +682,6 @@ pub struct DrawingSimulation {
     /// coarse tile; a no-op otherwise.
     pub coarse_flow_correction: bool,
 
-    /// LATERAL-COARSE-CORRECTION.md: which faces `coarse_flow_correction` corrects across.
-    /// Defaults to `Lateral` -- see `physics::CorrectionAxes` for why that is a measured choice
-    /// about where the deficit is, not a limitation of the formulation.
-    pub coarse_correction_axes: physics::CorrectionAxes,
-
     /// LATERAL-COARSE-CORRECTION.md: under-relaxation on the coarse-grid correction, in `[0, 1]`.
     ///
     /// The coarse level is an approximation of the fine one -- a different grid, and with no model
@@ -1253,7 +1248,6 @@ impl DrawingSimulation {
             // group. `COARSE_CORRECTION_DEFAULT_DAMPING` is a starting value, not a measured
             // optimum -- see its own doc comment.
             coarse_flow_correction: false,
-            coarse_correction_axes: physics::CorrectionAxes::Lateral,
             coarse_correction_damping: COARSE_CORRECTION_DEFAULT_DAMPING,
             last_frame_correction: physics::LateralCorrectionStats::default(),
             max_clock_rate: CLOCK_RATE_MAX,
@@ -2747,11 +2741,18 @@ impl DrawingSimulation {
         let correction_active = self.coarse_flow_correction
             && self.coarse.available
             && self.coarse_correction_damping > 0.0;
-        physics::lat_ledger_enable(
+        // `lat_ledger_ensure`, not `lat_ledger_enable`: the fine half must SURVIVE into this tick,
+        // because the boost below compares this tick's coarse transport against last tick's fine
+        // transport. Each half is zeroed explicitly just before the thing that writes it runs.
+        physics::lat_ledger_ensure(
             correction_active,
             self.coarse_state.delta.len(),
             self.active_blocks.len(),
         );
+        if correction_active {
+            // The coarse tick is about to rewrite the coarse half.
+            physics::lat_ledger_clear_coarse();
+        }
         if !correction_active {
             self.last_frame_correction = physics::LateralCorrectionStats::default();
         }
@@ -2793,6 +2794,40 @@ impl DrawingSimulation {
             // Everything the coarse level moved this tick is now in the ledger's COARSE half;
             // everything the fine level moves below belongs in the FINE half.
             physics::lat_ledger_set_coarse(false);
+        }
+
+        // LATERAL-COARSE-CORRECTION.md: turn this tick's coarse-vs-fine lateral deficit into a
+        // per-block conveyance multiplier, and install it for the repetitions below.
+        //
+        // Ordering: the coarse level has just run, so `coarse_h` is THIS tick's transport, while
+        // `fine_h` is still last tick's -- the fine level has not run yet. That is the right
+        // pairing rather than a lag to apologise for: the boost has to be in place BEFORE
+        // `settle_tick` so the fine solver can act on it, and last tick's realised lateral flow is
+        // the best available statement of what the fine level manages at this configuration.
+        //
+        // The boost changes only how fast the fine solver may convey laterally. It moves no mass
+        // and decides no placement -- see `compute_lateral_boost` for why that distinction is the
+        // whole design.
+        if correction_active {
+            let (coarse_h, coarse_v, fine_h, fine_v) = physics::lat_ledger_snapshot();
+            let (boost_h, boost_v, stats) = physics::compute_lateral_boost(
+                self.heightmap.width,
+                self.heightmap.height,
+                self.block_size,
+                self.coarse.coarse_n,
+                &coarse_h,
+                &coarse_v,
+                &fine_h,
+                &fine_v,
+                self.coarse_correction_damping,
+            );
+            self.last_frame_correction = stats;
+            physics::set_lateral_boost(&boost_h, &boost_v);
+            // Last tick's fine transport has now been consumed; the repetitions below accumulate
+            // this tick's into a clean buffer.
+            physics::lat_ledger_clear_fine();
+        } else {
+            physics::set_lateral_boost(&[], &[]);
         }
 
         // OVERCLOCKING.md (HIERARCHICAL-PRESSURE.md §7b): update the multi-rate block scheduler.
@@ -3059,31 +3094,6 @@ impl DrawingSimulation {
             self.blocks_touched = touched_accum;
             self.last_frame_block_steps = block_steps_this_frame;
             self.last_frame_stalled_boundaries = stalled_boundaries;
-            // LATERAL-COARSE-CORRECTION.md: the coarse-grid correction, applied AFTER every
-            // repetition of this frame has run. The ordering is the whole design: the fine level
-            // gets its full, unmodified chance first, and only what it failed to deliver against
-            // the coarse level's own realised transport is made up here. Running it earlier would
-            // correct a deficit the fine level was about to close by itself.
-            if correction_active {
-                let (coarse_h, coarse_v, fine_h, fine_v) = physics::lat_ledger_snapshot();
-                self.last_frame_correction = physics::apply_coarse_flow_correction(
-                    &mut self.heightmap,
-                    &mut self.cell_colors,
-                    &mut self.cell_props,
-                    &self.shape_mask,
-                    self.block_size,
-                    self.coarse.coarse_n,
-                    &coarse_h,
-                    &coarse_v,
-                    &fine_h,
-                    &fine_v,
-                    self.coarse_correction_axes,
-                    (self.overfill_capacity - 1.0).max(0.0),
-                    self.coarse_correction_damping,
-                    &mut self.last_displacements,
-                    &mut self.blocks_touched,
-                );
-            }
             // PERF-PROFILE.md TEMPORARY: log (target sub-steps, first-settled rep or -1) for
             // every block that was genuinely overclocked this frame.
             if extra_reps > 0 {

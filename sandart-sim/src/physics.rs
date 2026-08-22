@@ -1022,6 +1022,30 @@ pub fn lat_ledger_enable(on: bool, coarse_len: usize, fine_len: usize) {
     lat_ledger_resize(&LAT_LEDGER_FINE_V, fl);
 }
 
+/// See `LAT_LEDGER_ENABLED`'s doc comment. Enables the ledger and sizes the buffers, but
+/// **preserves their contents** when they are already the right length.
+///
+/// This is what the boost path calls, and the distinction matters: the boost compares THIS tick's
+/// coarse transport against LAST tick's fine transport (the fine level has not run yet at the
+/// point the boost has to be installed), so a blanket zeroing at the top of the tick would leave
+/// the fine half permanently empty and the deficit permanently equal to the coarse level's whole
+/// transport. Callers zero each half explicitly, at the point that half is about to be rewritten.
+pub fn lat_ledger_ensure(on: bool, coarse_len: usize, fine_len: usize) {
+    LAT_LEDGER_ENABLED.with(|c| c.set(on));
+    let (cl, fl) = if on { (coarse_len, fine_len) } else { (0, 0) };
+    for (key, len) in [
+        (&LAT_LEDGER_COARSE_H, cl),
+        (&LAT_LEDGER_COARSE_V, cl),
+        (&LAT_LEDGER_FINE_H, fl),
+        (&LAT_LEDGER_FINE_V, fl),
+    ] {
+        let needs = key.with(|c| c.borrow().len() != len);
+        if needs {
+            lat_ledger_resize(key, len);
+        }
+    }
+}
+
 /// See `LAT_LEDGER_ENABLED`'s doc comment. Which level subsequent flow is attributed to.
 pub fn lat_ledger_set_coarse(coarse: bool) {
     LAT_LEDGER_COARSE.with(|c| c.set(coarse));
@@ -1151,6 +1175,74 @@ fn lat_ledger_record_ca(
     }
 }
 
+/// LATERAL-COARSE-CORRECTION.md: the largest multiple `compute_lateral_boost` may apply to a
+/// block's lateral conveyance, at `strength = 1.0` and a total shortfall.
+///
+/// **7.0, so the ceiling is 8x.** Not swept -- derived from what the coefficient it multiplies
+/// means. DrySand's lateral `c_sq * damping` is ~0.06 and Water's ~0.23 (`wave_params`), while
+/// `flux_edge_candidate` clamps the integrated velocity to `+/-1.0` regardless. So 8x is roughly
+/// what it takes to bring the SLOWER material's lateral conveyance up to that hard clamp, and any
+/// larger ceiling would be a number the clamp silently discards rather than a stronger effect.
+/// The clamp, not this constant, is what actually bounds transport.
+const LATERAL_BOOST_MAX: f32 = 7.0;
+
+thread_local! {
+    // THE LATERAL CONVEYANCE BOOST (LATERAL-COARSE-CORRECTION.md §2, second design). One
+    // multiplier per LOD block on the conveyance coefficient of that block's LATERAL transport --
+    // `c_sq` on the flux solver's horizontal edges, `alpha` on the granular CA's horizontal moves.
+    // `1.0` is untouched behaviour; empty means the feature is off.
+    //
+    // This is what the coarse level's opinion is allowed to do, and it is deliberately ALL it is
+    // allowed to do. The first two designs had the correction move mass itself -- once dumped on
+    // the block boundary (visible seams), once spread uniformly through the block. Both were
+    // wrong, and wrong the same way: **a block is not a homogeneous bucket. It is partially full,
+    // it has a surface and a slope, and working out where material can actually go inside it is
+    // the entire reason the fine simulation is run at all** (the user, 2026-08-21: "what if a
+    // block is partially full. that is why we simulate the block. to get the flow. when we are
+    // using coarse flow to have more material flow, we can't skip the fine simulation").
+    //
+    // So the coarse level no longer says WHERE mass goes. It says only HOW MUCH the fine solver
+    // may move on this block's lateral edges, and the fine solver decides the rest with its own
+    // availability, headroom, angle-of-repose and capacity logic, per cell, exactly as it always
+    // has. Raising conveyance past the value CFL calibrated is precisely "move more material than
+    // would be safe otherwise" -- and it is bounded regardless, because `flux_edge_candidate`
+    // clamps its integrated velocity to +/-1.0, so no boost can push transport past the standing
+    // one-cell-per-tick limit.
+    //
+    // Read once per BLOCK in `settle_tick`, not per edge.
+    static LATERAL_BOOST: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static VERTICAL_BOOST: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// See `LATERAL_BOOST`. Installs this frame's per-block lateral conveyance multipliers. An empty
+/// slice turns the feature off.
+pub fn set_lateral_boost(lateral: &[f32], vertical: &[f32]) {
+    LATERAL_BOOST.with(|c| {
+        let mut b = c.borrow_mut();
+        b.clear();
+        b.extend_from_slice(lateral);
+    });
+    VERTICAL_BOOST.with(|c| {
+        let mut b = c.borrow_mut();
+        b.clear();
+        b.extend_from_slice(vertical);
+    });
+}
+
+/// See `LATERAL_BOOST`. `1.0` (no boost) when the feature is off or the block is out of range, so
+/// every call site can multiply unconditionally.
+#[inline]
+fn lateral_boost_at(b: usize) -> f32 {
+    LATERAL_BOOST.with(|c| c.borrow().get(b).copied().unwrap_or(1.0))
+}
+
+/// See `LATERAL_BOOST`. The vertical counterpart, driven by the vertical deficit and applied only
+/// to gravity-aligned edges.
+#[inline]
+fn vertical_boost_at(b: usize) -> f32 {
+    VERTICAL_BOOST.with(|c| c.borrow().get(b).copied().unwrap_or(1.0))
+}
+
 /// What one tick of `apply_coarse_flow_correction` did. All masses are in FINE mass units.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct LateralCorrectionStats {
@@ -1173,156 +1265,95 @@ pub struct LateralCorrectionStats {
     pub edges: u32,
 }
 
-/// Which faces `apply_coarse_flow_correction` is allowed to correct across.
+/// THE COARSE-GRID LATERAL CONVEYANCE BOOST (LATERAL-COARSE-CORRECTION.md).
 ///
-/// **The default is `Lateral`, and that is a measured choice rather than a limitation of the
-/// formulation.** The defect argument below is entirely direction-agnostic and the vertical axis
-/// is implemented and selectable -- but the deficit FLOW-DIRECTION.md actually measured is
-/// lateral (the coarse level's flow is 2.2x more lateral than the fine level's on DrySand, 1.5x
-/// on Water), while downward transport at the fine level is already running at its structural
-/// ceiling of one cell per tick under gravity. Correcting the vertical axis also puts the coarse
-/// level -- which has no model of repose and no model of free fall -- directly in opposition to
-/// the two fine-level mechanisms that are working. `Both` exists so that is a measurement and not
-/// an assumption.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum CorrectionAxes {
-    #[default]
-    Lateral,
-    Vertical,
-    Both,
-}
-
-impl CorrectionAxes {
-    pub fn lateral(self) -> bool {
-        matches!(self, CorrectionAxes::Lateral | CorrectionAxes::Both)
-    }
-    pub fn vertical(self) -> bool {
-        matches!(self, CorrectionAxes::Vertical | CorrectionAxes::Both)
-    }
-}
-
-/// THE COARSE-GRID FLOW CORRECTION (LATERAL-COARSE-CORRECTION.md).
+/// Builds the per-block multipliers `set_lateral_boost` installs, from the deficit between what
+/// the coarse level moved across each tile face and what the fine level moved across the same
+/// face. Returns `(boost, stats)`.
 ///
-/// The problem it exists to solve: the fine level's lateral edges move `c_sq * damping` of a
-/// height difference per tick -- ~6% for DrySand, ~23% for Water (`wave_params`) -- and those
-/// constants already sit at the CFL bound, so they cannot simply be raised. That bound is a
-/// LOCAL EXPLICIT-SCHEME STABILITY limit: it governs how fast local relaxation may propagate
-/// information. It is not a statement about how much mass may legally move; conservation is that
-/// statement, and the FCT limiter is what enforces it.
+/// **Why this is a multiplier on the fine solver and not a mass transfer.** The fine level's
+/// lateral edges move `c_sq * damping` of a height difference per tick -- ~6% for DrySand, ~23%
+/// for Water -- and those constants sit at the CFL bound. That bound is a LOCAL EXPLICIT-SCHEME
+/// STABILITY limit: it governs how fast local relaxation may propagate information, not how much
+/// mass may legally move. The coarse level runs on a grid `t` times coarser and is not subject to
+/// the same limit, and it moves material sideways at roughly twice the fine level's relative rate
+/// (FLOW-DIRECTION.md). So the coarse level is evidence that more lateral transport is available
+/// than the fine level's calibration allows -- and this raises the fine solver's allowance where
+/// that evidence exists.
 ///
-/// Local relaxation is a SMOOTHER. It kills short-wavelength error quickly and long-wavelength
-/// error at a rate that degrades as the wavelength grows. Spreading a pile sideways across many
-/// blocks is precisely the long-wavelength mode, which is why simply running more lateral
-/// sub-steps polishes the local repose angle and barely moves the pile. The coarse level is where
-/// that mode is solvable -- which is the whole reason multigrid exists, and it is what
-/// FLOW-DIRECTION.md measured.
+/// **It does not decide where mass goes, and that is the point.** Two earlier designs had the
+/// correction move mass itself: the first dumped each face's whole defect on the single line of
+/// cells at the block boundary, which produced clearly visible block edges (the seam metric went
+/// from ~0.9 to 3.6-5.9); the second spread it uniformly through the block, which looked smoother
+/// but was worse -- it put material into cells that should have been empty and smeared the pile
+/// across the vessel. Both failed for the same reason, and the user named it exactly: *"what if a
+/// block is partially full. that is why we simulate the block. to get the flow. when we are using
+/// coarse flow to have more material flow, we can't skip the fine simulation."* A block has a
+/// surface and a slope; only the fine solver knows where inside it material can actually go.
 ///
-/// So this is a coarse-grid correction, applied as a DEFECT, per block face:
+/// So the coarse level is demoted to setting a rate, and every question of placement stays with
+/// the fine solver: availability, acceptor headroom, the angle of repose, capacity, all per cell,
+/// all unchanged. Mass conservation is likewise untouched, because no new transport path is
+/// introduced at all -- this only scales a coefficient inside the existing FCT-limited solver.
 ///
-/// ```text
-///   defect[face] = damping * ( coarse_flux[face] * t*t  -  fine_flux[face] )
-/// ```
+/// **Bounded by construction.** `flux_edge_candidate` clamps its integrated velocity to `+/-1.0`
+/// whatever `c_sq` is, so no boost can push transport past the standing one-cell-per-tick limit.
+/// The boost itself is additionally capped at `1 + LATERAL_BOOST_MAX * strength`.
 ///
-/// `coarse_flux` is the signed flux the coarse sim really performed across that tile face this
-/// tick (`LAT_LEDGER_COARSE_H`/`_V`), converted from coarse units to fine mass units by `t*t` --
-/// the coarse level holds a tile's height as an AVERAGE over its `t*t` fine cells, so one unit of
-/// coarse height is `t*t` units of fine mass. `fine_flux` is the signed mass the fine level really
-/// moved across the same physical face, summed over every repetition of this frame.
-///
-/// Three properties, and they are the reason this is a correction rather than a fudge:
-///
-/// 1. **It is a flux.** Every transfer subtracts from one cell and adds the same amount to its
-///    neighbour, so mass is conserved exactly, by construction, in divergence form.
-/// 2. **It is a defect.** If the fine level already moved as much as the coarse level did, the
-///    correction is identically zero. There is no double counting.
-/// 3. **The existing limiter is the safety net.** Per edge, the transfer cannot exceed the donor's
-///    height or the acceptor's remaining headroom, so no cell can go negative or past capacity no
-///    matter what the coarse level asks for. The requested total is distributed over the face
-///    PROPORTIONAL TO that per-edge allowance, and scaled down as a whole if the face cannot
-///    supply it (recorded as `limited`).
-///
-/// Deliberately NOT clamped to the local half-difference. Exceeding what local relaxation could
-/// have moved is the entire point; conservation and the limiter are what keep it safe, not the
-/// stability bound.
-///
-/// **`damping` is why the coarse level's opinion is not taken at face value.** The coarse level is
-/// an approximation of the fine one -- a different grid, and with no model of repose at all -- so
-/// the correction is UNDER-RELAXED rather than applied whole. This is standard practice whenever
-/// the coarse operator is not a Galerkin projection of the fine one, which this one certainly is
-/// not. `1.0` means "trust the coarse level exactly"; `0.0` disables the correction. The known
-/// failure mode it guards against: the coarse level asks to flatten a granular pile below its
-/// angle of repose, the fine level pushes back on the next tick, and the flanks ring slowly.
-/// Damping trades how fast the correction acts against how hard it fights the fine level.
-/// **The shipped default is a starting value, not a measured optimum** -- see `diag_lateral_corr`,
-/// which sweeps it.
+/// The signal is unit-free: `deficit / |coarse_want|`, the FRACTION of the coarse level's own
+/// lateral transport that the fine level failed to deliver. `0` where the fine level kept up (no
+/// boost at all), `1` where it moved nothing while the coarse level moved plenty. A block takes
+/// the larger of its two lateral faces' shortfalls, since either one is a reason to convey faster.
 ///
 /// **Geometry requirement.** Runs only when a block IS a coarse tile
-/// (`block_size == width / coarse_n`), which is the shipped geometry and the same condition
-/// `update_block_clock_rates` special-cases. At any other block divisor a block face and a tile
-/// face are not the same line, and the coarse level has no opinion about the face being asked
-/// about; returns zeroed stats rather than guessing.
-///
-/// Writes `heightmap.data` directly. That is safe after `settle_tick` has returned because
-/// `settle_tick` re-seeds `temp_heights` from `heightmap.data` wholesale at the top of every call.
-/// Blocks it touches are marked in `blocks_touched` (so the coarse level's incremental restrict
-/// sees them next tick) and floored in `last_displacements` (so the scheduler does not read a
-/// block this just moved mass through as settled).
+/// (`block_size == width / coarse_n`), the shipped geometry and the same condition
+/// `update_block_clock_rates` special-cases; returns an empty boost otherwise.
 #[allow(clippy::too_many_arguments)]
-pub fn apply_coarse_flow_correction(
-    heightmap: &mut crate::grid::Heightmap,
-    cell_colors: &mut [u8],
-    cell_props: &mut [f32],
-    shape_mask: &[u8],
+pub fn compute_lateral_boost(
+    width: usize,
+    height: usize,
     block_size: usize,
     coarse_n: usize,
     coarse_h: &[f32],
     coarse_v: &[f32],
     fine_h: &[f32],
     fine_v: &[f32],
-    axes: CorrectionAxes,
-    overfill_ratio: f32,
-    damping: f32,
-    last_displacements: &mut [f32],
-    blocks_touched: &mut [bool],
-) -> LateralCorrectionStats {
+    strength: f32,
+) -> (Vec<f32>, Vec<f32>, LateralCorrectionStats) {
     let mut stats = LateralCorrectionStats::default();
-    let w = heightmap.width;
-    let h = heightmap.height;
-    if block_size == 0 || coarse_n == 0 || damping == 0.0 {
-        return stats;
+    if block_size == 0 || coarse_n == 0 || strength <= 0.0 {
+        return (Vec::new(), Vec::new(), stats);
     }
-    // See the geometry requirement in the doc comment: a block must be exactly a coarse tile.
-    let t = w / coarse_n;
-    if t == 0 || t != block_size || w % coarse_n != 0 {
-        return stats;
+    let t = width / coarse_n;
+    if t == 0 || t != block_size || width % coarse_n != 0 {
+        return (Vec::new(), Vec::new(), stats);
     }
-    let cols = w.div_ceil(block_size);
-    let rows = h.div_ceil(block_size);
+    let cols = width.div_ceil(block_size);
+    let rows = height.div_ceil(block_size);
     let n_blocks = cols * rows;
     for buf in [coarse_h, coarse_v, fine_h, fine_v] {
         if buf.len() < n_blocks {
-            return stats;
+            return (Vec::new(), Vec::new(), stats);
         }
     }
     // One unit of coarse height is `t*t` units of fine mass -- the coarse level stores a tile
     // height as an AVERAGE, not a sum. This is the only place that conversion happens.
     let coarse_to_fine = (t * t) as f32;
-    // Below this the transfer is f32 noise; the same reasoning as `flux_edge_apply`'s `MIN_FLUX`.
-    const MIN_CORRECTION: f32 = 1e-6;
-    let mut alloc: Vec<(usize, usize, f32)> = Vec::with_capacity(block_size);
+    let mut boost_h = vec![1.0f32; n_blocks];
+    let mut boost_v = vec![1.0f32; n_blocks];
+    // Below this the coarse level's own transport is f32 noise and the ratio is meaningless.
+    const MIN_WANT: f32 = 1e-4;
 
-    for b in 0..n_blocks {
-        let bx = b % cols;
-        let by = b / cols;
-        for horizontal in [true, false] {
-            if horizontal && !axes.lateral() {
-                continue;
-            }
-            if !horizontal && !axes.vertical() {
-                continue;
-            }
-            // The far face only -- right for H, bottom for V. Every interior face is some block's
-            // far face exactly once, so this visits each face once and no face twice.
+    // Both axes, each from its own deficit and each driving only its own edges. The lateral and
+    // vertical boosts are kept SEPARATE rather than merged into one per-block number: a block can
+    // be behind on sideways transport while keeping up perfectly on downward transport, and
+    // speeding up its vertical edges because its lateral edges are starved would be exactly the
+    // "coarse level overrides the fine level's judgement" failure this design exists to avoid.
+    for (horizontal, coarse, fine) in
+        [(true, coarse_h, fine_h), (false, coarse_v, fine_v)]
+    {
+        for b in 0..n_blocks {
+            let (bx, by) = (b % cols, b / cols);
             let neighbour = if horizontal {
                 if bx + 1 >= cols {
                     continue;
@@ -1334,111 +1365,38 @@ pub fn apply_coarse_flow_correction(
                 }
                 b + cols
             };
-            let (cf, ff) = if horizontal { (coarse_h, fine_h) } else { (coarse_v, fine_v) };
-            let defect = damping * (cf[b] * coarse_to_fine - ff[b]);
-            if defect.abs() < MIN_CORRECTION {
+            let want = coarse[b] * coarse_to_fine;
+            if want.abs() < MIN_WANT {
                 continue;
             }
-            // Positive defect means the coarse level moved more mass toward the increasing index
-            // than the fine level did, so the fine level owes a transfer in that direction.
-            let forward = defect > 0.0;
-            let magnitude = defect.abs();
-
-            // The `block_size` fine edges that make up this face.
-            alloc.clear();
-            let mut available = 0.0f32;
-            for k in 0..block_size {
-                let (ia, ib) = if horizontal {
-                    let y = by * block_size + k;
-                    if y >= h {
-                        break;
-                    }
-                    let x_a = (bx + 1) * block_size - 1;
-                    if x_a + 1 >= w {
-                        break;
-                    }
-                    (y * w + x_a, y * w + x_a + 1)
-                } else {
-                    let x = bx * block_size + k;
-                    if x >= w {
-                        break;
-                    }
-                    let y_a = (by + 1) * block_size - 1;
-                    if y_a + 1 >= h {
-                        break;
-                    }
-                    (y_a * w + x, (y_a + 1) * w + x)
-                };
-                if shape_mask[ia] == crate::MASK_OUTSIDE || shape_mask[ib] == crate::MASK_OUTSIDE {
-                    continue;
-                }
-                let (src, dst) = if forward { (ia, ib) } else { (ib, ia) };
-                let cap_dst =
-                    cell_overfill_capacity_for(cell_props[dst * 4 + PROP_WETNESS], overfill_ratio);
-                // The limiter, per edge: never more than the donor holds, never more than the
-                // acceptor can take. This is what makes exceeding the stability bound safe.
-                let allowance =
-                    heightmap.data[src].max(0.0).min((cap_dst - heightmap.data[dst]).max(0.0));
-                if allowance > 0.0 {
-                    alloc.push((src, dst, allowance));
-                    available += allowance;
-                }
-            }
-            if available <= 0.0 {
+            // Signed: a deficit only counts when the fine level moved LESS in the same direction
+            // the coarse level did. A fine level that moved more, or moved the other way, is not a
+            // reason to convey faster -- it is already ahead, and boosting it would be a second
+            // wrong.
+            let deficit = want.abs() - fine[b] * want.signum();
+            if deficit <= 0.0 {
                 continue;
             }
-            stats.requested += magnitude as f64;
+            let shortfall = (deficit / want.abs()).clamp(0.0, 1.0);
+            let f = 1.0 + LATERAL_BOOST_MAX * strength * shortfall;
+            // Either face is a reason to convey faster, so a block takes the larger of the two.
+            let target = if horizontal { &mut boost_h } else { &mut boost_v };
+            target[b] = target[b].max(f);
+            target[neighbour] = target[neighbour].max(f);
+            stats.requested += deficit as f64;
             stats.boundaries += 1;
-            // Proportional to allowance, scaled as a whole so the face never delivers more than
-            // was asked for OR more than it has.
-            let scale = (magnitude / available).min(1.0);
-            if magnitude > available {
-                stats.limited += 1;
-            }
-            // Largest single-edge transfer across this face, which is what the two blocks'
-            // displacement hints are set from below.
-            let mut applied_here = 0.0f32;
-            for &(src, dst, allowance) in &alloc {
-                let moved = allowance * scale;
-                if moved <= MIN_CORRECTION {
-                    continue;
-                }
-                advect_properties(cell_colors, cell_props, src, dst, moved, heightmap.data[dst]);
-                heightmap.data[src] -= moved;
-                heightmap.data[dst] += moved;
-                stats.applied += moved as f64;
-                if horizontal {
-                    stats.lateral_applied += moved as f64;
-                }
-                stats.edges += 1;
-                applied_here = applied_here.max(moved);
-            }
-            // Both sides moved mass, so neither may be read as settled next tick, and the coarse
-            // level's incremental restrict has to re-read both tiles.
-            //
-            // The displacement hint is the mass actually moved, NOT a flat bump to
-            // `MUST_SIMULATE_THRESHOLD` -- exactly what `activate_neighbor` does on the ordinary
-            // transport path, and for the same reason. A flat bump forces both blocks to simulate
-            // next tick however tiny the correction was, and since the NUMBER of faces carrying
-            // some correction is nearly independent of `damping` (measured: 844 faces at damping
-            // 0.05 and 796 at 1.0, on Water), that turned into a large, damping-independent
-            // frame-time cost -- +93% on Water even at a damping where the correction moved almost
-            // no mass at all. Scaling the hint by what actually moved means a correction too small
-            // to matter does not clear the MUST bar, and the scheduler treats corrected mass on
-            // exactly the same terms as mass the solver itself moved.
-            if applied_here > 0.0 {
-                for &nb in &[b, neighbour] {
-                    if let Some(d) = last_displacements.get_mut(nb) {
-                        *d = d.max(applied_here);
-                    }
-                    if let Some(tv) = blocks_touched.get_mut(nb) {
-                        *tv = true;
-                    }
-                }
-            }
         }
     }
-    stats
+    for (i, &f) in boost_h.iter().enumerate() {
+        let g = boost_v[i];
+        if f > 1.0 || g > 1.0 {
+            stats.edges += 1;
+        }
+        stats.applied += (f - 1.0) as f64;
+        stats.lateral_applied += (f - 1.0) as f64;
+        stats.applied += (g - 1.0) as f64;
+    }
+    (boost_h, boost_v, stats)
 }
 
 /// See `COARSE_BANG_BANG_COUNT`'s doc comment.
@@ -5339,6 +5297,11 @@ pub fn settle_tick(
 
         let bx = b % cols;
         let by = b / cols;
+        // LATERAL-COARSE-CORRECTION.md: this block's lateral conveyance multiplier, read ONCE per
+        // block rather than per edge -- it is a per-block quantity and the thread-local lookup has
+        // no business being in the cell loop. `1.0` whenever the feature is off.
+        let lateral_boost = lateral_boost_at(b);
+        let vertical_boost = vertical_boost_at(b);
         let start_x = bx * block_size;
         let end_x = ((bx + 1) * block_size).min(w);
         let start_y = by * block_size;
@@ -5642,7 +5605,11 @@ pub fn settle_tick(
                         let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[(center_idx + w) * 4 + PROP_WETNESS]);
                         let candidate = flux_edge_candidate(
                             head_a, head_b,
-                            c_sq, damping, 0.0,
+                            // LATERAL-COARSE-CORRECTION.md: the VERTICAL conveyance boost. This edge is
+                            // gravity-aligned, so it takes the vertical deficit's multiplier, never the lateral
+                            // one -- a block starved of sideways transport is not a reason to drop material
+                            // faster. Every other term is untouched, so the solver still owns placement.
+                            c_sq * vertical_boost, damping, 0.0,
                             h_a, h_b,
                             max_accept_fwd, max_accept_bwd,
                             // STICKINESS.md: the `weight` slot is exactly where a per-edge
@@ -5822,7 +5789,12 @@ pub fn settle_tick(
                             let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[nb_idx * 4 + PROP_WETNESS]);
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
-                                c_sq, damping, 0.0,
+                                // LATERAL-COARSE-CORRECTION.md: the lateral conveyance boost. This edge is horizontal
+                                // (`nb_idx == center_idx + 1`), so it is exactly the transport the coarse level has an
+                                // opinion about. Scaling `c_sq` raises how much this edge MAY move; every other term --
+                                // availability, acceptor headroom, the yield stress, the +/-1 clamp -- is untouched, so
+                                // the fine solver still decides whether and where anything actually moves.
+                                c_sq * lateral_boost, damping, 0.0,
                                 h_a, h_b,
                                 max_accept_fwd, max_accept_bwd,
                                 1.0,
@@ -5889,7 +5861,11 @@ pub fn settle_tick(
                             let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[nb_idx * 4 + PROP_WETNESS]);
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
-                                c_sq, damping, 0.0,
+                                // LATERAL-COARSE-CORRECTION.md: the VERTICAL conveyance boost. This edge is
+                                // gravity-aligned, so it takes the vertical deficit's multiplier, never the lateral
+                                // one -- a block starved of sideways transport is not a reason to drop material
+                                // faster. Every other term is untouched, so the solver still owns placement.
+                                c_sq * vertical_boost, damping, 0.0,
                                 h_a, h_b,
                                 max_accept_fwd, max_accept_bwd,
                                 // See the other vertical site for why `weight` is the right slot.
@@ -6397,7 +6373,12 @@ pub fn settle_tick(
                             let candidate = flux_edge_candidate(
                                 head_a,
                                 head_b_full,
-                                c_sq, damping, tau_eff,
+                                // LATERAL-COARSE-CORRECTION.md: the lateral conveyance boost. This edge is horizontal
+                                // (`nb_idx == center_idx + 1`), so it is exactly the transport the coarse level has an
+                                // opinion about. Scaling `c_sq` raises how much this edge MAY move; every other term --
+                                // availability, acceptor headroom, the yield stress, the +/-1 clamp -- is untouched, so
+                                // the fine solver still decides whether and where anything actually moves.
+                                c_sq * lateral_boost, damping, tau_eff,
                                 avail_a, avail_b,
                                 max_accept_fwd, max_accept_bwd,
                                 pressure_weight,
@@ -6726,7 +6707,19 @@ pub fn settle_tick(
                             } else {
                                 1.0 + (rand_val - 0.5) * 0.80 // Natural stochastic noise in sandbox carving (+/- 40%)
                             };
-                            let mut flow = (alpha * (effective_slope - threshold) * alpha_noise).max(0.0);
+                            // LATERAL-COARSE-CORRECTION.md: the lateral conveyance boost, on the
+                            // granular CA's own transfer coefficient. `alpha` is the CA's `c_sq` --
+                            // the coefficient that turns an above-threshold slope into a flow rate
+                            // -- and sand's lateral transport runs through here, not through the
+                            // flux solver, so boosting only `c_sq` would leave DrySand untouched.
+                            //
+                            // Gated on `ndx != 0.0`: this is a LATERAL boost, and a diagonal or
+                            // gravity-aligned CA move must not be sped up by it. `effective_slope
+                            // - threshold` is untouched, so the angle of repose still decides
+                            // WHETHER this move happens at all -- the boost only changes how much
+                            // moves once the CA has already ruled the move admissible.
+                            let ca_boost = if ndx != 0.0 { lateral_boost } else { 1.0 };
+                            let mut flow = (alpha * ca_boost * (effective_slope - threshold) * alpha_noise).max(0.0);
                             
                             if let Some(q) = quantize_size {
                                 flow = (flow / q).round() * q;

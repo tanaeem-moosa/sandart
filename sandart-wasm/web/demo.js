@@ -921,17 +921,15 @@ function syncSettings() {
         if (fallJitterVal) fallJitterVal.innerText = fallJitter.toFixed(2);
         state.set_liquid_fall_jitter(fallJitter);
     }
-    // LATERAL-COARSE-CORRECTION.md: the coarse-grid flow correction and its two settings. The
-    // damping slider and the axis selector are hidden while the correction is off -- the sim never
-    // reads them then, so they would move without doing anything.
+    // LATERAL-COARSE-CORRECTION.md: the coarse-grid flow correction. The strength slider is
+    // hidden while the correction is off -- the sim never reads it then, so it would move without
+    // doing anything.
     const corrCheck = document.getElementById('check-coarse-flow-correction');
     if (corrCheck) {
         const corrOn = corrCheck.checked;
         state.set_coarse_flow_correction(corrOn);
         const dampRow = document.getElementById('coarse-correction-damping-row');
         if (dampRow) dampRow.style.display = corrOn ? '' : 'none';
-        const axesRow = document.getElementById('coarse-correction-axes-row');
-        if (axesRow) axesRow.style.display = corrOn ? '' : 'none';
         const statsRow = document.getElementById('coarse-correction-stats-row');
         if (statsRow) statsRow.style.display = corrOn ? '' : 'none';
         const dampSlider = document.getElementById('coarse-correction-damping-slider');
@@ -943,18 +941,18 @@ function syncSettings() {
             // position already on screen rather than the sim's own default.
             state.set_coarse_correction_damping(damping);
         }
-        const axesSelect = document.getElementById('coarse-correction-axes-select');
-        if (axesSelect) state.set_coarse_correction_axes(parseInt(axesSelect.value, 10) || 0);
         const statsVal = document.getElementById('coarse-correction-stats-val');
         if (statsVal && corrOn) {
             // [requested, applied, lateral_applied, boundaries, limited, edges] -- see
-            // `coarse_correction_stats` in sandart-wasm/src/lib.rs.
+            // `coarse_correction_stats` in sandart-wasm/src/lib.rs. Under the conveyance-boost
+            // design `edges` is "blocks carrying a boost" and `applied` is the summed boost above
+            // 1.0, so the useful readout is how many blocks are being sped up and by how much.
             const st = state.coarse_correction_stats();
-            const pct = st[0] > 0 ? (st[1] / st[0]) * 100 : 0;
-            const limPct = st[3] > 0 ? (st[4] / st[3]) * 100 : 0;
+            const blocks = st[5];
+            const mean = blocks > 0 ? 1 + st[1] / blocks : 1;
             statsVal.innerText =
-                `asked ${st[0].toFixed(1)}, moved ${st[1].toFixed(1)} (${pct.toFixed(0)}%), ` +
-                `${st[3].toFixed(0)} faces, ${limPct.toFixed(0)}% limited`;
+                `${blocks.toFixed(0)} blocks boosted, mean ${mean.toFixed(2)}x, ` +
+                `${st[3].toFixed(0)} faces short`;
         }
     }
     const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
@@ -1455,6 +1453,18 @@ function setupPanelInput() {
     if (overfillStiffSlider) {
         overfillStiffSlider.addEventListener('input', syncSettings);
         overfillStiffSlider.addEventListener('change', syncSettings);
+    }
+    // LATERAL-COARSE-CORRECTION.md. These were missing on the first cut, and their absence is
+    // exactly why the toggle "never turned off" and the slider "did not work": `syncSettings()`
+    // is driven entirely by explicit listeners, so an unregistered control changes nothing until
+    // some OTHER control happens to fire a sync -- at which point it picks up whatever the
+    // unregistered control was left at, which reads as a toggle that only ever turns on.
+    const coarseCorrCheck = document.getElementById('check-coarse-flow-correction');
+    if (coarseCorrCheck) coarseCorrCheck.addEventListener('change', syncSettings);
+    const coarseCorrDamp = document.getElementById('coarse-correction-damping-slider');
+    if (coarseCorrDamp) {
+        coarseCorrDamp.addEventListener('input', syncSettings);
+        coarseCorrDamp.addEventListener('change', syncSettings);
     }
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above
