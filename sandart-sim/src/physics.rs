@@ -1349,9 +1349,10 @@ pub fn compute_lateral_boost(
     // be behind on sideways transport while keeping up perfectly on downward transport, and
     // speeding up its vertical edges because its lateral edges are starved would be exactly the
     // "coarse level overrides the fine level's judgement" failure this design exists to avoid.
-    for (horizontal, coarse, fine) in
-        [(true, coarse_h, fine_h), (false, coarse_v, fine_v)]
-    {
+    for (horizontal, coarse, coarse_cross, fine, fine_cross) in [
+        (true, coarse_h, coarse_v, fine_h, fine_v),
+        (false, coarse_v, coarse_h, fine_v, fine_h),
+    ] {
         for b in 0..n_blocks {
             let (bx, by) = (b % cols, b / cols);
             let neighbour = if horizontal {
@@ -1365,19 +1366,52 @@ pub fn compute_lateral_boost(
                 }
                 b + cols
             };
+            // SCALE-FREE, and this is the whole correctness of the signal.
+            //
+            // The obvious comparison -- `coarse_flux * t*t` against `fine_flux` -- is invalid, and
+            // FLOW-DIRECTION.md says so in as many words: "Scaled into fine mass units the coarse
+            // level moves ~13x more material across those boundaries in BOTH directions -- which
+            // is not a finding, it is the restatement that a coarse sim transports faster because
+            // its cells are bigger. The lateral/down ratio within a level is scale-free, and it is
+            // the only comparison here that carries meaning."
+            //
+            // Comparing magnitudes anyway pins the shortfall near `1 - 1/13` on every block, which
+            // is exactly what the first version did: measured mean shortfall 1.07 and 1.09 at two
+            // different strengths, i.e. saturated, i.e. a flat global multiplier wearing the
+            // costume of a targeted correction.
+            //
+            // So each level is asked the same scale-free question instead: OF YOUR OWN TRANSPORT
+            // ACROSS THIS FACE, what share went along this axis? A coarse level that sends 12% of
+            // its transport sideways where the fine level sends 5% is a real, unit-free statement
+            // that the fine level is under-serving this direction, and it says nothing about cell
+            // size.
+            let coarse_axis = coarse[b].abs();
+            let coarse_other = coarse_cross[b].abs();
+            let fine_axis = fine[b].abs();
+            let fine_other = fine_cross[b].abs();
+            let coarse_tot = coarse_axis + coarse_other;
+            let fine_tot = fine_axis + fine_other;
+            if coarse_tot < MIN_WANT || fine_tot < MIN_WANT {
+                continue;
+            }
+            let coarse_share = coarse_axis / coarse_tot;
+            let fine_share = fine_axis / fine_tot;
+            if coarse_share <= fine_share {
+                continue;
+            }
+            // Direction still has to agree: the coarse level wanting more sideways transport is
+            // only a reason to convey faster if the fine level is not already pushing harder the
+            // other way. A fine level moving the opposite way is a disagreement about DIRECTION,
+            // which a conveyance multiplier cannot fix and would only amplify.
+            if fine[b] != 0.0 && coarse[b] != 0.0 && fine[b].signum() != coarse[b].signum() {
+                continue;
+            }
             let want = coarse[b] * coarse_to_fine;
-            if want.abs() < MIN_WANT {
-                continue;
-            }
-            // Signed: a deficit only counts when the fine level moved LESS in the same direction
-            // the coarse level did. A fine level that moved more, or moved the other way, is not a
-            // reason to convey faster -- it is already ahead, and boosting it would be a second
-            // wrong.
-            let deficit = want.abs() - fine[b] * want.signum();
-            if deficit <= 0.0 {
-                continue;
-            }
-            let shortfall = (deficit / want.abs()).clamp(0.0, 1.0);
+            // The shortfall is the gap between the two shares, normalised by the coarse level's
+            // own share, so a level already at the coarse level's mixture scores 0 and one sending
+            // nothing along this axis scores 1.
+            let shortfall = ((coarse_share - fine_share) / coarse_share).clamp(0.0, 1.0);
+            let deficit = shortfall * want.abs();
             let f = 1.0 + LATERAL_BOOST_MAX * strength * shortfall;
             // Either face is a reason to convey faster, so a block takes the larger of the two.
             let target = if horizontal { &mut boost_h } else { &mut boost_v };
