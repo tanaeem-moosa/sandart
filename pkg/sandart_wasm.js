@@ -312,17 +312,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
     }
     /**
-     * "Correct across" selector (LATERAL-COARSE-CORRECTION.md): which faces the correction may
-     * act on -- `0` lateral (the default, and where the measured deficit is), `1` vertical,
-     * `2` both. Anything else is treated as lateral rather than rejected, so a stale UI value
-     * can never leave the sim in a state the panel is not showing. See
-     * `physics::CorrectionAxes` for why lateral is the default.
-     * @param {number} axes
-     */
-    set_coarse_correction_axes(axes) {
-        wasm.wasmsimulationstate_set_coarse_correction_axes(this.__wbg_ptr, axes);
-    }
-    /**
      * "Correction strength" slider (LATERAL-COARSE-CORRECTION.md): under-relaxation on the
      * coarse level's opinion, `0.0..=1.0`. The coarse level is an approximation with no model of
      * repose, so its correction is damped rather than applied whole; `0.0` is equivalent to the
