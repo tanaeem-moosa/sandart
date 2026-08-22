@@ -2159,6 +2159,8 @@ fn flux_edge_candidate(
     weight: f32,
     v_e_prev: f32,
     alpha: f32,
+    // BIND_CENSUS only -- which axis this edge lies on. Costs nothing when the census is off.
+    horizontal: bool,
 ) -> f32 {
     let driving = head_a - head_b;
     let yielded = if driving > tau {
@@ -2171,15 +2173,112 @@ fn flux_edge_candidate(
 
     // `alpha` comes from `edge_momentum_alpha` -- see there for why the overfill path takes its own.
     let v_target = c_sq * yielded;
-    let v = (((1.0 - alpha) * v_e_prev + alpha * v_target) * damping).clamp(-1.0, 1.0);
+    let raw = ((1.0 - alpha) * v_e_prev + alpha * v_target) * damping;
+    let v = raw.clamp(-1.0, 1.0);
 
-    weight * if v > 0.0 {
+    let out = weight * if v > 0.0 {
         v.min(avail_a).min(max_accept_fwd)
     } else if v < 0.0 {
         -((-v).min(avail_b).min(max_accept_bwd))
     } else {
         0.0
+    };
+    // THE BINDING-CONSTRAINT CENSUS (LATERAL-COARSE-CORRECTION.md §6). Off unless enabled; when
+    // off this is one predictable branch on a thread-local bool. See `bind_census_record`.
+    bind_census_record(raw, v, yielded, avail_a, avail_b, max_accept_fwd, max_accept_bwd, horizontal);
+    out
+}
+
+thread_local! {
+    // THE BINDING-CONSTRAINT CENSUS. For every edge the flux solver evaluates, WHICH of the four
+    // terms actually decided the answer:
+    //
+    //   v    = clamp(c_sq * yielded * damping, -1, +1)
+    //   flux = min(v, avail_donor, headroom_acceptor)
+    //
+    // The question it exists to settle: the coarse conveyance boost raises `c_sq`, which can only
+    // change the outcome on an edge where CONVEYANCE is the binding term. It measured as no help
+    // at all on Water (-3% to -8% spread) and as saturating almost immediately on DrySand (+27.4%
+    // at strength 0.25, +27.8% at 1.0), and the standing explanation is that for a body of water a
+    // full neighbour means `headroom ~ 0` inside the pile while the flank saturates the +/-1 clamp
+    // -- so the boost is aimed at the one term that is never the limit. This counts it rather than
+    // arguing it.
+    //
+    // LATERAL EDGES ONLY -- the vertical ones are not what this question is about.
+    //
+    // Bins, in the order they are tested: 0 = YIELD (below `tau`, nothing was going to move -- the
+    // angle of repose said no), 1 = CLAMP (|raw| exceeded the +/-1.0 one-cell-per-tick limit),
+    // 2 = ACCEPTOR (the receiving cell's headroom was smallest), 3 = DONOR (the donating cell did
+    // not hold enough), 4 = CONVEYANCE (`v` itself was smallest -- THE ONLY BIN A `c_sq` BOOST CAN
+    // MOVE), 5 = total edges seen. Bin 6 accumulates the flux that DID flow on conveyance-bound
+    // edges and bin 7 the total flux, so the share is available by mass as well as by edge count.
+    static BIND_CENSUS_ENABLED: std::cell::Cell<bool> = std::cell::Cell::new(false);
+    static BIND_CENSUS: std::cell::Cell<[f64; 8]> = const { std::cell::Cell::new([0.0; 8]) };
+}
+
+/// See `BIND_CENSUS`. Enables the census and zeroes it.
+pub fn bind_census_enable(on: bool) {
+    BIND_CENSUS_ENABLED.with(|c| c.set(on));
+    BIND_CENSUS.with(|c| c.set([0.0; 8]));
+}
+
+/// See `BIND_CENSUS`. Reads the bins and zeroes them.
+pub fn bind_census_take() -> [f64; 8] {
+    BIND_CENSUS.with(|c| {
+        let v = c.get();
+        c.set([0.0; 8]);
+        v
+    })
+}
+
+/// See `BIND_CENSUS`. Classifies one evaluated edge by which term decided its flux.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+fn bind_census_record(
+    raw: f32,
+    v: f32,
+    yielded: f32,
+    avail_a: f32,
+    avail_b: f32,
+    max_accept_fwd: f32,
+    max_accept_bwd: f32,
+    horizontal: bool,
+) {
+    if !BIND_CENSUS_ENABLED.with(|c| c.get()) {
+        return;
     }
+    let (mag, avail, headroom) = if v > 0.0 {
+        (v, avail_a, max_accept_fwd)
+    } else if v < 0.0 {
+        (-v, avail_b, max_accept_bwd)
+    } else {
+        (0.0, 0.0, 0.0)
+    };
+    let bin = if yielded == 0.0 {
+        0
+    } else if raw.abs() > 1.0 {
+        1
+    } else if headroom <= avail && headroom < mag {
+        2
+    } else if avail < mag {
+        3
+    } else {
+        4
+    };
+    let flowed = mag.min(avail).min(headroom).max(0.0) as f64;
+    if !horizontal {
+        return;
+    }
+    BIND_CENSUS.with(|c| {
+        let mut acc = c.get();
+        acc[bin] += 1.0;
+        acc[5] += 1.0;
+        if bin == 4 {
+            acc[6] += flowed;
+        }
+        acc[7] += flowed;
+        c.set(acc);
+    });
 }
 
 /// Applies a *final* (post-arbitration) signed flux to one edge: the APPLY half of the
@@ -5622,6 +5721,7 @@ pub fn settle_tick(
                                 ),
                             prev_v,
                             edge_momentum_alpha(wetness, overfill_active),
+                            false,
                         );
                         cand_v[center_idx] = candidate;
                         edge_v_active[center_idx] = true;
@@ -5800,6 +5900,7 @@ pub fn settle_tick(
                                 1.0,
                                 edge_vel_h[center_idx],
                                 edge_momentum_alpha(wetness, overfill_active),
+                                true,
                             );
                             cand_h[center_idx] = candidate;
                             edge_h_active[center_idx] = true;
@@ -5874,6 +5975,7 @@ pub fn settle_tick(
                                 ),
                                 edge_vel_v[center_idx],
                                 edge_momentum_alpha(wetness, overfill_active),
+                                false,
                             );
                             cand_v[center_idx] = candidate;
                             edge_v_active[center_idx] = true;
@@ -6384,6 +6486,7 @@ pub fn settle_tick(
                                 pressure_weight,
                                 edge_vel_h[center_idx],
                                 edge_momentum_alpha(wetness, overfill_active),
+                                true,
                             );
                             cand_h[center_idx] = candidate;
                             edge_h_active[center_idx] = true;

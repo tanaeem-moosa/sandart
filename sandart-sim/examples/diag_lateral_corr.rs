@@ -142,6 +142,7 @@ fn run(
     overclock: bool,
     on: bool,
     damping: f32,
+    vertical: bool,
 ) -> Run {
     let mut sim = DrawingSimulation::new_with_size(grid);
     sim.sandbox_shape = SandboxShape::Hourglass;
@@ -152,6 +153,7 @@ fn run(
     sim.overclocking_enabled = overclock;
     sim.coarse_flow_correction = on;
     sim.coarse_correction_damping = damping;
+    sim.coarse_correction_vertical = vertical;
     let targets = [None; 5];
     for _ in 0..warm {
         sim.budget_n = budget;
@@ -260,17 +262,19 @@ fn main() {
     );
     for mat in mats {
         println!("=== {mat:?} ===");
-        let base = run(grid, mat, ticks, warm, budget, overclock, false, 0.0);
+        let base = run(grid, mat, ticks, warm, budget, overclock, false, 0.0, true);
         print_row("correction OFF", &base, None, None, None);
+        for &vertical in &[true, false] {
         for &d in &dampings {
-            let r = run(grid, mat, ticks, warm, budget, overclock, true, d);
+            let r = run(grid, mat, ticks, warm, budget, overclock, true, d, vertical);
             print_row(
-                &format!("strength {d:.2}"),
+                &format!("{} strength {d:.3}", if vertical { "both  " } else { "lat-only" }),
                 &r,
                 Some(base.spread1),
                 Some(base.ms),
                 Some(base.steps),
             );
+        }
         }
         println!();
     }

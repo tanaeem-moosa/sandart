@@ -682,6 +682,14 @@ pub struct DrawingSimulation {
     /// coarse tile; a no-op otherwise.
     pub coarse_flow_correction: bool,
 
+    /// LATERAL-COARSE-CORRECTION.md: whether the correction also boosts GRAVITY-ALIGNED
+    /// conveyance, not just lateral. Default `true` ("both axes", the user's call) and
+    /// deliberately NOT exposed in the Debug panel -- it exists so the diagnostics can separate
+    /// the two effects, which matters because they do not point the same way on liquid: the
+    /// vertical boost measurably speeds drainage, and a body of water that drains faster has less
+    /// time to level, so on Water the vertical half works against the lateral half.
+    pub coarse_correction_vertical: bool,
+
     /// LATERAL-COARSE-CORRECTION.md: under-relaxation on the coarse-grid correction, in `[0, 1]`.
     ///
     /// The coarse level is an approximation of the fine one -- a different grid, and with no model
@@ -1248,6 +1256,7 @@ impl DrawingSimulation {
             // group. `COARSE_CORRECTION_DEFAULT_DAMPING` is a starting value, not a measured
             // optimum -- see its own doc comment.
             coarse_flow_correction: false,
+            coarse_correction_vertical: true,
             coarse_correction_damping: COARSE_CORRECTION_DEFAULT_DAMPING,
             last_frame_correction: physics::LateralCorrectionStats::default(),
             max_clock_rate: CLOCK_RATE_MAX,
@@ -2822,7 +2831,10 @@ impl DrawingSimulation {
                 self.coarse_correction_damping,
             );
             self.last_frame_correction = stats;
-            physics::set_lateral_boost(&boost_h, &boost_v);
+            physics::set_lateral_boost(
+                &boost_h,
+                if self.coarse_correction_vertical { &boost_v } else { &[] },
+            );
             // Last tick's fine transport has now been consumed; the repetitions below accumulate
             // this tick's into a clean buffer.
             physics::lat_ledger_clear_fine();
