@@ -1532,8 +1532,19 @@ pub fn apply_coarse_delta_transport(
     if delta.len() < n_tiles || inside.len() < n_tiles || moved_tiles.len() < n_tiles {
         return stats;
     }
+    // `shape_mask` is indexed by the same fine index as `heights` below, after only a
+    // `heights.len()` bounds check, so the two must agree in length before any of that is safe.
+    if shape_mask.len() < heights.len() {
+        return stats;
+    }
     // Below this a face's request is f32 noise against the mass scale and acting on it is churn.
     const MIN_TRANSFER: f32 = 1e-5;
+
+    // Hoisted out of the face loop: there are `2 * coarse_n^2` faces (8192 at the shipped 64x64),
+    // and allocating two `t*t` vectors per face would be that many allocations every tick in a
+    // function that runs inside the frame. Cleared per use instead.
+    let mut donor_w = vec![0.0f32; t * t];
+    let mut recv_w = vec![0.0f32; t * t];
 
     // Per-cell capacity, honouring the same overfill allowance the solver uses, so "headroom" here
     // means the same thing it means everywhere else.
@@ -1608,7 +1619,7 @@ pub fn apply_coarse_delta_transport(
                 let (dx0, dy0) = tile_cells(donor);
                 let (rx0, ry0) = tile_cells(receiver);
 
-                let mut donor_w = vec![0.0f32; t * t];
+                donor_w.iter_mut().for_each(|w| *w = 0.0);
                 let mut donor_total = 0.0f32;
                 for j in 0..t {
                     for i in 0..t {
@@ -1621,7 +1632,7 @@ pub fn apply_coarse_delta_transport(
                         donor_total += avail;
                     }
                 }
-                let mut recv_w = vec![0.0f32; t * t];
+                recv_w.iter_mut().for_each(|w| *w = 0.0);
                 let mut recv_total = 0.0f32;
                 for j in 0..t {
                     for i in 0..t {
