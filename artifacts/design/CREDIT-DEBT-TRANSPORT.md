@@ -1,32 +1,40 @@
-# Credit/debt transport: a novel architecture with a dead sizing term — 2026-08-26
+# Credit/debt transport: the design, and the review that shrank it — 2026-08-26, rev. 2026-08-27
 
-> # DO NOT BUILD THE SIZING TERM. THE ARCHITECTURE IS UNVALIDATED, NOT REFUTED.
+> # THE LIVE DESIGN IS §2.3. EVERYTHING IN §3 IS SUPERSEDED.
 >
-> **The architecture is new.** Persistent signed per-face debt, deferred payment, and a priority
-> worklist that schedules blocks by disagreement **have not been built in this repository**. Designs
-> 1, 2 and 3 (LATERAL-COARSE-CORRECTION.md §2) were each one-shot per-tick corrections applied
-> inside the existing global-pass architecture. None of them had persistence, a ledger, or
-> block-at-a-time settling. Review did not refute this design; it refuted one term inside it.
+> **Read §2.3 first.** The document records three passes over one idea, and only the third is a
+> proposal. §§0-2.2 are the history and the review; §§3-6 are the superseded mechanism, kept because
+> what killed it is the reason §2.3 looks the way it does.
 >
-> **What is dead is the sizing term (§3.2).** `0.7 * (coarse_flux - fine_realised)` is Design 1's
-> defect verbatim — built, measured at +41% spread on DrySand for +10% frame time, and rejected on
-> visible seams (0.80 → 3.60 DrySand lateral, 0.94 → 4.74 Water). It also never self-zeroes (§3.9),
-> which disqualifies the uniform-axis argument in §3.5. **It must be replaced before implementation.**
-> Both candidate replacements in §3.9.1 — `div F = delta` and `Delta[C]` — do self-zero, so the §3.9
-> objection dies with the term rather than with the design.
+> **§2.3, in one paragraph.** Correct the fine level by a coarse-derived *mass* signal —
+> `Delta[C] = M[C] - A[C]`, already maintained, in fine mass units, zero at agreement — routed
+> between neighbouring tiles as half the difference of their `Delta`s, placed inside the receiving
+> block by that block's own interior solve, and capped by headroom, static geometry and donor tile
+> mass. Anchoring rises from `lambda = 0.1` to `0.5`. **There is no debt ledger and nothing is
+> stored**: `Delta` is recomputed from the true fine state every tick, so a tile that was not paid
+> simply still shows a `Delta`.
 >
-> **A correction to this document's first revision, which over-read the review.** §2.1 originally
-> framed "does a coarse budget break O(L^2)?" as the bar. That was never the design's claim. The
-> claim is that the fine level should track the coarse level, and the prize for that is the coarse
-> level's own levelling rate — a `t*t = 64` factor at grid 512. On a fixed-size real-time grid that
-> is the whole prize, not a consolation. See §2.1 as revised.
+> **What the review killed, and it was one term, not the design.**
+> `0.7 * (coarse_flux - fine_realised)` (§3.2) is Design 1's defect verbatim — built, measured at
+> +41% spread on DrySand for +10% frame time, rejected on visible seams (0.80 → 3.60 DrySand lateral,
+> 0.94 → 4.74 Water). It also never self-zeroes (§3.9), because its two terms count mass that moved
+> `t` cells against mass that moved 1. `Delta[C]` has neither defect.
 >
-> **The argument that most defends the design was missed by both the first draft and the review**,
-> and is now §2.2: a persistent debt decouples total transport from per-tick transport. That is
-> what no previous design had, and it is why the bound that killed Design 3 on water does not
-> obviously apply here.
+> **What the review got wrong, and what this document's first revision repeated.** §2.1 framed "does
+> a coarse budget break O(L^2)?" as the bar. That was never the claim. The claim is that the fine
+> level should track the coarse level, and the prize is the coarse level's own levelling rate — a
+> `t*t = 64` factor at grid 512, which on a fixed-size real-time grid is the whole prize.
 >
-> §7's ordering (U-tube fixture first, unconditionally) stands and is unaffected by any of this.
+> **What the earlier form cost that §2.3 does not pay.** Persistent debt state, the `mass_err`
+> rework, and all five bypass paths the review found (`restrict_incremental` staleness,
+> `activate_neighbor`, edge momentum, the granular CA, structurally unpayable debt). Nothing is
+> stored, so none of them exist. That deletion is the largest single change between revisions.
+>
+> **Still open, and honest about it:** `Delta` is per-tile while the credit is per-face, so
+> half-the-difference is a one-tile-lookahead approximation to `div F = Delta` (§7(ii), multigrid,
+> remains strictly stronger and unbuilt); and the U-tube fixture is deferred by user decision until
+> after a first lateral-flow test, which means the first measurement can show whether material moves
+> sideways but not whether the loop converges or oscillates.
 
 **Design only — nothing built, nothing measured.** Written against `f10fc15`. Every number quoted
 comes from an earlier measured document and is cited to it; nothing here has been measured.
@@ -45,16 +53,20 @@ Designs 1, 2 and 3 were all *one-shot per-tick corrections inside the existing g
 architecture* — Design 1 applied its defect "as a limited flux across the single line of cells at
 the block boundary", that tick, with nothing carried forward.
 
-**What has NOT been built:**
+**What has NOT been built** — none of these exists anywhere in the repo's history:
 
-- Persistent signed per-face debt that survives the frame
-- Deferred payment — block B settling a debt on a later tick, from its own interior solve, choosing
-  which of its own cells pay
-- A priority worklist scheduling blocks by disagreement, replacing the global repetition loop
-- Block-at-a-time settling of any kind
+- Correcting the fine level by a coarse-derived **mass** signal at all. Design 3, the shipped one,
+  sets a conveyance *coefficient*; Designs 1 and 2 moved mass but within the tick that computed it.
+- Persistent per-face debt, deferred payment, or block-at-a-time settling.
+- A worklist scheduling blocks by disagreement, replacing the global repetition loop.
 
-No prior design has any of these. A reader coming to this document to check "have we tried this
-before" should answer: **the term yes, the mechanism no.**
+A reader coming here to check "have we tried this before" should answer: **the sizing term yes, the
+mechanism no.**
+
+Note that §2.3 keeps only the first of those bullets. Persistent debt and deferred payment were
+proposed, reviewed, and then **deleted as unnecessary** once it was noticed that `Delta` recomputed
+each tick already carries the memory they were introduced to provide. They are recorded here as
+genuinely novel, and as genuinely not needed.
 
 ### 0.1 Design 1 — this design's §3.2, already built and rejected
 
@@ -248,11 +260,88 @@ That sentence is right. But the coarse level *as built* is a simulation, not a s
 at 64x64 with nothing above it. The thing that would make the sentence true — a multigrid V-cycle —
 is scoped in TASK55-MULTIGRID.md and **is not built**. See §7.
 
+### 2.3 SUPERSEDING REVISION — the design as it now stands (2026-08-27)
+
+Three corrections from the user collapse the mechanism. **This section replaces §3.** Everything
+below §2 is retained as the record of what was proposed first and why it did not hold.
+
+**Correction 1 — `0.7` is a request, not an outcome.** Headroom, aperture and donor-mass caps all
+bind, so realised transport is `<= 0.7 * signal` and frequently well under. Any argument that
+reasons from the nominal rate is reasoning from a ceiling.
+
+**Correction 2 — `Delta[C]` is recomputed from reality every tick, so it self-corrects.** `A[C]` is
+re-restricted from the true fine grid at the top of every `CoarseState::tick` (coarse.rs:810), so it
+is a fresh measurement, not an accumulator. If the credit moved mass, `Delta` shrinks honestly. **If
+the credit was capped, blocked, or simply not paid, `Delta` is still there next tick.**
+
+**Correction 3 — anchoring is independent and can be aggressive: `lambda = 0.1 -> 0.5`.**
+
+#### What these three changes buy
+
+**The persistent debt ledger is deleted. `Delta` already is the ledger.** A tile that was owed mass
+and did not get it shows the same `Delta` next tick. That is persistence, recomputed rather than
+stored — and it removes the single most expensive and most dangerous part of the earlier design:
+§3.1's debt state, the `mass_err` rework in §5.4, and all five bypass paths the review identified
+(`restrict_incremental` staleness, `activate_neighbor`, `edge_vel_h/v` momentum, the granular CA,
+structurally unpayable debt). None of those hazards exist if nothing is stored.
+
+**`lambda = 0.5` restores the grounding, which `0.7` against `0.1` had inverted.** Anchoring closes
+`Delta` by moving `M` (coarse forgets); the credit closes it by moving `A` (fine acts). At 0.7
+against 0.1 roughly 7/8 of every gap closed by fine accommodating coarse, which makes coarse the de
+facto authority and contradicts the architecture's own principle that fine is the source of truth.
+At 0.7 against 0.5 — less, given Correction 1 — the two are comparable.
+
+**And it changes what `Delta` means, for the better.** At `lambda = 0.1` the carried residual can
+accumulate to ~10 coarse steps of disagreement. At 0.5 it halves every tick, so `Delta` is
+approximately **one coarse step of transport measured from a freshly-tethered state**. That is
+exactly the amount worth borrowing, and it bounds a wrong coarse opinion to one step before
+anchoring erases it. Aggressive anchoring makes `Delta` safe to act on rather than too small to use.
+
+#### The mechanism, stated fresh
+
+1. **Signal.** `Delta[C] = M[C] - A[C]` (coarse.rs:758), per tile, in fine mass units, recomputed
+   every tick. Zero at agreement by construction — the self-zeroing property §3.2's term lacked.
+2. **Routing.** Between neighbouring tiles, move **half the difference** of their `Delta`s:
+   `transfer = 0.5 * (Delta[neighbour] - Delta[self])`, symmetric so it cannot double-count from
+   both sides, and the same relaxation the fine solver already applies to heights.
+3. **Rate.** Scale by the request factor (0.7 as a starting value), then cap.
+4. **Caps, unchanged from §3.3/§3.4.** Receiver headroom (exact); face aperture from `shape_mask`,
+   which is a hard no and readable on both sides since it is static geometry; donor coarse-tile
+   mass. Fine face *occupancy* is still NOT a cap — empty-now means cannot-pay-yet, and `Delta`
+   persisting next tick is what handles it.
+5. **Placement, unchanged from §3.6 and still the part that answers both prior failures.** The
+   receiving block distributes by its own interior solve — headroom and head field — never uniformly
+   across the face.
+6. **Direction disagreement, unchanged from §3.8.** Treat the far side as full when donating, empty
+   when borrowing, so zero transfer falls out of the caps rather than being a special case.
+7. **Anchoring.** `lambda = 0.5`. Fixed, not a UI slider, until a first test says otherwise.
+
+#### What is still open, honestly
+
+- **`Delta` is per-tile; the credit is per-face.** Half-the-difference is a local answer to a routing
+  question whose exact answer is `div F = Delta`. It looks one tile ahead, so it is a Gauss-Seidel
+  style approximation, and whether that carries material across a long span is the open empirical
+  question. §7(ii) — multigrid — remains the strictly stronger answer and remains unbuilt.
+- **§2.2's persistence argument needs re-stating and softening.** It was written against a stored
+  debt. With `Delta` recomputed, the credit still escapes Design 3's *coefficient* bound (it does not
+  run through `flux_edge_candidate`'s conveyance, so water's ~0.235/tick ceiling does not apply), but
+  it is still subject to a per-tick *transport* cap of broadly similar magnitude. The honest claim is
+  therefore narrower than §2.2 states: the gain is that transport is driven by the coarse level's
+  global opinion rather than by a local height difference — **not** that the per-tick bound is
+  escaped. This should be measured, not argued.
+- **The U-tube fixture is deferred** by user decision until after a first lateral-flow test. The
+  consequence to hold in mind: the existing spread metric is an aggregate, so it will show whether
+  material moves sideways but **not** whether the loop converges or oscillates. If spread improves
+  while block-steps or churn rise, that is the missing discriminator making itself felt, and the
+  fixture becomes the next thing to build.
+
 ---
 
-## 3. The mechanism, as agreed in discussion
+## 3. The mechanism as first proposed — SUPERSEDED by §2.3
 
-Preserved as proposed. §3.9 and §3.5 are where it fails.
+**Retained as the record of what was proposed first and what the review found. §2.3 is the live
+design.** §3.9 and §3.5 are where this form fails; §3.4, §3.6 and §3.8 carry forward into §2.3
+unchanged.
 
 ### 3.1 Signed per-face credit/debt, and it is real state
 
@@ -613,6 +702,12 @@ mass form.
 
 This is now the only part of this document that is a recommendation rather than a record.
 
+> **REVISED 2026-08-27.** The user has deferred the U-tube fixture until after a first lateral-flow
+> test: *"we will get to it after we fix lateral flow."* The ordering below is therefore (ii) first
+> in practice — build §2.3 and measure it on the existing spread metric. §(i) is retained unchanged
+> because the reasoning for it has not changed, only its position in the queue, and §2.3 records
+> what deferring it costs: the spread metric cannot distinguish converging from oscillating.
+
 ### (i) Build the U-tube fixture — regardless of what happens to this design
 
 It does not exist in the current test set. It is cheap. It is the correct discriminator for the
@@ -662,14 +757,24 @@ on a water scene and report *magnitudes* per face, not ratios. That sizes §6(e)
 
 ## 8. Summary
 
+**THE LIVE DESIGN IS §2.3.** What follows classifies the earlier form.
+
+**Deleted by §2.3, and this is the largest simplification in the document:**
+
+- §3.1's persistent debt state — `Delta[C]`, recomputed each tick, already is the ledger.
+- §5.4's `mass_err` rework and all five bypass paths. Nothing is stored, so nothing can go stale.
+- Deferred payment as a separate mechanism — a tile that was not paid simply shows the same
+  `Delta` next tick.
+
 **Novel, and NOT refuted — unvalidated is a different verdict:**
 
-- §3.1 — persistent signed per-face debt surviving the frame. No prior design has this.
-- §2.2 — persistence decouples total transport from per-tick transport, so the per-tick CFL bound
-  that killed Design 3 on water does not obviously apply. **The design's strongest claim.**
-- §3.7 — a priority worklist replacing the global repetition loop. Real work (see §4), not a
-  refutation.
-- Deferred payment: B settles on a later tick from its own interior solve.
+- Correcting the fine level by a coarse-derived mass signal rather than by a coefficient. No prior
+  design does this; Designs 1-3 were one-shot per-tick corrections, and Design 3 acts on
+  conveyance.
+- §3.7 — block scheduling by disagreement. Real work (see §4), not a refutation.
+- §2.2 — **softened, see §2.3.** The credit escapes Design 3's coefficient bound but not a per-tick
+  transport cap of similar size. The gain is that transport follows the coarse level's global
+  opinion rather than a local height difference. Measure it; do not argue it.
 
 **Survives:**
 
