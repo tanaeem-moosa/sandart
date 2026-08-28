@@ -129,6 +129,30 @@ const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
 /// `diag_lateral_corr` sweeps it. Whatever that sweep says should replace this number.
 const COARSE_CORRECTION_DEFAULT_DAMPING: f32 = 0.5;
 
+/// CREDIT-DEBT-TRANSPORT.md §2.3: the shipped default for `coarse_delta_transport_rate`. A starting
+/// value, not a measured optimum, and a REQUEST rather than an outcome -- the caps bind first.
+const COARSE_DELTA_TRANSPORT_DEFAULT_RATE: f32 = 0.7;
+
+/// CREDIT-DEBT-TRANSPORT.md §2.3: the anchoring rate `CoarseState::lambda` is raised to this while
+/// `coarse_delta_transport` is on, from the standing `COARSE_DEFAULT_LAMBDA` of 0.10.
+///
+/// **This is not a tuning knob, it is what keeps the fine level the source of truth.** Anchoring
+/// closes `Delta` by moving `M` (the coarse level forgets its opinion); the transport closes it by
+/// moving `A` (the fine level acts on it). At a transport rate of 0.7 against `lambda = 0.1`,
+/// roughly 7/8 of every gap would close by the fine level accommodating the coarse one -- which
+/// silently makes the coarse level the authority and inverts the architecture's own principle
+/// (`coarse.rs`: the coarse level is anchored to the fine one because the fine one is ground
+/// truth). At 0.5 the two are comparable.
+///
+/// It also changes what `Delta` MEANS, for the better. At 0.1 the carried residual can accumulate
+/// to ~10 coarse steps of disagreement; at 0.5 it halves every tick, so `Delta` is approximately
+/// **one coarse step of transport measured from a freshly-tethered state**. That is exactly the
+/// amount worth borrowing, and it bounds how wrong a coarse opinion can get before anchoring erases
+/// it. Aggressive anchoring is what makes `Delta` safe to act on, not what makes it too small.
+///
+/// Deliberately NOT a UI slider until a first test says one is needed.
+const COARSE_DELTA_TRANSPORT_LAMBDA: f32 = 0.5;
+
 /// The rate ladder the RANK rule fills (see `rank_clock_rates`), highest first. Integer steps
 /// down to 1x and octaves below it: above 1x a rate IS a repetition count, so fractional values
 /// there only round back onto these anyway (`extra_reps` rounds), while below 1x a rate is a
@@ -708,6 +732,38 @@ pub struct DrawingSimulation {
     /// linger on screen after the toggle goes off.
     pub last_frame_correction: physics::LateralCorrectionStats,
 
+    /// CREDIT-DEBT-TRANSPORT.md §2.3: **move mass between coarse tiles by half the difference of
+    /// their `Delta`s**, rather than boosting a conveyance coefficient.
+    ///
+    /// This is a different lever from `coarse_flow_correction`, not a variant of it. That one sets
+    /// a multiplier and moves nothing (`compute_lateral_boost`); this one moves mass directly
+    /// (`physics::apply_coarse_delta_transport`). The reason for a second lever is recorded in
+    /// f10fc15: a conveyance boost cannot carry the long-wavelength mode at all, because past the
+    /// CFL bound the extra coefficient becomes ringing rather than transport -- measured on water
+    /// at +0.6%/+0.4% spread for +75-118% block-steps.
+    ///
+    /// The two are independent toggles and CAN be on together, but there is no reason to expect
+    /// that to be better than either alone and it has not been measured. Default **off**.
+    ///
+    /// Requires the coarse level and the shipped geometry where a block IS a coarse tile. Unlike
+    /// the conveyance boost, which degrades gracefully to "no boost", this one refuses to run at
+    /// all off that path -- see `apply_coarse_delta_transport`'s doc comment for why a
+    /// mass-moving mechanism must not degrade gracefully.
+    pub coarse_delta_transport: bool,
+
+    /// CREDIT-DEBT-TRANSPORT.md §2.3: the request factor on `coarse_delta_transport`, in `[0, 1]`.
+    ///
+    /// **A request, not an outcome.** Donor mass, receiver headroom and face aperture all cap what
+    /// actually moves, so realised transport is `<= rate * half-the-difference` and frequently well
+    /// under. `last_frame_delta_transport.limited` is what says how often a cap bound.
+    ///
+    /// `0.7` is a starting value, not a measured optimum.
+    pub coarse_delta_transport_rate: f32,
+
+    /// CREDIT-DEBT-TRANSPORT.md §2.3: last frame's delta-transport statistics, for the Debug panel.
+    /// Zeroed on any tick the transport does not run.
+    pub last_frame_delta_transport: physics::DeltaTransportStats,
+
     /// Upper end of the clock-rate range `update_block_clock_rates` clamps to -- the runtime,
     /// UI-adjustable form of `CLOCK_RATE_MAX` (which remains the default and the hard ceiling a
     /// caller is expected to stay under). This is the single knob that sets how many
@@ -1259,6 +1315,11 @@ impl DrawingSimulation {
             coarse_correction_vertical: true,
             coarse_correction_damping: COARSE_CORRECTION_DEFAULT_DAMPING,
             last_frame_correction: physics::LateralCorrectionStats::default(),
+            // CREDIT-DEBT-TRANSPORT.md §2.3. Default OFF, like every other debug toggle in this
+            // group, and untested -- nothing about it has been measured yet.
+            coarse_delta_transport: false,
+            coarse_delta_transport_rate: COARSE_DELTA_TRANSPORT_DEFAULT_RATE,
+            last_frame_delta_transport: physics::DeltaTransportStats::default(),
             max_clock_rate: CLOCK_RATE_MAX,
             min_clock_rate: CLOCK_RATE_MIN,
             block_clock_rate: vec![1.0f32; cols * rows],
@@ -2766,6 +2827,23 @@ impl DrawingSimulation {
             self.last_frame_correction = physics::LateralCorrectionStats::default();
         }
 
+        // CREDIT-DEBT-TRANSPORT.md §2.3: raise anchoring while the delta transport is on, so the
+        // fine level stays the source of truth and `Delta` keeps meaning "one coarse step from a
+        // freshly-tethered state". See `COARSE_DELTA_TRANSPORT_LAMBDA`'s doc comment -- this is a
+        // correctness coupling, not a tuning choice, and it must be set BEFORE `coarse_state.tick`
+        // since that is what runs `anchor`.
+        let delta_transport_active = self.coarse_delta_transport
+            && self.coarse.available
+            && self.coarse_delta_transport_rate > 0.0;
+        self.coarse_state.lambda = if delta_transport_active {
+            COARSE_DELTA_TRANSPORT_LAMBDA
+        } else {
+            coarse::COARSE_DEFAULT_LAMBDA
+        };
+        if !delta_transport_active {
+            self.last_frame_delta_transport = physics::DeltaTransportStats::default();
+        }
+
         if self.coarse.available {
             // STEP4-COARSE-IS-A-SIM.md: the coarse level's own dynamics now run the shipped
             // solver over a nested grid (`CoarseState::advance_nested_sim`), so it needs the
@@ -2803,6 +2881,67 @@ impl DrawingSimulation {
             // Everything the coarse level moved this tick is now in the ledger's COARSE half;
             // everything the fine level moves below belongs in the FINE half.
             physics::lat_ledger_set_coarse(false);
+        }
+
+        // CREDIT-DEBT-TRANSPORT.md §2.3: move mass between tiles by half the difference of their
+        // `Delta`s, BEFORE this tick's `settle_tick` runs.
+        //
+        // The ordering is the design. `Delta` has just been recomputed against the fine state as it
+        // stands, so it is this tick's disagreement; the transport deposits a tile-level quantity
+        // spread by headroom, and the `settle_tick` immediately below is what actually places it.
+        // LATERAL-COARSE-CORRECTION.md's post-mortem on Designs 1 and 2 -- "both failed designs
+        // share one root: they let the coarse level decide WHERE mass goes" -- is why the coarse
+        // level is only ever allowed to say how much crosses a face, never where it lands.
+        //
+        // No debt ledger and nothing stored: `Delta` is recomputed from the true fine state every
+        // tick (`CoarseState::tick` re-restricts `A` first), so a tile that was owed mass and did
+        // not get it simply still shows a `Delta` next tick. That is persistence, recomputed rather
+        // than stored, and it is why this needs none of the ledger machinery an earlier draft of
+        // the design specified.
+        if delta_transport_active {
+            let n_tiles = self.coarse_state.delta.len();
+            let mut moved_tiles = vec![false; n_tiles];
+            let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
+            self.last_frame_delta_transport = physics::apply_coarse_delta_transport(
+                &mut self.heightmap.data,
+                &self.shape_mask,
+                &self.cell_props,
+                &self.coarse_state.delta,
+                &self.coarse.inside,
+                &mut moved_tiles,
+                self.heightmap.width,
+                self.heightmap.height,
+                self.block_size,
+                self.coarse.coarse_n,
+                self.coarse_delta_transport_rate,
+                overfill_ratio,
+            );
+            // MANDATORY, and the reason is a silent compounding corruption rather than a visible
+            // bug. `apply_coarse_delta_transport` writes fine heights outside `settle_tick`, so
+            // two invariants the rest of the system relies on have to be restored by hand:
+            //
+            // 1. `restrict_incremental` (coarse.rs) SKIPS any tile whose touched flag is false and
+            //    keeps its old `a_mass`. A tile we changed but did not mark would keep a stale
+            //    `A[C]` indefinitely, which corrupts `Delta`, `eta`, the clock scheduler AND this
+            //    transport's own signal -- a feedback loop feeding on its own error.
+            // 2. A block whose displacement stays below the MUST threshold is not classified into
+            //    `will_simulate`, so it would never sweep the mass we just gave it. The deposit
+            //    would sit there as a step in the height field until something else woke the block.
+            //
+            // Tile index == block index is guaranteed here: `apply_coarse_delta_transport` returns
+            // without moving anything unless `t == block_size`, which is exactly that identity.
+            for b in 0..moved_tiles.len() {
+                if !moved_tiles[b] {
+                    continue;
+                }
+                if b < self.blocks_touched.len() {
+                    self.blocks_touched[b] = true;
+                }
+                if b < self.last_displacements.len() {
+                    self.last_displacements[b] = self.last_displacements[b]
+                        .max(physics::MUST_SIMULATE_THRESHOLD * 2.0);
+                }
+            }
         }
 
         // LATERAL-COARSE-CORRECTION.md: turn this tick's coarse-vs-fine lateral deficit into a

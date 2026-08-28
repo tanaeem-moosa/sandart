@@ -391,6 +391,8 @@ impl WasmSimulationState {
         let grade_clock_rates = self.sim.grade_clock_rates;
         let coarse_flow_correction = self.sim.coarse_flow_correction;
         let coarse_correction_damping = self.sim.coarse_correction_damping;
+        let coarse_delta_transport = self.sim.coarse_delta_transport;
+        let coarse_delta_transport_rate = self.sim.coarse_delta_transport_rate;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -443,6 +445,10 @@ impl WasmSimulationState {
         // its damping slider and its axis selector must all survive a resolution rebuild.
         sim.coarse_flow_correction = coarse_flow_correction;
         sim.coarse_correction_damping = coarse_correction_damping;
+        // Same reasoning again: UI debug settings, not simulation state. CREDIT-DEBT-TRANSPORT.md
+        // §2.3's toggle and its rate slider must survive a resolution rebuild like their siblings.
+        sim.coarse_delta_transport = coarse_delta_transport;
+        sim.coarse_delta_transport_rate = coarse_delta_transport_rate;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -880,6 +886,48 @@ impl WasmSimulationState {
     /// `DrawingSimulation::coarse_correction_damping`.
     pub fn set_coarse_correction_damping(&mut self, damping: f32) {
         self.sim.coarse_correction_damping = damping.clamp(0.0, 1.0);
+    }
+
+    /// "Coarse delta transport" checkbox (CREDIT-DEBT-TRANSPORT.md §2.3): move mass between coarse
+    /// tiles by half the difference of their `Delta`s, before the frame's `settle_tick` runs.
+    ///
+    /// A DIFFERENT LEVER from `set_coarse_flow_correction`, not a variant of it: that one sets a
+    /// conveyance multiplier and moves no mass, this one moves mass and sets no coefficient. The
+    /// reason a second lever exists is that a coefficient cannot carry the long-wavelength mode at
+    /// all -- past the CFL bound the extra coefficient becomes ringing, measured on water at
+    /// +0.6%/+0.4% spread for +75-118% block-steps.
+    ///
+    /// Turning this on also raises the coarse level's anchoring rate (0.10 -> 0.50), which is a
+    /// correctness coupling rather than a tuning choice -- see `COARSE_DELTA_TRANSPORT_LAMBDA`.
+    /// Plain field write, safe every frame; a no-op unless the coarse level is available AND a
+    /// block is a coarse tile. See `DrawingSimulation::coarse_delta_transport`.
+    pub fn set_coarse_delta_transport(&mut self, enabled: bool) {
+        self.sim.coarse_delta_transport = enabled;
+    }
+
+    /// "Delta transport rate" slider (CREDIT-DEBT-TRANSPORT.md §2.3): the request factor on half
+    /// the difference, `0.0..=1.0`. A REQUEST, not an outcome -- donor mass, receiver headroom and
+    /// face aperture all cap what actually moves. `0.0` is equivalent to the toggle being off.
+    /// Plain field write, safe every frame. See `DrawingSimulation::coarse_delta_transport_rate`.
+    pub fn set_coarse_delta_transport_rate(&mut self, rate: f32) {
+        self.sim.coarse_delta_transport_rate = rate.clamp(0.0, 1.0);
+    }
+
+    /// CREDIT-DEBT-TRANSPORT.md §2.3: last frame's delta-transport accounting, for the Debug panel
+    /// -- `[faces_considered, faces_moved, requested, applied, limited, blocked]`. Masses in fine
+    /// mass units. `applied / requested` well below 1 means the caps bound, which is a finding
+    /// about what the fine level can supply rather than a fault. `blocked` counts faces with no
+    /// open fine cell pair at all.
+    pub fn coarse_delta_transport_stats(&self) -> Vec<f32> {
+        let s = &self.sim.last_frame_delta_transport;
+        vec![
+            s.faces_considered as f32,
+            s.faces_moved as f32,
+            s.requested as f32,
+            s.applied as f32,
+            s.limited as f32,
+            s.blocked as f32,
+        ]
     }
 
     /// LATERAL-COARSE-CORRECTION.md: last frame's correction accounting, for the Debug panel --

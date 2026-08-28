@@ -1433,6 +1433,255 @@ pub fn compute_lateral_boost(
     (boost_h, boost_v, stats)
 }
 
+/// Counters for `apply_coarse_delta_transport`. Diagnostic only; nothing reads these back into the
+/// physics.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct DeltaTransportStats {
+    /// Tile faces where both sides were inside and the geometry was open -- the candidate set.
+    pub faces_considered: u32,
+    /// Of those, faces that actually carried mass.
+    pub faces_moved: u32,
+    /// Sum of `|half-the-difference * rate|` over considered faces, before any cap.
+    pub requested: f64,
+    /// Sum of mass actually moved. Strictly less than `requested` when a cap bound.
+    pub applied: f64,
+    /// Faces where a cap (donor mass, receiver headroom, or aperture) cut the request short. A
+    /// high fraction is a finding -- the coarse level asking for transport the fine level cannot
+    /// supply -- not a bug.
+    pub limited: u32,
+    /// Faces skipped because the shared face had no open fine cell pair at all.
+    pub blocked: u32,
+}
+
+/// CREDIT-DEBT-TRANSPORT.md §2.3: **move mass between coarse tiles by half the difference of their
+/// `Delta`s.**
+///
+/// This is the third sizing term this project has tried and the first one that is both
+/// dimensionally commensurable and self-zeroing. The two rejected predecessors are worth naming
+/// here so nobody reaches for them again:
+///
+/// - `coarse_flux * t*t - fine_flux` (LATERAL-COARSE-CORRECTION.md Design 1) subtracts mass that
+///   moved `t` cells from mass that moved 1, so it restates the resolution ratio rather than
+///   measuring an error, and it never reaches zero. It measured +41% spread on DrySand and was
+///   rejected on visible seams.
+/// - A conveyance-coefficient boost (Design 3, shipped) cannot carry the long-wavelength mode at
+///   all: past the CFL bound the extra coefficient becomes ringing. Measured on water at
+///   +0.6%/+0.4%.
+///
+/// `Delta[C] = M[C] - A[C]` has neither defect. `A[C]` is a **sum** of the tile's fine cell heights
+/// (`CoarseState::restrict`), and `M[C]` is the coarse level's own mass state for that tile in the
+/// same units, so `Delta` is a fine-mass quantity with no `t*t` conversion anywhere -- that absence
+/// is the entire correctness argument. It is zero when the two levels agree, by construction.
+///
+/// **Half the difference.** `Delta` high means the coarse level thinks a tile should hold more than
+/// the fine level does, so it wants to receive. Moving mass `m` from `self` to `nb` raises
+/// `Delta[self]` by `m` and lowers `Delta[nb]` by `m`, so the two meet at
+/// `m = 0.5 * (Delta[nb] - Delta[self])` -- the same relaxation the fine solver already applies to
+/// heights, and symmetric, so evaluating the face from either side gives the same signed answer and
+/// it cannot double-count.
+///
+/// **What this does NOT do, deliberately.** It does not decide where inside the receiving tile the
+/// mass ends up in any physical sense: it deposits weighted by each cell's remaining headroom and
+/// withdraws weighted by each cell's available mass, and then the ordinary `settle_tick` that runs
+/// immediately afterwards does the real placement. That ordering is the point.
+/// LATERAL-COARSE-CORRECTION.md's post-mortem on the two failed designs -- *"both failed designs
+/// share one root: they let the coarse level decide **where** mass goes"* -- is the constraint this
+/// is built to respect. Headroom weighting is a bookkeeping choice about how to spread a tile-level
+/// quantity over cells, not a claim about the flow.
+///
+/// **Conservation is exact by construction.** The amount is clamped to the donor's total available
+/// mass and the receiver's total headroom *before* anything moves, then withdrawn and deposited as
+/// the same `amount` split by normalised weights, so the two sides sum to the same number and no
+/// individual cell can be driven below zero or above capacity.
+///
+/// **Hard off-path when `t != block_size`.** `compute_lateral_boost` degrades gracefully there
+/// (returns an empty boost), which is safe for a coefficient. A mechanism that MOVES MASS must not
+/// degrade gracefully: block index and tile index only coincide on the shipped path, and the caller
+/// relies on that identity to mark blocks touched and to re-activate them. So this returns without
+/// moving anything, and the caller must not pretend it ran.
+///
+/// `moved_tiles` is filled with one flag per coarse tile: `true` where this function changed any
+/// fine cell. The caller MUST use it to mark those blocks touched and to raise their displacement,
+/// or `restrict_incremental` will skip the tile next tick and `A[C]` goes stale -- which corrupts
+/// `Delta`, `eta` and the clock scheduler, silently and compounding.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_coarse_delta_transport(
+    heights: &mut [f32],
+    shape_mask: &[u8],
+    cell_props: &[f32],
+    delta: &[f32],
+    inside: &[bool],
+    moved_tiles: &mut [bool],
+    width: usize,
+    height: usize,
+    block_size: usize,
+    coarse_n: usize,
+    rate: f32,
+    overfill_ratio: f32,
+) -> DeltaTransportStats {
+    let mut stats = DeltaTransportStats::default();
+    if coarse_n == 0 || block_size == 0 || rate <= 0.0 || width == 0 || height == 0 {
+        return stats;
+    }
+    let t = width / coarse_n;
+    // See the doc comment: hard off-path, not graceful degradation.
+    if t == 0 || t != block_size || width % coarse_n != 0 {
+        return stats;
+    }
+    let n_tiles = coarse_n * coarse_n;
+    if delta.len() < n_tiles || inside.len() < n_tiles || moved_tiles.len() < n_tiles {
+        return stats;
+    }
+    // Below this a face's request is f32 noise against the mass scale and acting on it is churn.
+    const MIN_TRANSFER: f32 = 1e-5;
+
+    // Per-cell capacity, honouring the same overfill allowance the solver uses, so "headroom" here
+    // means the same thing it means everywhere else.
+    let cap_of = |fi: usize| -> f32 {
+        let wetness = cell_props
+            .get(fi * 4 + PROP_WETNESS)
+            .copied()
+            .unwrap_or(0.0);
+        cell_overfill_capacity_for(wetness, overfill_ratio)
+    };
+
+    // Walk each tile's +x and +y neighbour, so every face is visited exactly once.
+    for cy in 0..coarse_n {
+        for cx in 0..coarse_n {
+            let c = cy * coarse_n + cx;
+            if !inside[c] {
+                continue;
+            }
+            for axis in 0..2 {
+                let (nx, ny) = if axis == 0 { (cx + 1, cy) } else { (cx, cy + 1) };
+                if nx >= coarse_n || ny >= coarse_n {
+                    continue;
+                }
+                let nb = ny * coarse_n + nx;
+                if !inside[nb] {
+                    continue;
+                }
+
+                // Half the difference. Positive => mass flows c -> nb.
+                let want = 0.5 * (delta[nb] - delta[c]) * rate;
+                if !want.is_finite() || want.abs() < MIN_TRANSFER {
+                    continue;
+                }
+
+                let (donor, receiver) = if want > 0.0 { (c, nb) } else { (nb, c) };
+                let amount_wanted = want.abs();
+
+                // --- Aperture: the open fine cell pairs across this shared face. Static geometry,
+                // readable on both sides, and a hard zero blocks the face entirely.
+                let mut aperture = 0usize;
+                let mut aperture_cap = 0.0f32;
+                for k in 0..t {
+                    let (a_fi, b_fi) = if axis == 0 {
+                        let fy = cy * t + k;
+                        let fx = cx * t + t - 1;
+                        (fy * width + fx, fy * width + fx + 1)
+                    } else {
+                        let fx = cx * t + k;
+                        let fy = cy * t + t - 1;
+                        (fy * width + fx, (fy + 1) * width + fx)
+                    };
+                    if a_fi >= heights.len() || b_fi >= heights.len() {
+                        continue;
+                    }
+                    if shape_mask[a_fi] == crate::MASK_OUTSIDE || shape_mask[b_fi] == crate::MASK_OUTSIDE {
+                        continue;
+                    }
+                    aperture += 1;
+                    aperture_cap += cap_of(if want > 0.0 { b_fi } else { a_fi });
+                }
+                if aperture == 0 {
+                    stats.blocked += 1;
+                    continue;
+                }
+                stats.faces_considered += 1;
+                stats.requested += amount_wanted as f64;
+
+                // --- Donor availability and receiver headroom, per cell, over the whole tile.
+                let tile_cells = |tile: usize| -> (usize, usize) {
+                    (tile % coarse_n, tile / coarse_n)
+                };
+                let (dx0, dy0) = tile_cells(donor);
+                let (rx0, ry0) = tile_cells(receiver);
+
+                let mut donor_w = vec![0.0f32; t * t];
+                let mut donor_total = 0.0f32;
+                for j in 0..t {
+                    for i in 0..t {
+                        let fi = (dy0 * t + j) * width + (dx0 * t + i);
+                        if fi >= heights.len() || shape_mask[fi] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        let avail = heights[fi].max(0.0);
+                        donor_w[j * t + i] = avail;
+                        donor_total += avail;
+                    }
+                }
+                let mut recv_w = vec![0.0f32; t * t];
+                let mut recv_total = 0.0f32;
+                for j in 0..t {
+                    for i in 0..t {
+                        let fi = (ry0 * t + j) * width + (rx0 * t + i);
+                        if fi >= heights.len() || shape_mask[fi] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        let head = (cap_of(fi) - heights[fi]).max(0.0);
+                        recv_w[j * t + i] = head;
+                        recv_total += head;
+                    }
+                }
+
+                let amount = amount_wanted
+                    .min(donor_total)
+                    .min(recv_total)
+                    .min(aperture_cap);
+                if amount < MIN_TRANSFER || donor_total <= 0.0 || recv_total <= 0.0 {
+                    if amount < amount_wanted {
+                        stats.limited += 1;
+                    }
+                    continue;
+                }
+                if amount < amount_wanted {
+                    stats.limited += 1;
+                }
+
+                // --- Move it. Both sides split the SAME `amount` by normalised weights, so the
+                // withdrawal and the deposit are equal by construction.
+                for j in 0..t {
+                    for i in 0..t {
+                        let w = donor_w[j * t + i];
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        let fi = (dy0 * t + j) * width + (dx0 * t + i);
+                        heights[fi] -= amount * (w / donor_total);
+                    }
+                }
+                for j in 0..t {
+                    for i in 0..t {
+                        let w = recv_w[j * t + i];
+                        if w <= 0.0 {
+                            continue;
+                        }
+                        let fi = (ry0 * t + j) * width + (rx0 * t + i);
+                        heights[fi] += amount * (w / recv_total);
+                    }
+                }
+
+                moved_tiles[donor] = true;
+                moved_tiles[receiver] = true;
+                stats.faces_moved += 1;
+                stats.applied += amount as f64;
+            }
+        }
+    }
+    stats
+}
+
 /// See `COARSE_BANG_BANG_COUNT`'s doc comment.
 pub fn reset_bang_bang_count() {
     COARSE_BANG_BANG_COUNT.with(|c| c.set(0));
