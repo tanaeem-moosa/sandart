@@ -63,6 +63,20 @@ export class WasmSimulationState {
         return v1;
     }
     /**
+     * CREDIT-DEBT-TRANSPORT.md §2.3: last frame's delta-transport accounting, for the Debug panel
+     * -- `[faces_considered, faces_moved, requested, applied, limited, blocked]`. Masses in fine
+     * mass units. `applied / requested` well below 1 means the caps bound, which is a finding
+     * about what the fine level can supply rather than a fault. `blocked` counts faces with no
+     * open fine cell pair at all.
+     * @returns {Float32Array}
+     */
+    coarse_delta_transport_stats() {
+        const ret = wasm.wasmsimulationstate_coarse_delta_transport_stats(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @param {string} canvas_id
      * @param {number} width
      * @param {number} height
@@ -330,6 +344,35 @@ export class WasmSimulationState {
      */
     set_coarse_delta_overlay(enabled) {
         wasm.wasmsimulationstate_set_coarse_delta_overlay(this.__wbg_ptr, enabled);
+    }
+    /**
+     * "Coarse delta transport" checkbox (CREDIT-DEBT-TRANSPORT.md §2.3): move mass between coarse
+     * tiles by half the difference of their `Delta`s, before the frame's `settle_tick` runs.
+     *
+     * A DIFFERENT LEVER from `set_coarse_flow_correction`, not a variant of it: that one sets a
+     * conveyance multiplier and moves no mass, this one moves mass and sets no coefficient. The
+     * reason a second lever exists is that a coefficient cannot carry the long-wavelength mode at
+     * all -- past the CFL bound the extra coefficient becomes ringing, measured on water at
+     * +0.6%/+0.4% spread for +75-118% block-steps.
+     *
+     * Turning this on also raises the coarse level's anchoring rate (0.10 -> 0.50), which is a
+     * correctness coupling rather than a tuning choice -- see `COARSE_DELTA_TRANSPORT_LAMBDA`.
+     * Plain field write, safe every frame; a no-op unless the coarse level is available AND a
+     * block is a coarse tile. See `DrawingSimulation::coarse_delta_transport`.
+     * @param {boolean} enabled
+     */
+    set_coarse_delta_transport(enabled) {
+        wasm.wasmsimulationstate_set_coarse_delta_transport(this.__wbg_ptr, enabled);
+    }
+    /**
+     * "Delta transport rate" slider (CREDIT-DEBT-TRANSPORT.md §2.3): the request factor on half
+     * the difference, `0.0..=1.0`. A REQUEST, not an outcome -- donor mass, receiver headroom and
+     * face aperture all cap what actually moves. `0.0` is equivalent to the toggle being off.
+     * Plain field write, safe every frame. See `DrawingSimulation::coarse_delta_transport_rate`.
+     * @param {number} rate
+     */
+    set_coarse_delta_transport_rate(rate) {
+        wasm.wasmsimulationstate_set_coarse_delta_transport_rate(this.__wbg_ptr, rate);
     }
     /**
      * Coarse-level `eta` (hydraulic head) debug overlay: plumbed exactly like

@@ -994,6 +994,28 @@
                     <div class="field-label">Correction (mass/frame)</div>
                     <div id="coarse-correction-stats-val" class="val-display">—</div>
                 </div>
+                <!-- CREDIT-DEBT-TRANSPORT.md §2.3. A DIFFERENT LEVER from the conveyance boost
+                     above, not a variant of it: that one sets a multiplier and moves no mass, this
+                     one moves mass and sets no coefficient. Both can be on at once; there is no
+                     reason to expect that to be better than either alone and it has not been
+                     measured. Untested as of this commit -- nothing about it has been measured. -->
+                <label class="checkbox-container">
+                    Coarse delta transport
+                    <input type="checkbox" id="check-coarse-delta-transport">
+                    <span class="checkmark"></span>
+                </label>
+                <div class="field row" id="coarse-delta-transport-rate-row" style="display: none;">
+                    <label for="coarse-delta-transport-rate-slider" title="How much of the coarse level's disagreement with the fine level to act on each tick. Mass is moved between coarse tiles by half the difference in their disagreement, then the fine simulation decides where inside the tile it actually lands. This is a request, not an outcome -- available material, free space and the shape of the wall between two tiles all cap it first. 0 = off.">Delta transport rate</label>
+                    <span id="coarse-delta-transport-rate-val" class="val-display">0.70</span>
+                    <input type="range" id="coarse-delta-transport-rate-slider" min="0" max="1" step="0.05" value="0.7">
+                </div>
+                <!-- Delivered vs asked, plus how often a cap bound. A low delivered fraction is a
+                     finding about what the fine level can supply, not a fault. "blocked" counts
+                     tile faces with no open cell pair at all -- geometry, not physics. -->
+                <div id="coarse-delta-transport-stats-row" style="display: none;">
+                    <div class="field-label">Delta transport (mass/frame)</div>
+                    <div id="coarse-delta-transport-stats-val" class="val-display">—</div>
+                </div>
                 <div class="field row" id="overfill-stiffness-row">
                     <label for="overfill-stiffness-slider" title="How hard the fluid resists being compressed under its own weight. Low is springy and compressible; high is nearly incompressible. The overfill ceiling follows this automatically.">Fluid stiffness</label>
                     <span id="overfill-stiffness-val" class="val-display">5.0</span>

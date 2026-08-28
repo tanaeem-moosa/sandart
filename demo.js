@@ -955,6 +955,39 @@ function syncSettings() {
                 `${st[3].toFixed(0)} faces short`;
         }
     }
+    // CREDIT-DEBT-TRANSPORT.md §2.3: the coarse delta transport. Same show/hide reasoning as the
+    // conveyance correction above -- the rate slider and the stats readout are hidden while the
+    // toggle is off, because the sim never reads them then.
+    const deltaCheck = document.getElementById('check-coarse-delta-transport');
+    if (deltaCheck) {
+        const deltaOn = deltaCheck.checked;
+        state.set_coarse_delta_transport(deltaOn);
+        const rateRow = document.getElementById('coarse-delta-transport-rate-row');
+        if (rateRow) rateRow.style.display = deltaOn ? '' : 'none';
+        const dStatsRow = document.getElementById('coarse-delta-transport-stats-row');
+        if (dStatsRow) dStatsRow.style.display = deltaOn ? '' : 'none';
+        const rateSlider = document.getElementById('coarse-delta-transport-rate-slider');
+        if (rateSlider) {
+            const rate = parseFloat(rateSlider.value);
+            const rateVal = document.getElementById('coarse-delta-transport-rate-val');
+            if (rateVal) rateVal.innerText = rate.toFixed(2);
+            // Pushed even while the transport is off, same as the damping slider above, so
+            // switching it on picks up the slider position already on screen.
+            state.set_coarse_delta_transport_rate(rate);
+        }
+        const dStatsVal = document.getElementById('coarse-delta-transport-stats-val');
+        if (dStatsVal && deltaOn) {
+            // [faces_considered, faces_moved, requested, applied, limited, blocked] -- see
+            // `coarse_delta_transport_stats` in sandart-wasm/src/lib.rs. The useful readout is how
+            // much of what the coarse level asked for actually survived the caps.
+            const dt = state.coarse_delta_transport_stats();
+            const pct = dt[2] > 0 ? (100 * dt[3]) / dt[2] : 0;
+            dStatsVal.innerText =
+                `${dt[1].toFixed(0)}/${dt[0].toFixed(0)} faces moved, ` +
+                `${dt[3].toFixed(1)} of ${dt[2].toFixed(1)} (${pct.toFixed(0)}%), ` +
+                `${dt[4].toFixed(0)} capped, ${dt[5].toFixed(0)} blocked`;
+        }
+    }
     const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
     if (stiffnessSlider) {
         const stiffness = parseFloat(stiffnessSlider.value);
