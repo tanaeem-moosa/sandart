@@ -129,9 +129,25 @@ const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
 /// `diag_lateral_corr` sweeps it. Whatever that sweep says should replace this number.
 const COARSE_CORRECTION_DEFAULT_DAMPING: f32 = 0.5;
 
-/// CREDIT-DEBT-TRANSPORT.md §2.3: the shipped default for `coarse_delta_transport_rate`. A starting
-/// value, not a measured optimum, and a REQUEST rather than an outcome -- the caps bind first.
-const COARSE_DELTA_TRANSPORT_DEFAULT_RATE: f32 = 0.7;
+/// CREDIT-DEBT-TRANSPORT.md §2.3: the shipped default for `coarse_delta_transport_rate`. A REQUEST
+/// rather than an outcome -- the caps bind first.
+///
+/// **0.5, and this one IS measured** (`diag_delta_transport --sweep`, 256 DrySand hourglass, 300
+/// ticks, checkerboard amplitude as mean |laplacian| against a toggle-off baseline):
+///
+/// | rate | checker | descent |
+/// |------|---------|---------|
+/// | off  | 1.00x   | 20.45   |
+/// | 0.25 | 0.91x   | 25.37   |
+/// | 0.50 | 0.94x   | 27.86   |
+/// | 0.70 | 1.05x   | 29.03   |
+/// | 1.00 | 1.35x   | 30.11   |
+///
+/// 0.5 buys most of the available descent while leaving the checkerboard BELOW the baseline -- the
+/// transport is a net smoother there. Above ~0.7 it starts adding high-frequency energy instead,
+/// and 1.0 sits exactly at the 2D stability limit (see `apply_coarse_delta_transport`'s quarter
+/// factor), which is marginal by definition rather than a place to live.
+const COARSE_DELTA_TRANSPORT_DEFAULT_RATE: f32 = 0.5;
 
 /// CREDIT-DEBT-TRANSPORT.md §2.3: the anchoring rate `CoarseState::lambda` is raised to this while
 /// `coarse_delta_transport` is on, from the standing `COARSE_DEFAULT_LAMBDA` of 0.10.

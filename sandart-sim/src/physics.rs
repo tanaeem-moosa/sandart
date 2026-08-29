@@ -1596,9 +1596,26 @@ pub fn apply_coarse_delta_transport(
                 if !inside[nb] {
                     continue;
                 }
-                // Half the difference. Positive => mass flows c -> nb. Symmetric, so evaluating
-                // the face from either side gives the same signed answer.
-                let want = 0.5 * (delta[nb] - delta[c]) * rate;
+                // A QUARTER of the difference, not a half, and the factor is a stability bound
+                // rather than a taste. Positive => mass flows c -> nb. Symmetric either way round.
+                //
+                // Half the difference is what equalises a PAIR, and it is the correct and stable
+                // relaxation in 1D. In 2D a tile exchanges across FOUR faces independently within
+                // the same pass, so applying a half on each face moves up to twice the tile's whole
+                // disagreement in one tick -- exactly 2x the explicit stability limit for a 5-point
+                // Laplacian, which is `1/(2d) = 1/4`. Past that limit the unstable mode is the
+                // highest frequency the stencil supports: a CHECKERBOARD, plus row striping.
+                //
+                // That is not a derivation looking for a symptom. It was measured, on the user's
+                // own scene, after they reported the artifact on screen (`diag_delta_transport
+                // --sweep`, mean |laplacian| against a toggle-off baseline): 0.91x at rate 0.10,
+                // 1.05x at 0.35, 1.31x at 0.45, 1.72x at 0.70 -- which was the shipped default --
+                // and 4.52x at 1.00. The knee is where the bound says it should be.
+                //
+                // With the quarter folded in, `rate = 1.0` means exactly the 2D stability limit
+                // instead of twice it, so the whole slider range is stable by construction and the
+                // rate is once again only an under-relaxation knob.
+                let want = 0.25 * (delta[nb] - delta[c]) * rate;
                 if !want.is_finite() || want.abs() < MIN_TRANSFER {
                     continue;
                 }

@@ -1,4 +1,4 @@
-//! Empirical proof of six things about the "coarse delta transport" debug toggle
+//! Empirical proof of seven things about the "coarse delta transport" debug toggle
 //! (`DrawingSimulation::coarse_delta_transport`, CREDIT-DEBT-TRANSPORT.md §2.3):
 //!
 //! 1. Left at its default (`false`) is indistinguishable from explicitly setting it `false`.
@@ -18,6 +18,9 @@
 //!
 //! 6. **A symmetric vessel stays symmetric.** Added after the first five all passed while the
 //!    implementation was visibly broken on screen -- see that test's own comment.
+//! 7. **It does not grow a checkerboard.** Added after (6) ALSO passed while a second, different
+//!    artifact was visible on screen. Two escapes in a row is the reason both of these pin
+//!    physical invariants rather than implementation details.
 //!
 //! Mirrors `coarse_flow_correction_toggle.rs`'s structure, which mirrors
 //! `coarse_pressure_coupling_toggle.rs` in turn.
@@ -241,5 +244,73 @@ fn coarse_delta_transport_does_not_bias_a_symmetric_hourglass() {
          ticks. Gravity is vertical and the vessel is symmetric, so this is transport that depends \
          on tile visit order -- check that COLLECT/ARBITRATE/APPLY is intact and that nothing \
          mutates `heights` while the collection pass is still reading them"
+    );
+}
+
+/// SECOND REGRESSION TEST for a defect the suite did not catch and a user saw on screen: a
+/// CHECKERBOARD through the lower bulb and horizontal striping through the upper one.
+///
+/// Cause: `apply_coarse_delta_transport` originally moved HALF the difference of two tiles'
+/// `Delta` across each face. Half is what equalises a pair and is the correct, stable relaxation
+/// in 1D -- but in 2D a tile exchanges across four faces within the same pass, so a half on each
+/// face moves up to twice the tile's whole disagreement per tick. That is exactly 2x the explicit
+/// stability limit for a 5-point Laplacian, `1/(2d) = 1/4`, and past that limit the mode that grows
+/// is the highest frequency the stencil supports: a checkerboard.
+///
+/// Measured before the fix (`diag_delta_transport --sweep`, mean |laplacian| vs toggle off): 1.05x
+/// at rate 0.35, 1.31x at 0.45, 1.72x at the then-shipped default of 0.70, and 4.52x at 1.00.
+/// After folding the quarter in, 1.00 sits AT the limit rather than twice it and reads 1.35x, with
+/// everything at or below 0.55 landing under the baseline.
+///
+/// This pins the invariant at rate 1.0, the worst case the slider allows. A future sizing term that
+/// reintroduces an over-relaxation will fail here rather than on someone's screen.
+#[test]
+fn coarse_delta_transport_does_not_grow_checkerboard() {
+    fn checker(sim: &DrawingSimulation) -> f64 {
+        let (w, h) = (sim.heightmap.width, sim.heightmap.height);
+        let (mut acc, mut n) = (0.0f64, 0usize);
+        for y in 1..h - 1 {
+            for x in 1..w - 1 {
+                let i = y * w + x;
+                if sim.heightmap.data[i] <= 0.01 {
+                    continue;
+                }
+                let c = sim.heightmap.data[i] as f64;
+                let nb = (sim.heightmap.data[i - 1] as f64
+                    + sim.heightmap.data[i + 1] as f64
+                    + sim.heightmap.data[i - w] as f64
+                    + sim.heightmap.data[i + w] as f64)
+                    / 4.0;
+                acc += (c - nb).abs();
+                n += 1;
+            }
+        }
+        if n > 0 { acc / n as f64 } else { 0.0 }
+    }
+    fn go(rate: f32) -> f64 {
+        let mut sim = DrawingSimulation::new_with_size(256);
+        sim.sandbox_shape = SandboxShape::Hourglass;
+        sim.gravity_dir = Vec2::new(0.0, 0.04);
+        sim.apply_preset(MaterialMode::DrySand);
+        sim.overfill_pressure = true;
+        sim.initialize_hourglass();
+        sim.coarse_delta_transport = rate > 0.0;
+        sim.coarse_delta_transport_rate = rate;
+        let targets = [None; 5];
+        for _ in 0..300 {
+            sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 0.0, 16.6);
+        }
+        checker(&sim)
+    }
+
+    let base = go(0.0);
+    let hot = go(1.0);
+    let ratio = hot / base.max(1e-9);
+    assert!(
+        ratio < 2.0,
+        "coarse delta transport grew high-frequency (checkerboard) energy to {ratio:.2}x the \
+         toggle-off baseline at rate 1.0 ({hot:.5} vs {base:.5}). Rate 1.0 must sit AT the 2D \
+         stability limit, not past it -- check that the per-face factor is 1/4 and not 1/2. The \
+         broken version measured 4.52x here"
     );
 }

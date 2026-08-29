@@ -1006,8 +1006,8 @@
                 </label>
                 <div class="field row" id="coarse-delta-transport-rate-row" style="display: none;">
                     <label for="coarse-delta-transport-rate-slider" title="How much of the coarse level's disagreement with the fine level to act on each tick. Mass is moved between coarse tiles by half the difference in their disagreement, then the fine simulation decides where inside the tile it actually lands. This is a request, not an outcome -- available material, free space and the shape of the wall between two tiles all cap it first. 0 = off.">Delta transport rate</label>
-                    <span id="coarse-delta-transport-rate-val" class="val-display">0.70</span>
-                    <input type="range" id="coarse-delta-transport-rate-slider" min="0" max="1" step="0.05" value="0.7">
+                    <span id="coarse-delta-transport-rate-val" class="val-display">0.50</span>
+                    <input type="range" id="coarse-delta-transport-rate-slider" min="0" max="1" step="0.05" value="0.5">
                 </div>
                 <!-- Delivered vs asked, plus how often a cap bound. A low delivered fraction is a
                      finding about what the fine level can supply, not a fault. "blocked" counts
