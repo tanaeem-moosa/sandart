@@ -1532,31 +1532,55 @@ pub fn apply_coarse_delta_transport(
     if delta.len() < n_tiles || inside.len() < n_tiles || moved_tiles.len() < n_tiles {
         return stats;
     }
-    // `shape_mask` is indexed by the same fine index as `heights` below, after only a
-    // `heights.len()` bounds check, so the two must agree in length before any of that is safe.
+    // `shape_mask` is indexed by the same fine index as `heights`, after only a `heights.len()`
+    // bounds check, so the two must agree in length before any of that is safe.
     if shape_mask.len() < heights.len() {
         return stats;
     }
     // Below this a face's request is f32 noise against the mass scale and acting on it is churn.
     const MIN_TRANSFER: f32 = 1e-5;
 
-    // Hoisted out of the face loop: there are `2 * coarse_n^2` faces (8192 at the shipped 64x64),
-    // and allocating two `t*t` vectors per face would be that many allocations every tick in a
-    // function that runs inside the frame. Cleared per use instead.
-    let mut donor_w = vec![0.0f32; t * t];
-    let mut recv_w = vec![0.0f32; t * t];
-
-    // Per-cell capacity, honouring the same overfill allowance the solver uses, so "headroom" here
-    // means the same thing it means everywhere else.
     let cap_of = |fi: usize| -> f32 {
-        let wetness = cell_props
-            .get(fi * 4 + PROP_WETNESS)
-            .copied()
-            .unwrap_or(0.0);
+        let wetness = cell_props.get(fi * 4 + PROP_WETNESS).copied().unwrap_or(0.0);
         cell_overfill_capacity_for(wetness, overfill_ratio)
     };
+    let fine_idx = |tile: usize, i: usize, j: usize| -> usize {
+        ((tile / coarse_n) * t + j) * width + (tile % coarse_n) * t + i
+    };
 
-    // Walk each tile's +x and +y neighbour, so every face is visited exactly once.
+    // --- Frozen per-tile availability and headroom. Computed ONCE, from the state as it stands
+    // before anything moves, because every phase below has to agree on the same picture.
+    let mut avail = vec![0.0f32; n_tiles];
+    let mut headroom = vec![0.0f32; n_tiles];
+    for c in 0..n_tiles {
+        if !inside[c] {
+            continue;
+        }
+        let (mut a, mut h) = (0.0f32, 0.0f32);
+        for j in 0..t {
+            for i in 0..t {
+                let fi = fine_idx(c, i, j);
+                if fi >= heights.len() || shape_mask[fi] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                a += heights[fi].max(0.0);
+                h += (cap_of(fi) - heights[fi]).max(0.0);
+            }
+        }
+        avail[c] = a;
+        headroom[c] = h;
+    }
+
+    // --- 1. COLLECT. Every face's candidate transfer, computed from the FROZEN `delta` and the
+    // frozen heights. Nothing is applied in this phase, and that is the whole correctness of it:
+    // an earlier version mutated `heights` in place while scanning, which made a tile's transfer
+    // depend on how many neighbours the scan had already visited. That is a scan-order bias --
+    // measured as a monotone leftward drift of the centre of mass in a perfectly symmetric
+    // hourglass (`diag_delta_transport`), plus over-transport, because a tile that had already
+    // given mass away still read its original `Delta` on its second face and gave again.
+    let mut faces: Vec<(usize, usize, f32)> = Vec::new();
+    let mut out_total = vec![0.0f32; n_tiles];
+    let mut in_total = vec![0.0f32; n_tiles];
     for cy in 0..coarse_n {
         for cx in 0..coarse_n {
             let c = cy * coarse_n + cx;
@@ -1572,123 +1596,131 @@ pub fn apply_coarse_delta_transport(
                 if !inside[nb] {
                     continue;
                 }
-
-                // Half the difference. Positive => mass flows c -> nb.
+                // Half the difference. Positive => mass flows c -> nb. Symmetric, so evaluating
+                // the face from either side gives the same signed answer.
                 let want = 0.5 * (delta[nb] - delta[c]) * rate;
                 if !want.is_finite() || want.abs() < MIN_TRANSFER {
                     continue;
                 }
-
                 let (donor, receiver) = if want > 0.0 { (c, nb) } else { (nb, c) };
-                let amount_wanted = want.abs();
 
-                // --- Aperture: the open fine cell pairs across this shared face. Static geometry,
-                // readable on both sides, and a hard zero blocks the face entirely.
-                let mut aperture = 0usize;
+                // Aperture: open fine cell pairs across the shared face. Static geometry, and a
+                // hard zero blocks the face entirely.
                 let mut aperture_cap = 0.0f32;
+                let mut open = false;
                 for k in 0..t {
                     let (a_fi, b_fi) = if axis == 0 {
-                        let fy = cy * t + k;
-                        let fx = cx * t + t - 1;
+                        let (fy, fx) = (cy * t + k, cx * t + t - 1);
                         (fy * width + fx, fy * width + fx + 1)
                     } else {
-                        let fx = cx * t + k;
-                        let fy = cy * t + t - 1;
+                        let (fx, fy) = (cx * t + k, cy * t + t - 1);
                         (fy * width + fx, (fy + 1) * width + fx)
                     };
                     if a_fi >= heights.len() || b_fi >= heights.len() {
                         continue;
                     }
-                    if shape_mask[a_fi] == crate::MASK_OUTSIDE || shape_mask[b_fi] == crate::MASK_OUTSIDE {
+                    if shape_mask[a_fi] == crate::MASK_OUTSIDE
+                        || shape_mask[b_fi] == crate::MASK_OUTSIDE
+                    {
                         continue;
                     }
-                    aperture += 1;
+                    open = true;
                     aperture_cap += cap_of(if want > 0.0 { b_fi } else { a_fi });
                 }
-                if aperture == 0 {
+                if !open {
                     stats.blocked += 1;
                     continue;
                 }
                 stats.faces_considered += 1;
-                stats.requested += amount_wanted as f64;
+                stats.requested += want.abs() as f64;
 
-                // --- Donor availability and receiver headroom, per cell, over the whole tile.
-                let tile_cells = |tile: usize| -> (usize, usize) {
-                    (tile % coarse_n, tile / coarse_n)
-                };
-                let (dx0, dy0) = tile_cells(donor);
-                let (rx0, ry0) = tile_cells(receiver);
-
-                donor_w.iter_mut().for_each(|w| *w = 0.0);
-                let mut donor_total = 0.0f32;
-                for j in 0..t {
-                    for i in 0..t {
-                        let fi = (dy0 * t + j) * width + (dx0 * t + i);
-                        if fi >= heights.len() || shape_mask[fi] == crate::MASK_OUTSIDE {
-                            continue;
-                        }
-                        let avail = heights[fi].max(0.0);
-                        donor_w[j * t + i] = avail;
-                        donor_total += avail;
-                    }
-                }
-                recv_w.iter_mut().for_each(|w| *w = 0.0);
-                let mut recv_total = 0.0f32;
-                for j in 0..t {
-                    for i in 0..t {
-                        let fi = (ry0 * t + j) * width + (rx0 * t + i);
-                        if fi >= heights.len() || shape_mask[fi] == crate::MASK_OUTSIDE {
-                            continue;
-                        }
-                        let head = (cap_of(fi) - heights[fi]).max(0.0);
-                        recv_w[j * t + i] = head;
-                        recv_total += head;
-                    }
-                }
-
-                let amount = amount_wanted
-                    .min(donor_total)
-                    .min(recv_total)
-                    .min(aperture_cap);
-                if amount < MIN_TRANSFER || donor_total <= 0.0 || recv_total <= 0.0 {
-                    if amount < amount_wanted {
-                        stats.limited += 1;
-                    }
+                let amount = want.abs().min(aperture_cap);
+                if amount < MIN_TRANSFER {
+                    stats.limited += 1;
                     continue;
                 }
-                if amount < amount_wanted {
+                if amount < want.abs() {
                     stats.limited += 1;
                 }
-
-                // --- Move it. Both sides split the SAME `amount` by normalised weights, so the
-                // withdrawal and the deposit are equal by construction.
-                for j in 0..t {
-                    for i in 0..t {
-                        let w = donor_w[j * t + i];
-                        if w <= 0.0 {
-                            continue;
-                        }
-                        let fi = (dy0 * t + j) * width + (dx0 * t + i);
-                        heights[fi] -= amount * (w / donor_total);
-                    }
-                }
-                for j in 0..t {
-                    for i in 0..t {
-                        let w = recv_w[j * t + i];
-                        if w <= 0.0 {
-                            continue;
-                        }
-                        let fi = (ry0 * t + j) * width + (rx0 * t + i);
-                        heights[fi] += amount * (w / recv_total);
-                    }
-                }
-
-                moved_tiles[donor] = true;
-                moved_tiles[receiver] = true;
-                stats.faces_moved += 1;
-                stats.applied += amount as f64;
+                out_total[donor] += amount;
+                in_total[receiver] += amount;
+                faces.push((donor, receiver, amount));
             }
         }
+    }
+
+    // --- 2. ARBITRATE. Several faces can legally claim the same tile's mass or the same tile's
+    // headroom and together ask for more than it has. This is the identical min-of-two-ratios
+    // projection `edge_arbitration_scale` applies per cell, at tile granularity: scaling every
+    // outgoing claim by `avail / out_total` bounds their sum by exactly `avail`, so it is single
+    // pass and exact rather than iterative.
+    let scale = |total: f32, budget: f32| -> f32 {
+        if total > budget && total > 0.0 { budget / total } else { 1.0 }
+    };
+    let mut net = vec![0.0f32; n_tiles];
+    for &(donor, receiver, amount) in &faces {
+        let f = scale(out_total[donor], avail[donor]).min(scale(in_total[receiver], headroom[receiver]));
+        // `limited` must count arbitration too, not just the aperture cap in phase 1 -- the whole
+        // point of the readout is "how much of what the coarse level asked for survived", and
+        // oversubscribed donors/acceptors are the dominant reason it does not.
+        if f < 1.0 {
+            stats.limited += 1;
+        }
+        let moved = amount * f;
+        if moved < MIN_TRANSFER {
+            continue;
+        }
+        net[donor] -= moved;
+        net[receiver] += moved;
+        stats.faces_moved += 1;
+        stats.applied += moved as f64;
+    }
+
+    // --- 3. APPLY. Each tile is written exactly once, from its NET change, so no tile's weights
+    // are disturbed by another tile's application and the result does not depend on tile order.
+    // `net` is bounded by `headroom` when positive and by `avail` when negative (phase 2
+    // guarantees both), so no cell can be driven past capacity or below zero.
+    for c in 0..n_tiles {
+        let n = net[c];
+        if n.abs() < MIN_TRANSFER {
+            continue;
+        }
+        let positive = n > 0.0;
+        let mut total = 0.0f32;
+        for j in 0..t {
+            for i in 0..t {
+                let fi = fine_idx(c, i, j);
+                if fi >= heights.len() || shape_mask[fi] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                total += if positive {
+                    (cap_of(fi) - heights[fi]).max(0.0)
+                } else {
+                    heights[fi].max(0.0)
+                };
+            }
+        }
+        if total <= 0.0 {
+            continue;
+        }
+        for j in 0..t {
+            for i in 0..t {
+                let fi = fine_idx(c, i, j);
+                if fi >= heights.len() || shape_mask[fi] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let w = if positive {
+                    (cap_of(fi) - heights[fi]).max(0.0)
+                } else {
+                    heights[fi].max(0.0)
+                };
+                if w <= 0.0 {
+                    continue;
+                }
+                heights[fi] += n * (w / total);
+            }
+        }
+        moved_tiles[c] = true;
     }
     stats
 }

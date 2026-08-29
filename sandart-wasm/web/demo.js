@@ -1499,6 +1499,17 @@ function setupPanelInput() {
         coarseCorrDamp.addEventListener('input', syncSettings);
         coarseCorrDamp.addEventListener('change', syncSettings);
     }
+    // CREDIT-DEBT-TRANSPORT.md §2.3's toggle and rate slider. Same registration the comment above
+    // exists to demand: `syncSettings()` reads every control, but nothing CALLS it unless a
+    // registered control fires, so an unregistered one appears to do nothing until some unrelated
+    // control is touched and drags its value along.
+    const coarseDeltaCheck = document.getElementById('check-coarse-delta-transport');
+    if (coarseDeltaCheck) coarseDeltaCheck.addEventListener('change', syncSettings);
+    const coarseDeltaRate = document.getElementById('coarse-delta-transport-rate-slider');
+    if (coarseDeltaRate) {
+        coarseDeltaRate.addEventListener('input', syncSettings);
+        coarseDeltaRate.addEventListener('change', syncSettings);
+    }
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above
     // tick() for why this never touches syncSettings or wasm).

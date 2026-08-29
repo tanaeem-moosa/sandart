@@ -1,4 +1,4 @@
-//! Empirical proof of five things about the "coarse delta transport" debug toggle
+//! Empirical proof of six things about the "coarse delta transport" debug toggle
 //! (`DrawingSimulation::coarse_delta_transport`, CREDIT-DEBT-TRANSPORT.md §2.3):
 //!
 //! 1. Left at its default (`false`) is indistinguishable from explicitly setting it `false`.
@@ -15,6 +15,9 @@
 //! 5. **It does not drive any cell negative or past capacity.** The per-cell corollary of (4) --
 //!    a total that balances while individual cells went out of range would still be a bug, and a
 //!    checksum test cannot see it.
+//!
+//! 6. **A symmetric vessel stays symmetric.** Added after the first five all passed while the
+//!    implementation was visibly broken on screen -- see that test's own comment.
 //!
 //! Mirrors `coarse_flow_correction_toggle.rs`'s structure, which mirrors
 //! `coarse_pressure_coupling_toggle.rs` in turn.
@@ -176,4 +179,67 @@ fn coarse_delta_transport_keeps_cells_in_range() {
             );
         }
     }
+}
+
+/// REGRESSION TEST for the defect the five tests above did not catch, and which a user found by
+/// looking at the screen: *"hourglass is not falling. It is attached to the right."*
+///
+/// The first implementation walked tiles in scan order and mutated `heights` IN PLACE while the
+/// `Delta` it was reading stayed frozen. Two consequences, both invisible to a checksum, a mass
+/// sum, or a per-cell range check:
+///
+/// 1. **Scan-order bias.** A face's transfer depended on how many of its neighbours the loop had
+///    already visited, so a left-to-right, top-to-bottom walk biased transport in that direction.
+///    Measured as the centre of mass of a perfectly symmetric hourglass drifting monotonically to
+///    `dx = -2.34` over 200 ticks, against `-0.02` with the toggle off.
+/// 2. **Over-transport.** A tile that had already given mass away still read its original `Delta`
+///    on its second face and gave again, which smeared material across the vessel instead of
+///    letting it fall -- the same failure LATERAL-COARSE-CORRECTION.md records for Design 2.
+///
+/// The fix was to split the pass into COLLECT / ARBITRATE / APPLY so nothing is applied until
+/// every face has been costed against the same frozen state. This test pins the property that
+/// makes that fix necessary: **a symmetric vessel under symmetric gravity must stay symmetric.**
+/// It is a physical invariant, not an implementation detail, so it holds for any future sizing
+/// term too.
+#[test]
+fn coarse_delta_transport_does_not_bias_a_symmetric_hourglass() {
+    fn com_x(sim: &DrawingSimulation) -> f64 {
+        let w = sim.heightmap.width;
+        let (mut mx, mut m) = (0.0f64, 0.0f64);
+        for (i, &h) in sim.heightmap.data.iter().enumerate() {
+            if h > 0.0 {
+                mx += h as f64 * (i % w) as f64;
+                m += h as f64;
+            }
+        }
+        if m > 0.0 { mx / m } else { 0.0 }
+    }
+
+    let mut sim = DrawingSimulation::new_with_size(256);
+    sim.sandbox_shape = SandboxShape::Hourglass;
+    sim.gravity_dir = Vec2::new(0.0, 0.04);
+    sim.apply_preset(MaterialMode::DrySand);
+    sim.overfill_pressure = true;
+    sim.initialize_hourglass();
+    sim.coarse_delta_transport = true;
+    sim.coarse_delta_transport_rate = 0.7;
+
+    let start = com_x(&sim);
+    let targets = [None; 5];
+    for _ in 0..200 {
+        sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 0.0, 16.6);
+    }
+    let drift = (com_x(&sim) - start).abs();
+
+    // Gravity is straight down and the hourglass is symmetric about its vertical axis, so the only
+    // lateral drift available is numerical. The broken version reached 2.34 cells; the fixed one
+    // sits at 0.03, against a toggle-off baseline of 0.02. A cell of slack is generous and still
+    // two orders of magnitude below the defect.
+    assert!(
+        drift < 1.0,
+        "coarse delta transport biased a symmetric hourglass sideways by {drift} cells over 200 \
+         ticks. Gravity is vertical and the vessel is symmetric, so this is transport that depends \
+         on tile visit order -- check that COLLECT/ARBITRATE/APPLY is intact and that nothing \
+         mutates `heights` while the collection pass is still reading them"
+    );
 }
