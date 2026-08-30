@@ -1,9 +1,7 @@
-pub mod coarse;
 pub mod grid;
 pub mod physics;
 pub mod quantiles;
 
-pub use coarse::{CoarseGeometry, CoarseState, COARSE_GRID};
 pub use grid::Heightmap;
 pub use physics::{ActiveBounds, displace_line, settle_tick};
 pub use quantiles::{
@@ -27,10 +25,6 @@ use serde::{Deserialize, Serialize};
 thread_local! {
     static EARLY_TERM_LOG: std::cell::RefCell<Vec<(u32, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
-pub fn early_term_log_take() -> Vec<(u32, i32)> {
-    EARLY_TERM_LOG.with(|c| std::mem::take(&mut *c.borrow_mut()))
-}
-
 pub const GRID_SIZE: usize = 512;
 pub const DEFAULT_SAND_HEIGHT: f32 = 0.35;
 
@@ -64,110 +58,10 @@ pub const MASK_BOUNDARY: u8 = 2;
 /// up at all, not whether it's expected to move once it has.
 const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
 
-/// EARLY-STOP.md: per-block clock rate is now an ARBITRARY value in `[CLOCK_RATE_MIN,
-/// CLOCK_RATE_MAX]` = `[1/8, 16]`, not quantised to a power of two.
-///
-/// The ceiling was 8 until rate GRADING landed (`grade_clock_rates`). Grading makes a high
-/// ceiling self-limiting rather than dangerous: a block can only reach 16x if it sits in a fast
-/// region wide enough to ramp there one step at a time from its surroundings, so raising the
-/// ceiling grants headroom where the scene genuinely earns it instead of licensing isolated
-/// blocks to sprint away from their neighbours. Without grading, treat 8 as the practical limit.
-///
-/// HIERARCHICAL-PRESSURE.md §7b's S1 justified the old power-of-two quantisation as needed "so
-/// clock domains nest instead of beating" and so a shared edge never sees one side mid-step. That
-/// reasoning does not apply to this implementation, and it was checked rather than assumed:
-/// `update()` repeats whole `settle_tick` calls over a participation set, and every repetition is
-/// a global synchronisation point -- a block either runs in that rep or it does not, atomically
-/// (see `force_overclocked_blocks_active`). There is no partial per-substep state for two
-/// non-nesting rates to desynchronise; a rate-3 block sitting out rep 3 while a rate-4 neighbour
-/// runs is structurally identical to the old rate-2 block sitting out rep 1 while a rate-4
-/// neighbour ran. S3 (edge ownership across a clock-rate boundary, below) is unchanged and is the
-/// place this reasoning would show up if it were wrong -- it forces every neighbour of a running
-/// block regardless of the neighbour's own rate, a mechanism that was always rate-value-agnostic.
-///
-/// The one residual risk §7b named -- a beat against the known period-2 checkerboard mode -- is
-/// measurable, not theoretical: `vpar` in `diag_overclock_ab`'s oscillation measurement (the
-/// production-resolution analogue of `overfill_pressure_toggle.rs`'s
-/// `diag_task70_rest_color_mixing_and_checkerboard`) is the instrument. An earlier revision of
-/// this comment claimed it had been run under arbitrary rates; it had not (EARLY-STOP.md records
-/// that run being killed). It has now: `vpar` is -0.004 (Water) and -0.000 (DrySand) with
-/// clocking on, against -0.000 / -0.002 with it off -- no parity split, so the beat §7b feared
-/// does not appear. Settled CHURN is a separate reading and is NOT clean: Water churns
-/// 0.000271/cell/tick clocked against 0.000029 unclocked and a 0.000025 at-rest baseline
-/// (DrySand moves the other way, 0.000745 against 0.006274). That is measured under the
-/// continuous rule only, with no quantised-rule control, so it is not yet attributable to
-/// arbitrary rates -- and it is why `overclocking_enabled` stays default OFF.
-///
-/// With early stop (below) bounding a block's real repetitions at its own physical settle point,
-/// `rate` is now a BUDGET, not a mandate, which is what makes a plain continuous rule -- no
-/// hysteresis, no octave stepping -- safe to ship in place of the old one: the exact value matters
-/// far less once physics, not the schedule, decides how many sub-steps a block actually gets.
-const CLOCK_RATE_MIN: f32 = 0.125;
-const CLOCK_RATE_MAX: f32 = 16.0;
 
-/// The disagreement fraction (`|Delta[b]| / capacity[b]`, dimensionless) at which a block is
-/// judged to want to run at the neutral 1x rate. `update_block_clock_rates` maps `signal /
-/// CLOCK_DELTA_REF_FRAC` directly onto `rate`, continuously (EARLY-STOP.md: the old octave-stepped
-/// hysteresis is gone, along with the power-of-two quantisation -- see `CLOCK_RATE_MIN`'s doc
-/// comment for why removing both is safe here). Picked as a round, conservative number pending a
-/// larger tuning pass -- see OVERCLOCKING.md for the rate distribution the old scheme produced at
-/// this same reference fraction.
-const CLOCK_DELTA_REF_FRAC: f32 = 0.05;
 
-/// LATERAL-COARSE-CORRECTION.md: the shipped default for `coarse_correction_damping`.
-///
-/// **0.5, and this is a starting value rather than a measured optimum.** The reasoning for
-/// starting at a half rather than at 1.0: the defect formulation makes 1.0 the *natural* value
-/// ("the coarse level moved this much, the fine level moved that much, make up the difference"),
-/// but the coarse level is not a Galerkin projection of the fine one -- different grid, and no
-/// model of the angle of repose whatsoever -- so its answer carries real approximation error and
-/// under-relaxing a coarse-grid correction under exactly those conditions is standard rather than
-/// timid. A half also means an unstable interaction, if there is one, ratchets in over several
-/// ticks instead of arriving whole on the first, which is the difference between a visible artifact
-/// and a divergence.
-///
-/// `diag_lateral_corr` sweeps it. Whatever that sweep says should replace this number.
-const COARSE_CORRECTION_DEFAULT_DAMPING: f32 = 0.5;
 
-/// CREDIT-DEBT-TRANSPORT.md §2.3: the shipped default for `coarse_delta_transport_rate`. A REQUEST
-/// rather than an outcome -- the caps bind first.
-///
-/// **0.5, and this one IS measured** (`diag_delta_transport --sweep`, 256 DrySand hourglass, 300
-/// ticks, checkerboard amplitude as mean |laplacian| against a toggle-off baseline):
-///
-/// | rate | checker | descent |
-/// |------|---------|---------|
-/// | off  | 1.00x   | 20.45   |
-/// | 0.25 | 0.91x   | 25.37   |
-/// | 0.50 | 0.94x   | 27.86   |
-/// | 0.70 | 1.05x   | 29.03   |
-/// | 1.00 | 1.35x   | 30.11   |
-///
-/// 0.5 buys most of the available descent while leaving the checkerboard BELOW the baseline -- the
-/// transport is a net smoother there. Above ~0.7 it starts adding high-frequency energy instead,
-/// and 1.0 sits exactly at the 2D stability limit (see `apply_coarse_delta_transport`'s quarter
-/// factor), which is marginal by definition rather than a place to live.
-const COARSE_DELTA_TRANSPORT_DEFAULT_RATE: f32 = 0.5;
 
-/// CREDIT-DEBT-TRANSPORT.md §2.3: the anchoring rate `CoarseState::lambda` is raised to this while
-/// `coarse_delta_transport` is on, from the standing `COARSE_DEFAULT_LAMBDA` of 0.10.
-///
-/// **This is not a tuning knob, it is what keeps the fine level the source of truth.** Anchoring
-/// closes `Delta` by moving `M` (the coarse level forgets its opinion); the transport closes it by
-/// moving `A` (the fine level acts on it). At a transport rate of 0.7 against `lambda = 0.1`,
-/// roughly 7/8 of every gap would close by the fine level accommodating the coarse one -- which
-/// silently makes the coarse level the authority and inverts the architecture's own principle
-/// (`coarse.rs`: the coarse level is anchored to the fine one because the fine one is ground
-/// truth). At 0.5 the two are comparable.
-///
-/// It also changes what `Delta` MEANS, for the better. At 0.1 the carried residual can accumulate
-/// to ~10 coarse steps of disagreement; at 0.5 it halves every tick, so `Delta` is approximately
-/// **one coarse step of transport measured from a freshly-tethered state**. That is exactly the
-/// amount worth borrowing, and it bounds how wrong a coarse opinion can get before anchoring erases
-/// it. Aggressive anchoring is what makes `Delta` safe to act on, not what makes it too small.
-///
-/// Deliberately NOT a UI slider until a first test says one is needed.
-const COARSE_DELTA_TRANSPORT_LAMBDA: f32 = 0.5;
 
 /// The rate ladder the RANK rule fills (see `rank_clock_rates`), highest first. Integer steps
 /// down to 1x and octaves below it: above 1x a rate IS a repetition count, so fractional values
@@ -184,44 +78,10 @@ const COARSE_DELTA_TRANSPORT_LAMBDA: f32 = 0.5;
 /// vary this for measurement -- see BLOCK-SIZE-SWEEP.md.
 const DEFAULT_BLOCK_DIVISOR: usize = 64;
 
-const CLOCK_RATE_LADDER: [f32; 15] = [
-    16.0, 14.0, 12.0, 10.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0, 0.5, 0.25, 0.125,
-];
 
-/// How strongly staleness (ticks since a block last ran) nudges its clock-rate signal upward.
-/// Deliberately only ever able to push a block toward a HIGHER rate (never suppress one) --
-/// "underclock conservatively" (HIERARCHICAL-PRESSURE.md §7b): a block that has gone a long time
-/// without running is treated as more urgent, not less.
-const CLOCK_STALENESS_WEIGHT: f32 = 0.03;
 
-/// Number of coarse time-buckets the block-simulation heat-map overlay's trailing window is
-/// divided into (see `DrawingSimulation::block_heat_buckets`). `HEAT_NUM_BUCKETS *
-/// HEAT_BUCKET_TICKS` is the ~300-tick window the task asked for.
-const HEAT_NUM_BUCKETS: usize = 10;
-/// Ticks per heat-map bucket — see `HEAT_NUM_BUCKETS`.
-const HEAT_BUCKET_TICKS: u32 = 30;
 
-/// Fixed reference ceiling for the per-cell pressure-field heat-map overlay's log compression
-/// (`DrawingSimulation::pressure_field_texels`). Chosen with headroom above the highest
-/// `column_depth` measured in practice (464, for water 60 rows deep — see `column_depth`'s own
-/// field doc comment in this file), so legitimate values compress smoothly toward 1.0 instead of
-/// clipping in the common case.
-///
-/// This is a FIXED constant, not the current frame's own max (auto-normalisation): a fixed scale
-/// means a given `column_depth` value always maps to the same on-screen colour, so two frames —
-/// in particular the "Fresh pressure field" toggle's on/off states, which is exactly what this
-/// overlay exists to compare — stay comparable by eye. The tradeoff is the opposite of what
-/// auto-normalisation would give: a rarer value above this ceiling clips instead of the scale
-/// stretching to fit it, and a frame whose whole field sits well below the ceiling (e.g. a mostly
-/// empty grid) reads uniformly dim rather than being stretched to use the full range.
-const PRESSURE_HEATMAP_LOG_MAX: f32 = 512.0;
 
-/// How often the overfill heat-map's saturation deciles are recomputed, in ticks. These are a
-/// LEGEND -- a scale the reader is reading off the screen -- so the requirement is legibility, not
-/// freshness: boundaries that move every frame make the colour of a cell incomparable between two
-/// consecutive frames and the overlay unreadable. 30 ticks is about half a second at 60fps, slow
-/// enough to read and fast enough to follow a filling vessel.
-const SATURATION_DECILE_REFRESH_TICKS: u32 = 30;
 
 pub const PROP_WETNESS: usize = 0;
 pub const PROP_THRESHOLD: usize = 1;
@@ -548,130 +408,11 @@ pub struct DrawingSimulation {
     /// the shape itself changes, which would silently discard an in-place mirror.
     pub flipped: bool,
 
-    /// Coarse pressure geometry (`sandart_sim::coarse`, HIERARCHICAL-PRESSURE.md §4, build
-    /// step 1). Rebuilt at the end of `generate_shape_mask` -- and ONLY there, so it is always
-    /// exactly as fresh as `shape_mask` itself, never staler and never rebuilt on some other
-    /// cadence.
-    pub coarse: CoarseGeometry,
 
-    /// Coarse simulation state (`sandart_sim::coarse`, HIERARCHICAL-PRESSURE.md §5, build
-    /// step 2). Holds restricted fine mass A, persistent coarse mass M, coarse head eta,
-    /// pressure P, and coarse-fine disagreement Delta.
-    pub coarse_state: CoarseState,
 
-    /// "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md build step 3). Same
-    /// shape as `overfill_pressure`/`head_field_transport`/`pressure_sensitive_flow`/
-    /// `fresh_pressure_field` above: a plain UI-facing field, forwarded straight through, no
-    /// reset. **Defaults to `true`**, unlike its siblings -- this is the one debug toggle in the
-    /// group that ships ON, because the point of shipping it at all is for the coarse level to be
-    /// visible by default, with the toggle available to switch it back off for an A/B comparison.
-    ///
-    /// `true` (default): today's coupled behaviour, unchanged -- `update()` runs
-    /// `coarse_state.tick(...)` every tick (restrict / anchor / advance the nested coarse sim /
-    /// export eta+delta) and `settle_tick` receives `&coarse_state.eta` / `&coarse_state.delta`
-    /// whenever `coarse.available`, exactly as before this toggle existed.
-    ///
-    /// `false`: BOTH halves of the coupling are removed, not just one.
-    /// - `update()` skips the `coarse_state.tick(...)` call entirely -- restriction, anchoring,
-    ///   and the nested 64x64 solver step all stop running, so the toggle also measures the
-    ///   coarse level's own per-tick cost, not just its effect on the fine grid.
-    /// - `settle_tick` is called with empty `coarse_eta`/`coarse_delta` slices, the exact same
-    ///   "not coupled" signal `coarse.available == false` already produces (see
-    ///   `physics::coarse_delta_eta`'s doc comment) -- so `settle_tick` takes the identical
-    ///   code path it took before this coupling existed. `coarse_state`'s own buffers (`eta`,
-    ///   `delta`, `m_mass`, ...) are left exactly as they last were (frozen, not zeroed) while
-    ///   off; they resume from wherever they were the instant this is flipped back on.
-    ///
-    /// "Coarse pressure coupling" debug toggle -- OVERCLOCKING.md split this field's meaning.
-    /// It now gates ONLY the driving-POTENTIAL half of the coupling: whether `settle_tick`
-    /// receives non-empty `coarse_eta`/`coarse_delta` (i.e. whether the coarse level's hydraulic
-    /// head reaches `phi`/`gravity_head` on any fine edge at all). It no longer gates the coarse
-    /// level's OWN per-tick dynamics -- `update()` now runs `coarse_state.tick(...)` (restrict /
-    /// anchor / advance the nested coarse sim / export eta+delta) unconditionally whenever
-    /// `coarse.available`, because the multi-rate block scheduler (`overclocking_enabled` below)
-    /// needs `|Delta|` regardless of whether the potential coupling is on. This also means the
-    /// coarse level's own per-tick cost is no longer part of what this toggle measures; it is now
-    /// a fixed cost whenever `coarse.available`.
-    ///
-    /// **Defaults to `false`** (changed from `true`) -- the user's own words: "let's leave the
-    /// coupling behind a flag until we are happy with overclocking." The coarse level runs and
-    /// its `|Delta|` drives the scheduler either way; only the driving-potential contribution to
-    /// the fine solver is gated by this flag, and that contribution ships off.
-    ///
-    /// `true`: `settle_tick` receives `&coarse_state.eta` / `&coarse_state.delta` whenever
-    /// `coarse.available`, exactly as before this split existed.
-    ///
-    /// `false`: `settle_tick` is called with empty `coarse_eta`/`coarse_delta` slices, the exact
-    /// same "not coupled" signal `coarse.available == false` already produces (see
-    /// `physics::coarse_delta_eta`'s doc comment) -- so `settle_tick` takes the identical code
-    /// path it took before this coupling existed. `coarse_state`'s own buffers (`eta`, `delta`,
-    /// `m_mass`, ...) keep advancing regardless (see above), so flipping this back on resumes
-    /// from a live, not frozen, state.
-    pub coarse_pressure_coupling: bool,
 
-    /// OVERCLOCKING.md: the multi-rate block-scheduler debug toggle. Independent of
-    /// `coarse_pressure_coupling` above -- this consumes `|coarse_state.delta|` directly (never
-    /// `phi`/`gravity_head`), so it can be A/B'd on its own build regardless of whether the
-    /// driving-potential coupling is also on. Defaults `false`, like every other debug toggle
-    /// except `coarse_pressure_coupling`'s old default.
-    ///
-    /// `true`: `update()` derives a per-block clock rate `block_clock_rate[b]` (EARLY-STOP.md: an
-    /// arbitrary value in `[1/8, 8]`, not power-of-two quantised) from `|Delta[b]|` and staleness
-    /// (HIERARCHICAL-PRESSURE.md §7b's "priority function based on amount of disagreement and
-    /// last simulation time"), then (a) skips a block whose rate is below 1x from the LOD
-    /// scheduler's budget-tier competition on ticks outside its own schedule (S2: MUST and STALE
-    /// are never touched, so this can only ever defer a low-priority sweep, never suppress a real
-    /// one), and (b) for a block whose rate is above 1x, runs up to `round(rate)` real sub-step
-    /// repetitions of `settle_tick` this frame instead of one -- EARLY-STOP.md: `rate` is an upper
-    /// BOUND now, not a mandate, so a block that reaches local equilibrium before its budgeted
-    /// repetitions are used stops early (`force_overclocked_blocks_active`); S3 still forces every
-    /// grid-neighbour of a genuinely-still-running forced block, so a boundary edge is evaluated
-    /// regardless of which side happens to own it by grid index. Also repurposes
-    /// `block_heat_texels()` to show clock rate instead of the recent-activity heat -- see that
-    /// function's doc comment.
-    ///
-    /// `false`: `block_clock_rate` is held at `1.0` everywhere and none of the above runs --
-    /// bit-identical to the tree before this toggle existed.
-    pub overclocking_enabled: bool,
 
-    /// EARLY-STOP.md: which rule turns a block's disagreement signal into a clock rate.
-    ///
-    /// `false` — the ABSOLUTE rule: `rate = clamp(signal / CLOCK_DELTA_REF_FRAC, min, max)`. Every
-    /// block is judged against a fixed reference fraction, so the number of blocks asking for 8x
-    /// is whatever the scene happens to produce, and the frame's cost is unbounded from below by
-    /// anything except early stop.
-    ///
-    /// `true` — the RANK rule (the user's design): sort blocks by signal and hand out rates by
-    /// POSITION, filling a fixed ladder whose band sizes are inversely proportional to the rate
-    /// (`n_r ∝ 1/r`), so every band does the SAME total work and the whole frame's block-step
-    /// count is a constant fraction of the block count regardless of scene. Under this rule
-    /// underclocking is what pays for overclocking: the 8x band can only be 1/8 the size of the
-    /// 1x band, and the fractional bands below 1x are what free the budget for it. "I want to be
-    /// able to simulate at 8x ... maybe we just need to sort the differences and assign equal
-    /// slices" (the user).
-    ///
-    /// Both rules respect `min_clock_rate`/`max_clock_rate`; the ladder is clipped to that range.
-    pub rank_clock_rates: bool,
 
-    /// EARLY-STOP.md: cap the GRADIENT of the rate field, not the rate. "maybe we need to align
-    /// sub step counts nearby or don't let them be off more than 1" (the user) -- the 2:1 balance
-    /// rule from adaptive mesh refinement, where neighbouring cells may differ by at most one
-    /// refinement level.
-    ///
-    /// Enforced DOWNWARD, by pulling fast blocks down to `min(neighbour) + 1`, iterated to a
-    /// fixed point -- never by raising slow ones, since "we can't force blocks to simulate more.
-    /// we are already too slow". So a lone 8x block surrounded by 1x neighbours becomes 2x, while
-    /// a wide contiguous fast region keeps its full rate: only a region big enough to ramp can
-    /// reach the ceiling.
-    ///
-    /// Two things follow. Work goes DOWN, because the ceiling is only reachable where the
-    /// scheduler wants a whole neighbourhood fast. And boundary stalls go down, because a seam
-    /// costs one repetition of mismatch per adjacent pair instead of up to seven: with a gradient
-    /// of 1, a block and its neighbour differ by at most one repetition of participation.
-    ///
-    /// Rates below 1x are left alone. They are skip PERIODS rather than repetition counts, they
-    /// already run at most once per frame, and grading them would only ever raise them.
-    pub grade_clock_rates: bool,
 
     /// STICKINESS.md: strength of the per-cell downward-flow jitter applied to UNDERFULL liquid,
     /// `0.0..=1.0`. `0.0` (the default) is bit-identical to before the feature existed.
@@ -685,192 +426,20 @@ pub struct DrawingSimulation {
     /// ever reduces.
     pub liquid_fall_jitter: f32,
 
-    /// EARLY-STOP.md: whether a block's clock rate GATES its participation in the extra
-    /// repetitions, or merely adds to it.
-    ///
-    /// `false` (the behaviour through 0b8868c) — `force_overclocked_blocks_active` only ever
-    /// ADDS: it raises the displacement of fast blocks and their neighbours so they are certain
-    /// to run. Every other block is still admitted on its own merits by `settle_tick`'s ordinary
-    /// MUST classification, on EVERY repetition, because a block that moved in the previous
-    /// repetition is by definition above the MUST bar. So a rate of 1x does not mean "runs once
-    /// per frame" -- it means "runs in every repetition, like everything else", and the rates buy
-    /// extra work without ever redirecting any. Measured: with only 34 blocks at 8x, the extra
-    /// repetitions still ran ~370 blocks each.
-    ///
-    /// `true` — repetitions after the first run ONLY the participation set: blocks whose rate
-    /// still clears the repetition index, plus the S3 neighbours they force. Everything else has
-    /// its displacement stashed and zeroed for the duration of that `settle_tick` call, then
-    /// restored with `max()` so a block that RECEIVED mass while sitting out (S2) keeps the
-    /// larger, live value rather than the stale snapshot. This is what makes the ladder a
-    /// redistribution of a fixed work budget instead of a multiplier on it.
-    pub rate_gated_reps: bool,
 
-    /// LATERAL-COARSE-CORRECTION.md: the coarse-grid flow correction, default **OFF**.
-    ///
-    /// `false`: bit-identical to the tree before this existed -- the ledger is not even enabled,
-    /// so `flux_edge_apply`/`try_move` pay one predictable branch and nothing else.
-    ///
-    /// `true`: after the frame's `settle_tick` repetitions have run, the mass the coarse level
-    /// actually moved across each tile face is compared with the mass the fine level actually
-    /// moved across the same face, and the DIFFERENCE is applied as a limited flux
-    /// (`physics::apply_coarse_flow_correction`). It exists because the fine level's lateral
-    /// transport is bounded by a local CFL condition that the coarse level, being a coarser grid,
-    /// is not subject to -- see that function's doc comment for the full argument and
-    /// `coarse_correction_damping` for why the coarse level's answer is not taken at face value.
-    ///
-    /// Requires the coarse level (`coarse.available`) and the shipped geometry where a block IS a
-    /// coarse tile; a no-op otherwise.
-    pub coarse_flow_correction: bool,
 
-    /// LATERAL-COARSE-CORRECTION.md: whether the correction also boosts GRAVITY-ALIGNED
-    /// conveyance, not just lateral. Default `true` ("both axes", the user's call) and
-    /// deliberately NOT exposed in the Debug panel -- it exists so the diagnostics can separate
-    /// the two effects, which matters because they do not point the same way on liquid: the
-    /// vertical boost measurably speeds drainage, and a body of water that drains faster has less
-    /// time to level, so on Water the vertical half works against the lateral half.
-    pub coarse_correction_vertical: bool,
 
-    /// LATERAL-COARSE-CORRECTION.md: under-relaxation on the coarse-grid correction, in `[0, 1]`.
-    ///
-    /// The coarse level is an approximation of the fine one -- a different grid, and with no model
-    /// of repose at all -- so its answer is damped rather than applied whole. `1.0` means "trust
-    /// the coarse level exactly"; `0.0` disables the correction entirely and is equivalent to
-    /// `coarse_flow_correction: false` for physics purposes.
-    ///
-    /// **The default is a starting value, not a measured optimum.** The trade it controls: a high
-    /// damping acts fast but fights the fine level harder, and the specific failure to watch for
-    /// is the coarse level asking to flatten a granular pile below its angle of repose, the fine
-    /// level restoring it next tick, and the flanks ringing. `diag_lateral_corr` sweeps this.
-    pub coarse_correction_damping: f32,
 
-    /// LATERAL-COARSE-CORRECTION.md: last frame's correction statistics, for the Debug panel and
-    /// the diagnostics. Zeroed every tick the correction does not run, so a stale reading cannot
-    /// linger on screen after the toggle goes off.
-    pub last_frame_correction: physics::LateralCorrectionStats,
 
-    /// CREDIT-DEBT-TRANSPORT.md §2.3: **move mass between coarse tiles by half the difference of
-    /// their `Delta`s**, rather than boosting a conveyance coefficient.
-    ///
-    /// This is a different lever from `coarse_flow_correction`, not a variant of it. That one sets
-    /// a multiplier and moves nothing (`compute_lateral_boost`); this one moves mass directly
-    /// (`physics::apply_coarse_delta_transport`). The reason for a second lever is recorded in
-    /// f10fc15: a conveyance boost cannot carry the long-wavelength mode at all, because past the
-    /// CFL bound the extra coefficient becomes ringing rather than transport -- measured on water
-    /// at +0.6%/+0.4% spread for +75-118% block-steps.
-    ///
-    /// The two are independent toggles and CAN be on together, but there is no reason to expect
-    /// that to be better than either alone and it has not been measured. Default **off**.
-    ///
-    /// Requires the coarse level and the shipped geometry where a block IS a coarse tile. Unlike
-    /// the conveyance boost, which degrades gracefully to "no boost", this one refuses to run at
-    /// all off that path -- see `apply_coarse_delta_transport`'s doc comment for why a
-    /// mass-moving mechanism must not degrade gracefully.
-    pub coarse_delta_transport: bool,
 
-    /// CREDIT-DEBT-TRANSPORT.md §2.3: the request factor on `coarse_delta_transport`, in `[0, 1]`.
-    ///
-    /// **A request, not an outcome.** Donor mass, receiver headroom and face aperture all cap what
-    /// actually moves, so realised transport is `<= rate * half-the-difference` and frequently well
-    /// under. `last_frame_delta_transport.limited` is what says how often a cap bound.
-    ///
-    /// `0.7` is a starting value, not a measured optimum.
-    pub coarse_delta_transport_rate: f32,
 
-    /// CREDIT-DEBT-TRANSPORT.md §2.3: last frame's delta-transport statistics, for the Debug panel.
-    /// Zeroed on any tick the transport does not run.
-    pub last_frame_delta_transport: physics::DeltaTransportStats,
 
-    /// Upper end of the clock-rate range `update_block_clock_rates` clamps to -- the runtime,
-    /// UI-adjustable form of `CLOCK_RATE_MAX` (which remains the default and the hard ceiling a
-    /// caller is expected to stay under). This is the single knob that sets how many
-    /// `settle_tick` repetitions a frame can cost: `update()`'s `extra_reps` is
-    /// `round(max rate over all blocks) - 1`, so a frame costs at most `round(max_clock_rate)`
-    /// repetitions no matter how far ahead the coarse level says a block is. Lowering it trades
-    /// settling rate for frame time directly, which is why it is exposed rather than tuned in
-    /// code -- see EARLY-STOP.md for the sweep. Values below `1.0` are clamped up: a "max" under
-    /// the neutral rate would mean no block may ever run at 1x, which is underclocking, not a
-    /// ceiling, and `min_clock_rate` is the control for that.
-    pub max_clock_rate: f32,
 
-    /// Lower end of the same range -- the runtime form of `CLOCK_RATE_MIN`. Set to `1.0` to
-    /// disable underclocking entirely (no block is ever asked to sit out a tick) while leaving
-    /// overclocking untouched; that is the control run that says what underclocking is actually
-    /// buying, since `apply_underclock_skip` can only defer a low-priority sweep, never cancel a
-    /// MUST one, and most blocks below 1x in a typical scene were not going to run anyway.
-    pub min_clock_rate: f32,
 
-    /// OVERCLOCKING.md / EARLY-STOP.md: per-block clock rate, an arbitrary value in `[1/8, 8]`
-    /// (not power-of-two quantised -- see `CLOCK_RATE_MIN`'s doc comment for why quantisation was
-    /// dropped), one entry per LOD block -- same indexing as `active_blocks`/`last_displacements`
-    /// (`cols * rows`, `block_size == grid/64`). `1.0` (the neutral/default rate) everywhere while
-    /// `overclocking_enabled` is `false`. Recomputed fresh from this tick's signal every call to
-    /// `update_block_clock_rates` (no hysteresis/step-limiting memory -- with early stop bounding
-    /// a block's real repetitions at its own physical settle point, `rate` is a budget, so exactly
-    /// how it moves tick to tick matters far less than it used to).
-    pub block_clock_rate: Vec<f32>,
 
-    /// EARLY-STOP.md: the ACTUAL number of per-block interior sweeps `update()`'s most recent
-    /// call ran, summed over every repetition of this frame's rep loop -- i.e. `sum` over blocks
-    /// of how many times each one was genuinely simulated (`active_blocks[b] !=
-    /// BlockActivity::Inactive` after a `settle_tick` call), not the naive `block_count *
-    /// round(rate)` a caller might otherwise assume. Early stop and underclock-skip both make the
-    /// real number diverge from that naive one -- this field exists so a caller (the web UI's
-    /// footer readout) can show the divergence rather than the budget. Compare against
-    /// `active_blocks.len()` (the block count) for a "how many effective clock-cycles did the grid
-    /// spend this frame" ratio: below 1x means underclocking is genuinely idling blocks, above 1x
-    /// means overclocking's extra repetitions are outweighing early stop's savings.
-    ///
-    /// `0` on any tick where nothing ran at all (`!has_active` -- `update()`'s own gate). Not
-    /// cumulative across ticks; overwritten fresh every call to `update()`.
-    pub last_frame_block_steps: u32,
 
-    /// EARLY-STOP.md: block-boundary edges that went UNEVALUATED this frame because the block
-    /// that OWNS them sat out a repetition its neighbour ran.
-    ///
-    /// Edges belong to their lower-index cell (physics.rs), so across a vertical block boundary
-    /// the LEFT block owns the shared edges and across a horizontal one the TOP block does. Under
-    /// `rate_gated_reps` a suppressed owner means those edges are simply not evaluated that
-    /// repetition: no mass moves across that seam, and material can pile against it. That is a
-    /// STALL, not a leak -- nothing is lost, it just does not flow -- and it is the mechanism to
-    /// suspect first for a visible seam or hole along block edges.
-    ///
-    /// Counted per repetition and summed over the frame, so it is comparable against
-    /// `last_frame_block_steps`. Zero whenever gating is off, and it falls sharply under
-    /// `grade_clock_rates` (66-73% measured), which is what makes it the number to watch when
-    /// trading allocation shape against artifacts.
-    pub last_frame_stalled_boundaries: u32,
 
-    /// EARLY-STOP.md: per block, how many `settle_tick` sweeps it ACTUALLY ran in the last frame
-    /// -- its executed sub-step count, summed over the repetition loop. `last_frame_block_steps`
-    /// is this vector's sum.
-    ///
-    /// This is the honest counterpart to `block_clock_rate`, which is only a BUDGET: early stop
-    /// lets a block stop short of its rate, `rate_gated_reps` keeps it out of repetitions it did
-    /// not earn, S3 forcing drags it into ones it did not ask for, and grading caps what it could
-    /// have wanted in the first place. Only this says what happened. It is what the block
-    /// heat-map overlay draws while overclocking is on, so the picture on screen is executed work
-    /// rather than the plan for it.
-    pub last_frame_block_substeps: Vec<u32>,
 
-    /// STEP3-ADAPTIVE-COARSE.md (incremental restriction): per-BLOCK "did this block's fine
-    /// heights possibly change this tick" flags, filled by `settle_tick`'s `touched_out`
-    /// parameter at the end of whichever tick most recently actually ran the fine solver. Read
-    /// by the FOLLOWING tick's `coarse_state.tick(..., Some(&self.blocks_touched))` -- the
-    /// ordering is deliberate: `coarse_state.tick()` runs at the top of `update()`, before this
-    /// tick's own `settle_tick` call, so it is observing heights as they stood at the end of the
-    /// PREVIOUS tick, which is exactly what the previous tick's `touched_out` describes.
-    /// Block index and coarse tile index coincide (`block_size == grid/64 == COARSE_GRID`), so
-    /// this is indexed identically to `coarse_state.a_mass` -- see `coarse::CoarseState::
-    /// restrict_incremental`'s doc comment for the exactness argument.
-    ///
-    /// Starts empty (`Vec::new()`), which `restrict_incremental` treats as "cannot vouch for
-    /// this, do a full rebuild" via a length mismatch -- correct for the first tick after
-    /// construction or after `generate_shape_mask` rebuilds `coarse`/`coarse_state` (both clear
-    /// this field for the same reason: a stale touched set from a different mask/shape is not
-    /// safe to trust). When `has_active` is false this tick (settle_tick does not run at all),
-    /// explicitly cleared to all-`false` rather than left stale, since nothing could have
-    /// changed.
-    pub blocks_touched: Vec<bool>,
 
     /// Coarse block activity grid for CA optimization.
     pub active_blocks: Vec<BlockActivity>,
@@ -957,49 +526,9 @@ pub struct DrawingSimulation {
     /// regardless of this field's value (`pressure_heatmap_head_field_toggle.rs`).
     pub pressure_heatmap_head_field: bool,
 
-    /// Whether the pressure heat-map overlay is actually being DRAWN. Purely a cost gate: the
-    /// saturation-decile refresh below is the only thing that reads it, and that exists solely to
-    /// produce the overlay's legend, so it must not run when nobody is looking at the overlay.
-    /// Mirrors the wasm wrapper's own `pressure_heatmap_enabled`, which owns the user-facing
-    /// switch; kept here too so the sim can gate its own work without the renderer having to
-    /// remember to ask.
-    pub pressure_heatmap_overlay: bool,
 
-    /// Task #70: tension at a completely empty cell, in the same units as the fill term and as one
-    /// row of gravity head. Zero (the default) reproduces the pre-tension behaviour exactly.
-    ///
-    /// The pressure law had compression above capacity and NOTHING below it, so a cell at 0.99 and
-    /// a cell at 0.05 both reported zero pressure and neither resisted being drained. The only
-    /// stable states were "pinned at the ceiling" and "scraped out", which is the bimodal
-    /// population behind the visible checkerboard. This is the missing restoring force. See
-    /// `physics::overfill_pressure_val`.
-    pub underfill_tension: f32,
 
-    /// Task #70: the fluid's bulk stiffness — how hard a column resists compressing under its own
-    /// weight. This is the dial the UI exposes; `overfill_capacity` is derived from it by
-    /// `overfill_ceiling_for` and is no longer independently settable.
-    ///
-    /// The two are the same physical quantity stated twice, and letting a user set both is a
-    /// footgun. Measured at stiffness 5.0 on a 128-grid: a settled column wants fill 1.06 at the
-    /// surface rising to 1.68 at the floor. A 1.90 ceiling accommodates that and the heat map
-    /// shows a clean depth gradient with all ten decile bands populated (504/492/510/503/473/533/
-    /// 496/500/497/523 cells). A 1.10 ceiling cannot: 5382 of 6318 cells pin to exactly 1.100,
-    /// nine of the ten bands collapse, and the fluid is back to being packed against a wall.
-    /// Softer fluid needs a higher ceiling, so the ceiling follows the dial.
-    pub overfill_stiffness: f32,
 
-    /// Decile boundaries (9 values, D1..D9) of per-cell SATURATION -- `height / capacity`, where
-    /// 1.0 is exactly full and anything above is overfill -- taken over cells that hold material.
-    /// Empty at construction and until the first refresh.
-    ///
-    /// These drive the overfill heat-map's colouring, which is a histogram equalisation rather
-    /// than a fixed scale: each decile gets one tenth of the occupied cells, so the overlay always
-    /// spends its full colour range on the distribution actually present instead of compressing
-    /// everything into one band. That is the property that makes "how saturated are we" readable
-    /// at a glance, and it is why the boundary VALUES have to be surfaced in the UI alongside it
-    /// -- without the legend an equalised map tells you the shape of the distribution but not its
-    /// magnitude, and magnitude is the whole question.
-    pub saturation_deciles: Vec<f32>,
 
     /// "Drive transport from the head field" debug toggle (task #55 step 3). Off by default
     /// (today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`-derived driving head, unchanged --
@@ -1070,40 +599,8 @@ pub struct DrawingSimulation {
     /// so it must never reach granular material.
     pub pressure_sensitive_flow: bool,
 
-    /// "Per-cell overfill pressure simulation" toggle (task #70).
-    /// When on, cells can take on a small overfill (up to 1.50x nominal capacity) under
-    /// overburden and transmit hydrostatic/Mohr-Coulomb pressure through stiffness gradient.
-    pub overfill_pressure: bool,
 
-    /// Maximum cell overfill capacity multiplier (e.g. 1.50 for 1.50x nominal capacity).
-    pub overfill_capacity: f32,
 
-    /// Per-block "how often was this block actually simulated" heat-map counter for the debug
-    /// overlay, flattened row-major as `[block][bucket]`: `HEAT_NUM_BUCKETS` bytes per block
-    /// (see that constant's doc comment). Length is always `active_blocks.len() *
-    /// HEAT_NUM_BUCKETS` (kept in sync defensively in `update`, the same way `settle_tick`
-    /// resizes its own per-block buffers).
-    ///
-    /// WHAT THIS MEASURES, EXACTLY: rather than a full 300-deep per-block ring buffer of
-    /// simulated/not-simulated bits (1024 blocks * 300 bits = ~38KB, workable but wasteful for
-    /// what is ultimately displayed as one blurry tint per block), the 300-tick window is
-    /// divided into `HEAT_NUM_BUCKETS` chunks of `HEAT_BUCKET_TICKS` ticks each. Every tick, the
-    /// current chunk's counter is incremented for each block `settle_tick` actually simulated;
-    /// every `HEAT_BUCKET_TICKS` ticks, the chunk that is about to start representing the newest
-    /// data is the same slot that held the OLDEST chunk (10 slots for a 10-chunk ring), so it is
-    /// cleared right before reuse — that clear IS the "periodic decay". Summing all buckets and
-    /// dividing by 300 (`block_heat_texels`/`block_heat_normalized`) gives the fraction of the
-    /// trailing window the block was simulated in.
-    ///
-    /// HOW THIS DIFFERS FROM AN EXACT 300-TICK TRAILING COUNT: the count is exact at whole-chunk
-    /// granularity but not at the tick level — a block simulated on tick 299-ago is
-    /// indistinguishable from one simulated on tick 271-ago, since both just increment the same
-    /// bucket. The aggregate also isn't pinned to exactly 300 ticks of history at every instant:
-    /// it's 9 complete 30-tick chunks (270 ticks, exact) plus however many ticks have elapsed in
-    /// the currently-filling 10th chunk (0..30 more), so the true window length breathes between
-    /// 270 and 300 ticks rather than sitting fixed at 300. For a coarse heat tint this is well
-    /// within what's visually distinguishable.
-    pub block_heat_buckets: Vec<u8>,
 }
 
 fn generate_smooth_noise(seed_val: u32, grid_size: usize) -> Heightmap {
@@ -1312,37 +809,16 @@ impl DrawingSimulation {
             // Placeholder until `generate_shape_mask()` below does the real build -- shape_mask
             // is still all-MASK_OUTSIDE at this point in construction, so there is nothing
             // meaningful to build from yet.
-            coarse: CoarseGeometry::empty(grid_size),
-            coarse_state: CoarseState::new(COARSE_GRID),
             // Defaults ON -- see this field's own doc comment for why it differs from every
             // other debug toggle in the group, which default off.
             // Defaults OFF -- see this field's own doc comment for why (OVERCLOCKING.md split
             // it from the coarse level's own dynamics, which now run unconditionally).
-            coarse_pressure_coupling: false,
-            overclocking_enabled: false,
-            rank_clock_rates: true,
             liquid_fall_jitter: 0.0,
-            grade_clock_rates: true,
-            rate_gated_reps: true,
             // LATERAL-COARSE-CORRECTION.md. Default OFF, like every other debug toggle in this
             // group. `COARSE_CORRECTION_DEFAULT_DAMPING` is a starting value, not a measured
             // optimum -- see its own doc comment.
-            coarse_flow_correction: false,
-            coarse_correction_vertical: true,
-            coarse_correction_damping: COARSE_CORRECTION_DEFAULT_DAMPING,
-            last_frame_correction: physics::LateralCorrectionStats::default(),
             // CREDIT-DEBT-TRANSPORT.md §2.3. Default OFF, like every other debug toggle in this
             // group, and untested -- nothing about it has been measured yet.
-            coarse_delta_transport: false,
-            coarse_delta_transport_rate: COARSE_DELTA_TRANSPORT_DEFAULT_RATE,
-            last_frame_delta_transport: physics::DeltaTransportStats::default(),
-            max_clock_rate: CLOCK_RATE_MAX,
-            min_clock_rate: CLOCK_RATE_MIN,
-            block_clock_rate: vec![1.0f32; cols * rows],
-            last_frame_block_steps: 0,
-            last_frame_stalled_boundaries: 0,
-            last_frame_block_substeps: vec![0u32; cols * rows],
-            blocks_touched: Vec::new(),
             active_blocks,
             last_displacements,
             last_simulated_ticks,
@@ -1356,15 +832,8 @@ impl DrawingSimulation {
             perfect_simulation: false,
             fresh_pressure_field: false,
             pressure_heatmap_head_field: false,
-            pressure_heatmap_overlay: false,
-            underfill_tension: 1.0,
-            saturation_deciles: Vec::new(),
             head_field_transport: false,
             pressure_sensitive_flow: false,
-            overfill_pressure: false,
-            overfill_capacity: physics::overfill_ceiling_for(physics::OVERFILL_STIFFNESS_K),
-            overfill_stiffness: physics::OVERFILL_STIFFNESS_K,
-            block_heat_buckets: vec![0u8; cols * rows * HEAT_NUM_BUCKETS],
         };
         sim.generate_shape_mask();
         sim
@@ -1413,16 +882,6 @@ impl DrawingSimulation {
         }
 
         self.shape_mask_dirty = true;
-
-        // Coarse pressure geometry (build step 1, HIERARCHICAL-PRESSURE.md §4/§9): rebuilt here,
-        // and only here, so it is always exactly as fresh as shape_mask -- never a separate call
-        // site to remember, never a separate staleness window.
-        self.coarse = coarse::CoarseGeometry::build(&self.shape_mask, &self.cell_props, w);
-        self.coarse_state = coarse::CoarseState::new(self.coarse.coarse_n);
-        // A touched set from before this rebuild refers to a possibly different mask/block
-        // layout; clearing forces the next `restrict_incremental` call to fall back to a full
-        // rebuild (length mismatch), which is always correct.
-        self.blocks_touched.clear();
     }
 
     /// Return a pointer to the shape mask data for WASM/GPU access.
@@ -1489,18 +948,10 @@ impl DrawingSimulation {
         self.active_blocks.fill(BlockActivity::Inactive);
         self.last_displacements.fill(0.0);
         self.last_simulated_ticks.fill(0);
-        // Simulation state, like the three buffers just above -- not a UI setting, so a reset
-        // clears it back to the neutral rate rather than carrying over whatever the scheduler
-        // had converged to before. `overclocking_enabled` itself (the debug toggle) is untouched.
-        self.block_clock_rate.fill(1.0);
-        self.last_frame_block_steps = 0;
-        self.last_frame_stalled_boundaries = 0;
-        self.last_frame_block_substeps.iter_mut().for_each(|v| *v = 0);
         // Keep in sync with `new_with_size`'s `budget_n` initialisation above.
         self.budget_n = 1024;
         self.ema_frame_ms = 33.3;
         self.tick_count = 0;
-        self.block_heat_buckets.fill(0);
         self.refresh_quantiles_full();
     }
 
@@ -1655,815 +1106,6 @@ impl DrawingSimulation {
     /// ticks — easing them for smooth frame-to-frame motion is left to the renderer/consumer.
     pub fn quantile_positions(&self) -> &[f32] {
         &self.quantile_targets
-    }
-
-    /// OVERCLOCKING.md / EARLY-STOP.md (HIERARCHICAL-PRESSURE.md §7b): update the per-block clock
-    /// rate from coarse-fine disagreement and staleness -- the user's own words, "a priority
-    /// function based on amount of disagreement and last simulation time". Block index and coarse
-    /// tile index coincide (`block_size == grid/64 == COARSE_GRID`), so `coarse_state.delta[b]`
-    /// and `coarse.capacity[b]` are read directly at index `b`.
-    ///
-    /// Two mappings from that signal onto a rate, selected by `rank_clock_rates` (see its doc
-    /// comment for which is which and why the rank rule exists):
-    ///
-    /// - ABSOLUTE: `rate = clamp(signal / CLOCK_DELTA_REF_FRAC, min, max)`, continuous and
-    ///   memoryless. No power-of-two quantisation, no octave-stepping, no hysteresis --
-    ///   `CLOCK_RATE_MIN`'s doc comment has the correctness argument for why removing
-    ///   quantisation is safe here. `signal == CLOCK_DELTA_REF_FRAC` maps to exactly 1x.
-    /// - RANK: sort by signal, fill `CLOCK_RATE_LADDER` with band sizes `∝ 1/r`. The rate a block
-    ///   gets depends on its POSITION among its peers, not on an absolute threshold, so the
-    ///   frame's total block-step count is scene-independent.
-    ///
-    /// Staleness only ever pushes the signal UP (`1.0 + staleness * CLOCK_STALENESS_WEIGHT`,
-    /// never a divisor) -- "underclock conservatively" (§7b): a block that has not run in a while
-    /// is treated as more urgent to run, never less, since missed transport is lost, not deferred
-    /// (the `+/-1.0` clamp in `flux_edge_candidate` means a block cannot catch up on waking).
-    ///
-    /// Does nothing (leaves `block_clock_rate` at whatever it was) if the coarse level's buffers
-    /// are not sized to match -- the caller's `overclocking_enabled && coarse.available` guard is
-    /// the normal reason this would be skipped, this is a defensive fallback.
-    fn update_block_clock_rates(&mut self) {
-        let n = self.block_clock_rate.len();
-        let tiles = self.coarse_state.delta.len();
-        if self.coarse.capacity.len() != tiles || self.last_simulated_ticks.len() != n || tiles == 0
-        {
-            return;
-        }
-        // Block and coarse tile are the same square only at the default block divisor. When
-        // blocks are bigger, a block covers several tiles and its disagreement is the MAX over
-        // them, not the sum: the signal is "how far out of agreement is this region", and one
-        // badly-out-of-agreement tile inside a block is a reason to run the whole block, while
-        // summing would let a big block's many quiet tiles dilute it. Cheap because it is one
-        // pass over tiles, not per block per tile.
-        let cols = self.block_size_cols();
-        let tile_n = COARSE_GRID;
-        let mut block_delta_frac = vec![0.0f32; n];
-        if tiles == n {
-            for b in 0..n {
-                let cap = self.coarse.capacity[b].max(1e-6);
-                block_delta_frac[b] = (self.coarse_state.delta[b].abs() / cap).max(0.0);
-            }
-        } else {
-            let g = self.heightmap.width;
-            let t = (g / tile_n).max(1);
-            let bs = self.block_size.max(1);
-            if cols == 0 {
-                return;
-            }
-            // Driven from the BLOCK side so both directions work: a block bigger than a tile takes
-            // the max over the tiles it covers, a block smaller than a tile takes the one tile it
-            // sits inside (its siblings inside that tile all read the same value, which is the
-            // honest answer -- the coarse level has no finer opinion to give).
-            for b in 0..n {
-                let bx = b % cols;
-                let by = b / cols;
-                let cx0 = (bx * bs) / t;
-                let cx1 = (((bx + 1) * bs - 1) / t).min(tile_n - 1);
-                let cy0 = (by * bs) / t;
-                let cy1 = (((by + 1) * bs - 1) / t).min(tile_n - 1);
-                let mut best = 0.0f32;
-                for cy in cy0..=cy1.max(cy0) {
-                    for cx in cx0..=cx1.max(cx0) {
-                        let c = cy * tile_n + cx;
-                        if c >= tiles {
-                            continue;
-                        }
-                        let cap = self.coarse.capacity[c].max(1e-6);
-                        let frac = (self.coarse_state.delta[c].abs() / cap).max(0.0);
-                        if frac > best {
-                            best = frac;
-                        }
-                    }
-                }
-                block_delta_frac[b] = best;
-            }
-        }
-        // Hoisted: the range is a per-frame setting, not per-block. `hi` is floored at 1.0 so a
-        // slider dragged to its bottom end means "no overclocking", never "every block
-        // underclocked"; `lo` is then held at or below `hi` so the clamp can never invert.
-        let hi = self.max_clock_rate.clamp(1.0, CLOCK_RATE_MAX);
-        let lo = self.min_clock_rate.clamp(CLOCK_RATE_MIN, hi);
-
-        // The signal itself is the same under both rules -- only its mapping onto a rate differs.
-        let mut signal = vec![0.0f32; n];
-        for b in 0..n {
-            let staleness = self.tick_count.wrapping_sub(self.last_simulated_ticks[b]).min(1000) as f32;
-            signal[b] = block_delta_frac[b] * (1.0 + staleness * CLOCK_STALENESS_WEIGHT);
-        }
-
-        if !self.rank_clock_rates {
-            for b in 0..n {
-                // The ABSOLUTE rule: continuous, memoryless, clamped. Reads only `signal`, never
-                // the previous rate -- no octave index to step, no hysteresis band, because
-                // `rate` is a budget early stop is free to underspend.
-                self.block_clock_rate[b] = (signal[b] / CLOCK_DELTA_REF_FRAC).clamp(lo, hi);
-            }
-            self.grade_block_clock_rates();
-            return;
-        }
-
-        // The RANK rule. A block with no disagreement at all is not ranked -- it goes straight to
-        // the bottom rate. Without this an empty or fully-settled scene would still hand its
-        // top 1/127th of blocks an 8x rate purely on floating-point dust, which is exactly the
-        // "spend the budget on blocks that do not need it" failure the rank rule exists to avoid.
-        self.block_clock_rate.iter_mut().for_each(|r| *r = lo);
-        let mut order: Vec<u32> = (0..n as u32).filter(|&b| signal[b as usize] > 0.0).collect();
-        if order.is_empty() {
-            return;
-        }
-        // Descending by signal. `partial_cmp` cannot see a NaN here (`delta` is finite and
-        // `capacity` is floored at 1e-6) but is handled rather than unwrapped, since a NaN would
-        // otherwise panic the whole frame over a scheduling hint.
-        order.sort_unstable_by(|&a, &b| {
-            signal[b as usize]
-                .partial_cmp(&signal[a as usize])
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // Ladder clipped to the live slider range. `hi >= 1.0` always, so 1x always survives and
-        // the ladder is never empty.
-        let ladder: Vec<f32> = CLOCK_RATE_LADDER
-            .iter()
-            .cloned()
-            .filter(|&r| r <= hi + 1e-6 && r >= lo - 1e-6)
-            .collect();
-        // Band sizes `n_r ∝ 1/r`: equal WORK per band, so the 8x band is an eighth of the 1x
-        // band and the fractional bands fund the fast ones. A gentler `1/lg(1+r)` falloff was
-        // tried and removed once grading landed -- grading already produces the wide, contiguous
-        // fast regions that falloff was widening the bands to get, and it does it by looking at
-        // the scene instead of by handing out more budget everywhere.
-        let inv_sum: f32 = ladder.iter().map(|&r| 1.0 / r).sum();
-        let m = order.len();
-        let mut start = 0usize;
-        for (i, &rate) in ladder.iter().enumerate() {
-            // `n_r ∝ 1/r`: equal work per band. The last band absorbs the rounding remainder so
-            // every ranked block is assigned exactly once.
-            let count = if i + 1 == ladder.len() {
-                m - start
-            } else {
-                ((m as f32) * (1.0 / rate) / inv_sum).round() as usize
-            };
-            let end = (start + count).min(m);
-            for &b in &order[start..end] {
-                self.block_clock_rate[b as usize] = rate;
-            }
-            start = end;
-            if start >= m {
-                break;
-            }
-        }
-        self.grade_block_clock_rates();
-    }
-
-    /// See `grade_clock_rates`. Pulls every block down to at most one repetition above its
-    /// slowest grid neighbour, iterated until nothing changes.
-    ///
-    /// Works in REPETITION space (`round(rate)`), not rate space, because that is what a
-    /// boundary stall is counted in: block `b` participates in repetition `r` iff
-    /// `round(rate) > r`, so two neighbours differing by one repetition can mismatch on at most
-    /// one repetition. Sub-1x rates are floored at 1 for the comparison only and written back
-    /// untouched -- they are skip periods, not repetition counts.
-    ///
-    /// Terminates: every pass either changes nothing or lowers at least one block by at least
-    /// one whole repetition, and repetitions are bounded below by 1, so the loop is bounded by
-    /// `CLOCK_RATE_MAX` passes. The explicit cap is belt-and-braces against a future
-    /// non-monotone edit.
-    fn grade_block_clock_rates(&mut self) {
-        if !self.grade_clock_rates {
-            return;
-        }
-        let n = self.block_clock_rate.len();
-        let cols = self.block_size_cols();
-        if cols == 0 || n == 0 || n % cols != 0 {
-            return;
-        }
-        let rows = n / cols;
-        // Repetition count per block; sub-1x blocks read as 1 (they run at most once).
-        let mut reps: Vec<u32> = self
-            .block_clock_rate
-            .iter()
-            .map(|&r| if r < 1.0 { 1 } else { r.round().max(1.0) as u32 })
-            .collect();
-        for _ in 0..(CLOCK_RATE_MAX as u32 + 1) {
-            let mut changed = false;
-            for b in 0..n {
-                if reps[b] <= 1 {
-                    continue;
-                }
-                let bx = b % cols;
-                let by = b / cols;
-                let mut min_nb = u32::MAX;
-                if bx > 0 { min_nb = min_nb.min(reps[b - 1]); }
-                if bx + 1 < cols { min_nb = min_nb.min(reps[b + 1]); }
-                if by > 0 { min_nb = min_nb.min(reps[b - cols]); }
-                if by + 1 < rows { min_nb = min_nb.min(reps[b + cols]); }
-                if min_nb == u32::MAX {
-                    continue;
-                }
-                let capped = reps[b].min(min_nb.saturating_add(1));
-                if capped < reps[b] {
-                    reps[b] = capped;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        for b in 0..n {
-            // Only ever written DOWN, and only for blocks that were overclocked to begin with:
-            // a sub-1x rate is left exactly as the allocator set it.
-            if self.block_clock_rate[b] >= 1.0 {
-                self.block_clock_rate[b] = self.block_clock_rate[b].min(reps[b] as f32);
-            }
-        }
-    }
-
-    /// S2 (HIERARCHICAL-PRESSURE.md §7b: "underclocked means does not sweep its interior, NOT
-    /// frozen"). For a block whose rate is below 1x AND is not currently MUST-worthy
-    /// (`last_displacements[b] < MUST_SIMULATE_THRESHOLD` -- so this never touches a block with
-    /// real work to do), zero its recorded displacement on ticks outside its own schedule so
-    /// `settle_tick`'s classification loop (physics.rs) does not admit it into the budget-tier
-    /// `rest_candidates` this tick. MUST and STALE are never touched here -- the staleness floor
-    /// (`MAX_STALENESS` in physics.rs) stays the independent backstop the design requires, and
-    /// the existing `activate_neighbor` machinery (untouched) still lets a skipped block receive
-    /// mass from a running neighbour and be copied back. This is deliberately the ONLY mechanism
-    /// by which underclocking has any effect: it can defer a low-priority sweep, it can never
-    /// cancel a real one.
-    ///
-    /// `phase = b % period` spreads underclocked blocks' scheduled ticks across the period
-    /// instead of every block at a given rate waking on the same tick.
-    fn apply_underclock_skip(&mut self) {
-        let n = self.block_clock_rate.len().min(self.last_displacements.len());
-        for b in 0..n {
-            let rate = self.block_clock_rate[b];
-            if rate >= 1.0 {
-                continue;
-            }
-            if self.last_displacements[b] >= physics::MUST_SIMULATE_THRESHOLD {
-                continue;
-            }
-            let period = (1.0 / rate).round().max(1.0) as u32;
-            let phase = (b as u32) % period;
-            if self.tick_count % period != phase {
-                self.last_displacements[b] = 0.0;
-            }
-        }
-    }
-
-    /// S3 (HIERARCHICAL-PRESSURE.md §7b: "edge ownership must follow the FASTER block" -- "the
-    /// most likely place for a multi-rate scheme to lose mass or stall a front"). `update()`
-    /// calls `settle_tick` again within the SAME rendered frame for a block's extra sub-step
-    /// repetitions. Edges are owned by their lower-index cell (see physics.rs), so on a
-    /// repetition where a fast block runs but its slower neighbour does not, a boundary edge
-    /// whose owner happens to be that slower (non-running) neighbour would silently never be
-    /// evaluated this repetition -- chosen by grid geometry, not physics.
-    ///
-    /// Rather than tracking which side owns which specific edge, this forces EVERY grid-adjacent
-    /// neighbour of a block that is genuinely overclocked (`rate > 1`) and STILL RUNNING this
-    /// repetition to also run this repetition, regardless of the neighbour's own rate, its own
-    /// settled state, or which side owns the shared edge. This does strictly more work than the
-    /// minimum fix (a forced neighbour runs whether or not it actually owns the boundary edge) --
-    /// the simple, conservative choice over a surgical per-edge one, matching "simplicity is now a
-    /// feature".
-    ///
-    /// EARLY-STOP.md: `rate` is a clock BUDGET, not a mandate. A block's own eligibility for this
-    /// repetition (the `seed` set below) now additionally requires that its last real,
-    /// physically-computed `last_displacements` -- written by the previous repetition's
-    /// `settle_tick` call, read here BEFORE this call floors it again -- is still at or above
-    /// `MUST_SIMULATE_THRESHOLD`. A block that already reached local equilibrium stops being
-    /// re-forced into its own interior sweep for the rest of this frame's budget; PERF-PROFILE.md
-    /// §3 measured ~59-62% of a rate>1 block's extra repetitions running on blocks that had
-    /// already settled by the first one, which is exactly the waste this removes. This reads
-    /// live, not cached, state, so S2 still holds: if a later repetition's neighbour-forcing (just
-    /// below) or the ordinary flux/`activate_neighbor` machinery pushes real mass into a
-    /// "settled" block, its `last_displacements` rises back above threshold and it becomes
-    /// eligible again on the next repetition -- a settled block can wake, it just does not run
-    /// for free while idle.
-    ///
-    /// Neighbour-forcing (S3) itself is UNCHANGED by early stop and must not be gated on the
-    /// neighbour's own settled state: an edge the neighbour owns still has to be evaluated on
-    /// every repetition the fast block genuinely runs, whether or not the neighbour's interior has
-    /// anything left to do -- that neighbour's own interior sweep is cheap relative to silently
-    /// losing mass across an unevaluated edge.
-    ///
-    /// `rep` is the repetition index (0-based) within this frame; only blocks whose rate clears
-    /// `rep` (i.e. still have iterations left) AND have not yet settled are seeded.
-    fn force_overclocked_blocks_active(&mut self, rep: u32) -> Vec<bool> {
-        let n = self.block_clock_rate.len();
-        let cols = self.block_size_cols();
-        let rows = if cols > 0 { n / cols } else { 0 };
-        if cols == 0 || rows == 0 || cols * rows != n {
-            // An all-true mask, not an empty one: the caller uses this to decide who may SIT OUT,
-            // and a degenerate block grid must not be read as "nobody may run".
-            return vec![true; n];
-        }
-        let mut forced = vec![false; n];
-        // Blocks that are nominally scheduled this repetition, whether or not they still have work
-        // of their own -- these are what force neighbours (S3). See the comment below.
-        let mut seed = vec![false; n];
-        for b in 0..n {
-            let rate = self.block_clock_rate[b];
-            // EARLY-STOP: `rate` is a BUDGET, not a mandate. A block whose own
-            // physically-computed displacement -- written by the PREVIOUS repetition's
-            // `settle_tick`, before this function overwrites it below -- has fallen under the
-            // scheduler's own settle bar has reached local equilibrium and gains nothing from
-            // further repetitions. The profile measured ~59-62% of extra sub-step executions
-            // running on exactly such blocks. This is eligibility only: a settled block still
-            // RECEIVES mass from running neighbours (S2), and neighbour-forcing (S3) below is
-            // deliberately NOT gated on it, so a clock-domain boundary never runs at the slow
-            // side's rate. A block that a neighbour pushes into has its displacement rise back
-            // above the bar and becomes eligible again on the next repetition.
-            // MASS-ERR-DIAGNOSIS.md: `still_has_work` gates whether a block sweeps its OWN
-            // interior. It must NOT also gate whether the block keeps acting as a neighbour-FORCER,
-            // and conflating the two was a real S3 violation with a measured spatial signature:
-            // a fast block at a clock-domain boundary that settled mid-frame stopped force-waking
-            // its slower neighbour, and that neighbour -- already zeroed by `apply_underclock_skip`
-            // on ticks outside its own schedule -- then had no route back into `will_simulate` for
-            // the rest of the frame, so its owned edge into the fast block went unevaluated.
-            // Measured as a REDISTRIBUTION (per-block excess summed to zero within 0.2%) localised
-            // to two bands one block-row apart with opposite signs and matched magnitudes.
-            //
-            // So: `scheduled` (nominal budget only) decides forcing; `scheduled && still_has_work`
-            // decides running. Early stop keeps its saving on interiors, S3 keeps its guarantee.
-            let scheduled = rate > 1.0 && (rate.round() as u32) > rep;
-            let still_has_work = self.last_displacements[b] >= physics::MUST_SIMULATE_THRESHOLD;
-            if scheduled && still_has_work {
-                forced[b] = true;
-            }
-            if scheduled {
-                seed[b] = true;
-            }
-        }
-        for b in 0..n {
-            if !seed[b] {
-                continue;
-            }
-            let bx = b % cols;
-            let by = b / cols;
-            if bx > 0 { forced[b - 1] = true; }
-            if bx + 1 < cols { forced[b + 1] = true; }
-            if by > 0 { forced[b - cols] = true; }
-            if by + 1 < rows { forced[b + cols] = true; }
-        }
-        for b in 0..n.min(self.last_displacements.len()) {
-            if forced[b] {
-                self.last_displacements[b] =
-                    self.last_displacements[b].max(physics::MUST_SIMULATE_THRESHOLD * 2.0);
-            }
-        }
-        forced
-    }
-
-    /// The block grid's column count -- `(grid_width + block_size - 1) / block_size`, the same
-    /// arithmetic `update()`/`settle_tick` use, exposed here so the clock-rate helpers above can
-    /// map a flat block index back to `(bx, by)` without re-deriving it inline three times.
-    /// Map a per-BLOCK touched mask onto the per-TILE one `CoarseState::restrict_incremental`
-    /// expects. Returns the input unchanged (cloned) when the two grids already coincide, which
-    /// is the shipped case. A tile inherits the flag of the block containing its top-left cell;
-    /// when blocks are bigger than tiles this over-reports (every tile in a touched block is
-    /// marked), which costs re-aggregation work and can never miss a change -- the direction that
-    /// keeps `A[C]` correct.
-    fn expand_touched_to_tiles(
-        touched: &[bool],
-        grid: usize,
-        block_size: usize,
-    ) -> Option<Vec<bool>> {
-        let tile_n = COARSE_GRID;
-        let n = tile_n * tile_n;
-        // `None` means "the caller's own block mask is already tile-indexed, use it directly" --
-        // the shipped geometry, and the reason this costs nothing there.
-        if touched.len() == n || touched.is_empty() || block_size == 0 || grid == 0 {
-            return None;
-        }
-        let cols = (grid + block_size - 1) / block_size;
-        let rows = (touched.len() + cols.max(1) - 1) / cols.max(1);
-        let t = (grid / tile_n).max(1);
-        // Driven from the BLOCK side, ORing into every tile a touched block overlaps, so this is
-        // correct whether blocks are bigger than tiles (one block marks many) or smaller (many
-        // blocks share one tile and any of them marks it). Over-reporting is the safe direction:
-        // it costs re-aggregation, it cannot miss a change.
-        let mut out = vec![false; n];
-        for b in 0..touched.len() {
-            if !touched[b] {
-                continue;
-            }
-            let bx = b % cols;
-            let by = b / cols;
-            if by >= rows {
-                continue;
-            }
-            let cx0 = (bx * block_size) / t;
-            let cx1 = (((bx + 1) * block_size - 1) / t).min(tile_n - 1);
-            let cy0 = (by * block_size) / t;
-            let cy1 = (((by + 1) * block_size - 1) / t).min(tile_n - 1);
-            for cy in cy0..=cy1.max(cy0) {
-                for cx in cx0..=cx1.max(cx0) {
-                    out[cy * tile_n + cx] = true;
-                }
-            }
-        }
-        Some(out)
-    }
-
-    fn block_size_cols(&self) -> usize {
-        let w = self.heightmap.width;
-        if self.block_size == 0 { 0 } else { (w + self.block_size - 1) / self.block_size }
-    }
-
-    /// Row-major block-heat texel bytes for the heat-map debug overlay, one byte per block
-    /// (always a 32x32 grid — see `new_with_size`'s doc comment), ready for direct upload as an
-    /// R8Unorm GPU texture: `byte = round((times_simulated_in_window / 300) * 255)`, clamped.
-    /// See `block_heat_buckets` for exactly what "times simulated in window" means and the
-    /// approximation it makes versus a true 300-tick trailing count.
-    ///
-    /// OVERCLOCKING.md: while `overclocking_enabled` is on, this is repurposed -- same texture,
-    /// same upload path, no shader or pipeline changes -- to show per-block SUB-STEPS ACTUALLY
-    /// EXECUTED in the last frame (`last_frame_block_substeps`), not the clock rate it was
-    /// budgeted.
-    ///
-    /// It drew the planned rate until now. The two are very different pictures once early stop,
-    /// `rate_gated_reps`, S3 forcing and grading are all in play: a block can be budgeted 8x and
-    /// run twice, or be rated 1x and run four times because a fast neighbour kept forcing it. The
-    /// overlay exists to answer "where is the time going", and only the executed count answers
-    /// that.
-    ///
-    /// Byte value is `log2(1 + substeps) / log2(1 + ceiling)` mapped onto `[0, 255]`, with the
-    /// ceiling taken from `max_clock_rate` so the scale follows the slider rather than a constant:
-    /// a block that ran zero times is black, one sweep (the ordinary, unclocked amount) sits low
-    /// on the ramp, and only a block spending the whole budget reads hot. Log rather than linear
-    /// because the interesting range is 1-4 sweeps and a linear ramp against a ceiling of 16
-    /// would leave all of it in the bottom quarter.
-    pub fn block_heat_texels(&self) -> Vec<u8> {
-        if self.overclocking_enabled
-            && self.last_frame_block_substeps.len() == self.active_blocks.len()
-        {
-            let ceiling = self.max_clock_rate.clamp(1.0, CLOCK_RATE_MAX);
-            let denom = (1.0 + ceiling).log2().max(1e-6);
-            return self
-                .last_frame_block_substeps
-                .iter()
-                .map(|&s| {
-                    let v = (1.0 + s as f32).log2() / denom;
-                    (v.clamp(0.0, 1.0) * 255.0).round() as u8
-                })
-                .collect();
-        }
-        let num_blocks = self.block_heat_buckets.len() / HEAT_NUM_BUCKETS;
-        (0..num_blocks)
-            .map(|b| {
-                let sum: u32 = (0..HEAT_NUM_BUCKETS)
-                    .map(|k| self.block_heat_buckets[b * HEAT_NUM_BUCKETS + k] as u32)
-                    .sum();
-                ((sum.min(300) as f32 / 300.0) * 255.0).round() as u8
-            })
-            .collect()
-    }
-
-    /// Row-major per-CELL pressure-field heat-map texels, one byte per grid cell (`grid_size *
-    /// grid_size` — NOT the fixed 32x32 block grid `block_heat_texels` above uses), ready for
-    /// direct upload as an R8Unorm GPU texture. Source quantity depends on
-    /// `pressure_heatmap_head_field`:
-    ///
-    /// - `false` (default): `column_depth` directly (see that field's doc comment for what it
-    ///   measures — the hydrostatic overburden driving lateral, and now vertical, flow), so the
-    ///   overlay tracks whichever pass currently populates it: both the default in-loop
-    ///   computation and the `fresh_pressure_field` standalone pass write the same `column_depth`
-    ///   array, so flipping THAT toggle is automatically reflected here with no extra plumbing.
-    /// - `true`: `physics::task55_head_field::head_field_to_pressure`, reading the PERSISTENT
-    ///   `head_field` buffer (task #55 step 2, rebuilt as incremental propagation — see
-    ///   `physics::task55_head_field`'s module doc comment) and converting it from an elevation to
-    ///   a pressure-like quantity (`p = head(i) - z(i)`) so it lands on the exact same scale as
-    ///   `column_depth` below. NOT computed fresh here — `head_field` is simulation state
-    ///   maintained by `settle_tick` while `head_field_transport` is on (see that field's own doc
-    ///   comment), so this is a cheap `O(cells)` read-and-convert, not a solve.
-    ///
-    /// SCALING (the design decision that makes this overlay legible at all): both sources are
-    /// unbounded and span orders of magnitude in practice — 0 in voids, through roughly
-    /// 24/64/104/144 down a resting sand column, to 464 for water 60 rows deep. A naive linear
-    /// map against a fixed max would render as a nearly-black screen with a bright sliver at the
-    /// very bottom, revealing no structure at all.
-    ///
-    /// This instead uses `ln(1 + p) / ln(1 + PRESSURE_HEATMAP_LOG_MAX)`, clamped to [0, 1]. Log
-    /// compression is the right shape here because low pressure is the interesting end (voids,
-    /// shallow columns, the free surface, an unsupported free-falling body) — the derivative of
-    /// `ln(1 + x)` is `1 / (1 + x)`, steepest near zero and flattening out at the high end, so
-    /// this gives maximum visual contrast to exactly the low-pressure structure a reader is
-    /// trying to resolve (e.g. the ~55-cell void this overlay was built to diagnose), while still
-    /// spreading the high end (deep water) across a visibly distinct hot range rather than
-    /// clipping it all to one color. Applying the SAME map to both sources (rather than each
-    /// having its own scale) is what makes an A/B between them meaningful: a roofed cave or the
-    /// U-tube's basin should read near-dark under `column_depth` (little material directly
-    /// overhead) and bright under the head field (it knows about the connected column beside it)
-    /// on ONE fixed colour scale, not two incomparable ones. See `PRESSURE_HEATMAP_LOG_MAX`'s own
-    /// doc comment for why the denominator is a fixed constant rather than each frame's own max.
-    pub fn pressure_field_texels(&self) -> Vec<u8> {
-        let log_max = (1.0 + PRESSURE_HEATMAP_LOG_MAX).ln();
-        let to_byte = |depth: f32| -> u8 {
-            let normalized = (1.0 + depth.max(0.0)).ln() / log_max;
-            (normalized.clamp(0.0, 1.0) * 255.0).round() as u8
-        };
-        if self.overfill_pressure {
-            // SATURATION DECILES, not a log-compressed pressure. The question this overlay is
-            // asked under the overfill model is "how saturated are we" -- how close the material
-            // is to capacity, and where it has gone past. A fixed scale answers that badly:
-            // saturation lives almost entirely in a narrow band around 1.0, so any fixed map
-            // renders the whole body one flat colour and hides exactly the structure being looked
-            // for. Equalising against the frame's own decile boundaries spends the full colour
-            // range on the distribution actually present.
-            //
-            // The cost is that colour is no longer comparable between frames, which is why the
-            // boundary values are surfaced in the UI (`saturation_deciles`) -- read the legend,
-            // not the hue. Boundaries refresh on a slow cadence so they are legible rather than
-            // strobing; between refreshes the mapping is fixed, so motion within a frame pair is
-            // real motion.
-            //
-            // Falls back to the log-compressed absolute scale until the first refresh has run
-            // (deciles empty), so the overlay is never blank.
-            let w = self.heightmap.width;
-            let h = self.heightmap.height;
-            if self.saturation_deciles.is_empty() {
-                let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                let overfill_head_unit =
-                    (physics::GRAVITY_HEAD_SCALE / depth_scale) * self.overfill_stiffness;
-                let base_head = physics::GRAVITY_HEAD_SCALE;
-                let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
-                return (0..w * h)
-                    .map(|idx| {
-                        let cap = physics::cell_capacity_for(self.cell_props[idx * 4 + PROP_WETNESS]);
-                        let p_val = physics::overfill_pressure_val(
-                            self.heightmap.data[idx], cap, overfill_ratio, overfill_head_unit,
-                            self.underfill_tension,
-                        );
-                        to_byte(p_val / base_head)
-                    })
-                    .collect();
-            }
-            const OCCUPIED: f32 = 1e-3;
-            (0..w * h)
-                .map(|idx| {
-                    let h_val = self.heightmap.data[idx];
-                    if h_val <= OCCUPIED || self.shape_mask[idx] == MASK_OUTSIDE {
-                        return 0u8;
-                    }
-                    let cap = physics::cell_capacity_for(self.cell_props[idx * 4 + PROP_WETNESS]);
-                    let sat = if cap > 0.0 { h_val / cap } else { 0.0 };
-                    // Buckets 0..=9 spread over 1..=255; 0 is reserved for "no material", so an
-                    // occupied cell in the lowest decile is still visibly distinct from air.
-                    let bucket = self.saturation_bucket(sat);
-                    (1 + (bucket * 254) / 9) as u8
-                })
-                .collect()
-        } else if self.pressure_heatmap_head_field {
-            crate::physics::task55_head_field::head_field_to_pressure(
-                self.heightmap.width,
-                self.heightmap.height,
-                &self.shape_mask,
-                &self.heightmap.data,
-                &self.head_field,
-            )
-            .into_iter()
-            .map(to_byte)
-            .collect()
-        } else {
-            self.column_depth.iter().map(|&d| to_byte(d)).collect()
-        }
-    }
-
-    /// Row-major coarse-level `eta` (hydraulic head) texels for the coarse-overlay debug
-    /// instrument, one byte per coarse tile, always `COARSE_GRID * COARSE_GRID` -- exactly
-    /// `HEAT_GRID_SIZE * HEAT_GRID_SIZE` in `sandart-render`, since the coarse grid IS the LOD
-    /// block grid (`coarse::CoarseGeometry`'s `t = grid_size / 64`). This is deliberately routed
-    /// through `HeightmapRenderer::update_coarse_eta`, the exact same fixed-64x64 R8Unorm upload
-    /// path `block_heat_texels` above already uses (including its "no bounds check, match the
-    /// size exactly" contract) -- there is no reason to invent a second shape for a texture that
-    /// is already the right size.
-    ///
-    /// `coarse_state.eta` is `CoarseState`'s own buffer regardless of whether the coarse level is
-    /// coupled into the fine solver THIS tick -- `coarse_state.tick(...)` (in `update()`, above
-    /// the fine `settle_tick` call) only runs while `coarse_pressure_coupling` is on, so with that
-    /// toggle off this overlay shows whatever `eta` last held (all zero if coupling has never run
-    /// since the shape was last generated). That is a property of the debug toggle, not a bug
-    /// here.
-    ///
-    /// SCALING: a FIXED physical reference, `base_head` -- "one row of gravity head" -- NOT the
-    /// frame's own min/max. Per-frame min/max was tried first and rejected: it stretches
-    /// whatever spread is on screen to the full ramp regardless of that spread's actual size, so
-    /// a field spanning 0.0001 and one spanning 10.0 render IDENTICALLY, and worse, a nearly-flat
-    /// field renders as dramatic, fully-saturated structure that is pure amplified noise. That
-    /// defeats the overlay's actual job, which is to answer "does the coarse level's `eta` have a
-    /// real gradient, or is it nearly flat" -- exactly the distinction per-frame normalisation
-    /// erases.
-    ///
-    /// `base_head = GRAVITY_HEAD_SCALE * gravity_dir.y.abs()` is the SAME quantity
-    /// `CoarseState::update_head_and_disagreement` (`coarse.rs`) nets out of `phi` to produce
-    /// `eta` in the first place, and the same scale `physics::coarse_delta_eta` drives fine edges
-    /// with -- "the scale at which `eta` differences matter" is not a free choice, it is this
-    /// number. A tile-to-tile difference of one `base_head` is large: it is the head drop across
-    /// one entire fine row, `coarse_delta_eta`'s standing scale for the term that drives real
-    /// mass across an edge. `HALF_RANGE_BASE_HEADS` below fixes how many `base_head`s the ramp's
-    /// half-width covers; this is a picked constant, not swept, and should be revisited once the
-    /// user has looked at real deployed data through it.
-    ///
-    /// The mapping re-centres each frame on the `inside` tiles' own MEAN, not their min/max --
-    /// this is not the rejected per-frame normalisation, because it only moves the ORIGIN, not
-    /// the GAIN. `eta` carries an arbitrary system-wide offset (`phi`'s zero is not physically
-    /// anchored), so displaying raw `eta` against an absolute zero would push an entire ordinary
-    /// scene off-scale into one saturated colour; centring on the mean removes that irrelevant
-    /// offset while a deviation of a given SIZE in `base_head` units always maps to the same
-    /// colour shift regardless of what else is on screen -- a tiny-spread field still collapses to
-    /// near-uniform grey, a genuinely sloped one still shows visible structure.
-    ///
-    /// Falls back to `1.0` -- the value `base_head` takes at the shipped default Sand-fall gravity
-    /// (`0.04`, documented on `GRAVITY_HEAD_SCALE` as making one row's head drop exactly `1.0`),
-    /// NOT an arbitrary number -- when `gravity_dir.y` is ~0 (Sandbox mode's `Phi == 0` regime),
-    /// where the live "one row" scale is itself degenerate.
-    ///
-    /// Tiles with `open_cells[C] == 0` (`inside[C] == false` -- dry land, the exterior, or the
-    /// whole grid when `coarse.available` is false at grid <= 64) are 0, the same "off/no data"
-    /// convention `block_heat_texels`/`pressure_field_texels` already use for their sequential
-    /// ramps.
-    pub fn coarse_eta_texels(&self) -> Vec<u8> {
-        const HALF_RANGE_BASE_HEADS: f32 = 1.0;
-        let n = COARSE_GRID * COARSE_GRID;
-        let eta = &self.coarse_state.eta;
-        let inside = &self.coarse.inside;
-        if eta.len() != n || inside.len() != n {
-            return vec![0u8; n];
-        }
-        let (mean, reference) = match self.coarse_eta_stats() {
-            Some((_, _, mean, reference)) => (mean, reference),
-            None => return vec![0u8; n],
-        };
-        let half_range = HALF_RANGE_BASE_HEADS * reference;
-        (0..n)
-            .map(|c| {
-                if !inside[c] {
-                    0u8
-                } else {
-                    let norm = 0.5 + 0.5 * ((eta[c] - mean) / half_range).clamp(-1.0, 1.0);
-                    (norm * 255.0).round() as u8
-                }
-            })
-            .collect()
-    }
-
-    /// `eta` statistics shared by `coarse_eta_texels` (above) and the web UI's numeric readout
-    /// (`sandart-wasm`'s `get_coarse_eta_stats`) -- ONE place computing min/max/mean/reference so
-    /// the readout the user reads a number off of can never drift from what the colour ramp
-    /// actually encoded. Returns `(min, max, mean, base_head_reference)` over `inside` tiles, or
-    /// `None` when there is no `inside` tile at all (nothing coarse-coupled is on screen). See
-    /// `coarse_eta_texels`'s doc comment for what `reference` means and why it is a fixed physical
-    /// scale rather than the frame's own spread.
-    pub fn coarse_eta_stats(&self) -> Option<(f32, f32, f32, f32)> {
-        let n = COARSE_GRID * COARSE_GRID;
-        let eta = &self.coarse_state.eta;
-        let inside = &self.coarse.inside;
-        if eta.len() != n || inside.len() != n {
-            return None;
-        }
-        let mut min_eta = f32::INFINITY;
-        let mut max_eta = f32::NEG_INFINITY;
-        let mut sum = 0.0f32;
-        let mut count = 0u32;
-        for c in 0..n {
-            if inside[c] {
-                min_eta = min_eta.min(eta[c]);
-                max_eta = max_eta.max(eta[c]);
-                sum += eta[c];
-                count += 1;
-            }
-        }
-        if count == 0 {
-            return None;
-        }
-        let mean = sum / count as f32;
-        let base_head = physics::GRAVITY_HEAD_SCALE * self.gravity_dir.y.abs();
-        let reference = if base_head > 1e-3 { base_head } else { 1.0 };
-        Some((min_eta, max_eta, mean, reference))
-    }
-
-    /// Row-major coarse-fine disagreement (`Delta = M - A`) texels for the coarse-overlay debug
-    /// instrument. Same shape, sizing, and staleness contract as `coarse_eta_texels` just above
-    /// -- read that function's doc comment first, this one only covers what differs.
-    ///
-    /// SCALING DIFFERS FROM `eta` in kind (diverging, not sequential) but agrees with it on the
-    /// core fix: a FIXED, physically meaningful reference per tile, not a per-frame `max(|delta|)`
-    /// stretch -- the same "0.01 must not look like 10" argument applies here just as much as to
-    /// `eta`. The reference used is `capacity[C]`, THAT TILE's own nominal fill capacity (`M` and
-    /// `A` are each individually bounded near `capacity[C]`, so `Delta = M - A` naturally ranges
-    /// roughly `-capacity[C] .. +capacity[C]`): `norm = 0.5 + 0.5 * clamp(delta[C] / capacity[C],
-    /// -1, 1)`. This is NOT per-frame normalisation -- `capacity[C]` is fixed geometry, unchanged
-    /// tick to tick except when the shape itself is rebuilt, so a genuinely tiny disagreement
-    /// reads as near-grey regardless of what any other tile or any other frame shows, and a
-    /// disagreement approaching a full tile's holding capacity reads as fully saturated. 0.5
-    /// (mid-ramp) is ALWAYS zero disagreement, never rescaled away from centre.
-    ///
-    /// Tiles with `inside[C] == false` are mapped to 128 (mid-ramp, "no disagreement"), NOT 0 like
-    /// `eta`'s convention -- 0 is a real, strongly-coloured endpoint on a DIVERGING ramp (maximally
-    /// negative), so using it for "no data" would paint dry land and the exterior in the same hue
-    /// as the tile most starved by the coarse level, which is exactly backwards.
-    pub fn coarse_delta_texels(&self) -> Vec<u8> {
-        let n = COARSE_GRID * COARSE_GRID;
-        let delta = &self.coarse_state.delta;
-        let inside = &self.coarse.inside;
-        let capacity = &self.coarse.capacity;
-        if delta.len() != n || inside.len() != n || capacity.len() != n {
-            return vec![0u8; n];
-        }
-        (0..n)
-            .map(|c| {
-                if !inside[c] || capacity[c] < 1e-6 {
-                    128u8
-                } else {
-                    let norm = 0.5 + 0.5 * (delta[c] / capacity[c]).clamp(-1.0, 1.0);
-                    (norm * 255.0).round() as u8
-                }
-            })
-            .collect()
-    }
-
-    /// `max(|Delta|)` over `inside` tiles, in raw mass units -- for the web UI's numeric readout
-    /// (`sandart-wasm`'s `get_coarse_delta_max_abs`) ONLY. Not used by `coarse_delta_texels`
-    /// above, which normalises each tile against its OWN `capacity[C]` rather than a single
-    /// scene-wide number; this is a plain absolute figure so the user can read "how big is the
-    /// worst disagreement right now" directly, in the same units `Delta` itself is in. `None` when
-    /// there is no `inside` tile at all.
-    pub fn coarse_delta_max_abs(&self) -> Option<f32> {
-        let n = COARSE_GRID * COARSE_GRID;
-        let delta = &self.coarse_state.delta;
-        let inside = &self.coarse.inside;
-        if delta.len() != n || inside.len() != n {
-            return None;
-        }
-        let mut max_abs = 0.0f32;
-        let mut any = false;
-        for c in 0..n {
-            if inside[c] {
-                max_abs = max_abs.max(delta[c].abs());
-                any = true;
-            }
-        }
-        if any { Some(max_abs) } else { None }
-    }
-
-    /// Recomputes `saturation_deciles` from the current heightmap. `O(n log n)` in the number of
-    /// OCCUPIED cells, which is why it runs on a slow cadence (`SATURATION_DECILE_REFRESH_TICKS`)
-    /// and only while the overlay is on.
-    ///
-    /// Empty cells are excluded deliberately. In a typical scene most of the grid is air, so
-    /// including it would put every decile boundary below D8 at 0.0 and the legend would read
-    /// "0, 0, 0, 0, 0, 0, 0, 0, 1.2" -- describing how much of the screen is empty, which the
-    /// reader can already see, instead of how saturated the material is, which is the question.
-    fn refresh_saturation_deciles(&mut self) {
-        const OCCUPIED: f32 = 1e-3;
-        let mut sat: Vec<f32> = self
-            .heightmap
-            .data
-            .iter()
-            .enumerate()
-            .filter(|&(idx, &h)| h > OCCUPIED && self.shape_mask[idx] != MASK_OUTSIDE)
-            .map(|(idx, &h)| {
-                let cap = physics::cell_capacity_for(self.cell_props[idx * 4 + PROP_WETNESS]);
-                if cap > 0.0 { h / cap } else { 0.0 }
-            })
-            .collect();
-
-        if sat.is_empty() {
-            self.saturation_deciles.clear();
-            return;
-        }
-        sat.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-        // TRUE NEAREST-RANK DECILES, AND NOTHING ELSE. Equalisation is the entire point of this
-        // colouring -- each band must hold a tenth of the occupied cells -- and nearest rank gives
-        // that by construction.
-        //
-        // A `MIN_BAND_SIZE` pass used to sit here, forcing consecutive boundaries at least 0.05
-        // apart and, when that collapsed the count below nine, replacing the quantiles outright
-        // with an evenly spaced ramp between min and max. It was added when settled water was
-        // pinned against the overfill ceiling and the legend read `1.90 1.90 1.90 ...`, which it
-        // did make prettier. Once the solver stopped over-compressing, EVERY pair of consecutive
-        // deciles fell inside 0.05, so the redistribution path became the only path and the
-        // colouring stopped being equalised at all -- `spec_task70_saturation_decile_legend`
-        // caught it with 58% of occupied cells in one band.
-        //
-        // Near-identical numbers in the legend are now the honest reading. An incompressible fluid
-        // HAS almost no spread in saturation; that is the fix working, not a display bug. If the
-        // overlay needs visible structure, the quantity to colour is pressure or depth, which
-        // still have a real gradient -- not a synthetic spread over one that does not.
-        self.saturation_deciles = (1..10)
-            .map(|d| {
-                let rank = (d * sat.len()) / 10;
-                sat[rank.min(sat.len() - 1)]
-            })
-            .collect();
-    }
-
-    /// Which decile bucket `0..=9` a saturation value falls in, given the current boundaries.
-    /// `saturation_deciles` is sorted, so this is a straight scan over nine values.
-    fn saturation_bucket(&self, sat: f32) -> usize {
-        self.saturation_deciles.iter().take_while(|&&b| sat >= b).count()
     }
 
     /// Full (all `GRID_SIZE` rows) row-mass recompute plus a fresh quantile target computation.
@@ -2809,229 +1451,6 @@ impl DrawingSimulation {
             }
         }
 
-        // Coarse pressure state update (HIERARCHICAL-PRESSURE.md §5, build step 2 & 3).
-        // Restricts fine mass into A, anchors M toward A, relaxes M across the coarse graph,
-        // and updates coarse hydraulic head (eta), pressure (P), and coarse-fine disagreement (Delta).
-        //
-        // OVERCLOCKING.md: runs UNCONDITIONALLY now (no longer gated on `coarse_pressure_coupling`
-        // -- that flag now gates only the driving-potential coupling into the fine solver, below).
-        // The coarse level's own dynamics must keep running regardless: it produces `|Delta|`,
-        // the multi-rate scheduler's signal, and the scheduler must work even when the potential
-        // coupling is off (its shipped default, per the user's own words -- see
-        // `coarse_pressure_coupling`'s doc comment).
-        // LATERAL-COARSE-CORRECTION.md: arm the flow ledger for this tick, BEFORE the coarse
-        // level runs, since the coarse tick is the first thing that will write to it. Sized every
-        // tick rather than on resize, because `lat_ledger_enable` is also what zeroes it -- one
-        // allocation-free pass over two small buffers, and it makes "the ledger holds exactly this
-        // tick" true by construction rather than by remembering to clear it somewhere else.
-        let correction_active = self.coarse_flow_correction
-            && self.coarse.available
-            && self.coarse_correction_damping > 0.0;
-        // `lat_ledger_ensure`, not `lat_ledger_enable`: the fine half must SURVIVE into this tick,
-        // because the boost below compares this tick's coarse transport against last tick's fine
-        // transport. Each half is zeroed explicitly just before the thing that writes it runs.
-        physics::lat_ledger_ensure(
-            correction_active,
-            self.coarse_state.delta.len(),
-            self.active_blocks.len(),
-        );
-        if correction_active {
-            // The coarse tick is about to rewrite the coarse half.
-            physics::lat_ledger_clear_coarse();
-        }
-        if !correction_active {
-            self.last_frame_correction = physics::LateralCorrectionStats::default();
-        }
-
-        // CREDIT-DEBT-TRANSPORT.md §2.3: raise anchoring while the delta transport is on, so the
-        // fine level stays the source of truth and `Delta` keeps meaning "one coarse step from a
-        // freshly-tethered state". See `COARSE_DELTA_TRANSPORT_LAMBDA`'s doc comment -- this is a
-        // correctness coupling, not a tuning choice, and it must be set BEFORE `coarse_state.tick`
-        // since that is what runs `anchor`.
-        let delta_transport_active = self.coarse_delta_transport
-            && self.coarse.available
-            && self.coarse_delta_transport_rate > 0.0;
-        self.coarse_state.lambda = if delta_transport_active {
-            COARSE_DELTA_TRANSPORT_LAMBDA
-        } else {
-            coarse::COARSE_DEFAULT_LAMBDA
-        };
-        if !delta_transport_active {
-            self.last_frame_delta_transport = physics::DeltaTransportStats::default();
-        }
-
-        if self.coarse.available {
-            // STEP4-COARSE-IS-A-SIM.md: the coarse level's own dynamics now run the shipped
-            // solver over a nested grid (`CoarseState::advance_nested_sim`), so it needs the
-            // real `gravity_dir` (not a pre-scaled scalar `base_head`) and the real overfill
-            // settings, unmodified -- "the coarse sim IS a 64x64 sim" means it uses the same
-            // constants the fine level does, derived the same way. `unit` remains the FINE
-            // grid's own `overfill_head_unit`, used only for `eta`'s export-side pressure scaling
-            // (unchanged from before this rebuild).
-            let expanded = Self::expand_touched_to_tiles(
-                &self.blocks_touched,
-                self.heightmap.width,
-                self.block_size,
-            );
-            let depth_scale = physics::REFERENCE_GRID_HEIGHT as f32 / self.heightmap.width as f32;
-            let unit = (physics::GRAVITY_HEAD_SCALE / depth_scale) * self.overfill_stiffness;
-            let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
-            self.coarse_state.tick(
-                &self.heightmap.data,
-                &self.shape_mask,
-                &self.cell_props,
-                &self.coarse,
-                self.gravity_dir,
-                overfill_ratio,
-                self.underfill_tension,
-                self.overfill_stiffness,
-                unit,
-                // `restrict_incremental` indexes this by COARSE TILE, and at the default block
-                // divisor a block and a tile are the same square, so this is the identity and
-                // `expanded` stays `None` -- no clone on the shipped path. At any other divisor
-                // the mask is expanded rather than handed over at the wrong length, which
-                // `restrict_incremental` would (correctly but expensively) treat as "cannot
-                // vouch for this" and answer with a full restrict every tick.
-                Some(expanded.as_deref().unwrap_or(&self.blocks_touched)),
-            );
-            // Everything the coarse level moved this tick is now in the ledger's COARSE half;
-            // everything the fine level moves below belongs in the FINE half.
-            physics::lat_ledger_set_coarse(false);
-        }
-
-        // CREDIT-DEBT-TRANSPORT.md §2.3: move mass between tiles by half the difference of their
-        // `Delta`s, BEFORE this tick's `settle_tick` runs.
-        //
-        // The ordering is the design. `Delta` has just been recomputed against the fine state as it
-        // stands, so it is this tick's disagreement; the transport deposits a tile-level quantity
-        // spread by headroom, and the `settle_tick` immediately below is what actually places it.
-        // LATERAL-COARSE-CORRECTION.md's post-mortem on Designs 1 and 2 -- "both failed designs
-        // share one root: they let the coarse level decide WHERE mass goes" -- is why the coarse
-        // level is only ever allowed to say how much crosses a face, never where it lands.
-        //
-        // No debt ledger and nothing stored: `Delta` is recomputed from the true fine state every
-        // tick (`CoarseState::tick` re-restricts `A` first), so a tile that was owed mass and did
-        // not get it simply still shows a `Delta` next tick. That is persistence, recomputed rather
-        // than stored, and it is why this needs none of the ledger machinery an earlier draft of
-        // the design specified.
-        if delta_transport_active {
-            let n_tiles = self.coarse_state.delta.len();
-            let mut moved_tiles = vec![false; n_tiles];
-            let overfill_ratio = (self.overfill_capacity - 1.0).max(0.0);
-            self.last_frame_delta_transport = physics::apply_coarse_delta_transport(
-                &mut self.heightmap.data,
-                &self.shape_mask,
-                &self.cell_props,
-                &self.coarse_state.delta,
-                &self.coarse.inside,
-                &mut moved_tiles,
-                self.heightmap.width,
-                self.heightmap.height,
-                self.block_size,
-                self.coarse.coarse_n,
-                self.coarse_delta_transport_rate,
-                overfill_ratio,
-            );
-            // MANDATORY, and the reason is a silent compounding corruption rather than a visible
-            // bug. `apply_coarse_delta_transport` writes fine heights outside `settle_tick`, so
-            // two invariants the rest of the system relies on have to be restored by hand:
-            //
-            // 1. `restrict_incremental` (coarse.rs) SKIPS any tile whose touched flag is false and
-            //    keeps its old `a_mass`. A tile we changed but did not mark would keep a stale
-            //    `A[C]` indefinitely, which corrupts `Delta`, `eta`, the clock scheduler AND this
-            //    transport's own signal -- a feedback loop feeding on its own error.
-            // 2. A block whose displacement stays below the MUST threshold is not classified into
-            //    `will_simulate`, so it would never sweep the mass we just gave it. The deposit
-            //    would sit there as a step in the height field until something else woke the block.
-            //
-            // Tile index == block index is guaranteed here: `apply_coarse_delta_transport` returns
-            // without moving anything unless `t == block_size`, which is exactly that identity.
-            for b in 0..moved_tiles.len() {
-                if !moved_tiles[b] {
-                    continue;
-                }
-                if b < self.blocks_touched.len() {
-                    self.blocks_touched[b] = true;
-                }
-                if b < self.last_displacements.len() {
-                    self.last_displacements[b] = self.last_displacements[b]
-                        .max(physics::MUST_SIMULATE_THRESHOLD * 2.0);
-                }
-            }
-        }
-
-        // LATERAL-COARSE-CORRECTION.md: turn this tick's coarse-vs-fine lateral deficit into a
-        // per-block conveyance multiplier, and install it for the repetitions below.
-        //
-        // Ordering: the coarse level has just run, so `coarse_h` is THIS tick's transport, while
-        // `fine_h` is still last tick's -- the fine level has not run yet. That is the right
-        // pairing rather than a lag to apologise for: the boost has to be in place BEFORE
-        // `settle_tick` so the fine solver can act on it, and last tick's realised lateral flow is
-        // the best available statement of what the fine level manages at this configuration.
-        //
-        // The boost changes only how fast the fine solver may convey laterally. It moves no mass
-        // and decides no placement -- see `compute_lateral_boost` for why that distinction is the
-        // whole design.
-        if correction_active {
-            let (coarse_h, coarse_v, fine_h, fine_v) = physics::lat_ledger_snapshot();
-            let (boost_h, boost_v, stats) = physics::compute_lateral_boost(
-                self.heightmap.width,
-                self.heightmap.height,
-                self.block_size,
-                self.coarse.coarse_n,
-                &coarse_h,
-                &coarse_v,
-                &fine_h,
-                &fine_v,
-                self.coarse_correction_damping,
-            );
-            self.last_frame_correction = stats;
-            physics::set_lateral_boost(
-                &boost_h,
-                if self.coarse_correction_vertical { &boost_v } else { &[] },
-            );
-            // Last tick's fine transport has now been consumed; the repetitions below accumulate
-            // this tick's into a clean buffer.
-            physics::lat_ledger_clear_fine();
-        } else {
-            physics::set_lateral_boost(&[], &[]);
-        }
-
-        // OVERCLOCKING.md (HIERARCHICAL-PRESSURE.md §7b): update the multi-rate block scheduler.
-        // Defensive resize first -- mirrors `settle_tick`'s own belt-and-suspenders pattern for
-        // `last_displacements`/`active_blocks`, in case the block grid ever changed shape without
-        // going through `new_with_size`/`reset()` (neither of which happens in production today).
-        let expected_block_len = self.active_blocks.len();
-        if self.block_clock_rate.len() != expected_block_len {
-            self.block_clock_rate.resize(expected_block_len, 1.0);
-        }
-        if self.overclocking_enabled && self.coarse.available {
-            self.update_block_clock_rates();
-            self.apply_underclock_skip();
-        } else if self.block_clock_rate.iter().any(|&r| r != 1.0) {
-            // Bit-identical to the toggle never having existed: no stale rate lingers on screen
-            // or in the scheduler while this is off.
-            self.block_clock_rate.fill(1.0);
-        }
-        // Upper bound on EXTRA `settle_tick` repetitions this frame, beyond the normal one -- a
-        // block at rate `n` (n > 1) runs AT MOST `round(n)` real sub-steps total this frame
-        // (EARLY-STOP.md: `force_overclocked_blocks_active` stops re-forcing a block once its own
-        // real displacement falls under `MUST_SIMULATE_THRESHOLD`, so most blocks run fewer than
-        // their rate's worth of repetitions -- see that function's doc comment for why arbitrary,
-        // non-power-of-two rates are still safe here). This frame-wide `extra_reps` is still the
-        // MAXIMUM rate across all blocks, rounded -- the rep loop below still iterates that many
-        // times, it just skips a settled block's own interior work on each one it no longer needs.
-        let extra_reps: u32 = if self.overclocking_enabled {
-            self.block_clock_rate
-                .iter()
-                .cloned()
-                .fold(1.0f32, f32::max)
-                .round()
-                .max(1.0) as u32
-                - 1
-        } else {
-            0
-        };
 
         // Run the gravity-driven settling cellular automata tick
         //
@@ -3039,14 +1458,11 @@ impl DrawingSimulation {
         // displacement value alone to trip the `> 3e-4` check just below: `settle_tick`'s own
         // MUST bar (`physics::MUST_SIMULATE_THRESHOLD` = 1e-4) sits below this gate's 3e-4 by
         // design (see that constant's doc comment), so a freshly-injected 1e-4 would silently
-        // fail to mark the tick active without this. `extra_reps > 0` is OR'd in for the same
-        // reason: overclocking can want extra sub-steps even on a frame where nothing has yet
-        // crossed the ordinary activity bars.
+        // fail to mark the tick active without this.
         let has_active = perfect_sim_found_material
             || self.last_displacements.iter().any(|&x| x > 3e-4)
             || self.marbles.iter().any(|m| m.was_active)
-            || self.gravity_dir.length_squared() > 1e-6
-            || extra_reps > 0;
+            || self.gravity_dir.length_squared() > 1e-6;
         if has_active {
             let mut active_marbles = [physics::ActiveMarbleInfo {
                 pos: Vec2::ZERO,
@@ -3066,54 +1482,6 @@ impl DrawingSimulation {
                 }
             }
 
-            // OVERCLOCKING.md: `rep in 0..=extra_reps` runs the normal call (`rep == 0`,
-            // unchanged classification, exactly as before this feature existed when
-            // `extra_reps == 0`) plus one real `settle_tick` call per additional sub-step a
-            // genuinely overclocked block has earned. `self.tick_count` is passed UNCHANGED on
-            // every repetition (not `+ rep`) -- F1 (HIERARCHICAL-PRESSURE.md §7b): staleness
-            // (`MAX_STALENESS` in physics.rs) is counted in `tick_count`, and re-using the same
-            // value for every repetition within one rendered frame means a tick keeps meaning
-            // "one rendered frame" regardless of how many internal sub-steps ran this frame, so
-            // `MAX_STALENESS` means the same amount of simulated time at every clock setting.
-            // `time_seed` still varies per repetition so repeated sub-steps do not all draw the
-            // exact same jitter/parity.
-            //
-            // `touched_this_rep` (rather than passing `&mut self.blocks_touched` directly) and
-            // the OR-merge below are necessary once `extra_reps > 0`: `settle_tick`'s
-            // `touched_out` REPLACES its target's contents each call, so passing
-            // `self.blocks_touched` straight through would let the LAST repetition's touched set
-            // silently overwrite (not accumulate with) every earlier repetition's -- and
-            // `CoarseState::restrict_incremental` (next tick) trusts that set completely, so a
-            // block touched only in an earlier repetition would read as unchanged and never get
-            // re-aggregated into `A[C]`. Reduces to one call and one copy, bit-identical to
-            // before this feature existed, when `extra_reps == 0`.
-            let mut touched_accum: Vec<bool> = Vec::new();
-            // PERF-PROFILE.md TEMPORARY: first rep (per block) whose real `last_displacements`
-            // fell under threshold, -1 if never within this frame's rep budget.
-            let mut first_settled: Vec<i32> = vec![-1; self.block_clock_rate.len()];
-            // EARLY-STOP.md: the ACTUAL count of per-block interior sweeps this frame, summed
-            // across every repetition -- see `last_frame_block_steps`'s own doc comment.
-            let mut block_steps_this_frame: u32 = 0;
-            // EARLY-STOP.md: see `last_frame_stalled_boundaries`.
-            let mut stalled_boundaries: u32 = 0;
-            // EARLY-STOP.md: see `last_frame_block_substeps`. Zeroed here, not in the per-rep
-            // loop, so it accumulates across every repetition of THIS frame and nothing else.
-            if self.last_frame_block_substeps.len() != self.active_blocks.len() {
-                self.last_frame_block_substeps.resize(self.active_blocks.len(), 0);
-            }
-            self.last_frame_block_substeps.iter_mut().for_each(|v| *v = 0);
-            // CLASSIFICATION-HOIST.md Stage 1: `fresh_overburden_must_blocks`/`support_fraction`
-            // classification was measured at ~54% of an overclocked frame (SCAFFOLDING-BREAKDOWN.md),
-            // paid identically on every one of this frame's `extra_reps + 1` `settle_tick` calls for
-            // an answer that barely changes rep-over-rep (the `needed[]` mask does not shrink
-            // materially -- same doc, and physics.rs's `compute_fresh_active` doc comment). Computed
-            // ONCE here, on the state as it stands before this frame's first `settle_tick` call
-            // (identical to what rep 0 would have computed live), and reused for every repetition.
-            // Safe by construction: the predicate "only ever adds indices to `must_simulate`; it
-            // never feeds a physics quantity" (physics.rs, `fresh_overburden_must_blocks`'s own doc
-            // comment) -- caching it changes WHICH blocks get scheduled, never what the physics
-            // computes. Verified against the defect this predicate exists to fix (Task #47 sand-slab
-            // divergence vs. perfect-sim) rather than assumed -- see CLASSIFICATION-HOIST.md.
             let fresh_active = physics::compute_fresh_active(
                 w,
                 h,
@@ -3127,49 +1495,7 @@ impl DrawingSimulation {
                 &self.edge_vel_v,
                 &self.last_displacements,
             );
-            for rep in 0..=extra_reps {
-                // EARLY-STOP.md: blocks sitting out this repetition under `rate_gated_reps`, as
-                // `(block, displacement before it was zeroed)`. Restored after the call.
-                let mut stashed: Vec<(usize, f32)> = Vec::new();
-                if rep > 0 {
-                    let participating = self.force_overclocked_blocks_active(rep);
-                    if self.rate_gated_reps {
-                        // Count the seams this repetition's suppression creates BEFORE acting on
-                        // it: an edge whose owning block (left/top, since edges belong to their
-                        // lower-index cell) sits out while the far side runs cannot be evaluated
-                        // by anyone this repetition.
-                        let cols_b = self.block_size_cols();
-                        if cols_b > 0 {
-                            let rows_b = participating.len() / cols_b;
-                            for b in 0..participating.len() {
-                                let bx = b % cols_b;
-                                let by = b / cols_b;
-                                if participating[b] {
-                                    continue;
-                                }
-                                if bx + 1 < cols_b && participating[b + 1] {
-                                    stalled_boundaries += 1;
-                                }
-                                if by + 1 < rows_b && participating[b + cols_b] {
-                                    stalled_boundaries += 1;
-                                }
-                            }
-                        }
-                        // Zeroing the displacement is the same lever `apply_underclock_skip`
-                        // uses: it is what keeps a block out of `settle_tick`'s MUST and budget
-                        // tiers. STALE is deliberately still reachable -- `MAX_STALENESS` is the
-                        // independent backstop and gating it on a clock rate would remove the one
-                        // mechanism that catches a wrongly-suppressed block.
-                        for b in 0..participating.len().min(self.last_displacements.len()) {
-                            if !participating[b] && self.last_displacements[b] != 0.0 {
-                                stashed.push((b, self.last_displacements[b]));
-                                self.last_displacements[b] = 0.0;
-                            }
-                        }
-                    }
-                }
-                let mut touched_this_rep: Vec<bool> = Vec::new();
-                settle_tick(
+            settle_tick(
                     &mut self.heightmap,
                     &mut self.temp_heights,
                     &mut self.cell_colors,
@@ -3182,7 +1508,7 @@ impl DrawingSimulation {
                     self.budget_n,
                     self.block_size,
                     &active_marbles[..active_count],
-                    time_seed.wrapping_add(rep.wrapping_mul(0x9E37_79B1)),
+                    time_seed,
                     &mut self.edge_vel_h,
                     &mut self.edge_vel_v,
                     &mut self.column_depth,
@@ -3194,126 +1520,15 @@ impl DrawingSimulation {
                     self.head_field_transport,
                     self.pressure_heatmap_head_field,
                     self.pressure_sensitive_flow,
-                    self.overfill_pressure,
-                    (self.overfill_capacity - 1.0).max(0.0),
-                    self.underfill_tension,
-                    self.overfill_stiffness,
-                    // Empty (not `&self.coarse_state.eta`) whenever the coarse level itself says
-                    // it is not coupled this tick -- `coarse_delta_eta` in physics.rs relies on
-                    // emptiness, not buffer length, to detect "not available", since
-                    // `CoarseState`'s buffers stay sized `COARSE_GRID * COARSE_GRID` regardless.
-                    // Also empty whenever the debug toggle is off (see `coarse_pressure_coupling`'s
-                    // own doc comment) -- same signal, same reason: `settle_tick` must take the
-                    // exact pre-coupling code path when the toggle is off.
-                    if self.coarse.available && self.coarse_pressure_coupling { &self.coarse_state.eta } else { &[] },
-                    // Same emptiness contract, for I4's per-tile flux budget (§6): `|Delta[C]|`
-                    // per tile, consumed by `coarse_delta_eta_budgeted` in physics.rs.
-                    if self.coarse.available && self.coarse_pressure_coupling { &self.coarse_state.delta } else { &[] },
-                    // CLASSIFICATION-HOIST.md Stage 1: the same frame-wide mask on every repetition
-                    // (see its own binding just above the `for rep` loop for why this is safe).
+                    // CLASSIFICATION-HOIST.md Stage 1: computed once, just above.
                     Some(&fresh_active),
-                    Some(&mut touched_this_rep),
                     self.liquid_fall_jitter,
                 );
-                // EARLY-STOP.md: `active_blocks[b] != Inactive` is exactly `will_simulate[b]` from
-                // this call (see `settle_tick`'s classification loop in physics.rs, which writes
-                // both from the same `must_simulate`/`stale_simulate`/`budget_simulate` sets) --
-                // i.e. this counts real interior sweeps actually run this repetition, not the
-                // repetition's rate-implied budget.
-                block_steps_this_frame += self
-                    .active_blocks
-                    .iter()
-                    .filter(|&&a| a != BlockActivity::Inactive)
-                    .count() as u32;
-                // Same predicate, per block rather than summed -- see `last_frame_block_substeps`.
-                for (b, &a) in self.active_blocks.iter().enumerate() {
-                    if a != BlockActivity::Inactive {
-                        self.last_frame_block_substeps[b] += 1;
-                    }
-                }
-                // Restore what was stashed above. `max()`, not assignment: a suppressed block can
-                // still RECEIVE mass from a running neighbour (S2), and that transfer writes a
-                // live displacement this must not overwrite with the stale snapshot. Taking the
-                // larger of the two can only ever schedule a block MORE eagerly, which is the
-                // safe direction -- the failure this guards against is a block that moved being
-                // recorded as settled.
-                for &(b, prev) in &stashed {
-                    self.last_displacements[b] = self.last_displacements[b].max(prev);
-                }
-                // PERF-PROFILE.md TEMPORARY: capture the REAL post-settle_tick displacement for
-                // this rep, before the next iteration's `force_overclocked_blocks_active` (if
-                // any) overwrites it.
-                for b in 0..self.block_clock_rate.len().min(self.last_displacements.len()) {
-                    if self.block_clock_rate[b] > 1.0
-                        && first_settled[b] < 0
-                        && self.last_displacements[b] < physics::MUST_SIMULATE_THRESHOLD
-                    {
-                        first_settled[b] = rep as i32;
-                    }
-                }
-                if touched_accum.len() != touched_this_rep.len() {
-                    touched_accum.resize(touched_this_rep.len(), false);
-                }
-                for (acc, &t) in touched_accum.iter_mut().zip(touched_this_rep.iter()) {
-                    *acc |= t;
-                }
-            }
-            self.blocks_touched = touched_accum;
-            self.last_frame_block_steps = block_steps_this_frame;
-            self.last_frame_stalled_boundaries = stalled_boundaries;
-            // PERF-PROFILE.md TEMPORARY: log (target sub-steps, first-settled rep or -1) for
-            // every block that was genuinely overclocked this frame.
-            if extra_reps > 0 {
-                EARLY_TERM_LOG.with(|c| {
-                    let mut log = c.borrow_mut();
-                    for b in 0..self.block_clock_rate.len() {
-                        let rate = self.block_clock_rate[b];
-                        if rate > 1.0 {
-                            log.push((rate.round() as u32, first_settled[b]));
-                        }
-                    }
-                });
-            }
         } else {
             self.active_bounds.active = false;
-            // Nothing ran, so no block's fine heights could have changed -- see
-            // `blocks_touched`'s own doc comment for why stale content here (rather than
-            // all-false) would be merely wasteful, not incorrect, but is cleared anyway.
-            self.blocks_touched.iter_mut().for_each(|v| *v = false);
-            self.last_frame_block_steps = 0;
-            self.last_frame_stalled_boundaries = 0;
-            self.last_frame_block_substeps.iter_mut().for_each(|v| *v = 0);
         }
 
         self.tick_count = self.tick_count.wrapping_add(1);
-
-        // Block-simulation heat-map bookkeeping (debug overlay) — see `block_heat_buckets`'s
-        // doc comment for exactly what this counts and the bucket-decay approximation it makes.
-        // Runs every tick regardless of `has_active` so the trailing window keeps aging stale
-        // activity out even while the sim is fully at rest; only the increment step below is
-        // gated on `has_active`, since `active_blocks` was NOT refreshed by `settle_tick` this
-        // tick if it didn't run, and crediting its stale contents into the new bucket would
-        // double-count activity that actually happened one or more ticks ago.
-        if self.block_heat_buckets.len() != self.active_blocks.len() * HEAT_NUM_BUCKETS {
-            self.block_heat_buckets
-                .resize(self.active_blocks.len() * HEAT_NUM_BUCKETS, 0);
-        }
-        let heat_bucket = ((self.tick_count / HEAT_BUCKET_TICKS) % HEAT_NUM_BUCKETS as u32) as usize;
-        if self.tick_count % HEAT_BUCKET_TICKS == 0 {
-            // Entering a new bucket: this slot last held the chunk that is now 300 ticks old,
-            // so clear it before this tick's activity starts filling it back in.
-            for b in 0..self.active_blocks.len() {
-                self.block_heat_buckets[b * HEAT_NUM_BUCKETS + heat_bucket] = 0;
-            }
-        }
-        if has_active {
-            for (b, &activity) in self.active_blocks.iter().enumerate() {
-                if activity != BlockActivity::Inactive {
-                    let slot = &mut self.block_heat_buckets[b * HEAT_NUM_BUCKETS + heat_bucket];
-                    *slot = slot.saturating_add(1);
-                }
-            }
-        }
 
         // Quantile mass-distribution lines (Sand-fall overlay): the steady-state path recomputes
         // at most every 5 ticks, and only while the feature is switched on. `has_active` being
@@ -3336,16 +1551,6 @@ impl DrawingSimulation {
             } else if has_active && self.tick_count % 5 == 0 {
                 self.refresh_quantiles_partial();
             }
-        }
-
-        // Saturation deciles for the overfill heat-map. Gated on the overlay actually being on,
-        // so a normal run never pays for it, and refreshed on a slow cadence because these are a
-        // legend the reader is reading, not a per-frame signal -- a scale that jumps every frame
-        // is unreadable and makes two frames incomparable.
-        if self.overfill_pressure && self.pressure_heatmap_overlay
-            && self.tick_count % SATURATION_DECILE_REFRESH_TICKS == 0
-        {
-            self.refresh_saturation_deciles();
         }
 
         // Update EMA of frame time and adjust budget_n

@@ -1167,14 +1167,7 @@ impl DynSim {
             head_field_transport,
             false,
             pressure_sensitive_flow,
-            false,
-            0.50,
-            0.0, // underfill_tension: off, so these keep asserting the pre-tension behaviour
-            crate::physics::OVERFILL_STIFFNESS_K, // overfill_stiffness: the shipped default
-            &[],
-            &[],
             None, // precomputed_fresh_active (Stage 1 hoist): this harness recomputes internally, bit-identical to pre-hoist behaviour
-            None, // incremental-restrict touched-blocks output (STEP3-ADAPTIVE-COARSE.md); this harness doesn't need it,
             0.0,
         );
         self.tick_count += 1;
@@ -1837,77 +1830,6 @@ fn visible_cells(sim: &crate::DrawingSimulation) -> Vec<usize> {
     (0..sim.shape_mask.len())
         .filter(|&i| sim.shape_mask[i] != crate::MASK_OUTSIDE && sim.heightmap.data[i] > 1e-4)
         .collect()
-}
-
-/// Task #55 step 2 (2.32): the pressure heat-map's new-field source must not read degenerately
-/// dark. Runs the SAME scenario `head_field_transport_toggle.rs` uses (a deep, continuously-fed
-/// liquid column under a narrow neck) with `head_field_transport = true` for the whole run, since
-/// `head_field` (the persistent buffer this overlay source reads -- see that field's own doc
-/// comment in `lib.rs`) is only advanced while that toggle is on.
-///
-/// THRESHOLD, an argument about visibility, not a number picked to pass: `pressure_field_texels`'s
-/// own log compression (`ln(1 + p) / ln(1 + PRESSURE_HEATMAP_LOG_MAX)`) gives an overlay its
-/// clearest, most legible structure near the LOW end of the 0..255 byte range (see that function's
-/// own doc comment -- the derivative of `ln(1+x)` is steepest near zero) -- which means a source
-/// whose mean sits in the bottom decile of that range is exactly the "nothing visible" failure
-/// mode this task fixes, regardless of exactly how dark: a viewer cannot distinguish "populated
-/// but dim" from "empty" at that end of an already-low-contrast-at-the-high-end map. `25.5` (an
-/// even 10% of the 0..255 range) is that floor -- well above the ~47.3/255 (18.5%) this task's own
-/// brief measured for the un-converged old design being *already borderline*, and comfortably
-/// below `column_depth`'s own mean on the identical scenario (measured in this same test and
-/// printed for comparison), so this floor cannot be satisfied by accident.
-#[test]
-fn test_head_field_overlay_is_not_degenerately_dark() {
-    let mut sim = crate::DrawingSimulation::new_with_size(128);
-    sim.sandbox_shape = crate::SandboxShape::Hourglass;
-    sim.gravity_dir = Vec2::new(0.0, 0.04);
-    sim.initialize_hourglass();
-    sim.apply_preset(crate::MaterialMode::Water);
-    sim.head_field_transport = true;
-
-    let targets = [None; 5];
-    for _ in 0..200 {
-        sim.update(
-            0.016,
-            &targets,
-            0.08,
-            crate::MaterialMode::Water,
-            crate::SandboxShape::Hourglass,
-            16.0,
-            16.0,
-        );
-    }
-
-    let visible = visible_cells(&sim);
-    assert!(
-        !visible.is_empty(),
-        "test_head_field_overlay_is_not_degenerately_dark: SCENARIO INVALID -- no visible \
-         (in-mask, wet) cells after 200 ticks, so no overlay brightness measurement is possible"
-    );
-
-    sim.pressure_heatmap_head_field = false;
-    let legacy_texels = sim.pressure_field_texels();
-    let legacy_mean: f64 =
-        visible.iter().map(|&i| legacy_texels[i] as f64).sum::<f64>() / visible.len() as f64;
-
-    sim.pressure_heatmap_head_field = true;
-    let new_texels = sim.pressure_field_texels();
-    let new_mean: f64 =
-        visible.iter().map(|&i| new_texels[i] as f64).sum::<f64>() / visible.len() as f64;
-
-    println!(
-        "test_head_field_overlay_is_not_degenerately_dark: {} visible cells, \
-         legacy(column_depth) mean={legacy_mean:.2}/255 new(head_field) mean={new_mean:.2}/255",
-        visible.len()
-    );
-
-    const NOT_DARK_FLOOR_255: f64 = 25.5; // 10% of the 0..255 range -- see this test's own doc comment
-    assert!(
-        new_mean >= NOT_DARK_FLOOR_255,
-        "head_field overlay source reads degenerately dark: mean={new_mean:.2}/255 is below the \
-         {NOT_DARK_FLOOR_255}/255 visibility floor (legacy column_depth source reads \
-         {legacy_mean:.2}/255 on the identical scenario, for comparison)"
-    );
 }
 
 #[test]

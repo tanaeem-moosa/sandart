@@ -43,7 +43,7 @@ cargo test -p sandart-sim --release --test <name>
 node scripts/check_js.js                      # REQUIRED before any demo.js push
 ```
 
-The library suite is **110 passed / 2 failed on `main`**, and that is the current expected state.
+The library suite is **98 passed / 2 failed on `main`**, and that is the current expected state.
 The two are:
 
 - `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
@@ -63,7 +63,17 @@ Reverting both fixed eight of the nine. See the TOMBSTONE comment in `physics.rs
 that expression, and `artifacts/design/SESSION-HANDOVER-2026-08-29.md` §1 for how the label slipped.
 
 Do not report "tests pass" without saying which target you ran — earlier entries claiming the tests
-pass were about the integration suites, not `--lib`. The integration suites all pass (10 targets).
+pass were about the integration suites, not `--lib`. The integration suites all pass (5 targets).
+
+**On 2026-08-30 the overfill model, the hierarchical coarse level and the block-clock scheduler were
+deleted.** ~13k lines: `coarse.rs`, the overfill law and its equilibrium solver, the overclocking
+scheduler and early-stop machinery, the lateral-correction and delta-transport experiments, five
+toggle test suites, 25 diagnostic examples, and the debug overlays those fed. The library suite lost
+13 tests with them (12 `coarse::tests::*` plus one overlay test) — that is the whole 110 -> 98 drop;
+no physics test was lost. The reason is in the git history and in `artifacts/design/`, which was
+kept in full: overfill's own instruments recorded no benefit, and the coarse level and scheduler
+were reachable only through it. `HANDOVER.md` still describes all of this as live — it is now a
+historical document on those subjects; this file and the code are the authority.
 
 There is also one pre-existing **doctest** failure, `physics::EQUILIBRIUM_LUT_SIZE (line 837)`: a
 4-space-indented formula in a doc comment that rustdoc tries to compile as Rust. Present since at

@@ -378,21 +378,7 @@ impl WasmSimulationState {
         let pressure_heatmap_head_field = self.sim.pressure_heatmap_head_field;
         let head_field_transport = self.sim.head_field_transport;
         let pressure_sensitive_flow = self.sim.pressure_sensitive_flow;
-        let overfill_pressure = self.sim.overfill_pressure;
-        let overfill_capacity = self.sim.overfill_capacity;
-        let overfill_stiffness = self.sim.overfill_stiffness;
-        let pressure_heatmap_overlay = self.sim.pressure_heatmap_overlay;
-        let coarse_pressure_coupling = self.sim.coarse_pressure_coupling;
-        let overclocking_enabled = self.sim.overclocking_enabled;
-        let max_clock_rate = self.sim.max_clock_rate;
-        let rank_clock_rates = self.sim.rank_clock_rates;
         let liquid_fall_jitter = self.sim.liquid_fall_jitter;
-        let rate_gated_reps = self.sim.rate_gated_reps;
-        let grade_clock_rates = self.sim.grade_clock_rates;
-        let coarse_flow_correction = self.sim.coarse_flow_correction;
-        let coarse_correction_damping = self.sim.coarse_correction_damping;
-        let coarse_delta_transport = self.sim.coarse_delta_transport;
-        let coarse_delta_transport_rate = self.sim.coarse_delta_transport_rate;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -415,40 +401,26 @@ impl WasmSimulationState {
         sim.pressure_heatmap_head_field = pressure_heatmap_head_field;
         // Same reasoning again -- and if this were dropped the decile legend would silently stop
         // refreshing after any resolution change, leaving a stale scale on screen.
-        sim.pressure_heatmap_overlay = pressure_heatmap_overlay;
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.head_field_transport = head_field_transport;
         // Same reasoning again: a UI debug toggle, not simulation state.
         sim.pressure_sensitive_flow = pressure_sensitive_flow;
         // Same reasoning again: a UI debug toggle, not simulation state.
-        sim.overfill_pressure = overfill_pressure;
-        sim.overfill_capacity = overfill_capacity;
-        sim.overfill_stiffness = overfill_stiffness;
         // Same reasoning again: a UI debug toggle, not simulation state -- must survive a
         // resolution rebuild like its siblings above rather than reverting to the fresh sim's
         // (also `true`) default and silently discarding an explicit user choice to turn it off.
-        sim.coarse_pressure_coupling = coarse_pressure_coupling;
         // Same reasoning again: a UI debug toggle, not simulation state.
-        sim.overclocking_enabled = overclocking_enabled;
         // Same reasoning again: a UI slider position, not simulation state.
-        sim.max_clock_rate = max_clock_rate;
         // Same reasoning again: a UI toggle, not simulation state.
-        sim.rank_clock_rates = rank_clock_rates;
         // Same reasoning again: a UI slider position, not simulation state.
         sim.liquid_fall_jitter = liquid_fall_jitter;
         // Same reasoning again: a UI toggle, not simulation state.
-        sim.rate_gated_reps = rate_gated_reps;
         // Same reasoning again: a UI toggle, not simulation state.
         // Same reasoning again: a UI toggle, not simulation state.
-        sim.grade_clock_rates = grade_clock_rates;
         // Same reasoning again: UI debug settings, not simulation state -- the correction toggle,
         // its damping slider and its axis selector must all survive a resolution rebuild.
-        sim.coarse_flow_correction = coarse_flow_correction;
-        sim.coarse_correction_damping = coarse_correction_damping;
         // Same reasoning again: UI debug settings, not simulation state. CREDIT-DEBT-TRANSPORT.md
         // §2.3's toggle and its rate slider must survive a resolution rebuild like their siblings.
-        sim.coarse_delta_transport = coarse_delta_transport;
-        sim.coarse_delta_transport_rate = coarse_delta_transport_rate;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
@@ -823,247 +795,11 @@ impl WasmSimulationState {
         self.sim.pressure_sensitive_flow = enabled;
     }
 
-    /// "Per-cell overfill pressure simulation" toggle (task #70): forwarded straight to the sim.
-    pub fn set_overfill_pressure(&mut self, enabled: bool) {
-        self.sim.overfill_pressure = enabled;
-    }
-
-    /// "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md, split by
-    /// OVERCLOCKING.md): forwarded straight to the sim, a plain field write (same shape as
-    /// `set_overfill_pressure` just above -- no reset, no reinitialisation, safe to call every
-    /// frame from `syncSettings()`). See `DrawingSimulation::coarse_pressure_coupling`'s doc
-    /// comment in sandart-sim/src/lib.rs for what it switches: this now gates ONLY the
-    /// driving-potential coupling into the fine solver (`phi`/`gravity_head`) -- the coarse
-    /// level's own per-tick work runs unconditionally regardless of this flag, since the
-    /// scheduler (`set_overclocking`) needs `|Delta|` either way. **Defaults `false`**, per the
-    /// user's own words: "let's leave the coupling behind a flag until we are happy with
-    /// overclocking."
-    pub fn set_coarse_pressure_coupling(&mut self, enabled: bool) {
-        self.sim.coarse_pressure_coupling = enabled;
-    }
-
-    /// "Overclocking" (multi-rate block scheduler) debug toggle (OVERCLOCKING.md): forwarded
-    /// straight to the sim, a plain field write -- no reset, no reinitialisation, safe to call
-    /// every frame from `syncSettings()`, same shape as `set_coarse_pressure_coupling` above.
-    /// Independent of that toggle: this drives per-block clock rate from `|Delta|` regardless of
-    /// whether the driving-potential coupling is also on. See
-    /// `DrawingSimulation::overclocking_enabled`'s doc comment in sandart-sim/src/lib.rs.
-    pub fn set_overclocking(&mut self, enabled: bool) {
-        self.sim.overclocking_enabled = enabled;
-    }
-
-    /// "Rank-based allocation" checkbox (EARLY-STOP.md): selects between allocating clock rates
-    /// by absolute threshold and allocating them by rank against a fixed ladder. Plain field
-    /// write, safe every frame; inert while the overclocking toggle is off. See
-    /// `DrawingSimulation::rank_clock_rates`.
-    pub fn set_rank_clock_rates(&mut self, rank: bool) {
-        self.sim.rank_clock_rates = rank;
-    }
-
-    /// "Rates gate repetitions" checkbox (EARLY-STOP.md): whether a block's clock rate decides
-    /// who RUNS in the extra repetitions, or only who is force-woken on top of everyone else.
-    /// Plain field write, safe every frame; inert while overclocking is off. See
-    /// `DrawingSimulation::rate_gated_reps`.
-    pub fn set_rate_gated_reps(&mut self, gated: bool) {
-        self.sim.rate_gated_reps = gated;
-    }
-
-    /// "Coarse flow correction" checkbox (LATERAL-COARSE-CORRECTION.md): after the frame's
-    /// sub-steps have run, the mass the coarse level actually moved across each tile face is
-    /// compared with the mass the fine level actually moved across the same face, and the
-    /// difference is applied as a limited flux. Exists because the fine level's lateral transport
-    /// is capped by a local CFL bound that the coarse level, being a coarser grid, is not subject
-    /// to. Plain field write, safe every frame; a no-op unless the coarse level is available.
-    /// See `DrawingSimulation::coarse_flow_correction`.
-    pub fn set_coarse_flow_correction(&mut self, enabled: bool) {
-        self.sim.coarse_flow_correction = enabled;
-    }
-
-    /// "Correction strength" slider (LATERAL-COARSE-CORRECTION.md): under-relaxation on the
-    /// coarse level's opinion, `0.0..=1.0`. The coarse level is an approximation with no model of
-    /// repose, so its correction is damped rather than applied whole; `0.0` is equivalent to the
-    /// toggle being off. Plain field write, safe every frame. See
-    /// `DrawingSimulation::coarse_correction_damping`.
-    pub fn set_coarse_correction_damping(&mut self, damping: f32) {
-        self.sim.coarse_correction_damping = damping.clamp(0.0, 1.0);
-    }
-
-    /// "Coarse delta transport" checkbox (CREDIT-DEBT-TRANSPORT.md §2.3): move mass between coarse
-    /// tiles by half the difference of their `Delta`s, before the frame's `settle_tick` runs.
-    ///
-    /// A DIFFERENT LEVER from `set_coarse_flow_correction`, not a variant of it: that one sets a
-    /// conveyance multiplier and moves no mass, this one moves mass and sets no coefficient. The
-    /// reason a second lever exists is that a coefficient cannot carry the long-wavelength mode at
-    /// all -- past the CFL bound the extra coefficient becomes ringing, measured on water at
-    /// +0.6%/+0.4% spread for +75-118% block-steps.
-    ///
-    /// Turning this on also raises the coarse level's anchoring rate (0.10 -> 0.50), which is a
-    /// correctness coupling rather than a tuning choice -- see `COARSE_DELTA_TRANSPORT_LAMBDA`.
-    /// Plain field write, safe every frame; a no-op unless the coarse level is available AND a
-    /// block is a coarse tile. See `DrawingSimulation::coarse_delta_transport`.
-    pub fn set_coarse_delta_transport(&mut self, enabled: bool) {
-        self.sim.coarse_delta_transport = enabled;
-    }
-
-    /// "Delta transport rate" slider (CREDIT-DEBT-TRANSPORT.md §2.3): the request factor on half
-    /// the difference, `0.0..=1.0`. A REQUEST, not an outcome -- donor mass, receiver headroom and
-    /// face aperture all cap what actually moves. `0.0` is equivalent to the toggle being off.
-    /// Plain field write, safe every frame. See `DrawingSimulation::coarse_delta_transport_rate`.
-    pub fn set_coarse_delta_transport_rate(&mut self, rate: f32) {
-        self.sim.coarse_delta_transport_rate = rate.clamp(0.0, 1.0);
-    }
-
-    /// CREDIT-DEBT-TRANSPORT.md §2.3: last frame's delta-transport accounting, for the Debug panel
-    /// -- `[faces_considered, faces_moved, requested, applied, limited, blocked]`. Masses in fine
-    /// mass units. `applied / requested` well below 1 means the caps bound, which is a finding
-    /// about what the fine level can supply rather than a fault. `blocked` counts faces with no
-    /// open fine cell pair at all.
-    pub fn coarse_delta_transport_stats(&self) -> Vec<f32> {
-        let s = &self.sim.last_frame_delta_transport;
-        vec![
-            s.faces_considered as f32,
-            s.faces_moved as f32,
-            s.requested as f32,
-            s.applied as f32,
-            s.limited as f32,
-            s.blocked as f32,
-        ]
-    }
-
-    /// LATERAL-COARSE-CORRECTION.md: last frame's correction accounting, for the Debug panel --
-    /// `[requested, applied, lateral_applied, boundaries, limited, edges]`. All masses in fine
-    /// mass units. `applied / requested` well below 1 means the fine level physically could not
-    /// supply what the coarse level asked for, which is a finding about the two levels rather
-    /// than a fault.
-    pub fn coarse_correction_stats(&self) -> Vec<f32> {
-        let s = self.sim.last_frame_correction;
-        vec![
-            s.requested as f32,
-            s.applied as f32,
-            s.lateral_applied as f32,
-            s.boundaries as f32,
-            s.limited as f32,
-            s.edges as f32,
-        ]
-    }
-
     /// "Falling liquid jitter" slider (STICKINESS.md): per-cell downward-flow jitter for
     /// UNDERFULL liquid, 0..=0.6. Plain field write, safe every frame. `0` is the pre-feature
     /// behaviour exactly. See `DrawingSimulation::liquid_fall_jitter`.
     pub fn set_liquid_fall_jitter(&mut self, jitter: f32) {
         self.sim.liquid_fall_jitter = jitter;
-    }
-
-    /// "Max clock rate" slider (EARLY-STOP.md): the ceiling of the per-block clock-rate range,
-    /// `1.0..=8.0`. A frame costs at most `round(max_clock_rate)` `settle_tick` repetitions, so
-    /// this is the direct frame-time/settling-rate trade -- `1.0` is "no overclocking" while
-    /// leaving underclocking in place, `8.0` is the default. Plain field write like
-    /// `set_overclocking` above: no reset, no reinitialisation, safe to call every frame from
-    /// `syncSettings()`. Has no effect while the overclocking toggle is off, since
-    /// `update_block_clock_rates` does not run then.
-    pub fn set_max_clock_rate(&mut self, rate: f32) {
-        self.sim.max_clock_rate = rate;
-    }
-
-    pub fn get_max_clock_rate(&self) -> f32 {
-        self.sim.max_clock_rate
-    }
-
-    /// "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.
-    /// Task #70: the fluid's bulk stiffness — how hard a column resists compressing under its own
-    /// weight. This replaced the "overfill capacity" control, which is now DERIVED from it:
-    /// stiffness decides how much compression a column wants and the ceiling has to clear that, so
-    /// exposing both let the user set a ceiling below what their own fluid demanded and pin every
-    /// cell against it. Setting one and computing the other makes that unreachable.
-    pub fn set_overfill_stiffness(&mut self, stiffness: f32) {
-        self.sim.overfill_stiffness = stiffness;
-        self.sim.overfill_capacity = sandart_sim::physics::overfill_ceiling_for(stiffness);
-    }
-
-    pub fn get_overfill_stiffness(&self) -> f32 {
-        self.sim.overfill_stiffness
-    }
-
-    pub fn set_overfill_capacity(&mut self, capacity: f32) {
-        self.sim.overfill_capacity = capacity;
-    }
-
-    pub fn get_overfill_capacity(&self) -> f32 {
-        self.sim.overfill_capacity
-    }
-
-    /// Block-simulation heat-map debug overlay: purely a render-side toggle (see
-    /// `heatmap_enabled`'s field doc comment) — the underlying per-block counter runs
-    /// unconditionally in `sim`, this only gates whether `render()` uploads/draws it.
-    pub fn set_heatmap_overlay(&mut self, enabled: bool) {
-        self.heatmap_enabled = enabled;
-    }
-
-    /// Per-cell pressure-field debug overlay: plumbed exactly like `set_heatmap_overlay` just
-    /// above -- a plain field write, no reset/reinitialisation path. Purely a render-side toggle
-    /// (see `pressure_heatmap_enabled`'s field doc comment); the underlying `sim.column_depth`
-    /// runs unconditionally in `sim`, this only gates whether `render()` uploads/draws it. Shows
-    /// whichever pass currently populates `column_depth`, so it tracks the "Fresh pressure field"
-    /// toggle (`set_fresh_pressure_field`) automatically and can be used to compare the two.
-    pub fn set_pressure_heatmap_overlay(&mut self, enabled: bool) {
-        self.pressure_heatmap_enabled = enabled;
-        // Mirrored into the sim purely as a cost gate on the saturation-decile refresh, which
-        // only exists to produce this overlay's legend.
-        self.sim.pressure_heatmap_overlay = enabled;
-    }
-
-    /// Coarse-level `eta` (hydraulic head) debug overlay: plumbed exactly like
-    /// `set_heatmap_overlay` -- a plain field write, no reset/reinitialisation path. Purely a
-    /// render-side toggle; `sim.coarse_state.eta` is maintained by `sim.update()` unconditionally
-    /// whenever `sim.coarse.available` (OVERCLOCKING.md: no longer tied to
-    /// `coarse_pressure_coupling`, see that field's own doc comment), this only gates whether
-    /// `render()` bothers uploading/tinting with it.
-    pub fn set_coarse_eta_overlay(&mut self, enabled: bool) {
-        self.coarse_eta_enabled = enabled;
-    }
-
-    /// Coarse-fine disagreement (`Delta`) debug overlay: plumbed exactly like
-    /// `set_coarse_eta_overlay` just above -- an independent toggle for an independent texture,
-    /// so both this and the `eta` overlay can be viewed at once.
-    pub fn set_coarse_delta_overlay(&mut self, enabled: bool) {
-        self.coarse_delta_enabled = enabled;
-    }
-
-    /// Numeric readout for the coarse `eta` overlay's console-footer entry: `[min, max, mean,
-    /// base_head_reference]` over `inside` coarse tiles, or empty when nothing is coarse-coupled
-    /// on screen (same empty-when-unavailable convention `get_saturation_deciles` already uses).
-    /// Exists because a colour ramp alone can't distinguish "the field truly is flat" from "I
-    /// can't tell" -- see `DrawingSimulation::coarse_eta_stats`'s doc comment for what each
-    /// element means, and `coarse_eta_texels`'s for why `base_head_reference` (not the frame's own
-    /// spread) is the scale the colour ramp itself is built against.
-    pub fn get_coarse_eta_stats(&self) -> Vec<f32> {
-        match self.sim.coarse_eta_stats() {
-            Some((min, max, mean, reference)) => vec![min, max, mean, reference],
-            None => Vec::new(),
-        }
-    }
-
-    /// Numeric readout for the coarse `Delta` overlay's console-footer entry: `[max(|Delta|)]` in
-    /// raw mass units over `inside` coarse tiles, or empty when nothing is coarse-coupled on
-    /// screen. Deliberately the plain absolute number, not normalised against anything -- the
-    /// point is to let the user read "how big is the worst disagreement right now" directly, which
-    /// is exactly the number `coarse_delta_texels`' per-tile `capacity[C]` normalisation does NOT
-    /// surface on its own.
-    pub fn get_coarse_delta_max_abs(&self) -> Vec<f32> {
-        match self.sim.coarse_delta_max_abs() {
-            Some(max_abs) => vec![max_abs],
-            None => Vec::new(),
-        }
-    }
-
-    /// The overfill heat-map's legend: nine saturation decile boundaries (D1..D9), where
-    /// saturation is `height / capacity`, so 1.0 is exactly full and above that is overfill.
-    /// Empty until the overlay has been on long enough for the first refresh, and empty whenever
-    /// the overfill model is off (the overlay then shows an absolute pressure scale, which needs
-    /// no legend of its own). Read this to answer "how saturated are we" -- under decile
-    /// colouring the hue tells you a cell's RANK, and only these numbers tell you its magnitude.
-    pub fn get_saturation_deciles(&self) -> Vec<f32> {
-        self.sim.saturation_deciles.clone()
     }
 
     pub fn load_pattern_gcode(&mut self, content: &str) -> bool {
@@ -1434,48 +1170,6 @@ impl WasmSimulationState {
         };
         self.renderer.update_uniforms(&self.queue, &current_uniforms);
 
-        // Block-simulation heat-map debug overlay: `sim.block_heat_buckets` is always
-        // maintained (see its doc comment), but building the byte array and uploading it to the
-        // GPU only happens while the overlay is actually switched on — this is the "costs
-        // nothing when disabled" half of the contract, the shader-side `heatmap_enabled == 0u`
-        // early-out (see shader.wgsl) is the other half.
-        if self.heatmap_enabled {
-            let heat_texels = self.sim.block_heat_texels();
-            self.renderer.update_block_heat(&self.queue, &heat_texels);
-        }
-
-        // Per-cell pressure-field debug overlay: same "costs nothing when disabled" contract as
-        // the block heat-map above -- `sim.column_depth` is always maintained, but building the
-        // per-cell byte array and uploading it only happens while this overlay is switched on;
-        // the shader-side `pressure_heatmap_enabled == 0u` early-out is the other half.
-        if self.pressure_heatmap_enabled {
-            // Skip the rebuild entirely when neither the simulation nor the chosen source has
-            // moved since the last upload -- see `pressure_heat_cache_key` for why (the paused
-            // case this overlay exists to serve). The uploaded texture persists on the GPU, so
-            // skipping the upload leaves the correct image on screen rather than a blank one.
-            let cache_key = (self.sim.tick_count, self.sim.pressure_heatmap_head_field);
-            if self.pressure_heat_cache_key != Some(cache_key) {
-                let pressure_texels = self.sim.pressure_field_texels();
-                self.renderer.update_pressure_heat(&self.queue, &pressure_texels);
-                self.pressure_heat_cache_key = Some(cache_key);
-            }
-        }
-
-        // Coarse-level debug overlays: same "costs nothing when disabled" contract as the two
-        // above. No cache key like the pressure heat-map's -- `coarse_eta_texels`/
-        // `coarse_delta_texels` are a single pass over the fixed 4096-tile coarse grid (same cost
-        // order as `block_heat_texels` above, which also uploads unconditionally every frame
-        // while on), not the per-cell `O(grid_size^2)` scan that made the pressure heat-map's
-        // cache worth having.
-        if self.coarse_eta_enabled {
-            let eta_texels = self.sim.coarse_eta_texels();
-            self.renderer.update_coarse_eta(&self.queue, &eta_texels);
-        }
-        if self.coarse_delta_enabled {
-            let delta_texels = self.sim.coarse_delta_texels();
-            self.renderer.update_coarse_delta(&self.queue, &delta_texels);
-        }
-
         // Calculate view projection matrix
         let aspect = self.surface_config.width as f32 / self.surface_config.height as f32;
         let projection = glam::Mat4::perspective_lh(0.785, aspect, 0.1, 100.0);
@@ -1577,19 +1271,6 @@ impl WasmSimulationState {
             }
         }
         js_sys::Int32Array::from(&[inactive, slow, medium, fast][..])
-    }
-
-    /// EARLY-STOP.md: `[executed_block_steps, block_count]` for the console footer's "steps"
-    /// readout. `executed_block_steps` is `DrawingSimulation::last_frame_block_steps` -- the
-    /// ACTUAL count of per-block interior sweeps the most recent `update()` call ran, summed
-    /// across every repetition of its rep loop, not the rate-implied budget. `block_count` is
-    /// `active_blocks.len()`, the fixed denominator the ratio is read against. Both are `i32`
-    /// (never negative at these grid sizes) so the pair fits a plain `Int32Array`, same pattern as
-    /// `get_active_block_counts` just above.
-    pub fn get_block_step_stats(&self) -> js_sys::Int32Array {
-        let executed = self.sim.last_frame_block_steps as i32;
-        let block_count = self.sim.active_blocks.len() as i32;
-        js_sys::Int32Array::from(&[executed, block_count][..])
     }
 
     pub fn get_budget_n(&self) -> usize {
