@@ -284,8 +284,6 @@ function tick(now) {
     // Calculate FPS and average frame time, update UI once per second to prevent DOM thrashing
     frameCount++;
     if (now - fpsTime >= 1000) {
-        updateSaturationDeciles();
-        updateCoarseOverlayStats();
         const avgStepTime = renderTimeCount > 0 ? (totalStepTime / renderTimeCount) : 0;
         const avgRenderTime = renderTimeCount > 0 ? (totalRenderTime / renderTimeCount) : 0;
         const avgTotalTime = avgStepTime + avgRenderTime;
@@ -315,27 +313,6 @@ function tick(now) {
         statBlocks.innerText = `${fast + medium + slow}`;
         statBlocks.parentElement.title =
             `must ${fast} · budgeted ${medium} · stale ${slow} · inactive ${inactive}`;
-
-        // EARLY-STOP.md: total per-block interior sweeps the last frame ACTUALLY ran, summed
-        // across every under/overclocking repetition -- not the rate-implied budget. With early
-        // stop, most of a fast block's extra repetitions get skipped once it settles, and an
-        // underclocked block can sit out its own tick entirely, so this number legitimately drops
-        // BELOW the block count as well as rising above it (a settled scene reads close to or
-        // below 1x; an actively-overclocked draining scene reads well above). The multiplier is
-        // moved to the hover title, same "one number, detail on hover" pattern as the other three
-        // footer stats.
-        const statBlockSteps = document.getElementById('stat-block-steps');
-        if (statBlockSteps) {
-            const stepStats = state.get_block_step_stats(); // [executed, block_count]
-            const executedSteps = stepStats[0];
-            const totalBlocks = stepStats[1];
-            statBlockSteps.innerText = `${executedSteps}`;
-            const avgClock = totalBlocks > 0 ? executedSteps / totalBlocks : 0;
-            statBlockSteps.parentElement.title =
-                `${executedSteps} executed sub-steps / ${totalBlocks} blocks this frame · ` +
-                `${avgClock.toFixed(2)}x avg clock -- the ACTUAL work done after under/overclocking ` +
-                `and early stop, not the per-block rate budget`;
-        }
 
         // Update floating HUD stats
         const hudFps = document.getElementById('hud-fps');
@@ -848,7 +825,6 @@ function syncSettings() {
 
     const walkSteps = parseInt(document.getElementById('walk-steps-slider').value);
     const walkSize = parseFloat(document.getElementById('walk-size-slider').value);
-    // (see updateSaturationDeciles at module scope for the decile legend)
     state.set_random_walk_params(walkSteps, walkSize);
     document.getElementById('walk-steps-val').innerText = walkSteps;
     document.getElementById('walk-size-val').innerText = walkSize.toFixed(3);
@@ -871,55 +847,10 @@ function syncSettings() {
     // LOD scheduler debug instruments (both off by default) -- see the "Debug" group's comment
     // in index.html for what each one does.
     state.set_perfect_simulation(document.getElementById('check-perfect-sim').checked);
-    state.set_heatmap_overlay(document.getElementById('check-heatmap').checked);
     state.set_fresh_pressure_field(false);
-    state.set_pressure_heatmap_overlay(document.getElementById('check-pressure-heatmap').checked);
-    state.set_coarse_eta_overlay(document.getElementById('check-coarse-eta').checked);
-    state.set_coarse_delta_overlay(document.getElementById('check-coarse-delta').checked);
     state.set_pressure_heatmap_head_field(false);
     state.set_head_field_transport(false);
     state.set_pressure_sensitive_flow(false);
-    // Overfill default OFF (2026-08-30). Its own instruments recorded no benefit -- spread 59 /
-    // pile peak 13, identical to the non-overfill baseline at EVERY capacity, and free fall 73 rows
-    // against a baseline of 122. The cone-shaped piles it was meant to fix read saturation
-    // 1.00-1.03, i.e. not compressed at all: a transport-rate problem, railed by the +/-1.0 clamp
-    // in `flux_edge_candidate`, not a pressure problem. See the TOMBSTONE in physics.rs for why its
-    // apparent wins were an artifact of the edge-velocity filters being disabled on this path only.
-    state.set_overfill_pressure(false);
-    state.set_coarse_pressure_coupling(document.getElementById('check-coarse-coupling').checked);
-    const overclockOn = document.getElementById('check-overclocking').checked;
-    state.set_overclocking(overclockOn);
-    // EARLY-STOP.md: clock-rate ceiling. The row is hidden while overclocking is off -- the
-    // scheduler never reads the range then, so the slider would move without doing anything.
-    // The value is still pushed to wasm in that case, so turning the toggle back on picks up
-    // the slider position that is already on screen rather than the sim's own default.
-    const rankCheck = document.getElementById('check-rank-clock-rates');
-    if (rankCheck) {
-        const rankRow = document.getElementById('rank-clock-rates-row');
-        if (rankRow) rankRow.style.display = overclockOn ? '' : 'none';
-        state.set_rank_clock_rates(rankCheck.checked);
-    }
-    const gradeCheck = document.getElementById('check-grade-clock-rates');
-    if (gradeCheck) {
-        const gradeRow = document.getElementById('grade-clock-rates-row');
-        if (gradeRow) gradeRow.style.display = overclockOn ? '' : 'none';
-        state.set_grade_clock_rates(gradeCheck.checked);
-    }
-    const gateCheck = document.getElementById('check-rate-gated-reps');
-    if (gateCheck) {
-        const gateRow = document.getElementById('rate-gated-reps-row');
-        if (gateRow) gateRow.style.display = overclockOn ? '' : 'none';
-        state.set_rate_gated_reps(gateCheck.checked);
-    }
-    const maxRateSlider = document.getElementById('max-clock-rate-slider');
-    if (maxRateSlider) {
-        const maxRate = parseFloat(maxRateSlider.value);
-        const maxRateVal = document.getElementById('max-clock-rate-val');
-        if (maxRateVal) maxRateVal.innerText = maxRate.toFixed(1);
-        const maxRateRow = document.getElementById('max-clock-rate-row');
-        if (maxRateRow) maxRateRow.style.display = overclockOn ? '' : 'none';
-        state.set_max_clock_rate(maxRate);
-    }
     const fallJitterSlider = document.getElementById('fall-jitter-slider');
     if (fallJitterSlider) {
         const fallJitter = parseFloat(fallJitterSlider.value);
@@ -927,84 +858,6 @@ function syncSettings() {
         if (fallJitterVal) fallJitterVal.innerText = fallJitter.toFixed(2);
         state.set_liquid_fall_jitter(fallJitter);
     }
-    // LATERAL-COARSE-CORRECTION.md: the coarse-grid flow correction. The strength slider is
-    // hidden while the correction is off -- the sim never reads it then, so it would move without
-    // doing anything.
-    const corrCheck = document.getElementById('check-coarse-flow-correction');
-    if (corrCheck) {
-        const corrOn = corrCheck.checked;
-        state.set_coarse_flow_correction(corrOn);
-        const dampRow = document.getElementById('coarse-correction-damping-row');
-        if (dampRow) dampRow.style.display = corrOn ? '' : 'none';
-        const statsRow = document.getElementById('coarse-correction-stats-row');
-        if (statsRow) statsRow.style.display = corrOn ? '' : 'none';
-        const dampSlider = document.getElementById('coarse-correction-damping-slider');
-        if (dampSlider) {
-            const damping = parseFloat(dampSlider.value);
-            const dampVal = document.getElementById('coarse-correction-damping-val');
-            if (dampVal) dampVal.innerText = damping.toFixed(2);
-            // Pushed even while the correction is off, so switching it on picks up the slider
-            // position already on screen rather than the sim's own default.
-            state.set_coarse_correction_damping(damping);
-        }
-        const statsVal = document.getElementById('coarse-correction-stats-val');
-        if (statsVal && corrOn) {
-            // [requested, applied, lateral_applied, boundaries, limited, edges] -- see
-            // `coarse_correction_stats` in sandart-wasm/src/lib.rs. Under the conveyance-boost
-            // design `edges` is "blocks carrying a boost" and `applied` is the summed boost above
-            // 1.0, so the useful readout is how many blocks are being sped up and by how much.
-            const st = state.coarse_correction_stats();
-            const blocks = st[5];
-            const mean = blocks > 0 ? 1 + st[1] / blocks : 1;
-            statsVal.innerText =
-                `${blocks.toFixed(0)} blocks boosted, mean ${mean.toFixed(2)}x, ` +
-                `${st[3].toFixed(0)} faces short`;
-        }
-    }
-    // CREDIT-DEBT-TRANSPORT.md §2.3: the coarse delta transport. Same show/hide reasoning as the
-    // conveyance correction above -- the rate slider and the stats readout are hidden while the
-    // toggle is off, because the sim never reads them then.
-    const deltaCheck = document.getElementById('check-coarse-delta-transport');
-    if (deltaCheck) {
-        const deltaOn = deltaCheck.checked;
-        state.set_coarse_delta_transport(deltaOn);
-        const rateRow = document.getElementById('coarse-delta-transport-rate-row');
-        if (rateRow) rateRow.style.display = deltaOn ? '' : 'none';
-        const dStatsRow = document.getElementById('coarse-delta-transport-stats-row');
-        if (dStatsRow) dStatsRow.style.display = deltaOn ? '' : 'none';
-        const rateSlider = document.getElementById('coarse-delta-transport-rate-slider');
-        if (rateSlider) {
-            const rate = parseFloat(rateSlider.value);
-            const rateVal = document.getElementById('coarse-delta-transport-rate-val');
-            if (rateVal) rateVal.innerText = rate.toFixed(2);
-            // Pushed even while the transport is off, same as the damping slider above, so
-            // switching it on picks up the slider position already on screen.
-            state.set_coarse_delta_transport_rate(rate);
-        }
-        const dStatsVal = document.getElementById('coarse-delta-transport-stats-val');
-        if (dStatsVal && deltaOn) {
-            // [faces_considered, faces_moved, requested, applied, limited, blocked] -- see
-            // `coarse_delta_transport_stats` in sandart-wasm/src/lib.rs. The useful readout is how
-            // much of what the coarse level asked for actually survived the caps.
-            const dt = state.coarse_delta_transport_stats();
-            const pct = dt[2] > 0 ? (100 * dt[3]) / dt[2] : 0;
-            dStatsVal.innerText =
-                `${dt[1].toFixed(0)}/${dt[0].toFixed(0)} faces moved, ` +
-                `${dt[3].toFixed(1)} of ${dt[2].toFixed(1)} (${pct.toFixed(0)}%), ` +
-                `${dt[4].toFixed(0)} capped, ${dt[5].toFixed(0)} blocked`;
-        }
-    }
-    const stiffnessSlider = document.getElementById('overfill-stiffness-slider');
-    if (stiffnessSlider) {
-        const stiffness = parseFloat(stiffnessSlider.value);
-        const stiffnessVal = document.getElementById('overfill-stiffness-val');
-        if (stiffnessVal) stiffnessVal.innerText = stiffness.toFixed(1);
-        // Sets the overfill ceiling too -- see `set_overfill_stiffness`. Do not also call
-        // `set_overfill_capacity` from here or the two go out of step again.
-        state.set_overfill_stiffness(stiffness);
-    }
-    updateSaturationDeciles();
-    updateCoarseOverlayStats();
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
@@ -1088,105 +941,6 @@ function loadActivePattern() {
 }
 
 const MULTISTAGE_HOURGLASS_SHAPE = 4;
-
-// Legend for the overfill heat-map's decile colouring. Module scope, like every other helper here
-// -- see scripts/check_js.js, which exists because helpers defined inside another function were
-// silently unreachable and shipped broken more than once.
-//
-// Under decile colouring a cell's hue encodes its RANK in the saturation distribution, not its
-// value, so these nine numbers are the only thing that turns the overlay into an answer to "how
-// saturated are we". 1.00 is exactly full; anything above is overfill. The row hides itself unless
-// decile colouring is what is actually on screen, since under the other heat-map sources the
-// colours are an absolute scale and these numbers would describe something that is not drawn.
-function updateSaturationDeciles() {
-    const row = document.getElementById('saturation-deciles-row');
-    if (!row) return;
-    const heatmapOn = document.getElementById('check-pressure-heatmap');
-    const active = !!state && !!heatmapOn && heatmapOn.checked;
-    row.style.display = active ? '' : 'none';
-    if (!active) return;
-    const out = document.getElementById('saturation-deciles-val');
-    if (!out) return;
-    const deciles = state.get_saturation_deciles();
-    if (!deciles || deciles.length === 0) {
-        // Deciles refresh on a slow cadence and start empty, so this is the normal state for the
-        // first fraction of a second after the overlay is switched on -- not an error.
-        out.textContent = '—';
-        return;
-    }
-    out.textContent = '';
-    Array.from(deciles).forEach((v, i) => {
-        const chip = document.createElement('span');
-        // Bucket i is the band ABOVE boundary i, and matches pressure_field_texels' own
-        // bucket -> byte map (1 + bucket * 254 / 9) so the swatch is the colour that band is
-        // actually drawn in.
-        const rgb = pressureRampColor((1 + ((i + 1) * 254) / 9) / 255);
-        chip.style.background = `rgb(${rgb[0]}, ${rgb[1]}, ${rgb[2]})`;
-        // Luminance-picked foreground: this ramp runs from a very dark violet to a pale yellow,
-        // so a single fixed text colour is unreadable at one end or the other.
-        const lum = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
-        chip.style.color = lum > 0.55 ? '#111' : '#fff';
-        chip.style.padding = '1px 4px';
-        chip.style.borderRadius = '2px';
-        chip.style.fontSize = '11px';
-        chip.textContent = v.toFixed(2);
-        chip.title = `Band ${i + 1}: ${v.toFixed(2)} saturation (top ${(10 - i) * 10}% rank)`;
-        out.appendChild(chip);
-    });
-}
-
-// Numeric readouts for the two coarse overlay checkboxes -- module scope, same reason as
-// updateSaturationDeciles() above (see scripts/check_js.js). A colour ramp alone can't tell the
-// user "the eta field truly is flat" apart from "I can't tell it's not" (see
-// coarse_eta_texels'/coarse_eta_stats' doc comments in sandart-sim/src/lib.rs for the full
-// argument); these two rows print the raw numbers the ramp was built from, so there's no ambiguity
-// left for a colour to paper over. Each row hides itself unless its matching checkbox is on, same
-// as the saturation-deciles row above.
-function updateCoarseOverlayStats() {
-    if (!state) return;
-    const etaRow = document.getElementById('coarse-eta-stat-row');
-    const etaOut = document.getElementById('stat-coarse-eta');
-    const etaOn = document.getElementById('check-coarse-eta');
-    if (etaRow && etaOut) {
-        const active = !!etaOn && etaOn.checked;
-        etaRow.style.display = active ? '' : 'none';
-        if (active) {
-            const stats = state.get_coarse_eta_stats(); // [min, max, mean, base_head_reference]
-            if (stats && stats.length === 4) {
-                const [min, max, , reference] = stats;
-                const spreadRows = (max - min) / reference;
-                etaOut.innerText = spreadRows.toFixed(3);
-                etaOut.parentElement.title =
-                    `eta ${min.toFixed(3)} .. ${max.toFixed(3)} · one row = ${reference.toFixed(3)} -- ` +
-                    `spread expressed in rows of gravity head, NOT the frame's own min/max, so a ` +
-                    `nearly-flat field reads as a small number here even if the colour looks busy.`;
-            } else {
-                // Nothing coarse-coupled on screen yet (grid <= 64, or coupling just switched on).
-                etaOut.innerText = '--';
-                etaOut.parentElement.title = '';
-            }
-        }
-    }
-    const deltaRow = document.getElementById('coarse-delta-stat-row');
-    const deltaOut = document.getElementById('stat-coarse-delta');
-    const deltaOn = document.getElementById('check-coarse-delta');
-    if (deltaRow && deltaOut) {
-        const active = !!deltaOn && deltaOn.checked;
-        deltaRow.style.display = active ? '' : 'none';
-        if (active) {
-            const stats = state.get_coarse_delta_max_abs(); // [max_abs] or empty
-            if (stats && stats.length === 1) {
-                deltaOut.innerText = stats[0].toFixed(3);
-                deltaOut.parentElement.title =
-                    'Worst-case |M - A| across the coarse grid, in raw mass units -- the future ' +
-                    "scheduler's clock signal (HIERARCHICAL-PRESSURE.md build step 4).";
-            } else {
-                deltaOut.innerText = '--';
-                deltaOut.parentElement.title = '';
-            }
-        }
-    }
-}
 
 // The pressure heat-map's colour ramp, mirrored from sandart-render/src/shader.wgsl: deep violet
 // -> hot magenta -> pale warm yellow, piecewise-linear with the knee at 0.5. Kept in sync BY HAND
@@ -1466,55 +1220,10 @@ function setupPanelInput() {
 
     document.getElementById('check-shadows').addEventListener('change', syncSettings);
     document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
-    document.getElementById('check-heatmap').addEventListener('change', syncSettings);
-    document.getElementById('check-pressure-heatmap').addEventListener('change', syncSettings);
-    document.getElementById('check-coarse-eta').addEventListener('change', syncSettings);
-    document.getElementById('check-coarse-delta').addEventListener('change', syncSettings);
-    document.getElementById('check-coarse-coupling').addEventListener('change', syncSettings);
-    document.getElementById('check-overclocking').addEventListener('change', syncSettings);
-    const rankClockCheck = document.getElementById('check-rank-clock-rates');
-    if (rankClockCheck) rankClockCheck.addEventListener('change', syncSettings);
-    const gradeRatesCheck = document.getElementById('check-grade-clock-rates');
-    if (gradeRatesCheck) gradeRatesCheck.addEventListener('change', syncSettings);
-    const gatedRepsCheck = document.getElementById('check-rate-gated-reps');
-    if (gatedRepsCheck) gatedRepsCheck.addEventListener('change', syncSettings);
-    const maxClockRateSlider = document.getElementById('max-clock-rate-slider');
-    if (maxClockRateSlider) {
-        maxClockRateSlider.addEventListener('input', syncSettings);
-        maxClockRateSlider.addEventListener('change', syncSettings);
-    }
     const fallJitterSliderEl = document.getElementById('fall-jitter-slider');
     if (fallJitterSliderEl) {
         fallJitterSliderEl.addEventListener('input', syncSettings);
         fallJitterSliderEl.addEventListener('change', syncSettings);
-    }
-    const overfillStiffSlider = document.getElementById('overfill-stiffness-slider');
-    if (overfillStiffSlider) {
-        overfillStiffSlider.addEventListener('input', syncSettings);
-        overfillStiffSlider.addEventListener('change', syncSettings);
-    }
-    // LATERAL-COARSE-CORRECTION.md. These were missing on the first cut, and their absence is
-    // exactly why the toggle "never turned off" and the slider "did not work": `syncSettings()`
-    // is driven entirely by explicit listeners, so an unregistered control changes nothing until
-    // some OTHER control happens to fire a sync -- at which point it picks up whatever the
-    // unregistered control was left at, which reads as a toggle that only ever turns on.
-    const coarseCorrCheck = document.getElementById('check-coarse-flow-correction');
-    if (coarseCorrCheck) coarseCorrCheck.addEventListener('change', syncSettings);
-    const coarseCorrDamp = document.getElementById('coarse-correction-damping-slider');
-    if (coarseCorrDamp) {
-        coarseCorrDamp.addEventListener('input', syncSettings);
-        coarseCorrDamp.addEventListener('change', syncSettings);
-    }
-    // CREDIT-DEBT-TRANSPORT.md §2.3's toggle and rate slider. Same registration the comment above
-    // exists to demand: `syncSettings()` reads every control, but nothing CALLS it unless a
-    // registered control fires, so an unregistered one appears to do nothing until some unrelated
-    // control is touched and drags its value along.
-    const coarseDeltaCheck = document.getElementById('check-coarse-delta-transport');
-    if (coarseDeltaCheck) coarseDeltaCheck.addEventListener('change', syncSettings);
-    const coarseDeltaRate = document.getElementById('coarse-delta-transport-rate-slider');
-    if (coarseDeltaRate) {
-        coarseDeltaRate.addEventListener('input', syncSettings);
-        coarseDeltaRate.addEventListener('change', syncSettings);
     }
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above

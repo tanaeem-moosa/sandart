@@ -819,207 +819,23 @@
                     <input type="checkbox" id="check-perfect-sim">
                     <span class="checkmark"></span>
                 </label>
-                <label class="checkbox-container">
-                    Block heat-map overlay
-                    <input type="checkbox" id="check-heatmap">
-                    <span class="checkmark"></span>
-                </label>
-                <label class="checkbox-container">
-                    Pressure field heat-map
-                    <input type="checkbox" id="check-pressure-heatmap" checked>
-                    <span class="checkmark"></span>
-                </label>
-                <!-- Coarse overlay (HIERARCHICAL-PRESSURE.md): tints each 64x64 coarse tile (the
-                     same tile the LOD block above uses) by the coarse level's own state. Two
-                     independent checkboxes rather than one selector, so both can be read at
-                     once -- they answer different questions. "eta" is the coarse hydraulic head:
-                     flat across a connected body at rest, so this is the instrument for "is the
-                     coarse level's own picture of the world sane" -- a settled pool should read
-                     as one uniform hue, a U-tube's two arms should visibly equalise. "delta" is
-                     the signed coarse-fine disagreement (M - A): zero where the two levels agree,
-                     so this is "how much work has the fine level not done yet, and in which
-                     direction" -- diverging colour, grey at zero, blue/orange at the two signs. -->
-                <label class="checkbox-container">
-                    Coarse overlay: eta (head)
-                    <input type="checkbox" id="check-coarse-eta">
-                    <span class="checkmark"></span>
-                </label>
-                <label class="checkbox-container">
-                    Coarse overlay: delta (disagreement)
-                    <input type="checkbox" id="check-coarse-delta">
-                    <span class="checkmark"></span>
-                </label>
-                <!-- Coarse pressure coupling (HIERARCHICAL-PRESSURE.md, split by
-                     OVERCLOCKING.md): a background 64x64 tile level that supplies driving
-                     hydraulic head to the fine solver so distant material can equalise faster
-                     than the fine flux solver alone. Off by default, like every other Debug
-                     toggle now -- "let's leave the coupling behind a flag until we are happy
-                     with overclocking" (the user). The coarse level's own dynamics (and the
-                     |Delta| the overclocking scheduler below reads) run regardless of this
-                     checkbox; this only gates whether that head also reaches the fine solver's
-                     potential. Turn on to A/B the driving-potential coupling itself. -->
-                <label class="checkbox-container">
-                    Coarse pressure coupling
-                    <input type="checkbox" id="check-coarse-coupling">
-                    <span class="checkmark"></span>
-                </label>
-                <!-- OVERCLOCKING.md: the multi-rate block scheduler. Independent of the coupling
-                     checkbox above -- this derives a per-block clock rate from coarse-fine
-                     disagreement (|Delta|) regardless of whether that disagreement's HEAD also
-                     reaches the fine solver's potential. Off by default, like every other Debug
-                     toggle. While on, the block heat-map overlay above (if also enabled) shows
-                     per-block SUB-STEPS ACTUALLY EXECUTED last frame instead of recent-activity
-                     heat (EARLY-STOP.md) -- turn both on to see where the frame's work really
-                     went. Not the clock rate: a block budgeted 8x may run twice after early stop
-                     and gating, or a 1x block may run four times because a fast neighbour kept
-                     forcing it, and only the executed count says which. Black is a block that did
-                     not run at all; the ramp is log-scaled against the Max clock rate slider. -->
-                <label class="checkbox-container">
-                    Overclocking (multi-rate blocks)
-                    <input type="checkbox" id="check-overclocking">
-                    <span class="checkmark"></span>
-                </label>
-                <!-- EARLY-STOP.md: the ceiling on the per-block clock rate, and the one knob that
-                     sets what an overclocked frame can cost -- a frame runs at most round(max)
-                     settle_tick repetitions. Straight frame-time/settling-rate trade, so it is a
-                     slider rather than a constant. Hidden unless overclocking is on, because with
-                     the toggle off the rate range is never consulted at all and a live-looking
-                     control that does nothing is worse than no control. 1.0 = no overclocking
-                     (underclocking still active). -->
-                <!-- EARLY-STOP.md: how a block's disagreement becomes a clock rate. OFF is the
-                     absolute rule (threshold against a fixed reference fraction, so how many
-                     blocks get 8x depends on the scene). ON is the rank rule: sort every block by
-                     disagreement and fill a fixed ladder whose bands are sized 1/r, so the 8x band
-                     is 1/8 the size of the 1x band and the fractional bands below 1x pay for it.
-                     Same hidden-unless-overclocking reasoning as the slider below. -->
-                <div class="field row" id="rank-clock-rates-row" style="display: none;">
-                    <label class="checkbox-container" style="margin: 0;" title="Allocate clock rates by rank against a fixed ladder (a block's rate depends on its position among all blocks) instead of by absolute threshold. Keeps total work scene-independent: the 8x band is 1/8 the size of the 1x band, funded by the underclocked bands.">
-                        Rank-based clock allocation
-                        <input type="checkbox" id="check-rank-clock-rates" checked>
-                        <span class="checkmark"></span>
-                    </label>
-                </div>
-                <!-- EARLY-STOP.md: the gate. OFF means a clock rate only ever ADDS work -- every
-                     still-moving block is re-admitted by the ordinary MUST classification on every
-                     repetition, so "1x" really means "runs in all of them". ON means repetitions
-                     after the first run only the blocks whose rate still clears them, plus the
-                     neighbours they force for edge ownership. That is what makes the ladder a
-                     redistribution of a work budget rather than a multiplier on it. -->
-                <div class="field row" id="rate-gated-reps-row" style="display: none;">
-                    <label class="checkbox-container" style="margin: 0;" title="Repetitions after the first run only the blocks whose clock rate still clears them (plus forced neighbours), instead of re-running every still-moving block. Roughly halves frame time at the same clock ceiling.">
-                        Rates gate repetitions
-                        <input type="checkbox" id="check-rate-gated-reps" checked>
-                        <span class="checkmark"></span>
-                    </label>
-                </div>
-                <div class="field row" id="max-clock-rate-row" style="display: none;">
-                    <label for="max-clock-rate-slider" title="Ceiling on how many extra physics sub-steps a single block may run in one frame. Higher settles faster and costs more per frame; 1.0 turns overclocking off without disabling the scheduler. With grading on this is headroom rather than a mandate -- only a region wide enough to ramp there reaches it.">Max clock rate</label>
-                    <span id="max-clock-rate-val" class="val-display">16.0</span>
-                    <input type="range" id="max-clock-rate-slider" min="1" max="16" step="0.5" value="16">
-                </div>
-                <!-- Legend for the overfill heat-map's decile colouring. Hidden unless that
-                     colouring is actually what is on screen (overfill model on AND overlay on),
-                     because under any other source the colours are an absolute scale and these
-                     numbers would describe something that is not being drawn. Under decile
-                     colouring the hue only encodes a cell's RANK, so without this the overlay
-                     cannot answer "how saturated are we" at all -- it is the legend, not a
-                     decoration. 1.00 is exactly full; above that is overfill. -->
-                <div id="saturation-deciles-row" style="display: none;">
-                    <div class="field-label">Saturation bands (h / capacity)</div>
-                    <!-- Each boundary is drawn on its own decile's colour, sampled from the same
-                         violet->magenta->pale-yellow ramp shader.wgsl uses, so a colour on the
-                         canvas can be read straight off this row. Swatch colour is the PURE ramp;
-                         on the canvas it is blended 0.55 over the material underneath, so
-                         on-screen hues are muted versions of these. -->
-                    <div id="saturation-deciles-val" style="display: flex; flex-wrap: wrap; gap: 2px;">—</div>
-                </div>
-                <!-- Pause / step: reading a heat-map that changes every frame is impossible.
-                     Pause freezes physics (render keeps running, so the canvas and overlays
-                     stay live); Step advances exactly one tick while paused. Pure JS loop
-                     state in demo.js -- never touches wasm, never routed through
+                <!-- Pause / step: pause freezes physics while the render loop keeps running,
+                     so the canvas stays live; Step advances exactly one tick while paused. Pure
+                     JS loop state in demo.js -- never touches wasm, never routed through
                      syncSettings(). Space toggles pause, "." steps, from anywhere except a
                      text input. -->
                 <div class="row gap-above">
                     <button id="btn-pause" title="Space">Pause</button>
                     <button id="btn-step" title="." disabled>Step</button>
                 </div>
-                <!-- Replaced "Overfill capacity" (task #70). The ceiling and the stiffness are the
-                     same physical quantity stated twice: stiffness decides how far a column wants
-                     to compress and the ceiling has to clear that, so exposing both let a ceiling
-                     be set below what the fluid demanded and pinned every cell against it. The
-                     ceiling is now derived — see `overfill_ceiling_for`. LOW = soft/springy,
-                     HIGH = near-incompressible. -->
-                <!-- STICKINESS.md: falling liquid descends as a perfectly uniform front, which
-                     reads as sticky and synthetic. This jitters each UNDERFULL liquid cell's
-                     downward flow by a per-cell random factor, so the leading edge of a fall goes
-                     ragged. Full cells are untouched -- they are column, not fall, and jittering
-                     them would make settled liquid churn. Only ever reduces a flux, so mass
-                     conservation and the one-cell-per-tick limit are untouched. 0 = off, exactly
-                     as before the feature existed. -->
+                <!-- STICKINESS.md: unrelated to the removed #70 machinery -- this randomises how
+                     fast each partly-filled liquid cell drains downward so a falling sheet stops
+                     descending as one flat front. -->
                 <div class="field row" id="fall-jitter-row">
                     <label for="fall-jitter-slider" title="Randomises how fast each partly-filled liquid cell drains downward, so a falling sheet stops descending as one flat front. Does not affect full cells or granular material.">Falling liquid jitter</label>
                     <span id="fall-jitter-val" class="val-display">0.00</span>
                     <input type="range" id="fall-jitter-slider" min="0" max="0.6" step="0.02" value="0">
                 </div>
-                <!-- LATERAL-COARSE-CORRECTION.md. The fine level's lateral edges move only a few
-                     percent of a height difference per tick, and those constants already sit at
-                     the CFL bound, so they cannot simply be raised. That bound is a LOCAL
-                     stability limit on relaxation, not a limit on how much mass may legally move
-                     -- conservation is that limit, and the flux limiter already enforces it. The
-                     coarse level runs on a grid 8x coarser and is not subject to the same bound;
-                     it moves material sideways at roughly twice the fine level's relative rate
-                     (FLOW-DIRECTION.md). This compares what each level actually moved across the
-                     same face and applies the DIFFERENCE as a limited flux, so it is a
-                     coarse-grid correction rather than an extra force: conservative by
-                     construction, zero wherever the fine level already kept up. -->
-                <label class="checkbox-container">
-                    Coarse flow correction
-                    <input type="checkbox" id="check-coarse-flow-correction">
-                    <span class="checkmark"></span>
-                </label>
-                <!-- Hidden unless the correction is on, the same reasoning as the clock-rate
-                     controls above: with the toggle off these are never read and a live-looking
-                     control that does nothing is worse than no control. -->
-                <div class="field row" id="coarse-correction-damping-row" style="display: none;">
-                    <label for="coarse-correction-damping-slider" title="How much faster the fine solver may move material where the coarse level says transport is missing. It does not move any material itself and does not decide where anything goes -- the fine simulation still does that, per cell, with its own capacity and angle-of-repose logic. 0 = off.">Correction strength</label>
-                    <span id="coarse-correction-damping-val" class="val-display">0.50</span>
-                    <input type="range" id="coarse-correction-damping-slider" min="0" max="1" step="0.05" value="0.5">
-                </div>
-                <!-- Reads out what the correction actually did last frame: how much transport the
-                     coarse level asked for, and how much survived the availability/headroom
-                     limiter. A delivered fraction well below 100% is not a fault -- it means the
-                     fine level physically cannot supply what the coarse level wants, which is a
-                     finding about the two levels. -->
-                <div id="coarse-correction-stats-row" style="display: none;">
-                    <div class="field-label">Correction (mass/frame)</div>
-                    <div id="coarse-correction-stats-val" class="val-display">—</div>
-                </div>
-                <!-- CREDIT-DEBT-TRANSPORT.md §2.3. A DIFFERENT LEVER from the conveyance boost
-                     above, not a variant of it: that one sets a multiplier and moves no mass, this
-                     one moves mass and sets no coefficient. Both can be on at once; there is no
-                     reason to expect that to be better than either alone and it has not been
-                     measured. Untested as of this commit -- nothing about it has been measured. -->
-                <label class="checkbox-container">
-                    Coarse delta transport
-                    <input type="checkbox" id="check-coarse-delta-transport">
-                    <span class="checkmark"></span>
-                </label>
-                <div class="field row" id="coarse-delta-transport-rate-row" style="display: none;">
-                    <label for="coarse-delta-transport-rate-slider" title="How much of the coarse level's disagreement with the fine level to act on each tick. Mass is moved between coarse tiles by half the difference in their disagreement, then the fine simulation decides where inside the tile it actually lands. This is a request, not an outcome -- available material, free space and the shape of the wall between two tiles all cap it first. 0 = off.">Delta transport rate</label>
-                    <span id="coarse-delta-transport-rate-val" class="val-display">0.50</span>
-                    <input type="range" id="coarse-delta-transport-rate-slider" min="0" max="1" step="0.05" value="0.5">
-                </div>
-                <!-- Delivered vs asked, plus how often a cap bound. A low delivered fraction is a
-                     finding about what the fine level can supply, not a fault. "blocked" counts
-                     tile faces with no open cell pair at all -- geometry, not physics. -->
-                <div id="coarse-delta-transport-stats-row" style="display: none;">
-                    <div class="field-label">Delta transport (mass/frame)</div>
-                    <div id="coarse-delta-transport-stats-val" class="val-display">—</div>
-                </div>
-                <div class="field row" id="overfill-stiffness-row">
-                    <label for="overfill-stiffness-slider" title="How hard the fluid resists being compressed under its own weight. Low is springy and compressible; high is nearly incompressible. The overfill ceiling follows this automatically.">Fluid stiffness</label>
-                    <span id="overfill-stiffness-val" class="val-display">5.0</span>
-                    <input type="range" id="overfill-stiffness-slider" min="1" max="60" step="0.5" value="5">
                 </div>
             </div>
 
@@ -1214,28 +1030,7 @@
                 <div><b id="stat-fps">60</b><span>fps</span></div>
                 <div><b id="stat-render-time">--</b><span>ms/frame</span></div>
                 <div><b id="stat-blocks">4096</b><span>blocks</span></div>
-                <!-- EARLY-STOP.md: the ACTUAL number of per-block interior sweeps the last frame
-                     ran, summed across every under/overclocking repetition -- not the rate-implied
-                     budget. Below block count means underclocked blocks are genuinely sitting out;
-                     above means overclocking's extra repetitions outweigh early stop's savings.
-                     See updateBlockStepStats() in demo.js. -->
-                <div><b id="stat-block-steps">--</b><span>blk-steps</span></div>
-                <!-- Numeric readouts for the coarse overlay checkboxes above -- a colour ramp
-                     alone can't tell the user "the field truly is flat" apart from "I can't
-                     tell", so these print the raw numbers the ramp itself was built from. Hidden
-                     unless the matching overlay checkbox is on (see updateCoarseOverlayStats() in
-                     demo.js), same pattern as #saturation-deciles-row below. "eta spread" is
-                     max-min over the coarse grid in the SAME units `stat-coarse-eta-ref` reports
-                     as one row of gravity head, so the two numbers together answer "is this
-                     spread big or small" without requiring the reader to already know the scale.
-                     "max |delta|" is `Delta`'s raw worst-case magnitude in mass units. -->
-                <div id="coarse-eta-stat-row" style="display: none;">
-                    <b id="stat-coarse-eta">--</b><span>eta spread (rows)</span>
-                </div>
-                <div id="coarse-delta-stat-row" style="display: none;">
-                    <b id="stat-coarse-delta">--</b><span>max |&Delta;|</span>
-                </div>
-                <!-- Populated from the wasm module at startup (see displayBuildStamp() in
+                                <!-- Populated from the wasm module at startup (see displayBuildStamp() in
                      demo.js) with the git SHA + build time baked in by sandart-wasm/build.rs.
                      Never hand-edit this value. -->
                 <div class="build-stamp">

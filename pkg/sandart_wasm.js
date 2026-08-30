@@ -49,34 +49,6 @@ export class WasmSimulationState {
         return ret;
     }
     /**
-     * LATERAL-COARSE-CORRECTION.md: last frame's correction accounting, for the Debug panel --
-     * `[requested, applied, lateral_applied, boundaries, limited, edges]`. All masses in fine
-     * mass units. `applied / requested` well below 1 means the fine level physically could not
-     * supply what the coarse level asked for, which is a finding about the two levels rather
-     * than a fault.
-     * @returns {Float32Array}
-     */
-    coarse_correction_stats() {
-        const ret = wasm.wasmsimulationstate_coarse_correction_stats(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-    /**
-     * CREDIT-DEBT-TRANSPORT.md §2.3: last frame's delta-transport accounting, for the Debug panel
-     * -- `[faces_considered, faces_moved, requested, applied, limited, blocked]`. Masses in fine
-     * mass units. `applied / requested` well below 1 means the caps bound, which is a finding
-     * about what the fine level can supply rather than a fault. `blocked` counts faces with no
-     * open fine cell pair at all.
-     * @returns {Float32Array}
-     */
-    coarse_delta_transport_stats() {
-        const ret = wasm.wasmsimulationstate_coarse_delta_transport_stats(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-    /**
      * @param {string} canvas_id
      * @param {number} width
      * @param {number} height
@@ -103,56 +75,11 @@ export class WasmSimulationState {
         return ret;
     }
     /**
-     * EARLY-STOP.md: `[executed_block_steps, block_count]` for the console footer's "steps"
-     * readout. `executed_block_steps` is `DrawingSimulation::last_frame_block_steps` -- the
-     * ACTUAL count of per-block interior sweeps the most recent `update()` call ran, summed
-     * across every repetition of its rep loop, not the rate-implied budget. `block_count` is
-     * `active_blocks.len()`, the fixed denominator the ratio is read against. Both are `i32`
-     * (never negative at these grid sizes) so the pair fits a plain `Int32Array`, same pattern as
-     * `get_active_block_counts` just above.
-     * @returns {Int32Array}
-     */
-    get_block_step_stats() {
-        const ret = wasm.wasmsimulationstate_get_block_step_stats(this.__wbg_ptr);
-        return ret;
-    }
-    /**
      * @returns {number}
      */
     get_budget_n() {
         const ret = wasm.wasmsimulationstate_get_budget_n(this.__wbg_ptr);
         return ret >>> 0;
-    }
-    /**
-     * Numeric readout for the coarse `Delta` overlay's console-footer entry: `[max(|Delta|)]` in
-     * raw mass units over `inside` coarse tiles, or empty when nothing is coarse-coupled on
-     * screen. Deliberately the plain absolute number, not normalised against anything -- the
-     * point is to let the user read "how big is the worst disagreement right now" directly, which
-     * is exactly the number `coarse_delta_texels`' per-tile `capacity[C]` normalisation does NOT
-     * surface on its own.
-     * @returns {Float32Array}
-     */
-    get_coarse_delta_max_abs() {
-        const ret = wasm.wasmsimulationstate_get_coarse_delta_max_abs(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
-    }
-    /**
-     * Numeric readout for the coarse `eta` overlay's console-footer entry: `[min, max, mean,
-     * base_head_reference]` over `inside` coarse tiles, or empty when nothing is coarse-coupled
-     * on screen (same empty-when-unavailable convention `get_saturation_deciles` already uses).
-     * Exists because a colour ramp alone can't distinguish "the field truly is flat" from "I
-     * can't tell" -- see `DrawingSimulation::coarse_eta_stats`'s doc comment for what each
-     * element means, and `coarse_eta_texels`'s for why `base_head_reference` (not the frame's own
-     * spread) is the scale the colour ramp itself is built against.
-     * @returns {Float32Array}
-     */
-    get_coarse_eta_stats() {
-        const ret = wasm.wasmsimulationstate_get_coarse_eta_stats(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
     }
     /**
      * @returns {number}
@@ -178,13 +105,6 @@ export class WasmSimulationState {
         return ret;
     }
     /**
-     * @returns {number}
-     */
-    get_max_clock_rate() {
-        const ret = wasm.wasmsimulationstate_get_max_clock_rate(this.__wbg_ptr);
-        return ret;
-    }
-    /**
      * Current `multistage_chambers` value, so the web UI can initialise its slider/readout
      * from the actual backing value rather than assuming its own hard-coded default matches.
      * @returns {number}
@@ -192,35 +112,6 @@ export class WasmSimulationState {
     get_multistage_chambers() {
         const ret = wasm.wasmsimulationstate_get_multistage_chambers(this.__wbg_ptr);
         return ret >>> 0;
-    }
-    /**
-     * @returns {number}
-     */
-    get_overfill_capacity() {
-        const ret = wasm.wasmsimulationstate_get_overfill_capacity(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * @returns {number}
-     */
-    get_overfill_stiffness() {
-        const ret = wasm.wasmsimulationstate_get_overfill_stiffness(this.__wbg_ptr);
-        return ret;
-    }
-    /**
-     * The overfill heat-map's legend: nine saturation decile boundaries (D1..D9), where
-     * saturation is `height / capacity`, so 1.0 is exactly full and above that is overfill.
-     * Empty until the overlay has been on long enough for the first refresh, and empty whenever
-     * the overfill model is off (the overlay then shows an absolute pressure scale, which needs
-     * no legend of its own). Read this to answer "how saturated are we" -- under decile
-     * colouring the hue tells you a cell's RANK, and only these numbers tell you its magnitude.
-     * @returns {Float32Array}
-     */
-    get_saturation_deciles() {
-        const ret = wasm.wasmsimulationstate_get_saturation_deciles(this.__wbg_ptr);
-        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
-        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
-        return v1;
     }
     /**
      * List every material as `[id, label, wetness, threshold, flow_rate, grain_size]` rows, in
@@ -326,96 +217,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_cell_props(this.__wbg_ptr, ptr0, len0);
     }
     /**
-     * "Correction strength" slider (LATERAL-COARSE-CORRECTION.md): under-relaxation on the
-     * coarse level's opinion, `0.0..=1.0`. The coarse level is an approximation with no model of
-     * repose, so its correction is damped rather than applied whole; `0.0` is equivalent to the
-     * toggle being off. Plain field write, safe every frame. See
-     * `DrawingSimulation::coarse_correction_damping`.
-     * @param {number} damping
-     */
-    set_coarse_correction_damping(damping) {
-        wasm.wasmsimulationstate_set_coarse_correction_damping(this.__wbg_ptr, damping);
-    }
-    /**
-     * Coarse-fine disagreement (`Delta`) debug overlay: plumbed exactly like
-     * `set_coarse_eta_overlay` just above -- an independent toggle for an independent texture,
-     * so both this and the `eta` overlay can be viewed at once.
-     * @param {boolean} enabled
-     */
-    set_coarse_delta_overlay(enabled) {
-        wasm.wasmsimulationstate_set_coarse_delta_overlay(this.__wbg_ptr, enabled);
-    }
-    /**
-     * "Coarse delta transport" checkbox (CREDIT-DEBT-TRANSPORT.md §2.3): move mass between coarse
-     * tiles by half the difference of their `Delta`s, before the frame's `settle_tick` runs.
-     *
-     * A DIFFERENT LEVER from `set_coarse_flow_correction`, not a variant of it: that one sets a
-     * conveyance multiplier and moves no mass, this one moves mass and sets no coefficient. The
-     * reason a second lever exists is that a coefficient cannot carry the long-wavelength mode at
-     * all -- past the CFL bound the extra coefficient becomes ringing, measured on water at
-     * +0.6%/+0.4% spread for +75-118% block-steps.
-     *
-     * Turning this on also raises the coarse level's anchoring rate (0.10 -> 0.50), which is a
-     * correctness coupling rather than a tuning choice -- see `COARSE_DELTA_TRANSPORT_LAMBDA`.
-     * Plain field write, safe every frame; a no-op unless the coarse level is available AND a
-     * block is a coarse tile. See `DrawingSimulation::coarse_delta_transport`.
-     * @param {boolean} enabled
-     */
-    set_coarse_delta_transport(enabled) {
-        wasm.wasmsimulationstate_set_coarse_delta_transport(this.__wbg_ptr, enabled);
-    }
-    /**
-     * "Delta transport rate" slider (CREDIT-DEBT-TRANSPORT.md §2.3): the request factor on half
-     * the difference, `0.0..=1.0`. A REQUEST, not an outcome -- donor mass, receiver headroom and
-     * face aperture all cap what actually moves. `0.0` is equivalent to the toggle being off.
-     * Plain field write, safe every frame. See `DrawingSimulation::coarse_delta_transport_rate`.
-     * @param {number} rate
-     */
-    set_coarse_delta_transport_rate(rate) {
-        wasm.wasmsimulationstate_set_coarse_delta_transport_rate(this.__wbg_ptr, rate);
-    }
-    /**
-     * Coarse-level `eta` (hydraulic head) debug overlay: plumbed exactly like
-     * `set_heatmap_overlay` -- a plain field write, no reset/reinitialisation path. Purely a
-     * render-side toggle; `sim.coarse_state.eta` is maintained by `sim.update()` unconditionally
-     * whenever `sim.coarse.available` (OVERCLOCKING.md: no longer tied to
-     * `coarse_pressure_coupling`, see that field's own doc comment), this only gates whether
-     * `render()` bothers uploading/tinting with it.
-     * @param {boolean} enabled
-     */
-    set_coarse_eta_overlay(enabled) {
-        wasm.wasmsimulationstate_set_coarse_eta_overlay(this.__wbg_ptr, enabled);
-    }
-    /**
-     * "Coarse flow correction" checkbox (LATERAL-COARSE-CORRECTION.md): after the frame's
-     * sub-steps have run, the mass the coarse level actually moved across each tile face is
-     * compared with the mass the fine level actually moved across the same face, and the
-     * difference is applied as a limited flux. Exists because the fine level's lateral transport
-     * is capped by a local CFL bound that the coarse level, being a coarser grid, is not subject
-     * to. Plain field write, safe every frame; a no-op unless the coarse level is available.
-     * See `DrawingSimulation::coarse_flow_correction`.
-     * @param {boolean} enabled
-     */
-    set_coarse_flow_correction(enabled) {
-        wasm.wasmsimulationstate_set_coarse_flow_correction(this.__wbg_ptr, enabled);
-    }
-    /**
-     * "Coarse pressure coupling" debug toggle (HIERARCHICAL-PRESSURE.md, split by
-     * OVERCLOCKING.md): forwarded straight to the sim, a plain field write (same shape as
-     * `set_overfill_pressure` just above -- no reset, no reinitialisation, safe to call every
-     * frame from `syncSettings()`). See `DrawingSimulation::coarse_pressure_coupling`'s doc
-     * comment in sandart-sim/src/lib.rs for what it switches: this now gates ONLY the
-     * driving-potential coupling into the fine solver (`phi`/`gravity_head`) -- the coarse
-     * level's own per-tick work runs unconditionally regardless of this flag, since the
-     * scheduler (`set_overclocking`) needs `|Delta|` either way. **Defaults `false`**, per the
-     * user's own words: "let's leave the coupling behind a flag until we are happy with
-     * overclocking."
-     * @param {boolean} enabled
-     */
-    set_coarse_pressure_coupling(enabled) {
-        wasm.wasmsimulationstate_set_coarse_pressure_coupling(this.__wbg_ptr, enabled);
-    }
-    /**
      * @param {number} mode
      */
     set_color_mode(mode) {
@@ -477,15 +278,6 @@ export class WasmSimulationState {
      */
     set_head_field_transport(enabled) {
         wasm.wasmsimulationstate_set_head_field_transport(this.__wbg_ptr, enabled);
-    }
-    /**
-     * Block-simulation heat-map debug overlay: purely a render-side toggle (see
-     * `heatmap_enabled`'s field doc comment) — the underlying per-block counter runs
-     * unconditionally in `sim`, this only gates whether `render()` uploads/draws it.
-     * @param {boolean} enabled
-     */
-    set_heatmap_overlay(enabled) {
-        wasm.wasmsimulationstate_set_heatmap_overlay(this.__wbg_ptr, enabled);
     }
     /**
      * @param {number} order
@@ -570,19 +362,6 @@ export class WasmSimulationState {
         }
     }
     /**
-     * "Max clock rate" slider (EARLY-STOP.md): the ceiling of the per-block clock-rate range,
-     * `1.0..=8.0`. A frame costs at most `round(max_clock_rate)` `settle_tick` repetitions, so
-     * this is the direct frame-time/settling-rate trade -- `1.0` is "no overclocking" while
-     * leaving underclocking in place, `8.0` is the default. Plain field write like
-     * `set_overclocking` above: no reset, no reinitialisation, safe to call every frame from
-     * `syncSettings()`. Has no effect while the overclocking toggle is off, since
-     * `update_block_clock_rates` does not run then.
-     * @param {number} rate
-     */
-    set_max_clock_rate(rate) {
-        wasm.wasmsimulationstate_set_max_clock_rate(this.__wbg_ptr, rate);
-    }
-    /**
      * The widest (top) tier's chamber count for `SandboxShape::MultiStageHourglass`'s
      * merging cascade -- user-selectable 5..=16, default 8. Clamped defensively even though
      * the UI slider (`chambers-slider` in `index.html`) already enforces the range, matching
@@ -600,43 +379,6 @@ export class WasmSimulationState {
      */
     set_neck_width(width) {
         wasm.wasmsimulationstate_set_neck_width(this.__wbg_ptr, width);
-    }
-    /**
-     * "Overclocking" (multi-rate block scheduler) debug toggle (OVERCLOCKING.md): forwarded
-     * straight to the sim, a plain field write -- no reset, no reinitialisation, safe to call
-     * every frame from `syncSettings()`, same shape as `set_coarse_pressure_coupling` above.
-     * Independent of that toggle: this drives per-block clock rate from `|Delta|` regardless of
-     * whether the driving-potential coupling is also on. See
-     * `DrawingSimulation::overclocking_enabled`'s doc comment in sandart-sim/src/lib.rs.
-     * @param {boolean} enabled
-     */
-    set_overclocking(enabled) {
-        wasm.wasmsimulationstate_set_overclocking(this.__wbg_ptr, enabled);
-    }
-    /**
-     * @param {number} capacity
-     */
-    set_overfill_capacity(capacity) {
-        wasm.wasmsimulationstate_set_overfill_capacity(this.__wbg_ptr, capacity);
-    }
-    /**
-     * "Per-cell overfill pressure simulation" toggle (task #70): forwarded straight to the sim.
-     * @param {boolean} enabled
-     */
-    set_overfill_pressure(enabled) {
-        wasm.wasmsimulationstate_set_overfill_pressure(this.__wbg_ptr, enabled);
-    }
-    /**
-     * "Overfill capacity multiplier" (task #70): 1.00..=2.00, forwarded straight to the sim.
-     * Task #70: the fluid's bulk stiffness — how hard a column resists compressing under its own
-     * weight. This replaced the "overfill capacity" control, which is now DERIVED from it:
-     * stiffness decides how much compression a column wants and the ceiling has to clear that, so
-     * exposing both let the user set a ceiling below what their own fluid demanded and pin every
-     * cell against it. Setting one and computing the other makes that unreachable.
-     * @param {number} stiffness
-     */
-    set_overfill_stiffness(stiffness) {
-        wasm.wasmsimulationstate_set_overfill_stiffness(this.__wbg_ptr, stiffness);
     }
     /**
      * @param {string} mode
@@ -673,18 +415,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_pressure_heatmap_head_field(this.__wbg_ptr, enabled);
     }
     /**
-     * Per-cell pressure-field debug overlay: plumbed exactly like `set_heatmap_overlay` just
-     * above -- a plain field write, no reset/reinitialisation path. Purely a render-side toggle
-     * (see `pressure_heatmap_enabled`'s field doc comment); the underlying `sim.column_depth`
-     * runs unconditionally in `sim`, this only gates whether `render()` uploads/draws it. Shows
-     * whichever pass currently populates `column_depth`, so it tracks the "Fresh pressure field"
-     * toggle (`set_fresh_pressure_field`) automatically and can be used to compare the two.
-     * @param {boolean} enabled
-     */
-    set_pressure_heatmap_overlay(enabled) {
-        wasm.wasmsimulationstate_set_pressure_heatmap_overlay(this.__wbg_ptr, enabled);
-    }
-    /**
      * "Pressure-sensitive flow rate" debug toggle (task #63): forwarded straight to the sim, a
      * plain field write (same shape as `set_head_field_transport` just above — no reset, no
      * reinitialisation, safe to call every frame from `syncSettings()`). See
@@ -712,26 +442,6 @@ export class WasmSimulationState {
      */
     set_random_walk_params(steps, step_size) {
         wasm.wasmsimulationstate_set_random_walk_params(this.__wbg_ptr, steps, step_size);
-    }
-    /**
-     * "Rank-based allocation" checkbox (EARLY-STOP.md): selects between allocating clock rates
-     * by absolute threshold and allocating them by rank against a fixed ladder. Plain field
-     * write, safe every frame; inert while the overclocking toggle is off. See
-     * `DrawingSimulation::rank_clock_rates`.
-     * @param {boolean} rank
-     */
-    set_rank_clock_rates(rank) {
-        wasm.wasmsimulationstate_set_rank_clock_rates(this.__wbg_ptr, rank);
-    }
-    /**
-     * "Rates gate repetitions" checkbox (EARLY-STOP.md): whether a block's clock rate decides
-     * who RUNS in the extra repetitions, or only who is force-woken on top of everyone else.
-     * Plain field write, safe every frame; inert while overclocking is off. See
-     * `DrawingSimulation::rate_gated_reps`.
-     * @param {boolean} gated
-     */
-    set_rate_gated_reps(gated) {
-        wasm.wasmsimulationstate_set_rate_gated_reps(this.__wbg_ptr, gated);
     }
     /**
      * @param {number} k
@@ -2482,17 +2192,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2112, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2110, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_afd3c11e77a262dc___convert__closures_____invoke___wasm_bindgen_afd3c11e77a262dc___JsValue__core_f0fd674eaa06beef___result__Result_____wasm_bindgen_afd3c11e77a262dc___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 62, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_afd3c11e77a262dc___convert__closures_____invoke___wasm_bindgen_afd3c11e77a262dc___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 62, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_afd3c11e77a262dc___convert__closures_____invoke___wasm_bindgen_afd3c11e77a262dc___JsValue______true__2);
             return ret;
         },
