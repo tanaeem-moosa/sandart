@@ -43,21 +43,27 @@ cargo test -p sandart-sim --release --test <name>
 node scripts/check_js.js                      # REQUIRED before any demo.js push
 ```
 
-The library suite has **TEN failures on `main` (102 passed / 10 failed)**. Earlier handovers, and an
-earlier revision of this file, called that "the known-good state". **That is wrong and was
-corrected on 2026-08-29** — see `artifacts/design/SESSION-HANDOVER-2026-08-29.md` §1:
+The library suite is **110 passed / 2 failed on `main`**, and that is the current expected state.
+The two are:
 
-- At `f43920a`, the commit immediately **before** the first overfill commit, the suite was
-  **103 passed / 1 failed**, and that one failure is the only one HANDOVER.md §1 sanctions.
-- So **nine of the ten are regressions introduced somewhere in the 114 `#70` overfill commits**,
-  not a baseline. They include `test_liquid_pool_levels_flat_in_closed_box` — water does not level
-  flat — which is the very behaviour several later sessions built machinery to fix.
-- The "pre-existing" label came from citing `95ce58e7` (2026-08-16), which is already two days into
-  overfill work. Each session inherited the framing and re-asserted it.
+- `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
+  keep failing. See HANDOVER.md §1.
+- `test_sandbox_wave_reach_is_budget_independent` — a real, open regression. The wave now reaches
+  the far wall (245/245 at both budgets) but its far-peak amplitude still depends on the budget
+  (0.006726 at 32 vs 0.007285 at 64). This is a SCHEDULER symptom, not a material-model one; it was
+  not part of the edge-velocity regression and points at the overclocking work. Not yet bisected.
 
-They have not been bisected. Do not treat them as acceptable, and do not report "tests pass"
-without saying which target you ran — earlier entries claiming the tests pass were about the
-integration suites, not `--lib`.
+**History, because the framing here was wrong twice.** From 2026-08-16 to 2026-08-30 the suite was
+102 passed / 10 failed, and successive handovers called that "pre-existing" or "the known-good
+state". It was neither: at `f43920a`, immediately before the first overfill commit, the suite was
+103 passed / 1 failed. Nine were regressions. They were **bisected on 2026-08-30** and traced to two
+commits inside a single 45-minute window on 2026-08-16, both adding a filter to the edge velocity in
+two different functions — `33b3059` in `flux_edge_apply` and `73b71a8` in `flux_edge_candidate`.
+Reverting both fixed eight of the nine. See the TOMBSTONE comment in `physics.rs` before touching
+that expression, and `artifacts/design/SESSION-HANDOVER-2026-08-29.md` §1 for how the label slipped.
+
+Do not report "tests pass" without saying which target you ran — earlier entries claiming the tests
+pass were about the integration suites, not `--lib`. The integration suites all pass (10 targets).
 
 There is also one pre-existing **doctest** failure, `physics::EQUILIBRIUM_LUT_SIZE (line 837)`: a
 4-space-indented formula in a doc comment that rustdoc tries to compile as Rust. Present since at

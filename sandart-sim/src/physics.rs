@@ -743,52 +743,44 @@ pub fn overfill_wave_params(
     }
 }
 
-/// Task #70: the EMA rate on an overfill edge's velocity — `1.0` means no momentum memory at all,
-/// smaller means more. **Currently 1.0: the filter is off.**
-///
-/// It was turned off on 2026-08-17 because it was the direct cause of three visible artifacts, not
-/// a cure for anything. The lag made falling liquid slower than the neck feeding it, so the stream
-/// had to queue sideways: measured at 512 in a multi-neck vessel, stream width 90 rows below the
-/// neck went 21 -> 55 cells with the filter on and 21 -> 33 with it off. A real falling stream
-/// NARROWS. The queue also released in slugs (the travelling ribs the user reported) and piled into
-/// cones at the floor.
-///
-/// Keep in mind what it is NOT doing, since this was got wrong once: its steady-state gain is
-/// `(alpha*damping)/(1 - damping*(1-alpha))` — 0.9363 at 0.30 against 0.9800 at 1.00 — so it is
-/// strictly a lag and cannot amplify transport. It never stabilised anything either; a linear
-/// filter between two saturating clamps is a no-op.
-///
-/// What turning it off costs, so it can be watched for: residual colour mixing in a settled body
-/// roughly doubles (drift 9.6 against 3.8 over 4000 ticks, with stripe contrast 55.73 against 55.98
-/// out of 56) and an edge-level alternating mode returns (velocity parity 0.87 against ~0.05). Both
-/// are far below the defect this replaced, where contrast collapsed from 56 to 0.27, but they are
-/// the same failure mode and worth watching.
-///
-/// The intended replacement is proper ACCELERATION — velocity as physical state integrating
-/// gravity — rather than a filter over the transfer. That would restore the low-pass on an edge's
-/// response as a side effect of being a second-order system, without the lag being applied to
-/// material that has nothing to be lagged against.
-///
-/// This is separated from the material's viscoplastic `alpha` because the two now answer different
-/// questions. The material form exists to make dry sand lock rigidly and water flow; on an overfill
-/// edge the velocity being filtered is a SOLVED TRANSFER, not a potential, so the filter is no
-/// longer doing any stabilising work (see §9 of the handover: it never was — a linear filter
-/// between two saturating clamps is a no-op). What it can still do is carry inertia, which is a
-/// question about how the fluid LOOKS, not about whether it is stable.
-pub const OVERFILL_MOMENTUM_ALPHA: f32 = 1.00;
-
-/// The EMA rate for one edge. One definition, so the candidate and apply halves cannot drift —
-/// they previously computed the same expression twice, in two places, from two different sources
-/// of `wetness`.
-#[inline]
-pub fn edge_momentum_alpha(wetness: f32, overfill_active: bool) -> f32 {
-    if overfill_active {
-        return OVERFILL_MOMENTUM_ALPHA.clamp(0.0001, 1.0);
-    }
-    // The viscoplastic form: dry granular sand (w = 0) locks immediately with zero velocity memory
-    // (alpha = 1.0), pure liquid (w = 1) carries full fluid momentum (alpha = 0.30).
-    (1.0 - 0.70 * wetness.clamp(0.0, 1.0)).clamp(0.10, 1.0)
-}
+// TOMBSTONE: DO NOT PUT A FILTER ON THE EDGE VELOCITY. Three were tried on 2026-08-16 and all
+// three are reverted. Bisected 2026-08-30; see `artifacts/design/SESSION-HANDOVER-2026-08-29.md`.
+//
+// The edge velocity update is an INTEGRATOR -- `v = (v_prev + c_sq * yielded) * damping`, clamped.
+// Velocity accumulates. Every attempt to make it a filter (blend `v_prev` toward a target) changes
+// the solver from second-order to first-order, and no choice of blend rate can express what it
+// replaced: at rate 1.0 the `v_prev` term is DELETED, not "unfiltered".
+//
+// What was tried, in one 45-minute window:
+//   15da8fe 16:28  accel filter, `0.7*v_raw + 0.3*v_prev`   -- reverted 17 min later by 56b9b91
+//   33b3059 16:55  liquid-only temporal EMA in `flux_edge_apply`   -- stuck until 2026-08-30
+//   73b71a8 17:10  "unified viscoplastic" blend in `flux_edge_candidate` -- stuck until 2026-08-30
+//
+// The last two stuck because they live in DIFFERENT FUNCTIONS -- the candidate half and the apply
+// half -- so each looked like a single isolated knob and every later session's tuning only ever
+// moved half the problem. Together they cost NINE library tests: water stopped levelling flat,
+// sand lost its angle of repose, the sandbox wave stalled at column 70 of 245, and liquid streams
+// stopped staying coherent. Measured on the library suite:
+//
+//   102 passed / 10 failed   both filters live (the state from 2026-08-16 to 2026-08-30)
+//   106 passed /  6 failed   candidate half reverted only
+//   110 passed /  2 failed   BOTH reverted -- of which one is the sanctioned #56 marker
+//
+// They were also NEUTRALISED on the overfill path alone (rate pinned to 1.0 there), which meant
+// every overfill-on/overfill-off A/B for three weeks was really measuring "filters off vs filters
+// on". That is why overfill appeared to help in Sand-fall and appeared to make Sandbox worse.
+//
+// NOTE the one real distinction buried in that pinning, which survives: on an overfill edge
+// `yielded` is a SOLVED mass transfer, so there is no previous velocity to accumulate and the
+// expression is `c_sq * yielded * damping`. That is not a filter and it stays. See
+// `flux_edge_candidate`.
+//
+// The documented case FOR a filter was inertia -- how the fluid looks -- never stability: a linear
+// filter between two saturating clamps cannot stabilise anything. Its measured cost was lag, which
+// made falling liquid slower than the neck feeding it, so the stream queued sideways (width 21->55
+// over 90 rows with it on, 21->33 with it off; free fall 73 rows against 122). If inertia is wanted
+// again, the answer is ACCELERATION -- velocity as physical state integrating gravity -- which is
+// what this expression already is. Not a filter over the transfer.
 
 /// Task #70: the overfill ceiling a given bulk stiffness needs, so the two can never be set
 /// against each other.
@@ -2501,7 +2493,7 @@ fn flux_edge_candidate(
     max_accept_bwd: f32,
     weight: f32,
     v_e_prev: f32,
-    alpha: f32,
+    overfill_active: bool,
     // BIND_CENSUS only -- which axis this edge lies on. Costs nothing when the census is off.
     horizontal: bool,
 ) -> f32 {
@@ -2514,9 +2506,20 @@ fn flux_edge_candidate(
         0.0
     };
 
-    // `alpha` comes from `edge_momentum_alpha` -- see there for why the overfill path takes its own.
-    let v_target = c_sq * yielded;
-    let raw = ((1.0 - alpha) * v_e_prev + alpha * v_target) * damping;
+    // Velocity ACCUMULATES here; it is not blended toward a target. See the TOMBSTONE comment
+    // earlier in this file for why every attempt to filter this expression has been reverted.
+    //
+    // The overfill path is the ONE exception, and it is NOT a filter. There `yielded` is already a
+    // SOLVED mass transfer rather than a potential, so carrying the previous velocity into it would
+    // double-count the transfer the solver just computed. That is the distinction the removed
+    // `edge_momentum_alpha` was expressing when it pinned the overfill rate to 1.0; only the
+    // DEFAULT path's blend was the regression. `spec_task70_u_tube_riser_keeps_rising` holds this
+    // in place -- reverting both paths to the integrator stalls the riser at 25/27/26/26.
+    let raw = if overfill_active {
+        (c_sq * yielded) * damping
+    } else {
+        (v_e_prev + c_sq * yielded) * damping
+    };
     let v = raw.clamp(-1.0, 1.0);
 
     let out = weight * if v > 0.0 {
@@ -2650,13 +2653,8 @@ fn flux_edge_apply(
     next_displacements: &mut Vec<f32>,
     total_flow: &mut f32,
     flow_occurred: &mut bool,
-    overfill_active: bool,
 ) {
-    let wetness = cell_props[a_idx * 4 + PROP_WETNESS]
-        .max(cell_props[b_idx * 4 + PROP_WETNESS])
-        .clamp(0.0, 1.0);
-    let alpha = edge_momentum_alpha(wetness, overfill_active);
-    *v_e = (1.0 - alpha) * (*v_e) + alpha * flux;
+    *v_e = flux;
 
     // Below this the transfer is pure f32 noise; skipping it is still exactly conservative
     // (nothing is added or removed), it just avoids an advect_properties call per edge per tick.
@@ -6044,7 +6042,6 @@ pub fn settle_tick(
                         } else {
                             edge_vel_v[center_idx]
                         };
-                        let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[(center_idx + w) * 4 + PROP_WETNESS]);
                         let candidate = flux_edge_candidate(
                             head_a, head_b,
                             // LATERAL-COARSE-CORRECTION.md: the VERTICAL conveyance boost. This edge is
@@ -6063,7 +6060,7 @@ pub fn settle_tick(
                                     fall_jitter, h_a, cap_a_eff, cell_props, center_idx, time_seed,
                                 ),
                             prev_v,
-                            edge_momentum_alpha(wetness, overfill_active),
+                            overfill_active,
                             false,
                         );
                         cand_v[center_idx] = candidate;
@@ -6229,7 +6226,6 @@ pub fn settle_tick(
                                 (cap_b_eff - h_b).max(0.0),
                                 (cap_c_eff - h_a).max(0.0),
                             );
-                            let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[nb_idx * 4 + PROP_WETNESS]);
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
                                 // LATERAL-COARSE-CORRECTION.md: the lateral conveyance boost. This edge is horizontal
@@ -6242,7 +6238,7 @@ pub fn settle_tick(
                                 max_accept_fwd, max_accept_bwd,
                                 1.0,
                                 edge_vel_h[center_idx],
-                                edge_momentum_alpha(wetness, overfill_active),
+                                overfill_active,
                                 true,
                             );
                             cand_h[center_idx] = candidate;
@@ -6302,7 +6298,6 @@ pub fn settle_tick(
                                 (cap_b_eff - h_b).max(0.0),
                                 (cap_c_eff - h_a).max(0.0),
                             );
-                            let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[nb_idx * 4 + PROP_WETNESS]);
                             let candidate = flux_edge_candidate(
                                 head_c_drive, head_b_drive,
                                 // LATERAL-COARSE-CORRECTION.md: the VERTICAL conveyance boost. This edge is
@@ -6317,7 +6312,7 @@ pub fn settle_tick(
                                     fall_jitter, h_a, cap_c_eff, cell_props, center_idx, time_seed,
                                 ),
                                 edge_vel_v[center_idx],
-                                edge_momentum_alpha(wetness, overfill_active),
+                                overfill_active,
                                 false,
                             );
                             cand_v[center_idx] = candidate;
@@ -6814,7 +6809,6 @@ pub fn settle_tick(
                             } else {
                                 ((cap_b - h_b).max(0.0), (cell_capacity - h_a).max(0.0))
                             };
-                            let wetness = cell_props[center_idx * 4 + PROP_WETNESS].max(cell_props[nb_idx * 4 + PROP_WETNESS]);
                             let candidate = flux_edge_candidate(
                                 head_a,
                                 head_b_full,
@@ -6828,7 +6822,7 @@ pub fn settle_tick(
                                 max_accept_fwd, max_accept_bwd,
                                 pressure_weight,
                                 edge_vel_h[center_idx],
-                                edge_momentum_alpha(wetness, overfill_active),
+                                overfill_active,
                                 true,
                             );
                             cand_h[center_idx] = candidate;
@@ -7353,7 +7347,7 @@ pub fn settle_tick(
             &mut edge_vel_v[idx],
             temp_heights, cell_colors, cell_props,
             &mut modified, &mut next_displacements,
-            &mut total_flow, &mut flow_occurred, overfill_active,
+            &mut total_flow, &mut flow_occurred,
         );
         #[cfg(test)]
         note_phase_flow(phase, final_flux);
@@ -7430,7 +7424,7 @@ pub fn settle_tick(
             &mut edge_vel_h[idx],
             temp_heights, cell_colors, cell_props,
             &mut modified, &mut next_displacements,
-            &mut total_flow, &mut flow_occurred, overfill_active,
+            &mut total_flow, &mut flow_occurred,
         );
         #[cfg(test)]
         note_phase_flow(phase, final_flux);

@@ -879,7 +879,13 @@ function syncSettings() {
     state.set_pressure_heatmap_head_field(false);
     state.set_head_field_transport(false);
     state.set_pressure_sensitive_flow(false);
-    state.set_overfill_pressure(true);
+    // Overfill default OFF (2026-08-30). Its own instruments recorded no benefit -- spread 59 /
+    // pile peak 13, identical to the non-overfill baseline at EVERY capacity, and free fall 73 rows
+    // against a baseline of 122. The cone-shaped piles it was meant to fix read saturation
+    // 1.00-1.03, i.e. not compressed at all: a transport-rate problem, railed by the +/-1.0 clamp
+    // in `flux_edge_candidate`, not a pressure problem. See the TOMBSTONE in physics.rs for why its
+    // apparent wins were an artifact of the edge-velocity filters being disabled on this path only.
+    state.set_overfill_pressure(false);
     state.set_coarse_pressure_coupling(document.getElementById('check-coarse-coupling').checked);
     const overclockOn = document.getElementById('check-overclocking').checked;
     state.set_overclocking(overclockOn);
