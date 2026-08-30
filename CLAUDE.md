@@ -43,10 +43,21 @@ cargo test -p sandart-sim --release --test <name>
 node scripts/check_js.js                      # REQUIRED before any demo.js push
 ```
 
-**The library suite has TEN failures on `main` and that is the known-good state** (102 passed / 10
-failed). Only one of them is sanctioned; see `HANDOVER.md` §10. Do not report the suite as broken
-on account of those ten, and do not report "tests pass" without saying which target you ran —
-earlier handover entries that say the tests pass were about the integration tests, not `--lib`.
+The library suite has **TEN failures on `main` (102 passed / 10 failed)**. Earlier handovers, and an
+earlier revision of this file, called that "the known-good state". **That is wrong and was
+corrected on 2026-08-29** — see `artifacts/design/SESSION-HANDOVER-2026-08-29.md` §1:
+
+- At `f43920a`, the commit immediately **before** the first overfill commit, the suite was
+  **103 passed / 1 failed**, and that one failure is the only one HANDOVER.md §1 sanctions.
+- So **nine of the ten are regressions introduced somewhere in the 114 `#70` overfill commits**,
+  not a baseline. They include `test_liquid_pool_levels_flat_in_closed_box` — water does not level
+  flat — which is the very behaviour several later sessions built machinery to fix.
+- The "pre-existing" label came from citing `95ce58e7` (2026-08-16), which is already two days into
+  overfill work. Each session inherited the framing and re-asserted it.
+
+They have not been bisected. Do not treat them as acceptable, and do not report "tests pass"
+without saying which target you ran — earlier entries claiming the tests pass were about the
+integration suites, not `--lib`.
 
 There is also one pre-existing **doctest** failure, `physics::EQUILIBRIUM_LUT_SIZE (line 837)`: a
 4-space-indented formula in a doc comment that rustdoc tries to compile as Rust. Present since at

@@ -800,9 +800,19 @@ in a form that does not depend on choosing a tick.
 ### The 10 failing library tests
 
 **`cargo test -p sandart-sim --lib --release` has TEN failures on `main`, against a working
-agreement (§1) that permits exactly one.** They are pre-existing — they were failing at `95ce58e7`
-before any of 2026-08-17's work and are unchanged by it — but a previous handover stated the suite
-passed 100%, which was true only of the *integration* suites. Do not repeat that. The list:
+agreement (§1) that permits exactly one.**
+
+> **CORRECTED 2026-08-29 — the "pre-existing" claim below is wrong.** `95ce58e7` is dated
+> 2026-08-16, which is already two days INTO the overfill work (first overfill commit `c844d68`,
+> 2026-08-14), so it establishes only that the failures predate a *later session*. Measured
+> directly: at `f43920a`, the commit immediately BEFORE overfill, the suite is **103 passed / 1
+> failed**, and that one failure is the sanctioned one. **Nine of these ten are overfill
+> regressions, not a baseline.** They have not been bisected. See
+> `artifacts/design/SESSION-HANDOVER-2026-08-29.md` §1.
+
+They were failing at `95ce58e7` before any of 2026-08-17's work and are unchanged by it — but a
+previous handover stated the suite passed 100%, which was true only of the *integration* suites. Do
+not repeat that. The list:
 
     task55_head_spec::test_task55_dynamic_transport_spec_scoreboard
     tests::test_dry_sand_has_angle_of_repose
