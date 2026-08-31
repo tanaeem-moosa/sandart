@@ -134,6 +134,73 @@ try {
         console.log("✓ updateVesselReadouts() execution PASSED");
     }
 
+    // ---- index.html structural checks -------------------------------------------------
+    //
+    // Added 2026-08-31 after a cleanup left one unmatched </div> in the Debug group. That closed
+    // #app-container early, so #viewport-container (and the canvas inside it) became a direct
+    // child of <body> instead of a flex child of #app-container -- the page rendered nothing and
+    // the sidebar contents spilled over the render area. Everything else here passed, including
+    // the whole Rust test suite, because nothing in this file looked at the HTML.
+    const htmlPath = path.join(__dirname, '..', 'sandart-wasm', 'web', 'index.html');
+    const html = fs.readFileSync(htmlPath, 'utf8');
+
+    // 1. Tag nesting. Only <div> is tracked: it is the tag the layout depends on and the one an
+    //    edit is most likely to unbalance.
+    const tagRe = /<(\/?)div\b[^>]*>/g;
+    let depth = 0, m;
+    while ((m = tagRe.exec(html)) !== null) {
+        depth += m[1] ? -1 : 1;
+        if (depth < 0) {
+            const line = html.slice(0, m.index).split('\n').length;
+            throw new Error(`index.html: unmatched </div> at line ${line} (closes past the root)`);
+        }
+    }
+    if (depth !== 0) {
+        throw new Error(`index.html: ${depth} <div> left unclosed at EOF`);
+    }
+    console.log("✓ index.html <div> nesting PASSED");
+
+    // 2. The canvas must stay inside #app-container. This is the invariant the bug above broke,
+    //    asserted directly rather than inferred from tag counts.
+    const appIdx = html.indexOf('id="app-container"');
+    const viewIdx = html.indexOf('id="viewport-container"');
+    if (appIdx < 0 || viewIdx < 0) {
+        throw new Error('index.html: #app-container or #viewport-container is missing');
+    }
+    // Count from the START of each element's own <div tag, so both opening tags are whole.
+    const appOpen = html.lastIndexOf('<div', appIdx);
+    const viewOpen = html.lastIndexOf('<div', viewIdx);
+    let d = 0;
+    const between = html.slice(appOpen, viewOpen);
+    const t2 = /<(\/?)div\b[^>]*>/g;
+    while ((m = t2.exec(between)) !== null) d += m[1] ? -1 : 1;
+    // d is the nesting depth of #viewport-container relative to <body>: >= 1 means it is still
+    // inside #app-container. 0 or less means a stray </div> has closed the container early.
+    if (d < 1) {
+        throw new Error(
+            `index.html: #viewport-container escaped #app-container (relative depth ${d}) -- ` +
+            'a stray </div> has closed the container early; the canvas will render nothing'
+        );
+    }
+    console.log("✓ index.html canvas nesting PASSED");
+
+    // 3. Every getElementById(...) in demo.js must resolve. This catches the other half of the
+    //    same failure mode: deleting a control's markup but leaving the JS that reads it, or
+    //    deleting live markup while cleaning up something unrelated.
+    const jsIds = new Set();
+    const idRe = /getElementById\(\s*['"]([^'"]+)['"]\s*\)/g;
+    while ((m = idRe.exec(code)) !== null) jsIds.add(m[1]);
+    const htmlIds = new Set();
+    const hIdRe = /\bid="([^"]+)"/g;
+    while ((m = hIdRe.exec(html)) !== null) htmlIds.add(m[1]);
+    const missing = [...jsIds].filter((id) => !htmlIds.has(id)).sort();
+    if (missing.length) {
+        throw new Error(
+            'demo.js reads element ids that do not exist in index.html: ' + missing.join(', ')
+        );
+    }
+    console.log(`✓ demo.js -> index.html id resolution PASSED (${jsIds.size} ids)`);
+
     console.log("All JS pre-commit checks PASSED successfully!");
     process.exit(0);
 } catch (err) {
