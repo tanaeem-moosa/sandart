@@ -132,11 +132,19 @@ The project is built in incremental, testable blocks:
 
 ## Project notes, backlog and handover
 
-Design docs, the full ticket backlog and a handover written for whoever picks this up next live
-in [`artifacts/`](artifacts/). Start with [`artifacts/HANDOVER.md`](artifacts/HANDOVER.md) — it
-covers the build/test loop (there is no linker on the dev host; everything compiles inside
-`distrobox enter sandart-dev`), the one test that is *meant* to fail, and the state of the
-in-flight hydraulic-head-field work.
+Design docs, the full ticket backlog and handovers written for whoever picks this up next live in
+[`artifacts/`](artifacts/).
+
+**Start with [`CLAUDE.md`](CLAUDE.md).** It is the authority on the build/test loop (there is no
+linker on the dev host; everything compiles inside `distrobox enter sandart-dev`), the current test
+state, and the one test that is *meant* to fail.
+
+[`artifacts/HANDOVER.md`](artifacts/HANDOVER.md) is a **historical** document as of 2026-08-31 —
+the overfill model, the hierarchical coarse level and the block-clock scheduler it describes were
+deleted on 2026-08-30. It is kept for its record of what was tried and why it failed, which is the
+part that cannot be recovered from the code. See
+[`artifacts/design/SESSION-HANDOVER-2026-08-30.md`](artifacts/design/SESSION-HANDOVER-2026-08-30.md)
+for that decision and the bisect behind it.
 
 ## License & Disclaimers
 

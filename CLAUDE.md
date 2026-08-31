@@ -5,8 +5,11 @@ wrong produces confident, wrong conclusions. It was written after a session conc
 cannot be run here" and committed that claim — the loop was documented in `README.md` and
 `artifacts/HANDOVER.md` §1 the whole time.
 
-`artifacts/HANDOVER.md` is the authority for all of this. Read its §1 before touching anything.
-What follows is the short version, not a replacement.
+**This file is the authority.** `artifacts/HANDOVER.md` was written on 2026-08-17 and is now a
+HISTORICAL document: most of what it describes as live — the overfill model, the hierarchical
+coarse level, the block-clock scheduler and their overlays — was deleted on 2026-08-30. Its build
+and test instructions are still correct; its account of what the code does is not. Read it for why
+things were tried, never for what exists.
 
 ## There is no linker on the host
 
@@ -34,14 +37,27 @@ cargo check -p sandart-wasm --target wasm32-unknown-unknown --release
 
 ## Tests
 
-Integration tests do **not** run in the main test command; run them separately. The full list is in
-`HANDOVER.md` §2.
+Integration tests do **not** run in the main test command; run them separately. There are five,
+and this is the whole list (`HANDOVER.md` §2's list is stale — it names five more that were deleted
+with the subsystems they tested):
 
 ```
-cargo test -p sandart-sim --lib --release     # ~70s, the main suite
-cargo test -p sandart-sim --release --test <name>
-node scripts/check_js.js                      # REQUIRED before any demo.js push
+cargo test -p sandart-sim --lib --release     # ~35s, the main suite
+cargo test -p sandart-sim --release --test fresh_pressure_field_toggle
+cargo test -p sandart-sim --release --test head_field_transport_toggle
+cargo test -p sandart-sim --release --test perfect_simulation_determinism
+cargo test -p sandart-sim --release --test pressure_heatmap_head_field_toggle
+cargo test -p sandart-sim --release --test pressure_sensitive_flow_toggle
+node scripts/check_js.js                      # REQUIRED before any web/ push -- see below
 ```
+
+`scripts/check_js.js` is not only a JS syntax check. It also validates `index.html`: `<div>`
+nesting balance, that `#viewport-container` is still inside `#app-container`, and that every
+`getElementById(...)` in `demo.js` resolves to an id that exists. Those HTML checks were added on
+2026-08-31 after a cleanup left one unmatched `</div>`, which re-parented the canvas out of the
+container that sizes it and shipped a blank page to Pages. The Rust suite and the old `check_js`
+both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
+`index.html`, run this.**
 
 The library suite is **98 passed / 2 failed on `main`**, and that is the current expected state.
 The two are:
@@ -72,12 +88,13 @@ toggle test suites, 25 diagnostic examples, and the debug overlays those fed. Th
 13 tests with them (12 `coarse::tests::*` plus one overlay test) — that is the whole 110 -> 98 drop;
 no physics test was lost. The reason is in the git history and in `artifacts/design/`, which was
 kept in full: overfill's own instruments recorded no benefit, and the coarse level and scheduler
-were reachable only through it. `HANDOVER.md` still describes all of this as live — it is now a
-historical document on those subjects; this file and the code are the authority.
+were reachable only through it. See `artifacts/design/SESSION-HANDOVER-2026-08-30.md` for the
+bisect that preceded it and the full account.
 
-There is also one pre-existing **doctest** failure, `physics::EQUILIBRIUM_LUT_SIZE (line 837)`: a
-4-space-indented formula in a doc comment that rustdoc tries to compile as Rust. Present since at
-least `f10fc15`. Unrelated to whatever you are working on.
+**Doctests pass** (`cargo test -p sandart-sim --doc --release`, 0 tests). Earlier revisions of this
+file recorded a permanent `physics::EQUILIBRIUM_LUT_SIZE` doctest failure and called it unrelated
+pre-existing noise. It was neither: the 4-space-indented formula rustdoc kept trying to compile was
+part of the overfill equilibrium solver's doc comment, and it went when the solver did.
 
 ## Verification is the deployed page
 

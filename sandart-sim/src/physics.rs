@@ -624,18 +624,6 @@ pub fn cell_capacity_for(wetness: f32) -> f32 {
     1.5 * (1.0 - l) + 1.0 * l
 }
 
-/// Task #70: Maximum fraction above nominal cell capacity that material is permitted to transiently occupy.
-/// Capped up to 1.5x nominal capacity (0.50 allowance) per user design decision.
-pub const OVERFILL_CEILING_RATIO: f32 = 0.50;
-
-/// Task #70: Hydrostatic stiffness parameter $k$ for the overfill pressure model.
-/// Calibrated so that steady-state overfill at the base of a deep resting column (depth ~300)
-/// reaches ~5% (0.05) overfill: k = (g * D) / sigma_max = (1.0 * 300) / 0.05 = 6000.
-pub const OVERFILL_STIFFNESS_K: f32 = 5.0;
-
-/// Task #70: Yield friction coefficient for granular material under the overfill stress model (Mohr-Coulomb).
-pub const OVERFILL_MOHR_COULOMB_MU: f32 = 0.60;
-
 // TOMBSTONE: DO NOT PUT A FILTER ON THE EDGE VELOCITY. Three were tried on 2026-08-16 and all
 // three are reverted. Bisected 2026-08-30; see `artifacts/design/SESSION-HANDOVER-2026-08-29.md`.
 //
@@ -675,46 +663,6 @@ pub const OVERFILL_MOHR_COULOMB_MU: f32 = 0.60;
 // again, the answer is ACCELERATION -- velocity as physical state integrating gravity -- which is
 // what this expression already is. Not a filter over the transfer.
 
-/// Task #70: **the transfer that puts one edge at equilibrium, solved in the pressure domain.**
-///
-/// This replaces `flux = c_sq * (potential difference)` on every overfill edge, and the difference
-/// is the whole stability story.
-///
-/// A potential difference is measured in pressure units, and the overfill spring makes those units
-/// enormous: `overfill_head_unit = (GRAVITY_HEAD_SCALE / depth_scale) * OVERFILL_STIFFNESS_K` is
-/// ~3700 at `w = 128` against a gravity head of 1.0. So `c_sq * driving` overshot equilibrium by
-/// three orders of magnitude, hit the `±1.0` clamp in `flux_edge_candidate`, and stayed there. That
-/// single fact explains every stability measurement taken on this model:
-///
-/// - The velocity EMA could not damp it. A linear filter between two saturating clamps does
-///   nothing while its input is 100x the clamp; measured, alpha 0.30 -> 0.10 changed settled churn
-///   by 2% (0.166 -> 0.162), and only alpha ~0.01 bit at all.
-/// - Halving the lateral wave speed did not damp it either (0.207 -> 0.217).
-/// - Lowering `OVERFILL_STIFFNESS_K` DID work, monotonically, all the way to exact rest — because
-///   `K` is the gain. It bought stillness by making the fluid less stiff, i.e. by deleting the
-///   physics the setting exists to express.
-///
-/// Solving for the transfer instead makes the flux O(mass) rather than O(pressure), so `K` no
-/// longer sets the timestep at all — it sets only the equilibrium compression profile, which is
-/// what it is supposed to mean.
-///
-/// Returns the SIGNED mass to move from `a` to `b` (negative = `b` to `a`) that solves
-///
-///     phi_a(h_a - d) + gravity_head = phi_b(h_b + d)
-///
-/// where `phi = cell_potential` (fill below capacity, fill plus nonlinear pressure above) and
-/// `gravity_head` is `+base_head` for a downward edge, `-base_head` upward, `0.0` lateral. `phi` is
-/// strictly increasing in `h`, so the residual is strictly decreasing in `d` and bisection is
-/// unconditionally convergent.
-///
-/// **Saturation is unreachable by construction, which is the point.** The solved `d` never carries
-/// the acceptor past the fill where its own back-pressure balances the donor. The scheme this
-/// replaced could not say that: it granted a flat 1.0 cell/tick of "convective through-flow" to any
-/// acceptor at or over capacity, and levelled in fill units, either of which pushes a cell to the
-/// `o_max` ceiling regardless of how hard it is already pushing back.
-///
-pub const EQUILIBRIUM_LUT_SIZE: usize = 4096;
-pub const EQUILIBRIUM_LUT_MAX_M: f32 = 4.0;
 
 
 thread_local! {
@@ -1449,13 +1397,6 @@ fn flux_edge_candidate(
 
     // Velocity ACCUMULATES here; it is not blended toward a target. See the TOMBSTONE comment
     // earlier in this file for why every attempt to filter this expression has been reverted.
-    //
-    // The overfill path is the ONE exception, and it is NOT a filter. There `yielded` is already a
-    // SOLVED mass transfer rather than a potential, so carrying the previous velocity into it would
-    // double-count the transfer the solver just computed. That is the distinction the removed
-    // `edge_momentum_alpha` was expressing when it pinned the overfill rate to 1.0; only the
-    // DEFAULT path's blend was the regression. `spec_task70_u_tube_riser_keeps_rising` holds this
-    // in place -- reverting both paths to the integrator stalls the riser at 25/27/26/26.
     let raw = (v_e_prev + c_sq * yielded) * damping;
     let v = raw.clamp(-1.0, 1.0);
 

@@ -1,5 +1,38 @@
 # Shoal & Swell — handover, updated 2026-08-17
 
+> ## ⚠️ SUPERSEDED, 2026-08-31 — read this box before anything below it
+>
+> **This is a historical document.** Most of what it describes as live no longer exists. On
+> 2026-08-30 the overfill pressure model, the hierarchical coarse level (`coarse.rs`), the
+> block-clock scheduler and every debug overlay they fed were **deleted** — ~13k lines. See
+> `artifacts/design/SESSION-HANDOVER-2026-08-30.md` and `CLAUDE.md`.
+>
+> **`CLAUDE.md` is now the authority** on the build loop, the test state and what the code
+> contains. Where this file and `CLAUDE.md` disagree, `CLAUDE.md` is right.
+>
+> What is still true here: §1's environment rules (no linker on the host; build in the container;
+> `cargo check -p sandart-wasm` typechecks nothing without `--target wasm32-unknown-unknown`), the
+> deployment story, and the record of experiments that failed and why. **That record is the reason
+> this file is kept.** Read it for why something was tried, never for what exists.
+>
+> What is NO LONGER TRUE, specifically:
+>
+> - **§9's headline** — the solved-mass-transfer overfill fix. The solver it fixed is deleted.
+>   Overfill's own instruments never showed a benefit (spread 59 / pile peak 13, identical to the
+>   non-overfill baseline at every capacity; free fall 73 rows against a baseline of 122).
+> - **§10's diagnosis stands, but read it carefully.** The transport-rate ceiling it identifies —
+>   the `±1.0` clamp in `flux_edge_candidate`, one cell of mass per cell per tick — is REAL, is
+>   still in the code, and is still the thing actually limiting flow. §10 is the most useful
+>   section of this document. What is dead is the machinery built on top of it.
+> - **§11's overclocking brief.** The scheduler is gone. It derived its rates from coarse-fine
+>   disagreement and could not outlive the coarse level.
+> - **§2's integration-test list.** Five of the ten named targets were deleted. `CLAUDE.md` has the
+>   current five.
+> - **Every "ten failures are pre-existing" statement.** They were nine regressions plus one
+>   sanctioned marker. Bisected 2026-08-30 to two edge-velocity filters added on 2026-08-16;
+>   reverting both fixed eight of the nine. See the TOMBSTONE comment in `physics.rs`.
+> - **The deployed sha** at the top of this section is long stale.
+
 Written at the end of a long session, for whoever picks this up next (human or otherwise). It
 assumes you can read code and does not re-explain what the code already says. What it does explain
 is the things the code cannot tell you: which experiments already failed, which hypotheses are
