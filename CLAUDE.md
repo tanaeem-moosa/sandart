@@ -59,15 +59,21 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **98 passed / 2 failed on `main`**, and that is the current expected state.
-The two are:
+The library suite is **101 passed / 1 failed on `main`**, and that is the current expected state.
+The one failure is `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56
+marker that must keep failing. See HANDOVER.md §1.
 
-- `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
-  keep failing. See HANDOVER.md §1.
-- `test_sandbox_wave_reach_is_budget_independent` — a real, open regression. The wave now reaches
-  the far wall (245/245 at both budgets) but its far-peak amplitude still depends on the budget
-  (0.006726 at 32 vs 0.007285 at 64). This is a SCHEDULER symptom, not a material-model one; it was
-  not part of the edge-velocity regression and points at the overclocking work. Not yet bisected.
+**`test_sandbox_wave_reach_is_budget_independent` was resolved on 2026-09-02, by fixing the test.**
+Its bit-identical-amplitude-across-budgets assertion was wrong in principle: `budget_n` exists to
+skip blocks whose contribution is *negligible, not zero*, so demanding identical output across
+budgets demanded the budget be a no-op. It had only ever passed on headroom — instrumenting the
+classification loop showed the budget tier starving on 1140 of 1200 ticks at budget 32, because
+`must_simulate` alone exceeds `budget_n` from tick 13 (MUST is budget-exempt; `budget_n` does not
+in fact cap the simulated block count, contrary to what a comment in `physics.rs` claimed). The
+underlying physics was never wrong: the full-simulation far-peak is unchanged from when the test
+was written (0.00779 then, 0.007786 now); only low-budget fidelity had drifted. The test now
+asserts reach EXACTLY across budgets and amplitude within 15% of the full-simulation reference.
+Read that test's header comment before touching it.
 
 **History, because the framing here was wrong twice.** From 2026-08-16 to 2026-08-30 the suite was
 102 passed / 10 failed, and successive handovers called that "pre-existing" or "the known-good
@@ -95,6 +101,15 @@ bisect that preceded it and the full account.
 file recorded a permanent `physics::EQUILIBRIUM_LUT_SIZE` doctest failure and called it unrelated
 pre-existing noise. It was neither: the 4-space-indented formula rustdoc kept trying to compile was
 part of the overfill equilibrium solver's doc comment, and it went when the solver did.
+
+**On 2026-09-02 the LOD block geometry changed back to a constant 8-cell block**
+(`DEFAULT_BLOCK_SIZE`), so the block grid scales with resolution again — 8x8 at grid 64 up to
+64x64 at 512. `block_size = grid/64` existed only to make a block and a `coarse.rs` pressure tile
+the same square, and the coarse level was deleted on 2026-08-30. At grid 512 (the shipped
+`GRID_SIZE`) the two geometries are identical, so this is a no-op at the default resolution; it
+removes the degenerate `block_size = 1` at grid 64 and `= 2` at 128. `budget_n` and the adaptive
+controller's throttles are now derived from the block count (`budget_throttles`) instead of
+hardcoded, and reproduce the old absolutes exactly at 512. See `artifacts/design/BLOCK-GEOMETRY-2026-09-02.md`.
 
 ## Verification is the deployed page
 

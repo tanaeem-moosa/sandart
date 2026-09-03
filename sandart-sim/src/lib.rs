@@ -73,10 +73,49 @@ const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
 /// frame's whole block-step count is `bands / Σ(1/r)` times the participating block count --
 /// 0.66x for the full ladder. That is the property that makes this a REPLACEMENT for a flat
 /// scheduler rather than an addition to one: the fractional bands fund the 8x band.
-/// The shipped LOD block geometry: `block_size = grid/64`, which makes a block and a coarse
-/// pressure tile the same square (`COARSE_GRID` is also 64). `new_with_block_divisor` exists to
-/// vary this for measurement -- see BLOCK-SIZE-SWEEP.md.
-const DEFAULT_BLOCK_DIVISOR: usize = 64;
+/// The shipped LOD block geometry: a CONSTANT block edge of 8 cells, so the block grid is 8x8 at
+/// grid 64, 16x16 at 128, 32x32 at 256 and 64x64 at 512.
+///
+/// This replaces the `block_size = grid/64` geometry, which pinned the block COUNT at 64x64 for
+/// every resolution and let the block SIZE float (1 cell at grid 64, 2 at 128, 4 at 256). That
+/// was chosen only to make a block and a coarse pressure tile the same square -- `COARSE_GRID`
+/// was also 64 -- and the coarse level was deleted on 2026-08-30, so nothing justifies 64 any
+/// more. Two things it cost, both now gone: `block_size = 1` at grid 64 degenerated the LOD
+/// scheduler to one block per cell, and grid 128's `block_size = 2` shipped into the slab
+/// artifact `VERTICAL_PRESSURE_CAP_MULT`'s doc comment documents.
+///
+/// At grid 512 -- the shipped `GRID_SIZE` -- this is a no-op: 512/8 = 64 blocks per axis, exactly
+/// the geometry that was already running. Only the smaller grids change, and they change toward
+/// the non-degenerate case.
+///
+/// The divisor is clamped to 64, so a future grid 1024 gets 64x64 blocks of 16 cells rather than
+/// 128x128 of 8. That bound is a placeholder for a resolution that does not exist yet; revisit it
+/// when 1024 is actually added rather than treating it as measured.
+pub(crate) const DEFAULT_BLOCK_SIZE: usize = 8;
+pub(crate) const MAX_BLOCKS_PER_AXIS: usize = 64;
+
+/// Blocks per axis for a grid, i.e. the `divisor` in `block_size = grid/divisor`.
+pub(crate) fn default_block_divisor(grid_size: usize) -> usize {
+    (grid_size / DEFAULT_BLOCK_SIZE).clamp(1, MAX_BLOCKS_PER_AXIS)
+}
+
+/// The adaptive frame-time controller's four throttles, as FRACTIONS of the block count.
+///
+/// They used to be absolute block counts (1024 / 128 / 16 / 4), correct only while the block count
+/// was pinned at 4096. Now that the count scales with the grid again they have to be derived, or a
+/// small grid would inherit a floor that is most of its domain. The divisors below are chosen to
+/// reproduce the previous absolute values EXACTLY at 4096 blocks (grid 512, the shipped size), so
+/// this is a no-op at the default resolution and a rescale everywhere else.
+///
+/// Returns `(initial, min, step_down, step_up)`.
+pub(crate) fn budget_throttles(block_count: usize) -> (usize, usize, usize, usize) {
+    (
+        (block_count / 4).max(1),    // 1024 at 4096
+        (block_count / 32).max(1),   //  128 at 4096
+        (block_count / 256).max(1),  //   16 at 4096
+        (block_count / 1024).max(1), //    4 at 4096
+    )
+}
 
 
 
@@ -678,59 +717,41 @@ impl DrawingSimulation {
     /// 64/128/256 as a debugging/perf instrument — see `docs/ARCHITECTURE.md` and the
     /// resolution-selector plumbing in `sandart-wasm`.
     ///
-    /// `block_size` (the LOD scheduler's block edge length in cells) scales with `grid_size`
-    /// rather than staying an absolute constant, specifically `(grid_size / 64).max(1)`, so the
-    /// grid is always tiled into the same 64x64 = 4096 blocks regardless of resolution. This
-    /// keeps `budget_n` (and `BUDGET_MIN`/`BUDGET_STEP_*` in `update`) meaningful as the *same
-    /// fraction* of the grid at every resolution, and it is load-bearing beyond that: the
-    /// block-simulation heat-map overlay (`sandart-render`'s `HEAT_GRID_SIZE`,
-    /// `update_block_heat`) uploads `block_heat_texels()` into a texture sized to a FIXED
-    /// `HEAT_GRID_SIZE x HEAT_GRID_SIZE` with no bounds check on the source slice's length, so if
-    /// the block count varied with resolution that upload would read out of bounds or corrupt the
-    /// image at whichever resolution the block grid was smaller. Keeping `block_size` absolute
-    /// instead of resolution-scaled would additionally have made low resolutions (e.g. 64/16 =
-    /// 4x4 = 16 total blocks) fall entirely under `budget_n`'s minimum, disabling the LOD
-    /// scheduler's throttling outright at low res and making 64 behave differently from 512 for
-    /// scheduling reasons unrelated to physics.
+    /// `block_size` (the LOD scheduler's block edge length in cells) is a CONSTANT 8 cells at
+    /// every shipped resolution — see `DEFAULT_BLOCK_SIZE`. The block grid therefore scales with
+    /// the grid: 8x8 at 64, 16x16 at 128, 32x32 at 256, 64x64 at 512.
     ///
-    /// **Was `grid_size / 32` (32x32 = 1024 blocks); changed to `/ 64` so the LOD block is the
-    /// same object as `coarse::CoarseGeometry`'s pressure tile** (`COARSE_GRID = 64` in
-    /// `coarse.rs`, HIERARCHICAL-PRESSURE.md §2 "The LOD block and the pressure cell are the same
-    /// object") — one restriction pass, one activity structure, once the coarse pressure level is
-    /// wired in. Nothing reads `coarse.rs`'s output yet, so today this is purely a scheduling
-    /// change: `budget_n` and the block-count constants below all had to move with it (see
-    /// `update`'s `BUDGET_MIN`/`BUDGET_STEP_*`, and the two `budget_n = 1024` sites), and wake
-    /// propagation (`activate_neighbor_upstream`/`_side` in `physics.rs`, which wake one adjacent
-    /// *block*) now covers half as many cells per tick since a block is half as wide — see
-    /// `artifacts/design/BLOCK-RESIZE.md` for the measurement.
+    /// **This reverses the `grid_size / 64` geometry** that pinned the block count at 64x64 = 4096
+    /// for every resolution. That was adopted so the LOD block and `coarse::CoarseGeometry`'s
+    /// pressure tile were the same square (`COARSE_GRID` was also 64); the coarse level was
+    /// deleted on 2026-08-30, so the reason is gone while the cost was not — `block_size` was 1 at
+    /// grid 64 (one block per cell, the LOD scheduler degenerate) and 2 at grid 128 (the slab
+    /// artifact `VERTICAL_PRESSURE_CAP_MULT` documents). At grid 512 the two geometries are
+    /// identical, so this is a no-op at the shipped default.
     ///
-    /// **The floor stays `.max(1)`, unchanged from before this change**, so grid 64 gets
-    /// `block_size = 1` — the LOD scheduler degenerates to one block per cell there. This is a
-    /// DIFFERENT decision from `coarse.rs`'s for the (currently unwired) pressure module, which
-    /// disables itself below `t = 2` rather than floor: that module needs `t` (fine cells per
-    /// coarse cell) to stay >= 2 so a coarse cell's own overfill pressure is never double-counted
-    /// against itself. The LOD scheduler has no such correctness constraint — a 1-cell block is
-    /// just the smallest possible scheduling unit, with no known wrong behaviour, only the loss of
-    /// LOD grouping benefit at a resolution too small for that benefit to matter (4,096 cells
-    /// total). Flooring at 2 instead was considered and rejected specifically because it would
-    /// have broken the resolution-invariant block count described above: grid 64 would then be
-    /// 32x32 = 1024 blocks while every other shipped resolution is 64x64 = 4096, and the heat-map
-    /// texture upload above has no path for a smaller source buffer. Grid 128 (block_size 2, the
-    /// smallest NON-degenerate case) is deliberately shipped without a floor even though
-    /// `physics.rs` documents a slab artifact at `block_size = 2` elsewhere
-    /// (`VERTICAL_PRESSURE_CAP_MULT`'s doc comment) — measured before shipping, see
-    /// `artifacts/design/BLOCK-RESIZE.md`.
+    /// Because the block count is resolution-dependent again, `budget_n` and the adaptive
+    /// controller's throttles are now DERIVED from it (`budget_throttles`) rather than hardcoded,
+    /// so they stay the same fraction of the block grid at every resolution — which is the
+    /// property the `/64` geometry was also trying to buy, obtained directly instead.
+    ///
+    /// **If you re-wire the block heat-map overlay, read this.** `sandart-render`'s
+    /// `update_block_heat` uploads into a texture of fixed `HEAT_GRID_SIZE` (64) square with no
+    /// bounds check on the source slice, so it is only safe while the block grid is exactly 64x64
+    /// — true at grid 512, false at 64/128/256 under this geometry. That path is currently DEAD
+    /// (`update_block_heat` has no callers and `block_heat_texels` was deleted with the overlays),
+    /// which is why the constraint no longer binds. Reviving it means sizing the texture from the
+    /// block grid, not from a constant.
+    ///
     pub fn new_with_size(grid_size: usize) -> Self {
-        Self::new_with_block_divisor(grid_size, DEFAULT_BLOCK_DIVISOR)
+        Self::new_with_block_divisor(grid_size, default_block_divisor(grid_size))
     }
 
     /// `new_with_size`, with the LOD block edge length left open: `block_size = grid/divisor`.
-    /// `DEFAULT_BLOCK_DIVISOR` (64) is the shipped geometry, where a block and a coarse tile are
-    /// the same square. A SMALLER divisor means BIGGER blocks (32 -> 16-cell blocks at grid 512,
-    /// 16 -> 32-cell blocks), which decouples the two: a block then covers several coarse tiles
-    /// and the scheduler aggregates their disagreement (see `update_block_clock_rates`), which is
-    /// the "each will have 4 disagreements to deal with" case. Exists so block size can be
-    /// MEASURED rather than argued about -- see BLOCK-SIZE-SWEEP.md.
+    /// The shipped geometry is `default_block_divisor(grid)`, i.e. a constant 8-cell block; a
+    /// SMALLER divisor means BIGGER blocks (16 -> 32-cell blocks at grid 512). Exists so block
+    /// size can be MEASURED rather than argued about -- see BLOCK-SIZE-SWEEP.md.
+    ///
+    /// `block_size` is floored at 1, so a divisor larger than `grid_size` silently clamps.
     pub fn new_with_block_divisor(grid_size: usize, divisor: usize) -> Self {
         let heightmap = generate_smooth_noise(12345u32, grid_size);
         let temp_heights = heightmap.data.clone();
@@ -766,11 +787,10 @@ impl DrawingSimulation {
         let active_blocks = vec![BlockActivity::Inactive; cols * rows];
         let last_displacements = vec![0.0f32; cols * rows];
         let last_simulated_ticks = vec![0u32; cols * rows];
-        // 4x the pre-#(this task) value (256), matching the 4x block-count increase (1024 -> 4096
-        // blocks at grid >= 128) so this stays the same *fraction* of the block grid it always
-        // was. See `reset()` below for the other site, and `BUDGET_MIN`/`BUDGET_STEP_*` in
-        // `update` for the rest of the throttle that had to move with it.
-        let budget_n = 1024;
+        // A quarter of the block grid -- 1024 at grid 512, the value this was hardcoded to while
+        // the block count was pinned at 4096. See `budget_throttles`, `reset()` below for the
+        // other site, and the throttle in `update`.
+        let budget_n = budget_throttles(cols * rows).0;
         let ema_frame_ms = 33.3;
 
         let mut sim = Self {
@@ -949,7 +969,7 @@ impl DrawingSimulation {
         self.last_displacements.fill(0.0);
         self.last_simulated_ticks.fill(0);
         // Keep in sync with `new_with_size`'s `budget_n` initialisation above.
-        self.budget_n = 1024;
+        self.budget_n = budget_throttles(self.active_blocks.len()).0;
         self.ema_frame_ms = 33.3;
         self.tick_count = 0;
         self.refresh_quantiles_full();
@@ -1555,28 +1575,23 @@ impl DrawingSimulation {
 
         // Update EMA of frame time and adjust budget_n
         const EMA_ALPHA: f32 = 0.1;
-        // 4x their pre-#(this task) values (32 / 4 / 1) — block counts quadrupled (1024 -> 4096
-        // at grid >= 128, see `block_size`'s doc comment), and these are block-count throttles, so
-        // leaving them unscaled would have made the adaptive controller 4x tighter (floor) and 4x
-        // slower to respond (step) as a *fraction* of the block grid than it was before this
-        // change, with no corresponding change in actual physics cost per block.
-        const BUDGET_MIN: usize = 128;
-        const BUDGET_STEP_DOWN: usize = 16;
-        const BUDGET_STEP_UP: usize = 4;
+        // Derived from the block count rather than hardcoded: these are block-count throttles,
+        // and the block count is resolution-dependent again (`DEFAULT_BLOCK_SIZE`). The divisors
+        // in `budget_throttles` reproduce the previous absolute 128 / 16 / 4 exactly at grid 512.
+        let budget_max = cols * rows; // 4096 at grid 512
+        let (_, budget_min, budget_step_down, budget_step_up) = budget_throttles(budget_max);
 
         if last_frame_time_ms > 0.0 && target_frame_time_ms > 0.0 {
             self.ema_frame_ms = EMA_ALPHA * last_frame_time_ms + (1.0 - EMA_ALPHA) * self.ema_frame_ms;
-            
-            let budget_max = cols * rows; // e.g. 1024
 
             // Target 95% of target FPS (Vsync interval * 1.05) to account for browser Vsync-locking
             // and allow the budget to grow back up when running smoothly.
             let adjusted_target = target_frame_time_ms * 1.05;
 
             if self.ema_frame_ms > adjusted_target {
-                self.budget_n = self.budget_n.saturating_sub(BUDGET_STEP_DOWN).max(BUDGET_MIN);
+                self.budget_n = self.budget_n.saturating_sub(budget_step_down).max(budget_min);
             } else if self.ema_frame_ms < adjusted_target {
-                self.budget_n = (self.budget_n + BUDGET_STEP_UP).min(budget_max);
+                self.budget_n = (self.budget_n + budget_step_up).min(budget_max);
             }
         }
     }
@@ -2580,6 +2595,56 @@ mod tests {
             deltas
         );
     }
+
+    /// The shipped LOD geometry, pinned per resolution. `DEFAULT_BLOCK_SIZE` replaced the old
+    /// `grid/64` divisor on 2026-09-02; nothing else in the suite goes through `new_with_size`,
+    /// so without this the geometry has no coverage at all.
+    #[test]
+    fn test_shipped_block_geometry_is_a_constant_eight_cell_block() {
+        // (grid, expected blocks per axis, expected block edge in cells)
+        for (grid, axis, block_size) in [(64, 8, 8), (128, 16, 8), (256, 32, 8), (512, 64, 8)] {
+            let divisor = default_block_divisor(grid);
+            assert_eq!(divisor, axis, "grid {} should tile into {} blocks per axis", grid, axis);
+            assert_eq!(
+                (grid / divisor.max(1)).max(1),
+                block_size,
+                "grid {} should use a {}-cell block", grid, block_size
+            );
+        }
+
+        // No resolution degenerates. `grid/64` gave block_size 1 at grid 64 (one block per cell,
+        // the LOD scheduler doing nothing) and 2 at grid 128 (the slab artifact
+        // `VERTICAL_PRESSURE_CAP_MULT` documents). Both are why that geometry went.
+        for grid in [64usize, 128, 256, 512] {
+            assert!(
+                (grid / default_block_divisor(grid).max(1)).max(1) >= 4,
+                "grid {} degenerates to a block smaller than 4 cells", grid
+            );
+        }
+
+        // A future grid 1024 is capped at 64 blocks per axis rather than 128 -- a placeholder
+        // bound, not a measured one. If 1024 ships, revisit `MAX_BLOCKS_PER_AXIS`.
+        assert_eq!(default_block_divisor(1024), MAX_BLOCKS_PER_AXIS);
+    }
+
+    /// The adaptive controller's throttles are fractions of the block count now that the block
+    /// count is resolution-dependent again. They must reproduce the previous hardcoded absolutes
+    /// exactly at grid 512, the shipped `GRID_SIZE` -- that is what makes the geometry change a
+    /// no-op at the default resolution.
+    #[test]
+    fn test_budget_throttles_match_the_old_absolutes_at_grid_512() {
+        let blocks_512 = default_block_divisor(512) * default_block_divisor(512);
+        assert_eq!(blocks_512, 4096);
+        assert_eq!(budget_throttles(blocks_512), (1024, 128, 16, 4));
+
+        // Never zero, however small the grid -- a zero step would freeze the controller and a
+        // zero floor would let the budget collapse to nothing.
+        for grid in [64usize, 128, 256, 512] {
+            let blocks = default_block_divisor(grid) * default_block_divisor(grid);
+            let (init, min, down, up) = budget_throttles(blocks);
+            assert!(min >= 1 && down >= 1 && up >= 1, "grid {} produced a zero throttle", grid);
+            assert!(init <= blocks, "grid {} initial budget exceeds the block count", grid);
+            assert!(min <= init, "grid {} floor is above the initial budget", grid);
+        }
+    }
 }
-
-

@@ -356,8 +356,20 @@ first.
 
 ## 9. Block-LOD scheduling
 
-The grid is divided into fixed-size blocks (`block_size`, currently 16, giving 32×32
-blocks over the 512 grid). Each tick, `settle_tick` decides which blocks actually need to
+The grid is divided into blocks of a constant 8 cells a side (`DEFAULT_BLOCK_SIZE`), so the
+block grid scales with resolution: 8×8 at grid 64, 16×16 at 128, 32×32 at 256 and 64×64 =
+4096 over the shipped 512 grid. Between `94d7390` and 2026-09-02 this was instead
+`block_size = grid/64`, pinning the block *count* at 64×64 and letting the *size* float, so
+that a block and a `coarse.rs` pressure tile were the same square; the coarse level was
+deleted on 2026-08-30 and the geometry was reverted to a constant block size, which also
+removes the degenerate 1-cell block at grid 64 and 2-cell block at grid 128.
+
+Because the block count is resolution-dependent again, `budget_n` and the adaptive frame-time
+controller's floor and step sizes are derived from it (`budget_throttles` in
+`sandart-sim/src/lib.rs`) rather than hardcoded, so each stays the same fraction of the block
+grid at every resolution. They reproduce the previous absolute values exactly at grid 512.
+
+Each tick, `settle_tick` decides which blocks actually need to
 run based on `last_displacements` and marks the outcome in `active_blocks: Vec<BlockActivity>`
 (`Fast`/`Medium`/`Slow`/`Inactive`) — a fresh, this-tick-only snapshot, reset to `Inactive`
 at the start of every call. `activate_neighbor` is the wake mechanism: any edge that
