@@ -2647,4 +2647,45 @@ mod tests {
             assert!(min <= init, "grid {} floor is above the initial budget", grid);
         }
     }
+
+    /// CONTROL for the asymmetry hunt (2026-09-08): is the vessel MASK itself left-right
+    /// symmetric? If it is not, no amount of solver symmetry can produce a symmetric result and
+    /// the physics is innocent. Checked at every resolution the UI offers, for the shapes the
+    /// asymmetry is reported in.
+    #[test]
+    fn test_vessel_masks_are_left_right_symmetric() {
+        let mut worst: Vec<String> = Vec::new();
+        for grid in [128usize, 256, 512] {
+            for (name, shape) in [
+                ("Hourglass", SandboxShape::Hourglass),
+                ("MultiNeckHourglass", SandboxShape::MultiNeckHourglass),
+                ("MultiStageHourglass", SandboxShape::MultiStageHourglass),
+            ] {
+                let mut sim = DrawingSimulation::new_with_size(grid);
+                sim.sandbox_shape = shape;
+                sim.generate_shape_mask();
+                let w = grid;
+                let mut mismatches = 0usize;
+                let mut first: Option<(usize, usize)> = None;
+                for y in 0..grid {
+                    for x in 0..grid {
+                        let m = sim.shape_mask[y * w + x];
+                        let mirror = sim.shape_mask[y * w + (w - 1 - x)];
+                        if m != mirror {
+                            mismatches += 1;
+                            if first.is_none() { first = Some((x, y)); }
+                        }
+                    }
+                }
+                if mismatches > 0 {
+                    worst.push(format!(
+                        "{} at grid {}: {} mirror mismatches (first at x={}, y={})",
+                        name, grid, mismatches, first.unwrap().0, first.unwrap().1
+                    ));
+                }
+                println!("MASKSYM {} grid={} mismatches={}", name, grid, mismatches);
+            }
+        }
+        assert!(worst.is_empty(), "Vessel masks are not left-right symmetric:\n  {}", worst.join("\n  "));
+    }
 }

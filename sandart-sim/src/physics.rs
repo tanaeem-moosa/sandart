@@ -2763,7 +2763,15 @@ pub fn multistage_tier_chambers(n: u32) -> Vec<u32> {
 /// sync with it.
 fn multistage_neck_half_width(w_f: f32, chamber_w: f32, neck_width: f32) -> f32 {
     let neck_cap = 0.30 * chamber_w;
-    let neck_hw = (neck_width * w_f).min(neck_cap).max(0.5);
+    // The floor is 1.0, not 0.5, because `eval_sandbox_shape`'s mirror axis is `(w-1)/2` — a
+    // HALF-INTEGER for even `w` — so a cell's `|dx|` is always a half-integer: 0.5, 1.5, 2.5...
+    // A half-width of 0.5 with the strict `|dx| < allowed_hw` test therefore admits NO cell at all
+    // and closes the neck completely, trapping everything above it. 1.0 opens the two central
+    // cells, the narrowest neck that is symmetric about the axis. (Under the old integer axis
+    // `w/2`, `|dx|` was an integer and 0.5 admitted exactly the one centre cell, which is why this
+    // floor was 0.5 until the axis was corrected on 2026-09-08.) Necks on this axis are
+    // necessarily even-width; an odd-width neck cannot be centred symmetrically.
+    let neck_hw = (neck_width * w_f).min(neck_cap).max(1.0);
     let anti_merge_ceiling = (chamber_w / 2.0 - 0.5).max(0.5);
     neck_hw.min(anti_merge_ceiling)
 }
@@ -2830,7 +2838,12 @@ pub fn eval_sandbox_shape(
     multistage_chambers: u32,
     flipped: bool,
 ) -> (bool, bool) {
-    let center_x = w as f32 / 2.0;
+    // Cell centres are the integer indices 0..=w-1, so the grid's true mirror axis is at
+    // (w-1)/2, not w/2. With w/2 the mirror pair (x, w-1-x) produced dx values that were not
+    // negatives of each other but off by exactly one cell, so EVERY vessel was evaluated half
+    // a cell left of centre and no shape was left-right symmetric. See
+    // `test_vessel_masks_are_left_right_symmetric`.
+    let center_x = (w - 1) as f32 / 2.0;
     let center_y = h as f32 / 2.0;
     let dx = cx as f32 - center_x;
     // Turning the apparatus over inverts the *structure*, not just its contents. Every shape
@@ -10096,20 +10109,28 @@ mod tests {
             sim.tick_count = initial_tick_count;
             let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
-            // `eval_sandbox_shape` reflects `dx = cx as f32 - w as f32 / 2.0` about `w / 2.0` (an
-            // *integer* for even `w`), so the mask's true mirror map is `x -> w - x` (verified
-            // directly against `make_test_mask`'s output for this exact shape/size: the Square
-            // mask here is inside for x in [3, 61], symmetric under `x -> 64 - x`, NOT under
-            // `x -> 63 - x` / `w - 1 - x` — the convention `test_sandbox_wave_stays_left_right_symmetric`
-            // uses. That test gets away with the off-by-one because its Circle bump never reaches
-            // the mask boundary; this test's blob spreads to fill nearly the whole 64-wide box
-            // (see `test_liquid_splashes_on_impact`'s width_after=59), so the wrong axis measures
-            // a spurious ~1-column wall-proximity bias on top of any real solver bias. Centring
-            // the blob on 9 columns (28..=36, an odd count around x=32) makes it bit-symmetric
-            // about the mask's actual axis: mirror(28)=36, mirror(29)=35, ..., mirror(32)=32
-            // (self).
+            // The mask's mirror map is `x -> w - 1 - x`, the natural one for cell centres at the
+            // integer indices `0..=w-1`.
+            //
+            // THIS USED TO SAY `x -> w - x`, AND THAT WAS A BUG BEING DOCUMENTED AS A FACT.
+            // `eval_sandbox_shape` reflected about `w as f32 / 2.0`, half a cell right of the
+            // grid's true centre, so every vessel it generated really was symmetric about `w - x`
+            // rather than `w - 1 - x` — this test measured that, correctly concluded the mask's
+            // axis was `w - x`, and adapted to it instead of reporting it. The evaluator was
+            // corrected on 2026-09-08 (`test_vessel_masks_are_left_right_symmetric` pins it), so
+            // the natural axis is now the real one and the accommodation had to go with it.
+            //
+            // That matters for more than tidiness. The red-black edge-colouring experiment
+            // (`d6d843b`, 2026-07-31) removed ALL scan-order dependence from the lateral pass and
+            // found this test's `late_persistent_run` unmoved at 75, concluding the residual lean
+            // was ORDER-INDEPENDENT and that no scan-order fix could ever reach it. That
+            // conclusion was drawn against the off-axis mirror map below, i.e. with a half-cell
+            // geometric bias folded into the measurement. It deserves re-testing now, not citing.
+            //
+            // The blob is 8 columns (28..=35), an even count straddling the axis at 31.5, so it is
+            // bit-symmetric about it: mirror(28)=35, mirror(29)=34, mirror(30)=33, mirror(31)=32.
             for y in 50..54 {
-                for x in 28..37 {
+                for x in 28..36 {
                     sim.hm.data[y * w + x] = 1.0;
                 }
             }
@@ -10117,15 +10138,14 @@ mod tests {
             // Signed left-minus-right mass difference: positive means excess mass on the left
             // half, negative means excess on the right. Normalised by total mass so the scale is
             // comparable tick to tick as the blob spreads and (if it splashes) loses/gains contact
-            // area. Pairs `x` with `w - x` (the mask's true mirror, see above); `x = 0` has no
-            // partner (its mirror `w` is out of range) but is always outside the mask for this
-            // shape, so skipping it costs nothing, and `x = w / 2` is its own mirror and
-            // contributes exactly 0.
+            // area. Pairs `x` with `w - 1 - x` (see the note above on why this is the mask's real
+            // mirror). Every column has a partner and no column is its own mirror, so the loop
+            // covers the left half exactly once.
             let signed_diff = |s: &TestSim| -> f64 {
                 let mut diff = 0.0f64;
                 for y in 0..h {
-                    for x in 1..w / 2 {
-                        let j = w - x;
+                    for x in 0..w / 2 {
+                        let j = w - 1 - x;
                         let i = y * w + x;
                         let jj = y * w + j;
                         if s.mask[i] == crate::MASK_OUTSIDE || s.mask[jj] == crate::MASK_OUTSIDE {
@@ -10875,32 +10895,119 @@ mod tests {
         assert_eq!(hm.data[src_idx], 0.0, "Residual sand was trapped! h={}", hm.data[src_idx]);
     }
 
+
+    /// DIAGNOSTIC for the water-asymmetry hunt (2026-09-08). Not an assertion: it prints.
+    ///
+    /// Run with:
+    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_water_hourglass
+    ///
+    /// Reproduces the reported scenario -- water draining an hourglass, one neck against three --
+    /// at the two resolutions the asymmetry was reported to differ between. Runs at FULL budget so
+    /// the LOD scheduler cannot contribute; whatever lean shows up here is geometry plus the
+    /// solver's own sweep order.
+    ///
+    /// `mirror` is the height field against its own reflection, normalised by total mass -- it
+    /// measures shape, not just mass balance. `signed` is (left mass - right mass) / total, which
+    /// keeps the DIRECTION of the lean: a symmetric sloshing noise averages to zero, a one-sided
+    /// bias does not.
+    #[test]
+    #[ignore]
+    fn diag_water_hourglass_mirror_asymmetry() {
+        let bs = crate::DEFAULT_BLOCK_SIZE;
+        for grid in [128usize, 256] {
+            for (name, shape) in [
+                ("Hourglass ", SandboxShape::Hourglass),
+                ("MultiNeck ", SandboxShape::MultiNeckHourglass),
+            ] {
+                let mask = make_test_mask(grid, grid, shape, 0.04, 1.0);
+                let props = get_test_props(MaterialMode::Water, grid * grid);
+                let mut sim = TestSim::new(grid, grid, props, mask, bs);
+
+                // Water in the UPPER chamber only, so it has to drain through the neck(s).
+                for y in 0..grid / 2 {
+                    for x in 0..grid {
+                        let i = y * grid + x;
+                        if sim.mask[i] != crate::MASK_OUTSIDE {
+                            sim.hm.data[i] = 0.5;
+                        }
+                    }
+                }
+
+                let mirror = |s: &TestSim| -> f64 {
+                    let (mut diff, mut total) = (0.0f64, 0.0f64);
+                    for y in 0..grid {
+                        for x in 0..grid {
+                            let (i, j) = (y * grid + x, y * grid + (grid - 1 - x));
+                            if s.mask[i] == crate::MASK_OUTSIDE || s.mask[j] == crate::MASK_OUTSIDE {
+                                continue;
+                            }
+                            diff += (s.hm.data[i] - s.hm.data[j]).abs() as f64;
+                            total += s.hm.data[i] as f64;
+                        }
+                    }
+                    if total > 0.0 { diff / total } else { 0.0 }
+                };
+                let signed = |s: &TestSim| -> f64 {
+                    let (mut l, mut r) = (0.0f64, 0.0f64);
+                    for y in 0..grid {
+                        for x in 0..grid {
+                            let i = y * grid + x;
+                            if s.mask[i] == crate::MASK_OUTSIDE { continue; }
+                            if x * 2 + 1 < grid { l += s.hm.data[i] as f64; }
+                            else if x * 2 + 1 > grid { r += s.hm.data[i] as f64; }
+                        }
+                    }
+                    let t = l + r;
+                    if t > 0.0 { (l - r) / t } else { 0.0 }
+                };
+
+                let budget = (grid / bs) * (grid / bs);
+                let init_m = mirror(&sim);
+                let (mut worst_m, mut worst_s) = (0.0f64, 0.0f64);
+                // Ticks scale with resolution. Transport is clamped to one cell per tick and a
+                // cell at 256 is half the physical size, so the same physical drain needs twice
+                // the ticks -- comparing equal tick counts across resolutions would report
+                // "unfinished" as "asymmetric".
+                let ticks = 1500u32 * (grid as u32) / 128;
+                for _ in 1..=ticks {
+                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+                    worst_m = worst_m.max(mirror(&sim));
+                    let s = signed(&sim);
+                    if s.abs() > worst_s.abs() { worst_s = s; }
+                }
+                println!(
+                    "DIAGASYM {} grid={} ticks={} init_mirror={:.3e} worst_mirror={:.4} \
+                     final_mirror={:.4} worst_signed={:+.4} final_signed={:+.4}",
+                    name, grid, ticks, init_m, worst_m, mirror(&sim), worst_s, signed(&sim)
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_no_floating_sand_under_gravity() {
         let w = 64;
         let h = 64;
         let mut hm = Heightmap::new(w, h, 0.0);
 
-        // Fill random sand in upper chamber inside hourglass boundary
-        let center_x = 32.0;
-        let center_y = 32.0;
-        let chamber_h = 0.40 * 64.0;
-        let max_hw = 0.35 * 64.0;
-        let neck_hw = 0.04 * 64.0;
+        // Fill random sand into the upper chamber, USING THE VESSEL'S OWN MASK.
+        //
+        // This test used to reimplement the hourglass boundary inline (twice -- once to fill and
+        // once to assert), with a hardcoded `center_x = 32.0`. That duplicate never agreed with
+        // `eval_sandbox_shape` exactly, and once the shape evaluator's mirror axis was corrected
+        // from `w/2` to `(w-1)/2` on 2026-09-08 the disagreement became a full cell: the fill put
+        // sand in columns the vessel does not support, and the test reported it as "floating sand"
+        // -- a defect in the test's own geometry, not in the solver. Filling from the mask that
+        // the solver is actually given removes the duplication rather than re-syncing it.
+        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.04, 0.6);
+        let inside = |cx: usize, cy: usize| -> bool { mask[cy * w + cx] != crate::MASK_OUTSIDE };
 
         for y in 5..30 {
-            let dy = y as f32 - center_y;
-            let dy_abs = dy.abs();
-            if dy_abs < chamber_h {
-                let t = dy_abs / chamber_h;
-                let allowed_hw = neck_hw + t.powf(0.6) * (max_hw - neck_hw);
-                for x in 2..62 {
-                    let dx = x as f32 - center_x;
-                    if dx.abs() < allowed_hw {
-                        let idx = y * w + x;
-                        let pseudo_rand = ((x * 17 + y * 31) % 100) as f32 / 100.0;
-                        hm.data[idx] = pseudo_rand * 0.8;
-                    }
+            for x in 2..62 {
+                if inside(x, y) {
+                    let idx = y * w + x;
+                    let pseudo_rand = ((x * 17 + y * 31) % 100) as f32 / 100.0;
+                    hm.data[idx] = pseudo_rand * 0.8;
                 }
             }
         }
@@ -10927,7 +11034,7 @@ mod tests {
 
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.04, 0.6);
+        // `mask` is already bound above, where the chamber fill uses it.
         // Run gravity settling until all falling sand completes landing and flow reaches zero
         for i in 0..2000 {
             let flow = settle_tick(
@@ -10970,24 +11077,8 @@ mod tests {
                 let h_curr = hm.data[idx];
                 let h_below = hm.data[idx_below];
 
-                let center_x = 32.0;
-                let center_y = 32.0;
-                let chamber_h = 0.40 * 64.0;
-                let max_hw = 0.35 * 64.0;
-                let neck_hw = 0.04 * 64.0;
-
-                let is_in = |cx: usize, cy: usize| -> bool {
-                    let dx = cx as f32 - center_x;
-                    let dy = cy as f32 - center_y;
-                    let dy_abs = dy.abs();
-                    if dy_abs < chamber_h {
-                        let t = dy_abs / chamber_h;
-                        let allowed_hw = neck_hw + t.powf(0.6) * (max_hw - neck_hw);
-                        dx.abs() < allowed_hw
-                    } else {
-                        false
-                    }
-                };
+                // The same mask the solver was given -- see the note on the fill above.
+                let is_in = inside;
 
                 if is_in(x, y) && h_curr > 0.005 && is_in(x, y + 1) && h_below == 0.0 {
                     println!("Column x={}:", x);
@@ -11997,7 +12088,11 @@ mod tests {
     /// the task report this shipped alongside rather than kept green here forever, since keeping
     /// it green here would require never actually lowering the floor.
     fn old_multistage_eval(cx: usize, cy: usize, w: usize, h: usize, neck_width: f32, hourglass_curve: f32) -> (bool, bool) {
-        let center_x = w as f32 / 2.0;
+        // Re-baselined 2026-09-08 with `eval_sandbox_shape`'s mirror-axis correction. This is a
+        // frozen copy of the old hard-coded n=8 formula, kept to prove the generic n-chamber
+        // formula reproduces it; the axis is not what it is freezing, so it tracks the fix.
+        // Left at `w/2` it would have pinned the off-by-one permanently.
+        let center_x = (w - 1) as f32 / 2.0;
         let center_y = h as f32 / 2.0;
         let dx = cx as f32 - center_x;
         let dy = cy as f32 - center_y;

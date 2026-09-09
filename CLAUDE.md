@@ -59,9 +59,23 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **101 passed / 1 failed on `main`**, and that is the current expected state.
-The one failure is `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56
-marker that must keep failing. See HANDOVER.md §1.
+The library suite is **100 passed / 3 failed on `main`**, and that is the current expected state:
+
+- `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
+  keep failing. See HANDOVER.md §1.
+- `test_sandbox_wave_stays_left_right_symmetric` — the residual SOLVER asymmetry, deliberately left
+  visible. Its mirror error no longer decays (peaks 4.7e-7, still 4.4e-7 at tick 400) against an
+  assertion demanding `final < 0.25 * worst`. The magnitude is tiny; what matters is that it is now
+  measurable at all. It was partly hidden before 2026-09-08 because the mirror comparison skips
+  cells whose mask mirror is OUTSIDE, and the mask was asymmetric, so many cells were skipped.
+- `test_cascade_no_dam_or_neck_merge_across_chamber_count_range` — **known outstanding work on the
+  MultiStage/cascade geometry only.** The 2026-09-08 mirror-axis correction moved every chamber
+  centre by half a cell, and this shape family's neck floor and `anti_merge_ceiling` were both
+  tuned against the old integer axis. The floor was fixed (0.5 -> 1.0, see
+  `multistage_neck_half_width`); `anti_merge_ceiling`'s `-0.5` has the same axis sensitivity and
+  has NOT been re-derived, so at `w=64, chambers=11, neck_width=0.06` the wall between adjacent
+  necks opens and chambers merge. Hourglass and MultiNeckHourglass are unaffected. Do not "fix"
+  this by reverting the axis.
 
 **`test_sandbox_wave_reach_is_budget_independent` was resolved on 2026-09-02, by fixing the test.**
 Its bit-identical-amplitude-across-budgets assertion was wrong in principle: `budget_n` exists to
@@ -110,6 +124,29 @@ the same square, and the coarse level was deleted on 2026-08-30. At grid 512 (th
 removes the degenerate `block_size = 1` at grid 64 and `= 2` at 128. `budget_n` and the adaptive
 controller's throttles are now derived from the block count (`budget_throttles`) instead of
 hardcoded, and reproduce the old absolutes exactly at 512. See `artifacts/design/BLOCK-GEOMETRY-2026-09-02.md`.
+
+**On 2026-09-08 `eval_sandbox_shape`'s mirror axis was corrected from `w/2` to `(w-1)/2`.**
+Cell centres are the integer indices `0..=w-1`, so the true axis is `(w-1)/2`; with `w/2` the
+mirror pair `(x, w-1-x)` differed by exactly one cell and **every vessel in the app was asymmetric
+by construction**, at every resolution. `test_vessel_masks_are_left_right_symmetric` pins it (all
+shapes now report zero mirror mismatches). Measured effect on water draining an hourglass: the
+persistent settled lean, which was ~1% of total mass and always the same direction, goes to zero.
+
+Three consequences to know before touching symmetry work:
+
+- The axis is a HALF-INTEGER for even `w`, so a cell's `|dx|` is always 0.5, 1.5, 2.5... Any
+  threshold compared with a strict `|dx| < allowed` must account for that: a half-width of exactly
+  0.5 now admits NO cell. Symmetric necks on this axis are necessarily even-width.
+- `test_water_blob_stays_left_right_symmetric_under_gravity` had **documented the bug as a fact**,
+  adapting its mirror map to `x -> w - x`. That accommodation is gone. Note this means the
+  red-black experiment `d6d843b`'s conclusion — that the residual lean is order-independent — was
+  drawn against an off-axis metric; it was re-tested on 2026-09-08 with the corrected axis and
+  metric and **still holds**: `late_persistent_run` stays 75/43.
+- `test_no_floating_sand_under_gravity` reimplemented the vessel boundary inline, twice, with a
+  hardcoded `center_x = 32.0`. It now fills and asserts from the real mask. If you find another
+  test with its own copy of the shape math, that is the bug.
+
+See `artifacts/design/ASYMMETRY-2026-09-08.md`.
 
 ## Verification is the deployed page
 
