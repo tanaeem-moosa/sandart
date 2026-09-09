@@ -109,3 +109,78 @@ is not geometry and not scan order; both are now ruled out by measurement rather
 `diag_water_hourglass_mirror_asymmetry` is the metric to judge any candidate against — it is the
 reported scenario, unlike the water blob, whose `late_persistent_run` red-black already failed to
 move twice.
+
+## 8. Red-black retried, and the trade it revealed
+
+Retried on 2026-09-08 at the user's request, against current `main` rather than July's solver.
+
+**It was NOT subsumed by capacity arbitration**, contrary to `d6d843b`'s closing note. The
+shared-endpoint write is UPSTREAM of arbitration: the lateral flux call writes `cell_avail` and
+`cell_freecap` for both endpoints, consecutive lateral edges along a row share an endpoint (edge
+(x, x+1) and edge (x+1, x+2) both write cell x+1), last writer wins, and which is last is the sweep
+direction. `accumulate_edge_totals` then reads those arrays as it goes, so the oversubscription
+bookkeeping arbitration depends on was itself direction-dependent.
+
+Structural differences from July: the lateral edge now carries the GRANULAR share too (Stage C), it
+writes candidates rather than applying flux, and arbitration runs per-phase inside the phase loop.
+So the pass sits at the end of phase 1's traversal, before pressure projection — not after the
+phase loop as in `d6d843b`.
+
+### What it bought
+
+`test_tick_phase_mechanism_isolation`, before -> after:
+
+    mechanism                        worst                  final              late_run
+    REFERENCE (all 0)          5.6845e-2 -> 2.6940e-2   8.6467e-3 -> 1.6880e-2   44 -> 40
+    Block-level x order        4.6161e-2 -> no-op       1.1543e-2 -> no-op       43 -> 40
+    Cell-level lateral sweep   6.4742e-2 -> no-op       2.2851e-2 -> no-op       42 -> 40
+    RNG seed                   7.5810e-2 -> 3.9442e-2   2.0887e-3 -> 1.5517e-2   45 -> 42
+
+SEVEN of eight mechanisms are now bit-identical to baseline; only the RNG still moves anything.
+Baseline `worst` fell 53%.
+
+Note the isolation harness's own documentation was STALE before this: it claimed only two
+mechanisms move anything and that "the CA checkerboard and RNG seed live in the granular path a
+liquid scenario never reaches". The RNG demonstrably moves it. That is not the dispersion term —
+`dispersion` scales by `tau`, which scales by `granular_share = 1 - cell_liquidity`, so it is
+identically zero for water; setting `DISPERSION_TAU_FRAC = 0` leaves the drain metric bit-identical.
+Whatever RNG path reaches liquid, it is not that one, and it is unidentified.
+
+On the reported scenario (`diag_water_hourglass_mirror_asymmetry`):
+
+    grid/shape        worst mirror         worst signed
+    Hourglass 128   0.6353 -> 0.4661    +0.0652 -> -0.0148
+    MultiNeck 128   0.7134 -> 0.4546    -0.0304 -> +0.0086
+    Hourglass 256   0.6816 -> 0.4426    +0.0658 -> +0.0073
+    MultiNeck 256   0.7299 -> 0.5053    +0.0194 -> -0.0054
+
+MultiNeck stops being worse than single-neck at 128 — the "much worse with 3 necks" signature goes.
+July's blocker, `test_settled_liquid_sleeps_and_wakes`, does NOT recur.
+
+### What it cost, and the actual lever
+
+`test_liquid_flowing_liquid_does_not_stand_in_walls`, enclosed void cells:
+
+                  voids@120   voids@160    total
+    baseline          51          2         9509
+    red-black        167         77        20658
+    thresholds      <=150       <=20      <=34000
+
+Draining liquid clings to walls ~3x longer.
+
+**The diagnosis "red-black loses the sideways cascade a directional sweep provided, so transport
+slows" is WRONG, and was refuted directly.** Running two colour sweeps per tick (`[0,1,0,1]`) to
+restore transport made symmetry dramatically BETTER — worst mirror 0.1522 / 0.1761 / 0.1016 /
+0.1354, a 4-7x improvement on the untouched 0.64-0.73 — and voids WORSE still (238 / 159 / 32465).
+
+So symmetry and drainage move in opposite directions on one dial, and the dial is HOW OFTEN THE
+LATERAL EDGE IS INTEGRATED RELATIVE TO THE GRAVITY-ALIGNED ONE. This is an operator-split balance
+problem, not a colouring problem. Red-black moves the dial one notch; two sweeps move it two.
+
+The next thing to try is therefore NOT a different colouring or a point on this curve, but giving
+the gravity-aligned edge matching treatment so the split stays balanced, then re-measuring both
+metrics together. If that holds, the 4-7x symmetry improvement is available WITH drainage. It
+plausibly connects to the +-1.0 clamp lever, since both are about how much transport one tick is
+allowed to do.
+
+Perf was not measured. July saw ~8% on an older solver.

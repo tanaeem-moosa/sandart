@@ -59,7 +59,7 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **100 passed / 3 failed on `main`**, and that is the current expected state:
+The library suite is **99 passed / 4 failed on `main`**, and that is the current expected state:
 
 - `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
   keep failing. See HANDOVER.md §1.
@@ -68,6 +68,13 @@ The library suite is **100 passed / 3 failed on `main`**, and that is the curren
   assertion demanding `final < 0.25 * worst`. The magnitude is tiny; what matters is that it is now
   measurable at all. It was partly hidden before 2026-09-08 because the mirror comparison skips
   cells whose mask mirror is OUTSIDE, and the mask was asymmetric, so many cells were skipped.
+- `test_liquid_flowing_liquid_does_not_stand_in_walls` — **a deliberately shipped regression, on
+  main so it can be looked at, and a revert candidate.** The red-black lateral pass (2026-09-08)
+  takes enclosed void cells from 51/2/9509 to 167/77/20658 against thresholds 150/20/34000, i.e.
+  draining liquid clings to walls ~3x longer. It is the cost side of a real trade: the same change
+  cuts mid-drain mirror asymmetry 27-36%. **Do not silently re-baseline these thresholds** — they
+  are the only thing recording what the symmetry win cost. See `artifacts/design/ASYMMETRY-2026-09-08.md`
+  §8 for the measured trade curve and the operator-rebalance hypothesis for fixing both at once.
 - `test_cascade_no_dam_or_neck_merge_across_chamber_count_range` — **known outstanding work on the
   MultiStage/cascade geometry only.** The 2026-09-08 mirror-axis correction moved every chamber
   centre by half a cell, and this shape family's neck floor and `anti_merge_ceiling` were both
