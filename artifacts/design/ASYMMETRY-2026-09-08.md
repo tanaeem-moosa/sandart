@@ -184,3 +184,93 @@ plausibly connects to the +-1.0 clamp lever, since both are about how much trans
 allowed to do.
 
 Perf was not measured. July saw ~8% on an older solver.
+
+## 9. The 45-degree walls (2026-09-09) — it is incompressibility, and two fixes are refuted
+
+User's report, on `cc3fc3f`: symmetry is good, the drainage speckle is fine ("I don't mind the
+waterflow lines"), but water sits at "almost 45 degree walls". Clarified target: **not** full
+flattening — "that is how we ended up on our misadventure with pressure" — but flattening MORE, and
+losing the clear straight angles.
+
+### It is NOT a red-black regression
+
+`diag_water_levelling`: water piled into the left third of a CLOSED 256 box, so nothing can drain
+and only lateral transport can change the surface. Surface height range across the box:
+
+                   t=300      t=1200     t=3000
+    baseline     range 232  range 202  range 141
+    cc3fc3f      range 232  range 214  range 168
+
+Red-black makes it ~19% worse; the defect is overwhelmingly pre-existing. Water does not level.
+
+### The mechanism: a full cell has zero room
+
+Same box filled to h=0.5 instead of h=1.0, so every cell has headroom:
+
+    full (h=1.0)   maxslope 21 -> 6 -> 5
+    half (h=0.5)   maxslope  6 -> 3 -> 2
+
+Lateral flow cannot pass THROUGH a cell that is at capacity, so a piled body levels at roughly one
+cell per tick. A uniform transport limit is what produces a uniform slope — the straight facet is
+transport-limited, not pressure-limited. No constant moves this; `LATERAL_PRESSURE_SCALE` was swept
+5/8/12/20 and `voids@160` got worse at every value above 5 while levelling did not improve
+monotonically.
+
+### REFUTED 1: raising water's cell capacity
+
+`cell_capacity_for` gives water 1.0 and granular 1.5 — the material that most needs to transmit
+lateral flow has the least headroom. Raising water to 1.5 looks excellent on every metric that was
+being watched (levelling range 168 -> 102, `voids@120` 167 -> 146 and `voids@160` 77 -> 2, which
+turns `test_liquid_flowing_liquid_does_not_stand_in_walls` from failing to passing).
+
+**It is compressibility, not headroom.** The suite says so directly: `test_liquid_is_incompressible`
+fails, plus both task55 scoreboards. The user caught it independently and framed it exactly right —
+"are we effectively reducing starting content?" Yes: once cells reach the new limit you are back in
+the same transport-limited state with denser water and a shorter pile. The gain is borrowed from
+the transient while the slack is consumed, and paid for in physics correctness.
+
+### REFUTED 2: a global preference for lateral flow
+
+User's proposal: "add a preference for lateral flow when there is multiple candidate". The place it
+lands is `in_transit_at`, which withholds vertically-in-transit mass from the lateral edge —
+gravity's strict first claim. Sweeping the withheld fraction:
+
+    withhold   levelling range   maxslope   voids@120  voids@160   stream width (4-cell tap)
+      1.0          168              5          167        77        passes
+      0.9          165              4           --        --        18  FAIL
+      0.75         158              3           --        --        24  FAIL
+      0.5          138              3          146       108        FAIL
+      0.0          121              2          164       116        30  FAIL
+
+It does what was asked — maxslope 5 -> 2, levelling +28%, mass conserved exactly, capacity never
+exceeded. But EVERY reduction, down to 0.9, breaks `test_liquid_stream_stays_coherent`: the falling
+stream fans out to 18-30 cells from a 4-cell tap.
+
+That failure is already documented, in the operator-split comment a few lines below the site:
+"a fused pass cannot tell 'falling' from 'resting' and spreads both, fanning a 4-cell stream out to
+33. What actually distinguishes them is that the falling cell has somewhere to go *along* gravity
+and the pooled cell does not."
+
+**Which means the proposal is already implemented, correctly, for the case it is right in.**
+`in_transit_at` withholds only up to `downstream_route` — so a cell that CANNOT fall (blocked
+below, i.e. resting in a pile) already has full lateral availability. The knob only turns down the
+part that keeps falling streams narrow. Do not re-sweep it.
+
+### Where that leaves it
+
+The levelling limit is incompressibility itself, and the two cheap ways around it are refuted: one
+gives up incompressibility, the other gives up stream coherence. A resting pile already has full
+lateral availability, so the remaining constraint is purely that mass must physically traverse
+cells that are at capacity, one cell per tick.
+
+That points back at the transport RATE — the `+-1.0` clamp and solver sub-stepping (`HANDOVER.md`
+§10) — which is the one lever here that changes no physics at all, only how much of it runs per
+rendered frame. It is also the only one of these that does not reopen the pressure project.
+
+### Comment cleanup done alongside
+
+`pressure_project` and `pressure_gate` were referenced in eight places in `physics.rs` as if live;
+both were deleted in `3bb6533` ("it cannot run, and enabling it changes nothing"). One of those
+references sent this session off to diagnose machinery that does not exist. All now corrected or
+replaced with a tombstone that records what the deleted pass was FOR, since the packed-column limit
+it targeted is real and still bites.

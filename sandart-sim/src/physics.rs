@@ -1743,8 +1743,9 @@ fn accumulate_edge_totals(
 /// Correctness is unchanged, not approximated: when no touched cell is oversubscribed every
 /// `edge_arbitration_scale` would have returned exactly `1.0`, and when one is, this pass runs and
 /// rebuilds the identical totals from the identical `(edge_key, salt, time_seed)` before any scale
-/// is computed. It reads `cand_h`/`cand_v` rather than a saved candidate because
-/// `pressure_project` writes its final, post-correction flux back into those arrays.
+/// is computed. It reads `cand_h`/`cand_v` rather than a saved candidate because the deleted
+/// pressure-projection pass used to write its post-correction flux back into those arrays; the
+/// read stays correct now that nothing does (they hold the COLLECT candidate directly).
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn accumulate_edge_jitter(
@@ -1934,7 +1935,7 @@ mod upstream_wake_gate {
 /// DIAGNOSTIC-ONLY A/B TOGGLE for the fresh-overburden MUST-simulate predicate (task #47, the
 /// "sand-slab" scheduling defect fix -- see the predicate's own comment at its call site in
 /// `settle_tick`, just before the MUST/STALE/REST classification loop). Same pattern and same
-/// rationale as `upstream_wake_gate`/`pressure_gate`: a thread-local so parallel tests don't
+/// rationale as `upstream_wake_gate`/`fresh_overburden_gate`: a thread-local so parallel tests don't
 /// interfere, `#[cfg(test)]`-gated so it does not exist in production at all (a non-test build --
 /// including every integration-test binary in `tests/`, which links this crate as an ordinary,
 /// non-`--cfg test` dependency -- always takes the fix; see the `#[cfg(not(test))]` twin below,
@@ -1988,7 +1989,7 @@ mod fresh_overburden_gate {
 
 /// TASK #55 DIAGNOSTIC-ONLY A/B TOGGLE for the multiplicative lateral driving head (see
 /// `mult_lateral_driving`'s doc comment for the mechanism). Same thread-local-per-test pattern as
-/// `upstream_wake_gate`/`pressure_gate`/`fresh_overburden_gate` -- `#[cfg(test)]`-gated so it does
+/// `upstream_wake_gate`/`fresh_overburden_gate`/`head_field_gate` -- `#[cfg(test)]`-gated so it does
 /// not exist in production at all, `#[cfg(not(test))]` twin hardcodes the shipped choice so a
 /// non-test build pays no thread-local read.
 ///
@@ -4158,21 +4159,6 @@ pub fn settle_tick(
     let mut touched_cells = std::mem::take(&mut scratch.touched_cells);
     let mut g0_liquid_cells = std::mem::take(&mut scratch.g0_liquid_cells);
 
-    // Pressure projection scratch (`pressure_project`, run once per phase between COLLECT and the
-    // arbitration totals below). Same allocate-once-outside-the-loop, clear-only-what-was-touched
-    // discipline as the buffers above; `pressure_project` itself owns clearing these via its own
-    // `nodes` list from the previous call.
-    // `pressure_project` reads these six only inside its `run_solve` branch, and `run_solve` is
-    // `!overfill_active` -- so with the overfill model on (the shipped configuration) they are
-    // never indexed at all. Allocating them empty there saves six zeroed grid-sized buffers per
-    // tick; measured at 512 that is the single largest item in the tick's fixed overhead.
-    // Per-node capacity cache, populated once per node on its first visit each call (wetness, and
-    // therefore `cell_capacity_for(wetness)`, is constant for the duration of one `pressure_project`
-    // call, so this is what lets the Jacobi loop stop re-deriving it every iteration -- see that
-    // function's perf note). Never needs clearing: every read is preceded, within the SAME call, by
-    // a write at that node's first visit, unlike `phi_a`/`phi_b`/`fstar`/`lap`/`degree`, which carry
-    // meaning across a call's own iterations and so must be reset from the previous call's leftovers.
-
     // 2. Continuous per-cell solver (loop over active blocks)
     let b_len = expected_len;
     // Directional operator split for liquid under gravity.
@@ -4529,9 +4515,10 @@ pub fn settle_tick(
 
                         touched_cells.push(center_idx);
                         touched_cells.push(nb_idx);
-                        // With the overfill model on, `pressure_project`'s solve never runs
-                        // (`run_solve` is `!overfill_active`), so it can never revise this
-                        // candidate -- and then summing it here, where the value and both
+                        // Nothing revises this candidate between here and APPLY: the
+                        // pressure-projection pass that once could was deleted in `3bb6533`,
+                        // together with the overfill model that gated it off anyway. So summing it
+                        // here, where the value and both
                         // endpoints' budgets are already in registers, saves walking the whole
                         // `touched_h`/`touched_v` lists a second time just to add it up. With the
                         // model off the correction can still move it, so the totals stay deferred
@@ -5693,28 +5680,20 @@ pub fn settle_tick(
     }
 
 
-    // --- PRESSURE PROJECTION ---
+    // TOMBSTONE: a pressure-projection pass used to run here, between COLLECT and the arbitration
+    // totals, to let a packed column learn where its only outlet is within one tick instead of one
+    // cell per tick. It was DELETED in `3bb6533` ("it cannot run, and enabling it changes nothing")
+    // along with the overfill model that gated it. `accumulate_edge_totals`, which briefly lived
+    // inside it, is back at each COLLECT site.
     //
-    // Runs once per phase, strictly between COLLECT (just finished above) and the arbitration
-    // totals: it corrects `cand_h`/`cand_v` for the capacity constraint over the WHOLE
-    // candidate-edge graph `touched_h ∪ touched_v` produced this phase, in place, so that a packed
-    // column with a single outlet can learn where its only exit is within one tick instead of one
-    // cell per tick. See `pressure_project`'s doc comment for the full derivation and the proof
-    // that this cannot compromise the positivity/capacity guarantees arbitration still enforces
-    // afterwards, or mass conservation (which stays structural throughout). A no-op on the
-    // correction (falls through to plain totals accumulation) when `pressure_gate::is_disabled()`
-    // or neither touched list holds anything this phase.
-    //
-    // `accumulate_edge_totals` -- previously a separate pass here, right after this call, walking
-    // `touched_h`/`touched_v` a second time -- now runs INSIDE `pressure_project`, in the same
-    // pass that applies and clamps the correction (see that function's perf note): every term
-    // still reflects the (possibly pressure-corrected) final candidate, exactly as before, just
-    // without paying for a whole extra traversal to get there. `edge_key`/`salt`/`a_idx`/`b_idx`
-    // stay the same convention every COLLECT site in this phase used (edge_key == the edge's own
-    // index into `cand_h`/`cand_v`, `a_idx`/`b_idx` its two endpoints, salt keyed only by
-    // orientation and phase) -- see the `EDGE_SALT_*` calls above, at each COLLECT site, which
-    // this replaces.
-
+    // Do not read the absence as "nobody tried": the packed-column limit it targeted is real and
+    // still bites. A full water cell has zero room, so lateral flow cannot pass through it and a
+    // piled body levels at roughly one cell per tick, which is what makes a settled surface hold a
+    // straight facet instead of flattening. Measured 2026-09-09: water piled in the left third of a
+    // CLOSED 256 box still spans 168 rows of surface after 3000 ticks
+    // (`diag_water_levelling`). Raising water's `cell_capacity_for` to give it headroom does fix
+    // the levelling (168 -> 102) but that is compressibility, not headroom, and it fails
+    // `test_liquid_is_incompressible`. See `artifacts/design/ASYMMETRY-2026-09-08.md` §9.
 
     // Arbitration can only ever change a flux for a cell whose RAW claims exceed its own budget
     // (`budget_term` returns a flat 1.0 otherwise), and `accumulate_edge_totals` has just told us
@@ -11016,6 +10995,80 @@ mod tests {
     /// measures shape, not just mass balance. `signed` is (left mass - right mass) / total, which
     /// keeps the DIRECTION of the lean: a symmetric sloshing noise averages to zero, a one-sided
     /// bias does not.
+    /// DIAGNOSTIC (2026-09-09): does the water free surface LEVEL, or does it hold a slope?
+    ///
+    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_water_levelling
+    ///
+    /// The reported defect is water sitting at "almost 45 degree walls" in a multi-neck hourglass.
+    /// A liquid free surface must be FLAT whatever the vessel does; holding a slope is sand
+    /// behaviour. This measures the surface directly: for every column that has any water, take the
+    /// topmost filled cell, then report the surface's height RANGE across the vessel and the worst
+    /// slope between horizontally adjacent columns, in cells-per-cell (1.0 == 45 degrees).
+    ///
+    /// Reported at three times: early (still filling), mid, and late (should have levelled).
+    #[test]
+    #[ignore]
+    fn diag_water_levelling() {
+        let bs = crate::DEFAULT_BLOCK_SIZE;
+        for grid in [256usize] {
+            for (name, shape) in [
+                ("ClosedBox", SandboxShape::Square),
+            ] {
+                let mask = make_test_mask(grid, grid, shape, 0.04, 1.0);
+                let props = get_test_props(MaterialMode::Water, grid * grid);
+                let mut sim = TestSim::new(grid, grid, props, mask, bs);
+                // A closed box with all the water piled into the LEFT THIRD, filled to the brim.
+                // Nothing can drain out, so the only thing that can change the surface is lateral
+                // transport. A liquid must flatten this to a level pool; the time it takes and the
+                // slope it stalls at is exactly what "45 degree walls" is complaining about.
+                for y in 0..grid {
+                    for x in 0..grid / 3 {
+                        let i = y * grid + x;
+                        if sim.mask[i] != crate::MASK_OUTSIDE {
+                            sim.hm.data[i] = 1.0;
+                        }
+                    }
+                }
+
+                // Topmost filled cell per column.
+                let surface = |s: &TestSim| -> Vec<Option<usize>> {
+                    (0..grid).map(|x| {
+                        (0..grid).find(|&y| {
+                            let i = y * grid + x;
+                            s.mask[i] != crate::MASK_OUTSIDE && s.hm.data[i] > 0.05
+                        })
+                    }).collect()
+                };
+                let stats = |s: &TestSim| -> (usize, f64, f64) {
+                    let surf = surface(s);
+                    let ys: Vec<usize> = surf.iter().filter_map(|&o| o).collect();
+                    if ys.len() < 2 { return (0, 0.0, 0.0); }
+                    let range = (*ys.iter().max().unwrap() - *ys.iter().min().unwrap()) as f64;
+                    let mut worst = 0.0f64;
+                    for x in 0..grid - 1 {
+                        if let (Some(a), Some(b)) = (surf[x], surf[x + 1]) {
+                            worst = worst.max((a as f64 - b as f64).abs());
+                        }
+                    }
+                    (ys.len(), range, worst)
+                };
+
+                let budget = (grid / bs) * (grid / bs);
+                let mut out = String::new();
+                for t in 1..=3000u32 {
+                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+                    if t == 300 || t == 1200 || t == 3000 {
+                        let (n, range, worst) = stats(&sim);
+                        out.push_str(&format!(
+                            " | t={} cols={} range={:.0} maxslope={:.1}", t, n, range, worst
+                        ));
+                    }
+                }
+                println!("DIAGLEVEL {} grid={}{}", name, grid, out);
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn diag_water_hourglass_mirror_asymmetry() {
