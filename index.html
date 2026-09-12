@@ -838,13 +838,18 @@
                 </div>
                 <!-- Fix for a settled liquid surface holding a straight ~45-degree facet instead
                      of flattening: reruns the lateral (cross-gravity) edge pass extra times per
-                     tick, weighted by how wet (liquidity) the donor cell is. 1.0 (the default) is
-                     bit-identical to today's single pass. Dry material is always exactly 1.0 --
-                     see `DrawingSimulation::lateral_substeps`'s doc comment. -->
+                     tick, weighted by how wet (liquidity) the donor cell is. 1.0 is bit-identical to
+                     the old single pass; the page defaults to 2.5, chosen by eye on 2026-09-11
+                     (the library default stays 1.0). Dry material is always exactly 1.0.
+                     A fractional value's fractional part is realised as a single random draw per
+                     tick, global to the whole grid (not per block/cell, which showed as seams),
+                     so the expected extra-pass rate matches the slider exactly without ever
+                     running a wasted partial pass -- see `DrawingSimulation::lateral_substeps`'s
+                     doc comment. -->
                 <div class="field row" id="lateral-substeps-row">
-                    <label for="lateral-substeps-slider" title="How many times the sideways (lateral) flow pass runs per tick, scaled by how wet each donor cell is. 1.0 is today's single pass. Higher values flatten a settled liquid surface instead of leaving a straight diagonal facet. Dry material is unaffected at every value.">Lateral substeps</label>
-                    <span id="lateral-substeps-val" class="val-display">1.0</span>
-                    <input type="range" id="lateral-substeps-slider" min="1.0" max="4.0" step="0.1" value="1.0">
+                    <label for="lateral-substeps-slider" title="How many times the sideways (lateral) flow pass runs per tick, scaled by how wet each donor cell is. 1.0 is today's single pass. Higher values flatten a settled liquid surface instead of leaving a straight diagonal facet. A fractional value is realised as a per-tick coin flip (e.g. 2.5 runs 3 passes half the time, 2 the other half), so the average matches the number shown. Dry material is unaffected at every value.">Lateral substeps</label>
+                    <span id="lateral-substeps-val" class="val-display">2.5</span>
+                    <input type="range" id="lateral-substeps-slider" min="1.0" max="4.0" step="0.1" value="2.5">
                 </div>
             </div>
 
