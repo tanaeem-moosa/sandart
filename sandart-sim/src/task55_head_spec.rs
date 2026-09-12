@@ -1169,6 +1169,7 @@ impl DynSim {
             pressure_sensitive_flow,
             None, // precomputed_fresh_active (Stage 1 hoist): this harness recomputes internally, bit-identical to pre-hoist behaviour
             0.0,
+            1.0, // lateral_substeps: bit-identical default, not varied by any task55 spec
         );
         self.tick_count += 1;
         flow

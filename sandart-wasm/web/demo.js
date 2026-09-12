@@ -858,6 +858,13 @@ function syncSettings() {
         if (fallJitterVal) fallJitterVal.innerText = fallJitter.toFixed(2);
         state.set_liquid_fall_jitter(fallJitter);
     }
+    const lateralSubstepsSlider = document.getElementById('lateral-substeps-slider');
+    if (lateralSubstepsSlider) {
+        const lateralSubsteps = parseFloat(lateralSubstepsSlider.value);
+        const lateralSubstepsVal = document.getElementById('lateral-substeps-val');
+        if (lateralSubstepsVal) lateralSubstepsVal.innerText = lateralSubsteps.toFixed(1);
+        state.set_lateral_substeps(lateralSubsteps);
+    }
 
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
@@ -1224,6 +1231,11 @@ function setupPanelInput() {
     if (fallJitterSliderEl) {
         fallJitterSliderEl.addEventListener('input', syncSettings);
         fallJitterSliderEl.addEventListener('change', syncSettings);
+    }
+    const lateralSubstepsSliderEl = document.getElementById('lateral-substeps-slider');
+    if (lateralSubstepsSliderEl) {
+        lateralSubstepsSliderEl.addEventListener('input', syncSettings);
+        lateralSubstepsSliderEl.addEventListener('change', syncSettings);
     }
 
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above

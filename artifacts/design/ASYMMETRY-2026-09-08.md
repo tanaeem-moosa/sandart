@@ -274,3 +274,30 @@ both were deleted in `3bb6533` ("it cannot run, and enabling it changes nothing"
 references sent this session off to diagnose machinery that does not exist. All now corrected or
 replaced with a tombstone that records what the deleted pass was FOR, since the packed-column limit
 it targeted is real and still bites.
+
+## 10. Wetness-weighted lateral sub-passes (2026-09-11) — the user's design, shipped behind a dial
+
+The user rejected liquid-only gating ("it messes with mixed materials in a visually obvious way"),
+so the lateral edge pass reruns `ceil(N)-1` extra times per tick, and extra pass k moves
+`clamp(1 + (N-1)*liquidity(donor) - k, 0, 1)` of its flux. The DONOR's wetness is used, so dry
+material is s = 1 (bit-identical) and N is real-valued. Extra passes read heads from `temp_heights`,
+so each one sees the previous pass's movement. The weight scales the mass moved, never the stored
+edge velocity. Dial: `lateral_substeps` (UI "Lateral substeps", default 1.0 = bit-identical).
+
+`diag_lateral_substeps_sweep`, re-run independently:
+
+    N     levelling range t=300/1200/3000   stream width (limit 12)   Yogurt repose   hourglass worst_mirror
+    1.0   232 / 214 / 168                   10                        0.0308          0.443
+    1.5   231 / 205 / 150                   10                        0.0260          0.329
+    2.0   221 / 170 / 112                   12                        0.0237          0.532
+    2.5   231 / 148 /  65                   12                        0.0225          0.666
+    3.0   229 / 136 /  42                   14  FAIL                  0.0219          0.705
+    4.0   221 / 117 /  24                   18  FAIL                  0.0206          0.708
+
+Dry repose 0.0887 at every N. `max_h` 1.0 and mass conserved at every N. `final_mirror` stays 0.
+Unlike REFUTED 2, streams hold up to N = 2.5, because `in_transit_at` still withholds falling mass
+on every pass. Costs: the transient mirror error grows with N (up to ~1.6x), and frame time grows
+too. The agent measured grid-512 water hourglass ms/tick at 11.2 / 19.5 / 26.4 for N = 1 / 2 / 3;
+that perf number is not independently re-run. `column_depth` is one pass stale in extra passes,
+which is an untried second lever. `maxslope` (the worst adjacent-column step) does not track the
+facet and barely moves; judge by range.

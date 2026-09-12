@@ -3596,6 +3596,15 @@ pub(crate) fn phase_offset(_k: usize) -> u32 {
 struct SolverScratch {
     cand_h: Vec<f32>,
     cand_v: Vec<f32>,
+    // TASK: lateral substeps. Holds the UNWEIGHTED candidate flux for an extra lateral pass's
+    // touched_h entries only (phase >= 2 -- see `lateral_substeps`'s doc comment on `settle_tick`).
+    // `cand_h[idx]` in an extra pass holds the donor-wetness-WEIGHTED candidate (what actually
+    // moves, and what arbitration budgets against); this buffer holds the same edge's candidate
+    // before that weighting, so APPLY can restore `edge_vel_h` to what the edge's own momentum
+    // integrator would have produced had the full (unweighted) candidate been realised, per that
+    // parameter's velocity-vs-mass requirement. Untouched (and unread) for phase <= 1 -- those two
+    // phases stay bit-identical to before this buffer existed.
+    cand_h_unweighted: Vec<f32>,
     edge_h_active: Vec<bool>,
     edge_v_active: Vec<bool>,
     cell_out_total: Vec<f32>,
@@ -3626,6 +3635,7 @@ mod solver_scratch {
             s = SolverScratch::default();
             s.cand_h.resize(cell_count, 0.0);
             s.cand_v.resize(cell_count, 0.0);
+            s.cand_h_unweighted.resize(cell_count, 0.0);
             s.edge_h_active.resize(cell_count, false);
             s.edge_v_active.resize(cell_count, false);
             s.cell_out_total.resize(cell_count, 0.0);
@@ -3743,6 +3753,68 @@ pub fn settle_tick(
     // which early-outs on it. The coarse nested sim passes 0.0: this is a look of the fine
     // material, not a scheduling input.
     fall_jitter: f32,
+    // `DrawingSimulation::lateral_substeps` -- how many times the cross-gravity (lateral) edge
+    // pass (section "2b. RED-BLACK EDGE COLOURING" below) runs per tick, as a CONTINUOUS function
+    // of the DONOR cell's wetness. This is the fix for the straight ~45-degree facet a piled
+    // liquid settles into instead of flattening: both the lateral and the vertical edge solvers
+    // move at most one cell of fill per tick (the `flux_edge_candidate` +/-1.0 clamp), so a full
+    // donor cell has no room for mass to pass THROUGH it sideways, at the same rate gravity keeps
+    // stacking it. Running the lateral pass extra times lets wet material spread further per tick
+    // without changing the vertical rate or the one-cell-per-tick clamp itself.
+    //
+    // `1.0` (the library default) is BIT-IDENTICAL to before this parameter existed: the phase
+    // loop below runs exactly its original two phases and nothing in this function reads
+    // `lateral_substeps` at all in that case. Above `1.0`, `ceil(lateral_substeps) - 1` extra
+    // phases run after the normal phase 1, each numbered `phase = 2, 3, ...`; each one skips the
+    // whole per-cell traversal (the granular CA, the g=0 Sandbox liquid solver, and phase 0's
+    // gravity-aligned edges all run ONLY in their normal phase) and executes just the 2b lateral
+    // COLLECT followed by the existing ARBITRATE + APPLY. Extra pass `k` (`k = phase - 1`, so
+    // `k = 1, 2, ...`) moves `weight = clamp(s_donor - k, 0, 1)` of that edge's candidate flux,
+    // where `s_donor = 1 + (lateral_substeps - 1) * liquidity(donor_wetness)` and DONOR is
+    // whichever endpoint the candidate's sign says the flux leaves (never the average or the
+    // minimum of the two). A dry donor has `liquidity == 0`, hence `s_donor == 1`, hence
+    // `weight == 0` for every `k >= 1`: dry material never gets a nonzero weight in an extra pass
+    // and the edge is skipped before any of the (relatively expensive) per-edge work below runs,
+    // so a dry region pays nothing extra. There is no liquid-only or sand-only gate anywhere in
+    // this mechanism -- it is a pure function of wetness, continuous through the sand/water
+    // preset boundary, by design (a gate would show visibly at a mixed-material boundary).
+    //
+    // The extra weight scales the MASS actually moved, never the edge's stored momentum
+    // (`edge_vel_h`): `cand_h[idx]` holds the donor-weighted candidate (what arbitration budgets
+    // against and what APPLY moves as mass), while `cand_h_unweighted[idx]` (see `SolverScratch`)
+    // holds the same edge's un-weighted candidate so APPLY can still set `edge_vel_h[idx]` to
+    // `cand_h_unweighted[idx] * arb_scale` -- the edge's momentum integrator accumulates as if the
+    // full candidate had been considered, only its realised transfer this pass was partial. A 50%
+    // pass must not halve the edge's momentum, or the next pass/tick would see an artificially
+    // starved edge velocity and under-drive real flow.
+    //
+    // Extra passes read their lateral heads (`h_a_frozen`/`h_b_frozen`) from `temp_heights`, not
+    // `heightmap.data` (the pre-tick snapshot phase 1's own pass 0 reads) -- `heightmap.data` is
+    // only copied back from `temp_heights` at step 3, after the whole phase loop, so an extra pass
+    // reading it would see the SAME head every time and never learn what the previous extra pass
+    // just moved, which would overshoot rather than continue levelling. `temp_heights` already
+    // reflects every APPLY up to and including the previous phase, and 2b's COLLECT never mutates
+    // it, so it is a valid frozen read for the whole of one extra pass.
+    //
+    // `column_depth` is NOT recomputed between extra passes -- it stays exactly what phase 1's own
+    // traversal left it at, one (or more) passes stale by the last extra pass. Accepted for this
+    // change; a future revision could recompute it per extra pass if that staleness turns out to
+    // matter.
+    //
+    // The dispersion/lock RNG rolls (`disp_roll`/`lock_roll`, both derived from `seed`) are salted
+    // with the phase index in extra passes, so each extra pass draws different rolls rather than
+    // silently repeating pass 0's; `seed` itself, and hence pass 0's own rolls, is byte-for-byte
+    // unchanged. `EDGE_SALT_H`/`EDGE_SALT_V`'s existing `.wrapping_add(phase as u32)` already
+    // differs per extra phase with no change needed.
+    //
+    // `in_transit_at` (and hence `avail_a`/`avail_b`) reads `edge_vel_v`, which lateral passes
+    // never write -- intentionally: a falling stream stays withheld from lateral spread on every
+    // extra pass exactly as it is on pass 0, which is why streams stay narrow instead of also
+    // fanning out under this parameter.
+    //
+    // The red-black edge colouring (2b's own doc comment) and this donor-based weighting are both
+    // mirror-symmetric -- there is no x-ordering dependence anywhere in this mechanism.
+    lateral_substeps: f32,
 ) -> f32 {
     let w = heightmap.width;
     let h = heightmap.height;
@@ -4139,6 +4211,7 @@ pub fn settle_tick(
     let mut scratch = solver_scratch::take(cell_count);
     let mut cand_h = std::mem::take(&mut scratch.cand_h);
     let mut cand_v = std::mem::take(&mut scratch.cand_v);
+    let mut cand_h_unweighted = std::mem::take(&mut scratch.cand_h_unweighted);
     let mut edge_h_active = std::mem::take(&mut scratch.edge_h_active);
     let mut edge_v_active = std::mem::take(&mut scratch.edge_v_active);
     let mut cell_out_total = std::mem::take(&mut scratch.cell_out_total);
@@ -4187,7 +4260,17 @@ pub fn settle_tick(
     // a stretched 0.10-fill smear. Sweeping bottom-to-top empties the acceptor before the donor
     // is considered, which is the CFL-respecting order: mass advances at most one cell per tick
     // and a saturated stream stays saturated (peak fill 1.0).
-    for phase in 0..2usize {
+    // `lateral_substeps` extra-pass count -- see that parameter's own doc comment. Extra passes
+    // only make sense under gravity (2b, the thing they re-run, is itself gated on
+    // `gravity_active`) and only above `1.0` (`ceil(1.0) - 1 == 0`, so this is `2` -- the original
+    // phase count -- whenever `lateral_substeps <= 1.0`, which is what keeps `1.0` bit-identical).
+    let extra_lateral_passes = if gravity_active && lateral_substeps > 1.0 {
+        (lateral_substeps.ceil() as usize).saturating_sub(1)
+    } else {
+        0
+    };
+    let total_phases = 2usize + extra_lateral_passes;
+    for phase in 0..total_phases {
         // phase 0 only exists for in-plane gravity; at g = 0 there is no gravity-aligned
         // direction and the Sandbox liquid solver handles both of its edges in phase 1.
         if phase == 0 && !gravity_active {
@@ -4203,7 +4286,7 @@ pub fn settle_tick(
         // phase 0, the first phase run, since every `touched_*` list starts empty). Sparse by
         // construction — only cells with a live edge or a g=0-liquid visit last phase pay this
         // cost — rather than an O(grid) fill every phase.
-        for &idx in &touched_h { edge_h_active[idx] = false; cand_h[idx] = 0.0; }
+        for &idx in &touched_h { edge_h_active[idx] = false; cand_h[idx] = 0.0; cand_h_unweighted[idx] = 0.0; }
         for &idx in &touched_v { edge_v_active[idx] = false; cand_v[idx] = 0.0; }
         for &idx in &touched_cells {
             cell_out_total[idx] = 0.0;
@@ -4223,6 +4306,11 @@ pub fn settle_tick(
         // True when phase 0 should walk rows bottom-to-top (the usual case: gravity points at
         // +y, i.e. down the grid).
         let against_gravity_is_up = gravity_dir.y >= 0.0;
+    // `lateral_substeps` extra passes (`phase >= 2`, see that parameter's doc comment) skip this
+    // whole traversal -- the granular CA, the g=0 Sandbox liquid solver and phase 0's
+    // gravity-aligned edges all run exactly once per tick, only in their normal phase -- and go
+    // straight to section 2b's lateral COLLECT below.
+    if phase <= 1 {
     for idx_b in 0..b_len {
         let b = if phase == 0 {
             // Reverse of the main block order along the gravity axis.
@@ -5255,6 +5343,7 @@ pub fn settle_tick(
             }
         }
     }
+    } // end `if phase <= 1` -- the per-cell traversal only runs in the two normal phases.
 
     // 2b. RED-BLACK EDGE COLOURING of the liquid+granular lateral (cross-gravity) edge.
     //
@@ -5296,7 +5385,12 @@ pub fn settle_tick(
     // superseded by the capacity-arbitration design that since landed. Arbitration did NOT subsume
     // it -- the shared-endpoint write above is upstream of arbitration and still direction
     // dependent -- which is why this is being retried. See `artifacts/design/ASYMMETRY-2026-09-08.md`.
-    if phase == 1 && gravity_active {
+    // `phase >= 1` (not `phase == 1`): `lateral_substeps`'s extra passes (`phase >= 2`) also run
+    // this section, and only this section -- see that parameter's doc comment. They only exist
+    // when `gravity_active` (built into `extra_lateral_passes` above), so this condition is
+    // unchanged in effect from `phase == 1 && gravity_active` for every phase that existed before
+    // this parameter did.
+    if phase >= 1 && gravity_active {
         for colour in 0..2usize {
             for b in 0..expected_len {
                 if !will_simulate[b] {
@@ -5329,10 +5423,33 @@ pub fn settle_tick(
                             // of (x, y, time_seed), so moving the edge to this pass does not change
                             // a single roll -- the dispersion and lock draws stay exactly what they
                             // were for this cell on this tick.
-                            let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213);
+                            // `lateral_substeps`: salted with the phase index for an extra pass
+                            // (`phase >= 2`) so its dispersion/lock rolls differ from pass 0's and
+                            // from each other, instead of silently repeating them -- see that
+                            // parameter's doc comment. A no-op (`^ 0`) for `phase <= 1`, so pass
+                            // 0's own rolls, and hence `1.0`'s bit-identity, are untouched.
+                            let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213)
+                                ^ if phase >= 2 { (phase as u32).wrapping_mul(0x9E37_79B1) } else { 0 };
                             let _ = (granular_share, lateral_boost, by, cell_capacity, seed);
 
-                    if gravity_active && !is_oobleck_band && x + 1 < w && is_inside(x + 1, y) {
+                    if gravity_active && !is_oobleck_band && x + 1 < w && is_inside(x + 1, y)
+                        // `lateral_substeps` cheap early skip (see that parameter's doc comment,
+                        // point 3): in an extra pass, an edge whose better-case donor still cannot
+                        // reach a positive weight this pass can never move anything, so skip the
+                        // whole (relatively expensive) edge body -- dispersion/lock rolls,
+                        // `flux_edge_candidate`, the two `in_transit_at` calls -- before paying for
+                        // any of it. Uses `max(cell_liquidity, liq_b_cheap)` -- an upper bound on
+                        // whichever endpoint turns out to be the actual donor -- since the donor
+                        // itself is only known after `flux_edge_candidate` returns a signed
+                        // candidate, below. A no-op for `phase <= 1` (short-circuits to `true`
+                        // immediately), so pass 0 never evaluates this at all.
+                        && (phase < 2 || {
+                            let liq_b_cheap = liquidity(cell_props[(center_idx + 1) * 4 + PROP_WETNESS]);
+                            let max_liq = cell_liquidity.max(liq_b_cheap);
+                            let k = (phase - 1) as f32;
+                            (1.0 + (lateral_substeps - 1.0) * max_liq - k) > 0.0
+                        })
+                    {
                         let nb_idx = center_idx + 1;
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
@@ -5354,8 +5471,19 @@ pub fn settle_tick(
                         let threshold_prop = cell_props[center_idx * 4 + PROP_THRESHOLD];
                         let tau = GRANULAR_TAU_SCALE * threshold_prop * granular_share;
 
-                        let h_a_frozen = heightmap.data[center_idx];
-                        let h_b_frozen = heightmap.data[nb_idx];
+                        // `lateral_substeps`: an extra pass (`phase >= 2`) must see the PREVIOUS
+                        // pass's own movement, which lives only in `temp_heights` -- `heightmap.data`
+                        // is the pre-tick snapshot and is not updated until step 3, after the whole
+                        // phase loop, so reading it here would show every extra pass the identical
+                        // head and overshoot. `h_a`/`h_b` just above already ARE `temp_heights`
+                        // reads, so reusing them costs nothing extra. Pass 0 (`phase <= 1`) is
+                        // untouched: bit-identical `heightmap.data` reads, exactly as before this
+                        // parameter existed.
+                        let (h_a_frozen, h_b_frozen) = if phase >= 2 {
+                            (h_a, h_b)
+                        } else {
+                            (heightmap.data[center_idx], heightmap.data[nb_idx])
+                        };
 
                         // Lateral dispersion (see `DISPERSION_TAU_FRAC`'s doc comment): a small,
                         // signed, per-edge-per-tick random perturbation of the driving head,
@@ -5641,33 +5769,80 @@ pub fn settle_tick(
                                 pressure_weight,
                                 edge_vel_h[center_idx],
                             );
-                            cand_h[center_idx] = candidate;
-                            edge_h_active[center_idx] = true;
-                            touched_h.push(center_idx);
-                            cell_avail[center_idx] = avail_a;
-                            // Pure function of the cell, same contract and same fix as the
-                            // gravity-aligned pass above -- the lateral copy had the identical
-                            // per-edge write. It bites far less often here (a lateral neighbour
-                            // usually HAS mass, so the clobbering write is not zero) which is
-                            // precisely why the defect read as "sideways works, upward does not".
-                            cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
-                            cell_avail[nb_idx] = avail_b;
-                            cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
-                            // Cell-level band -- see the gravity-aligned pass. Reads `temp_heights`
-                            // rather than `heightmap.data` because this phase runs AFTER phase 0's
-                            // apply step, so the frozen snapshot for lateral edges is the
-                            // post-gravity state, not the tick's opening state.
+                            // `lateral_substeps`: pass 0 (`phase <= 1`) is bit-identical to before
+                            // this parameter existed -- the candidate is recorded and totalled
+                            // unweighted, exactly as always. An extra pass (`phase >= 2`) instead
+                            // weights the candidate by the DONOR's wetness before it is either
+                            // recorded (as the mass that will actually move) or totalled (as what
+                            // arbitration budgets against) -- see that parameter's doc comment for
+                            // the full reasoning, including why `edge_vel_h` must NOT see this
+                            // weight (handled at APPLY, in the `touched_h` loop below, via
+                            // `cand_h_unweighted`).
+                            if phase < 2 {
+                                cand_h[center_idx] = candidate;
+                                edge_h_active[center_idx] = true;
+                                touched_h.push(center_idx);
+                                cell_avail[center_idx] = avail_a;
+                                // Pure function of the cell, same contract and same fix as the
+                                // gravity-aligned pass above -- the lateral copy had the identical
+                                // per-edge write. It bites far less often here (a lateral neighbour
+                                // usually HAS mass, so the clobbering write is not zero) which is
+                                // precisely why the defect read as "sideways works, upward does not".
+                                cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
+                                cell_avail[nb_idx] = avail_b;
+                                cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
+                                // Cell-level band -- see the gravity-aligned pass. Reads `temp_heights`
+                                // rather than `heightmap.data` because this phase runs AFTER phase 0's
+                                // apply step, so the frozen snapshot for lateral edges is the
+                                // post-gravity state, not the tick's opening state.
 
-                            touched_cells.push(center_idx);
-                            touched_cells.push(nb_idx);
-                            // See the vertical-edge site above for why this is summed here
-                            // rather than in a second pass over the touched lists.
-                            {
-                                accumulate_edge_totals(
-                                    candidate, center_idx, nb_idx,
-                                    &mut cell_out_total, &mut cell_in_total,
-                                    &cell_avail, &cell_freecap, &mut oversubscribed,
-                                );
+                                touched_cells.push(center_idx);
+                                touched_cells.push(nb_idx);
+                                // See the vertical-edge site above for why this is summed here
+                                // rather than in a second pass over the touched lists.
+                                {
+                                    accumulate_edge_totals(
+                                        candidate, center_idx, nb_idx,
+                                        &mut cell_out_total, &mut cell_in_total,
+                                        &cell_avail, &cell_freecap, &mut oversubscribed,
+                                    );
+                                }
+                            } else {
+                                // DONOR = the cell the flux leaves, i.e. the sign of the candidate
+                                // (never the average or the minimum). `s_donor = 1 + (lateral_substeps
+                                // - 1) * liquidity(donor)`; this pass (`k = phase - 1`) moves
+                                // `clamp(s_donor - k, 0, 1)` of the candidate. A dry donor has
+                                // `liquidity == 0` hence `s_donor == 1` hence `weight == 0` for every
+                                // `k >= 1` -- exactly the early cheap-skip's bound, now evaluated
+                                // exactly rather than as the two-endpoint upper bound that check used.
+                                let donor_liquidity = if candidate >= 0.0 { cell_liquidity } else { liq_b };
+                                let k = (phase - 1) as f32;
+                                let weight = (1.0 + (lateral_substeps - 1.0) * donor_liquidity - k).clamp(0.0, 1.0);
+                                if weight > 0.0 {
+                                    let weighted = candidate * weight;
+                                    // Mass moved is the WEIGHTED candidate (`cand_h`, read back by
+                                    // both arbitration and the APPLY loop below as `raw` -- final
+                                    // mass flux is `weighted * arb_scale`). `cand_h_unweighted` keeps
+                                    // the UNWEIGHTED candidate so APPLY can still set `edge_vel_h` to
+                                    // `unweighted * arb_scale` -- the edge's momentum integrator must
+                                    // not see this pass's partial realisation as if it were the whole
+                                    // edge's throughput.
+                                    cand_h[center_idx] = weighted;
+                                    cand_h_unweighted[center_idx] = candidate;
+                                    edge_h_active[center_idx] = true;
+                                    touched_h.push(center_idx);
+                                    cell_avail[center_idx] = avail_a;
+                                    cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
+                                    cell_avail[nb_idx] = avail_b;
+                                    cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
+                                    touched_cells.push(center_idx);
+                                    touched_cells.push(nb_idx);
+                                    accumulate_edge_totals(
+                                        weighted, center_idx, nb_idx,
+                                        &mut cell_out_total, &mut cell_in_total,
+                                        &cell_avail, &cell_freecap, &mut oversubscribed,
+                                    );
+                                }
                             }
                         }
                     }
@@ -5843,6 +6018,17 @@ pub fn settle_tick(
             &mut modified, &mut next_displacements,
             &mut total_flow, &mut flow_occurred,
         );
+        // `lateral_substeps`: an extra pass (`phase >= 2`) moved only a fraction of this edge's
+        // candidate as mass (`final_flux` above, correctly the weighted value `flux_edge_apply`
+        // just used), but `flux_edge_apply` also just set `edge_vel_h[idx] = final_flux` -- the
+        // WEIGHTED value -- which would silently halve the edge's momentum on a 50% pass. Restore
+        // it to what the edge's own integrator should see: the UNWEIGHTED candidate scaled by the
+        // same arbitration factor, from `cand_h_unweighted` (see that buffer's doc comment and
+        // `lateral_substeps`'s own doc comment for why velocity and mass must diverge here). A
+        // no-op for `phase <= 1`, which never writes `cand_h_unweighted`.
+        if phase >= 2 {
+            edge_vel_h[idx] = cand_h_unweighted[idx] * scale;
+        }
         #[cfg(test)]
         note_phase_flow(phase, final_flux);
 
@@ -5969,6 +6155,7 @@ pub fn settle_tick(
 
     scratch.cand_h = cand_h;
     scratch.cand_v = cand_v;
+    scratch.cand_h_unweighted = cand_h_unweighted;
     scratch.edge_h_active = edge_h_active;
     scratch.edge_v_active = edge_v_active;
     scratch.cell_out_total = cell_out_total;
@@ -6142,6 +6329,11 @@ mod tests {
         /// same name (TASK #70). Defaults to `false` in `new()`.
         pub overfill_pressure: bool,
         pub overfill_ratio: f32,
+        /// Mirrors `DrawingSimulation::lateral_substeps` / `settle_tick`'s parameter of the same
+        /// name. Defaults to `1.0` in `new()` (bit-identical) so every existing `TestSim`-based
+        /// test is unaffected; set directly (`sim.lateral_substeps = 2.0`) to exercise the extra
+        /// lateral passes on a specific scenario without touching `tick()`'s signature.
+        pub lateral_substeps: f32,
     }
 
     impl TestSim {
@@ -6171,6 +6363,7 @@ mod tests {
                 pressure_sensitive_flow: false,
                 overfill_pressure: false,
                 overfill_ratio: 0.50,
+                lateral_substeps: 1.0,
             }
         }
 
@@ -6202,6 +6395,7 @@ mod tests {
                 self.pressure_sensitive_flow,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                self.lateral_substeps,
             );
             self.tick_count += 1;
             flow
@@ -6532,6 +6726,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
             if flow > 0.0 {
                 flow_occurred = true;
@@ -6605,6 +6800,7 @@ mod tests {
             false, false,
             None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
             0.0,
+            1.0,
         );
         assert_eq!(flow, 0.0);
         assert!(!bounds.active, "Settling should deactivate when stable");
@@ -6685,6 +6881,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
 
             assert!(flow > 0.0, "Material {:?} should flow under steep slope", mat);
@@ -6792,6 +6989,7 @@ mod tests {
             false, false,
             None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
             0.0,
+            1.0,
         );
 
         assert!(flow > 0.0, "Settling flow must occur for the test");
@@ -7103,6 +7301,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -7203,6 +7402,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -7257,6 +7457,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -7332,6 +7533,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -7438,6 +7640,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -10666,6 +10869,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -10783,6 +10987,7 @@ mod tests {
                     false, false,
                     None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                     0.0,
+                    1.0,
                 );
             }
 
@@ -10884,6 +11089,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -10973,6 +11179,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -11143,6 +11350,242 @@ mod tests {
         }
     }
 
+    /// DIAGNOSTIC: the `lateral_substeps` measurement sweep, run in one process so every N shares
+    /// the same binary/build (`cargo test -p sandart-sim --lib --release -- --ignored --nocapture
+    /// diag_lateral_substeps_sweep`). Each block below is a close copy of an existing test's own
+    /// scenario, with `sim.lateral_substeps` set per N instead of left at the default -- see that
+    /// field's doc comment on `TestSim` and `physics::settle_tick`'s own parameter doc comment for
+    /// the mechanism being measured.
+    #[test]
+    #[ignore]
+    fn diag_lateral_substeps_sweep() {
+        let ns: [f32; 6] = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0];
+        for &n in &ns {
+            // ---- 1. Water levelling (diag_water_levelling's own scenario) ----
+            {
+                let bs = crate::DEFAULT_BLOCK_SIZE;
+                let grid = 256usize;
+                let mask = make_test_mask(grid, grid, SandboxShape::Square, 0.04, 1.0);
+                let props = get_test_props(MaterialMode::Water, grid * grid);
+                let mut sim = TestSim::new(grid, grid, props, mask, bs);
+                sim.lateral_substeps = n;
+                for y in 0..grid {
+                    for x in 0..grid / 3 {
+                        let i = y * grid + x;
+                        if sim.mask[i] != crate::MASK_OUTSIDE {
+                            sim.hm.data[i] = 1.0;
+                        }
+                    }
+                }
+                let surface = |s: &TestSim| -> Vec<Option<usize>> {
+                    (0..grid).map(|x| {
+                        (0..grid).find(|&y| {
+                            let i = y * grid + x;
+                            s.mask[i] != crate::MASK_OUTSIDE && s.hm.data[i] > 0.05
+                        })
+                    }).collect()
+                };
+                let stats = |s: &TestSim| -> (usize, f64, f64) {
+                    let surf = surface(s);
+                    let ys: Vec<usize> = surf.iter().filter_map(|&o| o).collect();
+                    if ys.len() < 2 { return (0, 0.0, 0.0); }
+                    let range = (*ys.iter().max().unwrap() - *ys.iter().min().unwrap()) as f64;
+                    let mut worst = 0.0f64;
+                    for x in 0..grid - 1 {
+                        if let (Some(a), Some(b)) = (surf[x], surf[x + 1]) {
+                            worst = worst.max((a as f64 - b as f64).abs());
+                        }
+                    }
+                    (ys.len(), range, worst)
+                };
+                let budget = (grid / bs) * (grid / bs);
+                let initial_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
+                let mut out = String::new();
+                for t in 1..=3000u32 {
+                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+                    if t == 300 || t == 1200 || t == 3000 {
+                        let (cnt, range, worst) = stats(&sim);
+                        out.push_str(&format!(" | t={} cols={} range={:.0} maxslope={:.1}", t, cnt, range, worst));
+                    }
+                }
+                let final_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
+                println!("SWEEP N={:.1} LEVELLING{} mass {:.3}->{:.3}", n, out, initial_mass, final_mass);
+            }
+
+            // ---- 2. Stream coherence (test_liquid_stream_stays_coherent's own scenario, scale 1) ----
+            {
+                let w = 64usize;
+                let h = 96usize;
+                let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+                let props = get_test_props(MaterialMode::Water, w * h);
+                let mut sim = TestSim::new(w, h, props, mask, 32);
+                sim.lateral_substeps = n;
+                let gravity_dir = glam::Vec2::new(0.0, 0.04);
+                for _ in 0..40 {
+                    for y in 6..10 {
+                        for x in 30..34 {
+                            sim.hm.apply_external_mass(x, y, 1.0);
+                        }
+                    }
+                    sim.tick(gravity_dir, usize::MAX);
+                }
+                let mut max_width = 0usize;
+                let mut peak_h = 0.0f32;
+                for y in 15..70 {
+                    let mut min_x = None;
+                    let mut max_x = None;
+                    for x in 0..w {
+                        let val = sim.hm.data[y * w + x];
+                        if val > 0.05 {
+                            if min_x.is_none() { min_x = Some(x); }
+                            max_x = Some(x);
+                            peak_h = peak_h.max(val);
+                        }
+                    }
+                    if let (Some(mn), Some(mx)) = (min_x, max_x) {
+                        max_width = max_width.max(mx - mn + 1);
+                    }
+                }
+                println!("SWEEP N={:.1} STREAM max_width={} peak_h={:.4}", n, max_width, peak_h);
+            }
+
+            // ---- 3. Repose angle: DrySand (must be unchanged, s=1 always) and a DAMP material
+            //         (Yogurt, wetness=0.75 -> liquidity=0.5 exactly -- see `liquidity`'s doc
+            //         comment for the 0.65..0.85 band), to show the continuous response between
+            //         the sand and water presets. ----
+            {
+                let rig = ReposeRig::new(1);
+                let area = 10.0f32;
+                let measure_ticks = 100usize;
+                let steep_initial = 0.35f32;
+                let half_width_1 = ((area * steep_initial).sqrt() / steep_initial).round() as isize;
+
+                let mut sim_dry = rig.build(1, steep_initial, area);
+                sim_dry.lateral_substeps = n;
+                let dry_final = rig.settle_and_measure(&mut sim_dry, measure_ticks, half_width_1);
+
+                let mut sim_damp = rig.build_material(1, steep_initial, area, MaterialMode::Yogurt, cell_capacity_for(0.75));
+                sim_damp.lateral_substeps = n;
+                let damp_final = rig.settle_and_measure(&mut sim_damp, measure_ticks, half_width_1);
+
+                println!(
+                    "SWEEP N={:.1} REPOSE dry_final={:.4} ({:.2}deg) damp[Yogurt,wetness=0.75,liquidity=0.5]_final={:.4} ({:.2}deg)",
+                    n, dry_final, dry_final.atan().to_degrees(), damp_final, damp_final.atan().to_degrees()
+                );
+            }
+
+            // ---- 4. Mirror asymmetry (diag_water_hourglass_mirror_asymmetry's Hourglass@256 case) ----
+            {
+                let bs = crate::DEFAULT_BLOCK_SIZE;
+                let grid = 256usize;
+                let mask = make_test_mask(grid, grid, SandboxShape::Hourglass, 0.04, 1.0);
+                let props = get_test_props(MaterialMode::Water, grid * grid);
+                let mut sim = TestSim::new(grid, grid, props, mask, bs);
+                sim.lateral_substeps = n;
+                for y in 0..grid / 2 {
+                    for x in 0..grid {
+                        let i = y * grid + x;
+                        if sim.mask[i] != crate::MASK_OUTSIDE {
+                            sim.hm.data[i] = 0.5;
+                        }
+                    }
+                }
+                let mirror = |s: &TestSim| -> f64 {
+                    let (mut diff, mut total) = (0.0f64, 0.0f64);
+                    for y in 0..grid {
+                        for x in 0..grid {
+                            let (i, j) = (y * grid + x, y * grid + (grid - 1 - x));
+                            if s.mask[i] == crate::MASK_OUTSIDE || s.mask[j] == crate::MASK_OUTSIDE {
+                                continue;
+                            }
+                            diff += (s.hm.data[i] - s.hm.data[j]).abs() as f64;
+                            total += s.hm.data[i] as f64;
+                        }
+                    }
+                    if total > 0.0 { diff / total } else { 0.0 }
+                };
+                let budget = (grid / bs) * (grid / bs);
+                let ticks = 1500u32 * (grid as u32) / 128;
+                let mut worst_m = 0.0f64;
+                for _ in 1..=ticks {
+                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+                    worst_m = worst_m.max(mirror(&sim));
+                }
+                println!(
+                    "SWEEP N={:.1} MIRROR Hourglass grid=256 ticks={} worst_mirror={:.4} final_mirror={:.4}",
+                    n, ticks, worst_m, mirror(&sim)
+                );
+            }
+
+            // ---- 5. Incompressibility + mass conservation (test_liquid_is_incompressible's own
+            //         scenario) -- must hold at every N. ----
+            {
+                let w = 64;
+                let h = 64;
+                let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
+                let props = get_test_props(MaterialMode::Water, w * h);
+                let mut sim = TestSim::new(w, h, props, mask, 32);
+                sim.lateral_substeps = n;
+                for y in 4..60 {
+                    for x in 6..18 {
+                        sim.hm.data[y * w + x] = 1.0;
+                    }
+                }
+                let initial_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
+                let gravity_dir = glam::Vec2::new(0.0, 0.04);
+                for _ in 0..1500 {
+                    sim.tick(gravity_dir, 256);
+                }
+                let max_h = sim.hm.data.iter().cloned().fold(0.0f32, f32::max);
+                let final_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
+                println!(
+                    "SWEEP N={:.1} INCOMPRESSIBLE max_h={:.6} mass {:.4}->{:.4} (diff={:.6})",
+                    n, max_h, initial_mass, final_mass, (final_mass - initial_mass).abs()
+                );
+                assert!(max_h <= 1.0 + 1e-3, "N={}: incompressibility violated: max_h={:.6}", n, max_h);
+                assert!(
+                    (final_mass - initial_mass).abs() < 1e-2,
+                    "N={}: mass not conserved: {} -> {}", n, initial_mass, final_mass
+                );
+            }
+        }
+    }
+
+    /// DIAGNOSTIC: ms/tick at grid 512, a water hourglass draining under full budget, release
+    /// build, for N in {1, 2, 3} -- `cargo test -p sandart-sim --lib --release -- --ignored
+    /// --nocapture diag_lateral_substeps_perf`.
+    #[test]
+    #[ignore]
+    fn diag_lateral_substeps_perf() {
+        let bs = crate::DEFAULT_BLOCK_SIZE;
+        let grid = 512usize;
+        for &n in &[1.0f32, 2.0, 3.0] {
+            let mask = make_test_mask(grid, grid, SandboxShape::Hourglass, 0.04, 1.0);
+            let props = get_test_props(MaterialMode::Water, grid * grid);
+            let mut sim = TestSim::new(grid, grid, props, mask, bs);
+            sim.lateral_substeps = n;
+            for y in 0..grid / 2 {
+                for x in 0..grid {
+                    let i = y * grid + x;
+                    if sim.mask[i] != crate::MASK_OUTSIDE {
+                        sim.hm.data[i] = 0.5;
+                    }
+                }
+            }
+            let budget = (grid / bs) * (grid / bs);
+            let ticks = 300u32;
+            // Warm-up tick, excluded from timing (first tick pays one-off allocations).
+            sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+            let start = std::time::Instant::now();
+            for _ in 0..ticks {
+                sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+            }
+            let elapsed = start.elapsed();
+            let ms_per_tick = elapsed.as_secs_f64() * 1000.0 / ticks as f64;
+            println!("SWEEP N={:.1} PERF grid=512 hourglass drain ms/tick={:.4}", n, ms_per_tick);
+        }
+    }
+
     #[test]
     fn test_no_floating_sand_under_gravity() {
         let w = 64;
@@ -11222,6 +11665,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
             if i > 200 && flow == 0.0 {
                 break;
@@ -11457,6 +11901,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -11639,6 +12084,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
 
@@ -11783,6 +12229,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             ) as f64;
         }
 
@@ -12028,6 +12475,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
 
             if i % 500 == 0 || i == 3999 {
@@ -12571,6 +13019,7 @@ mod tests {
                 false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
+                1.0,
             );
         }
         let outside: f32 = (0..w * h).filter(|&i| mask[i] == crate::MASK_OUTSIDE).map(|i| hm.data[i]).sum();

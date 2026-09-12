@@ -638,7 +638,18 @@ pub struct DrawingSimulation {
     /// so it must never reach granular material.
     pub pressure_sensitive_flow: bool,
 
-
+    /// How many times the cross-gravity (lateral) edge pass runs per tick, as a real-valued dial
+    /// (NOT an integer count) -- the fix for a settled liquid facet staying at a straight ~45
+    /// degrees instead of flattening, since both the lateral and vertical edge solvers move at
+    /// most one cell of fill per tick and a full donor cell has no room to pass mass through it
+    /// sideways at the rate gravity keeps stacking it. `1.0` (the default here) is BIT-IDENTICAL
+    /// to before this field existed. Above `1.0`, `ceil(lateral_substeps) - 1` extra lateral
+    /// passes run each tick, and DRY material is completely unaffected at every value (the extra
+    /// weight is a continuous function of wetness with no liquid-only or sand-only gate -- see
+    /// `physics::settle_tick`'s `lateral_substeps` parameter doc comment for the full mechanism
+    /// and the traps it has to avoid). Not yet exposed to the UI beyond `set_lateral_substeps` in
+    /// `sandart-wasm`; the shipped default is chosen after measuring, not assumed here.
+    pub lateral_substeps: f32,
 
 }
 
@@ -854,6 +865,7 @@ impl DrawingSimulation {
             pressure_heatmap_head_field: false,
             head_field_transport: false,
             pressure_sensitive_flow: false,
+            lateral_substeps: 1.0,
         };
         sim.generate_shape_mask();
         sim
@@ -1543,6 +1555,7 @@ impl DrawingSimulation {
                     // CLASSIFICATION-HOIST.md Stage 1: computed once, just above.
                     Some(&fresh_active),
                     self.liquid_fall_jitter,
+                    self.lateral_substeps,
                 );
         } else {
             self.active_bounds.active = false;

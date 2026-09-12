@@ -379,6 +379,7 @@ impl WasmSimulationState {
         let head_field_transport = self.sim.head_field_transport;
         let pressure_sensitive_flow = self.sim.pressure_sensitive_flow;
         let liquid_fall_jitter = self.sim.liquid_fall_jitter;
+        let lateral_substeps = self.sim.lateral_substeps;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -414,6 +415,10 @@ impl WasmSimulationState {
         // Same reasoning again: a UI toggle, not simulation state.
         // Same reasoning again: a UI slider position, not simulation state.
         sim.liquid_fall_jitter = liquid_fall_jitter;
+        // Same reasoning again: a UI slider position, not simulation state -- must survive a
+        // resolution rebuild like its siblings above rather than reverting to the fresh sim's
+        // `1.0` default and silently discarding an explicit user choice.
+        sim.lateral_substeps = lateral_substeps;
         // Same reasoning again: a UI toggle, not simulation state.
         // Same reasoning again: a UI toggle, not simulation state.
         // Same reasoning again: a UI toggle, not simulation state.
@@ -800,6 +805,15 @@ impl WasmSimulationState {
     /// behaviour exactly. See `DrawingSimulation::liquid_fall_jitter`.
     pub fn set_liquid_fall_jitter(&mut self, jitter: f32) {
         self.sim.liquid_fall_jitter = jitter;
+    }
+
+    /// "Lateral substeps" slider: how many times the cross-gravity edge pass runs per tick, as a
+    /// continuous dial, 1.0..=4.0. Plain field write, safe every frame. `1.0` (the default) is
+    /// bit-identical to before this parameter existed. See `DrawingSimulation::lateral_substeps`'s
+    /// doc comment for the mechanism and `physics::settle_tick`'s own parameter of the same name
+    /// for the full reasoning.
+    pub fn set_lateral_substeps(&mut self, substeps: f32) {
+        self.sim.lateral_substeps = substeps;
     }
 
     pub fn load_pattern_gcode(&mut self, content: &str) -> bool {
