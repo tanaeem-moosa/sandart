@@ -2113,6 +2113,111 @@ fn note_phase_flow(phase: usize, flux: f32) {
 #[allow(dead_code)]
 fn note_phase_flow(_phase: usize, _flux: f32) {}
 
+/// MEASUREMENT-ONLY DIAGNOSTIC (LOD-FLUX-BUDGET-SURVEY, see `diag_lod_flux_budget_survey` in
+/// `tests`). `#[cfg(test)]`-gated and thread-local like `phase_flow_stats`/`BIND_CENSUS`, so it
+/// costs nothing in production and cannot interact with parallel tests. Disabled (`ENABLED ==
+/// false`) unless a diagnostic explicitly turns it on, so it also costs nothing in every OTHER
+/// test.
+///
+/// Records, per block, the realised (post-arbitration, actually-applied) flux this tick -- NOT
+/// the speculative wake hints (`UPSTREAM_DISPLACEMENT_HINT`/`SIDE_DISPLACEMENT_HINT`), which never
+/// flow through `flux_edge_apply` at all. For each block: the largest single-edge magnitude seen
+/// (and whether that edge was interior to the block or a boundary edge shared with a neighbour
+/// block), the sum of every edge magnitude touching the block, and (separately) the sum
+/// restricted to `phase >= 2` -- the EXTRA `lateral_substeps` passes beyond the baseline phase-1
+/// pass -- so a block's extra-pass contribution can be compared against its total.
+#[cfg(test)]
+mod lod_diag {
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+
+    thread_local! {
+        static ENABLED: Cell<bool> = Cell::new(false);
+        // block -> (max_abs_flux_this_tick, sum_abs_flux_this_tick, max_flux_was_a_cross_block_edge)
+        static BLOCK_FLUX: RefCell<HashMap<usize, (f32, f64, bool)>> = RefCell::new(HashMap::new());
+        // block -> sum of |flux| realised during phase >= 2 (the EXTRA lateral_substeps passes) this tick
+        static BLOCK_EXTRA_LATERAL: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
+        static TOTAL_FLUX: Cell<f64> = Cell::new(0.0);
+        // (phase0_ns, phase1_ns, extra_lateral_ns) -- wall time inside the phase loop's body only.
+        static PHASE_COST: Cell<(u128, u128, u128)> = Cell::new((0, 0, 0));
+    }
+
+    pub fn set_enabled(v: bool) {
+        ENABLED.with(|c| c.set(v));
+    }
+    pub fn is_enabled() -> bool {
+        ENABLED.with(|c| c.get())
+    }
+
+    pub fn reset_tick() {
+        BLOCK_FLUX.with(|m| m.borrow_mut().clear());
+        BLOCK_EXTRA_LATERAL.with(|m| m.borrow_mut().clear());
+        TOTAL_FLUX.with(|c| c.set(0.0));
+    }
+    pub fn reset_cost() {
+        PHASE_COST.with(|c| c.set((0, 0, 0)));
+    }
+
+    // Flux recording is a separate switch from `ENABLED` (which also gates phase timing) so a
+    // timing sample can be taken on a tick where the per-edge HashMap bookkeeping below is OFF --
+    // otherwise the timing measures this instrument, not the solver.
+    thread_local! {
+        static FLUX: Cell<bool> = Cell::new(false);
+    }
+    pub fn set_flux(v: bool) {
+        FLUX.with(|c| c.set(v));
+    }
+
+    pub fn note_flux(block: usize, mag: f32, is_cross: bool, phase: usize) {
+        if !FLUX.with(|c| c.get()) {
+            return;
+        }
+        BLOCK_FLUX.with(|m| {
+            let mut m = m.borrow_mut();
+            let e = m.entry(block).or_insert((0.0f32, 0.0f64, false));
+            if mag > e.0 {
+                e.0 = mag;
+                e.2 = is_cross;
+            }
+            e.1 += mag as f64;
+        });
+        if phase >= 2 {
+            BLOCK_EXTRA_LATERAL.with(|m| {
+                *m.borrow_mut().entry(block).or_insert(0.0) += mag as f64;
+            });
+        }
+    }
+    pub fn note_total(mag: f32) {
+        TOTAL_FLUX.with(|c| c.set(c.get() + mag as f64));
+    }
+    pub fn note_phase_cost(phase: usize, ns: u128) {
+        PHASE_COST.with(|c| {
+            let (mut p0, mut p1, mut lat) = c.get();
+            if phase == 0 {
+                p0 += ns;
+            } else if phase == 1 {
+                p1 += ns;
+            } else {
+                lat += ns;
+            }
+            c.set((p0, p1, lat));
+        });
+    }
+
+    pub fn take_block_flux() -> HashMap<usize, (f32, f64, bool)> {
+        BLOCK_FLUX.with(|m| m.borrow().clone())
+    }
+    pub fn take_extra_lateral() -> HashMap<usize, f64> {
+        BLOCK_EXTRA_LATERAL.with(|m| m.borrow().clone())
+    }
+    pub fn take_total() -> f64 {
+        TOTAL_FLUX.with(|c| c.get())
+    }
+    pub fn take_phase_cost() -> (u128, u128, u128) {
+        PHASE_COST.with(|c| c.get())
+    }
+}
+
 fn wave_params(wetness: f32) -> (f32, f32) {
     if wetness <= 0.75 {
         (0.08, 0.76)
@@ -4357,6 +4462,13 @@ pub fn settle_tick(
     };
     let total_phases = 2usize + extra_lateral_passes;
     for phase in 0..total_phases {
+        // LOD-FLUX-BUDGET-SURVEY (see `lod_diag`): wall time for this phase's whole loop body
+        // (COLLECT + ARBITRATE/APPLY), bucketed by phase index at the matching `note_phase_cost`
+        // call just before the loop's closing brace. A rough native-only proxy for wasm cost --
+        // see that diagnostic's own doc comment.
+        #[cfg(test)]
+        let __lod_diag_phase_t0 =
+            if lod_diag::is_enabled() { Some(std::time::Instant::now()) } else { None };
         // phase 0 only exists for in-plane gravity; at g = 0 there is no gravity-aligned
         // direction and the Sandbox liquid solver handles both of its edges in phase 1.
         if phase == 0 && !gravity_active {
@@ -6033,6 +6145,20 @@ pub fn settle_tick(
         );
         #[cfg(test)]
         note_phase_flow(phase, final_flux);
+        // LOD-FLUX-BUDGET-SURVEY (see `lod_diag`): record the REALISED flux, excluding wake
+        // hints, against both endpoint blocks -- once each, so an interior edge (a_b == nb_b)
+        // contributes to that one block's sum once, not twice.
+        #[cfg(test)]
+        if lod_diag::is_enabled() {
+            let mag = final_flux.abs();
+            if mag > 1e-7 {
+                lod_diag::note_total(mag);
+                lod_diag::note_flux(a_b, mag, a_b != nb_b, phase);
+                if nb_b != a_b {
+                    lod_diag::note_flux(nb_b, mag, true, phase);
+                }
+            }
+        }
 
         // Upstream wake. `flux_edge_apply` above activates only `a_b`/`nb_b`, the two blocks
         // THIS edge touches. A cell one row further upstream of the donor -- e.g. directly
@@ -6121,6 +6247,19 @@ pub fn settle_tick(
         }
         #[cfg(test)]
         note_phase_flow(phase, final_flux);
+        // LOD-FLUX-BUDGET-SURVEY (see `lod_diag`): see the identical comment on the vertical
+        // (`touched_v`) loop above.
+        #[cfg(test)]
+        if lod_diag::is_enabled() {
+            let mag = final_flux.abs();
+            if mag > 1e-7 {
+                lod_diag::note_total(mag);
+                lod_diag::note_flux(a_b, mag, a_b != nb_b, phase);
+                if nb_b != a_b {
+                    lod_diag::note_flux(nb_b, mag, true, phase);
+                }
+            }
+        }
 
         // Upstream wake -- lateral counterpart of the vertical edge's identical fix just above
         // (see its comment for the general argument, and the touched_v loop's "Speculative
@@ -6173,6 +6312,12 @@ pub fn settle_tick(
             if by > 0 { activate_neighbor(wake_b - cols, flow_val, &mut modified, &mut next_displacements); }
             if by + 1 < rows { activate_neighbor(wake_b + cols, flow_val, &mut modified, &mut next_displacements); }
         }
+    }
+
+    // LOD-FLUX-BUDGET-SURVEY (see `lod_diag`): see the matching comment at the top of this loop.
+    #[cfg(test)]
+    if let Some(__t0) = __lod_diag_phase_t0 {
+        lod_diag::note_phase_cost(phase, __t0.elapsed().as_nanos());
     }
 
     } // end `for phase` — body left at the original indentation so the operator split reads as a
@@ -11438,6 +11583,377 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// MEASUREMENT-ONLY DIAGNOSTIC (LOD-FLUX-BUDGET-SURVEY). Answers: how much of the block-LOD
+    /// scheduler's simulated work, at the app's shipped scale, is spent on blocks doing almost
+    /// nothing, and would a more aggressive `MUST_SIMULATE_THRESHOLD` remove a large share of
+    /// simulated blocks while touching little of the tick's actual flux. Never asserts; reports
+    /// tables via `println!`. Run with:
+    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_lod_flux_budget_survey
+    ///
+    /// Uses `DrawingSimulation`, not `TestSim`: `DrawingSimulation::update` is the literal
+    /// production call path (`sandart-wasm` calls it unchanged) -- it calls `compute_fresh_active`
+    /// once per frame and passes `Some(&fresh_active)` into `settle_tick`, where `TestSim::tick`
+    /// always passes `None` and lets `settle_tick` recompute the same thing internally (documented
+    /// bit-identical, see `precomputed_fresh_active`'s call-site comments). Going through
+    /// `DrawingSimulation` means this diagnostic exercises the same struct and entry point the app
+    /// does, not just an output known to match it.
+    ///
+    /// Scenario, chosen to mirror the app: grid 512 (`GRID_SIZE`, the shipped resolution, giving
+    /// `DEFAULT_BLOCK_SIZE`=8 blocks -> 64x64 = 4096 blocks, matching "549 active of 4096" in the
+    /// reported symptom), `SandboxShape::MultiNeckHourglass` (3 necks; `eval_sandbox_shape`'s
+    /// branch hardcodes the neck count, so there is no separate "neck count" field to set) at
+    /// `DrawingSimulation`'s own production defaults `neck_width=0.005`, `hourglass_curve=0.6`
+    /// (see `new_with_block_divisor`), `MaterialMode::Water` (`apply_preset`, matching
+    /// `get_test_props`'s numbers), the upper half filled to 0.5 (the same fill
+    /// `diag_water_hourglass_mirror_asymmetry` uses, so it has to drain through the necks),
+    /// gravity `(0.0, 0.04)` (the magnitude used everywhere else in this file and by
+    /// `set_gravity`), `lateral_substeps = 2.5` (the page default per commit 8dcbe9b, "Stochastic
+    /// global lateral pass count; page default 2.5"). `last_frame_time_ms`/`target_frame_time_ms`
+    /// are passed as `0.0` on every tick so `update`'s adaptive budget controller never touches
+    /// `budget_n` -- see its guard, `if last_frame_time_ms > 0.0 && target_frame_time_ms > 0.0` --
+    /// which is what lets this diagnostic hold `budget_n` fixed at exactly the two values asked
+    /// for: `budget_throttles(4096).1` (128, the controller's floor at grid 512 -- what a
+    /// consistently-slow, 34ms/frame app settles at) and `4096` (the full block count, i.e. no
+    /// throttling at all).
+    ///
+    /// Per-block realised-flux and phase-cost instrumentation is `lod_diag` (defined earlier in
+    /// this file, next to `phase_flow_stats`) -- see its doc comment for exactly what it counts
+    /// and why a wake hint can never be mistaken for realised flux. Tier counts and the MUST/
+    /// STALE/BUDGETED/INACTIVE split come straight from `sim.active_blocks` (no reimplementation
+    /// of the classification loop); the MUST-by-displacement/fresh_active split is recovered by
+    /// recomputing `compute_fresh_active` on the exact pre-tick snapshot `settle_tick` itself
+    /// would have read (a pure function of state that has not changed yet), rather than by
+    /// threading a new output out of `settle_tick`.
+    #[test]
+    #[ignore]
+    fn diag_lod_flux_budget_survey() {
+        use std::time::Instant;
+
+        let block_size = crate::DEFAULT_BLOCK_SIZE;
+        let cols = (GRID_SIZE + block_size - 1) / block_size;
+        let rows = cols;
+        let block_count = cols * rows;
+        let (_, budget_floor, _, _) = crate::budget_throttles(block_count);
+
+        let sample_ticks: [u32; 3] = [200, 1000, 3000];
+        let max_ticks: u32 = 3000;
+
+        for &(label, budget_n) in &[("budget128(floor)", budget_floor), ("budget_full", block_count)] {
+            let mut sim = DrawingSimulation::new(); // GRID_SIZE = 512, block_size = 8 -> 4096 blocks
+            sim.sandbox_shape = SandboxShape::MultiNeckHourglass;
+            sim.apply_preset(MaterialMode::Water);
+            sim.generate_shape_mask();
+            sim.gravity_dir = glam::Vec2::new(0.0, 0.04);
+            sim.lateral_substeps = 2.5;
+            sim.budget_n = budget_n;
+            sim.active_bounds.active = true;
+
+            // Water in the UPPER chamber only -- same fill as diag_water_hourglass_mirror_asymmetry,
+            // so it has to drain through the neck(s).
+            let mut initial_upper_mass = 0.0f64;
+            for y in 0..GRID_SIZE / 2 {
+                for x in 0..GRID_SIZE {
+                    let i = y * GRID_SIZE + x;
+                    if sim.shape_mask[i] != crate::MASK_OUTSIDE {
+                        sim.heightmap.data[i] = 0.5;
+                        initial_upper_mass += 0.5;
+                    }
+                }
+            }
+
+            println!(
+                "=== LOD-FLUX-BUDGET-SURVEY [{label}] budget_n={budget_n} block_count={block_count} ==="
+            );
+
+            // Per sample tick s, instrumentation runs on three ticks only (running it on every tick
+            // made the 512 run far too slow to finish):
+            //   s-2: phase TIMING only, flux recording OFF, so the cost split measures the solver
+            //        rather than this instrument's per-edge HashMap bookkeeping;
+            //   s-1: flux recording ON, kept as `prev_block_flux` -- this is the flux that set
+            //        `last_displacements` for tick s, so it is what attributes a MUST block's
+            //        displacement to a real flux rather than a wake hint;
+            //   s:   flux recording ON, reported.
+            let mut finished_tick: Option<u32> = None;
+            let mut prev_block_flux: std::collections::HashMap<usize, (f32, f64, bool)> =
+                std::collections::HashMap::new();
+            let mut timing: ((u128, u128, u128), u128) = ((0, 0, 0), 0);
+            for t in 1..=max_ticks {
+                let is_timing = sample_ticks.contains(&(t + 2));
+                let is_prev = sample_ticks.contains(&(t + 1));
+                let sample = sample_ticks.contains(&t);
+                lod_diag::set_enabled(is_timing || is_prev || sample);
+                lod_diag::set_flux(is_prev || sample);
+                lod_diag::reset_tick();
+                lod_diag::reset_cost();
+
+                // Pre-tick snapshot: exactly the inputs `settle_tick`'s own classification loop
+                // reads to decide MUST/STALE/REST for THIS tick. Only needed on the sampled tick.
+                let (pre_disp, fresh_active) = if sample {
+                    (
+                        sim.last_displacements.clone(),
+                        compute_fresh_active(
+                            GRID_SIZE, GRID_SIZE, sim.block_size, cols, rows,
+                            &sim.shape_mask, &sim.heightmap.data, &sim.heightmap.external_mass_this_tick,
+                            &sim.cell_props, &sim.edge_vel_v, &sim.last_displacements,
+                        ),
+                    )
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+
+                let t0 = Instant::now();
+                sim.update(
+                    1.0 / 60.0, &[None; 5], sim.marble_radius, sim.material_mode, sim.sandbox_shape,
+                    0.0, 0.0,
+                );
+                let tick_wall_ns = t0.elapsed().as_nanos();
+
+                if is_timing {
+                    timing = (lod_diag::take_phase_cost(), tick_wall_ns);
+                }
+                if is_prev {
+                    prev_block_flux = lod_diag::take_block_flux();
+                }
+                if sample {
+                    report_lod_sample(
+                        label, t, &sim, &pre_disp, &fresh_active, block_count,
+                        &prev_block_flux, timing.0, timing.1,
+                    );
+                }
+
+                if finished_tick.is_none() {
+                    let mut upper_mass = 0.0f64;
+                    for y in 0..GRID_SIZE / 2 {
+                        for x in 0..GRID_SIZE {
+                            let i = y * GRID_SIZE + x;
+                            if sim.shape_mask[i] != crate::MASK_OUTSIDE {
+                                upper_mass += sim.heightmap.data[i] as f64;
+                            }
+                        }
+                    }
+                    if upper_mass < 0.03 * initial_upper_mass {
+                        finished_tick = Some(t);
+                        println!(
+                            "  [{label}] drain considered FINISHED at tick={t} (upper-chamber mass {:.4} of initial {:.4}, {:.1}%)",
+                            upper_mass, initial_upper_mass,
+                            100.0 * upper_mass / initial_upper_mass.max(1e-9)
+                        );
+                    }
+                }
+            }
+            lod_diag::set_enabled(false);
+            if finished_tick.is_none() {
+                println!("  [{label}] drain NOT finished by tick={max_ticks}");
+            }
+        }
+    }
+
+    /// Per-sampled-tick report body for `diag_lod_flux_budget_survey`, split out only so the loop
+    /// above stays readable. `pre_disp`/`fresh_active` are the pre-tick snapshot the caller took
+    /// immediately before calling `sim.update` for tick `t`; `sim` is read AFTER that call, so
+    /// `sim.active_blocks` reflects this tick's classification while `pre_disp`/`fresh_active`
+    /// reflect the inputs that produced it.
+    fn report_lod_sample(
+        label: &str,
+        t: u32,
+        sim: &DrawingSimulation,
+        pre_disp: &[f32],
+        fresh_active: &[bool],
+        block_count: usize,
+        prev_block_flux: &std::collections::HashMap<usize, (f32, f64, bool)>,
+        phase_cost: (u128, u128, u128),
+        tick_wall_ns: u128,
+    ) {
+        const THRESH: f32 = MUST_SIMULATE_THRESHOLD;
+        let block_flux = lod_diag::take_block_flux();
+        let total_flux = lod_diag::take_total();
+        let extra_lateral = lod_diag::take_extra_lateral();
+        // Timing comes from tick t-2, taken with flux recording OFF (see the caller).
+        let (p0_ns, p1_ns, lat_ns) = phase_cost;
+
+        // 1. Tier counts + MUST split by reason.
+        let (mut n_must_disp_only, mut n_must_fresh_only, mut n_must_both) = (0usize, 0usize, 0usize);
+        let (mut n_stale, mut n_medium, mut n_inactive) = (0usize, 0usize, 0usize);
+        let mut must_blocks: Vec<usize> = Vec::new();
+        for b in 0..block_count {
+            let d = pre_disp.get(b).copied().unwrap_or(0.0);
+            let f = fresh_active.get(b).copied().unwrap_or(false);
+            match sim.active_blocks[b] {
+                crate::BlockActivity::Fast => {
+                    must_blocks.push(b);
+                    match (d >= THRESH, f) {
+                        (true, true) => n_must_both += 1,
+                        (true, false) => n_must_disp_only += 1,
+                        (false, true) => n_must_fresh_only += 1,
+                        (false, false) => println!(
+                            "   [WARN] [{label}] tick={t} block {b} is Fast but neither disp>=thr nor fresh_active (d={d})"
+                        ),
+                    }
+                }
+                crate::BlockActivity::Slow => n_stale += 1,
+                crate::BlockActivity::Medium => n_medium += 1,
+                crate::BlockActivity::Inactive => n_inactive += 1,
+            }
+        }
+        let n_must = n_must_disp_only + n_must_fresh_only + n_must_both;
+
+        println!(
+            "-- [{label}] tick={t} tiers: MUST={n_must} (disp_only={n_must_disp_only} fresh_only={n_must_fresh_only} both={n_must_both}) STALE={n_stale} BUDGETED={n_medium} INACTIVE={n_inactive} (of {block_count})"
+        );
+        println!(
+            "-- [{label}] tick={t} tick_wall={:.3}ms total_realised_flux={:.6}",
+            tick_wall_ns as f64 / 1e6, total_flux
+        );
+
+        // 2. Flux histogram (max |final_flux| per block, excluding wake hints), per tier, for
+        // SIMULATED blocks only (MUST/STALE/BUDGETED) -- an Inactive block is not simulated even
+        // if it happens to appear in `block_flux` via a neighbour's cross-block edge.
+        let bin_labels = ["<1e-5", "<1e-4", "<1e-3", "<1e-2", ">=1e-2"];
+        let bin_of = |m: f32| -> usize {
+            if m < 1e-5 { 0 } else if m < 1e-4 { 1 } else if m < 1e-3 { 2 } else if m < 1e-2 { 3 } else { 4 }
+        };
+        for (tier_name, tier) in [
+            ("MUST", crate::BlockActivity::Fast),
+            ("STALE", crate::BlockActivity::Slow),
+            ("BUDGETED", crate::BlockActivity::Medium),
+        ] {
+            let mut counts = [0usize; 5];
+            let mut flux_share = [0.0f64; 5];
+            let mut n_no_flux = 0usize;
+            for b in 0..block_count {
+                if sim.active_blocks[b] != tier {
+                    continue;
+                }
+                match block_flux.get(&b) {
+                    Some(&(max_abs, sum_abs, _)) => {
+                        let bin = bin_of(max_abs);
+                        counts[bin] += 1;
+                        flux_share[bin] += sum_abs;
+                    }
+                    None => {
+                        n_no_flux += 1;
+                        counts[0] += 1;
+                    }
+                }
+            }
+            let tier_total_flux: f64 = flux_share.iter().sum();
+            print!("   [{label}] tick={t} {tier_name} hist(max|flux| per block):");
+            for i in 0..5 {
+                print!(" {}={}", bin_labels[i], counts[i]);
+            }
+            println!(" (of which no-recorded-flux, folded into <1e-5: {n_no_flux})");
+            print!("   [{label}] tick={t} {tier_name} flux-share-of-tick-total:");
+            for i in 0..5 {
+                print!(
+                    " {}={:.4}",
+                    bin_labels[i],
+                    if total_flux > 0.0 { flux_share[i] / total_flux } else { 0.0 }
+                );
+            }
+            println!(
+                " (tier carries {:.4} of tick total)",
+                if total_flux > 0.0 { tier_total_flux / total_flux } else { 0.0 }
+            );
+        }
+
+        // 3. Displacement source for MUST-by-displacement blocks (disp_only + both): did the value
+        // that cleared MUST_SIMULATE_THRESHOLD come from a real flux on an edge interior to the
+        // block, a real flux on a boundary edge shared with a neighbour block, or (structurally
+        // impossible, checked here rather than assumed) a wake hint.
+        let (mut src_own, mut src_cross, mut src_unattributed) = (0usize, 0usize, 0usize);
+        for &b in &must_blocks {
+            let d = pre_disp.get(b).copied().unwrap_or(0.0);
+            if d < THRESH {
+                continue; // fresh_active-only MUST block -- no displacement claim to attribute
+            }
+            // PREVIOUS tick's flux: `pre_disp` was written by tick t-1, so that is the flux that
+            // can explain it. Comparing against this tick's flux would attribute nothing.
+            match prev_block_flux.get(&b) {
+                Some(&(max_abs, _, is_cross)) if max_abs >= THRESH - 1e-6 => {
+                    if is_cross { src_cross += 1; } else { src_own += 1; }
+                }
+                _ => src_unattributed += 1,
+            }
+        }
+        println!(
+            "   [{label}] tick={t} MUST-by-displacement source: real_flux_own_edge={src_own} real_flux_cross_block_edge={src_cross} unattributed={src_unattributed} (hints are structurally excluded: UPSTREAM_DISPLACEMENT_HINT={:.4} SIDE_DISPLACEMENT_HINT={:.4}, both < MUST_SIMULATE_THRESHOLD={:.4} and `next_displacements` only ever takes a max, never a sum)",
+            UPSTREAM_DISPLACEMENT_HINT, SIDE_DISPLACEMENT_HINT, THRESH
+        );
+
+        // 4. Counterfactual MUST count at higher thresholds. Only the displacement disjunct moves;
+        // fresh_active is a separate, budget-exempt predicate a `MUST_SIMULATE_THRESHOLD` change
+        // does not touch.
+        for &alt in &[2e-2f32, 5e-2, 1e-1] {
+            let mut demoted = 0usize;
+            let mut demoted_flux = 0.0f64;
+            for &b in &must_blocks {
+                let d = pre_disp.get(b).copied().unwrap_or(0.0);
+                let f = fresh_active.get(b).copied().unwrap_or(false);
+                if d >= THRESH && !f && d < alt {
+                    demoted += 1;
+                    if let Some(&(_, sum_abs, _)) = block_flux.get(&b) {
+                        demoted_flux += sum_abs;
+                    }
+                }
+            }
+            println!(
+                "   [{label}] tick={t} counterfactual MUST_SIMULATE_THRESHOLD={:.2}: {demoted} of {n_must} current MUST blocks would drop out, carrying {:.4} of tick-total flux",
+                alt,
+                if total_flux > 0.0 { demoted_flux / total_flux } else { 0.0 }
+            );
+        }
+
+        // 5. Rough cost attribution (NATIVE-ONLY PROXY for wasm; std::time::Instant around the
+        // phase loop's per-iteration wall time, cfg(test)-gated -- see `lod_diag`'s doc comment).
+        let accounted = p0_ns + p1_ns + lat_ns;
+        let other_ns = (tick_wall_ns as i128 - accounted as i128).max(0) as u128;
+        let tot = tick_wall_ns.max(1) as f64;
+        println!(
+            "   [{label}] tick={t} cost (NATIVE PROXY, not wasm): phase0={:.1}% phase1={:.1}% lateral_extra_passes={:.1}% other(classification/head-field/copy-back/etc.)={:.1}% (tick_wall={:.3}ms)",
+            100.0 * p0_ns as f64 / tot,
+            100.0 * p1_ns as f64 / tot,
+            100.0 * lat_ns as f64 / tot,
+            100.0 * other_ns as f64 / tot,
+            tick_wall_ns as f64 / 1e6
+        );
+
+        // Extra-lateral-pass flux (phase >= 2, the `lateral_substeps` passes beyond baseline)
+        // against whether the block was already carrying >= THRESH flux from phase 0/1 anyway.
+        let (mut extra_on_hot, mut extra_on_marginal) = (0.0f64, 0.0f64);
+        for (&b, &sum_extra) in &extra_lateral {
+            let overall_max = block_flux.get(&b).map(|&(m, _, _)| m).unwrap_or(0.0);
+            if overall_max >= THRESH {
+                extra_on_hot += sum_extra;
+            } else {
+                extra_on_marginal += sum_extra;
+            }
+        }
+        let extra_total: f64 = extra_lateral.values().sum();
+        println!(
+            "   [{label}] tick={t} extra-lateral-pass flux: total={:.6} on-blocks-already->=thresh={:.4} on-marginal-blocks={:.4} (shares of extra-pass total)",
+            extra_total,
+            if extra_total > 0.0 { extra_on_hot / extra_total } else { 0.0 },
+            if extra_total > 0.0 { extra_on_marginal / extra_total } else { 0.0 }
+        );
+
+        // Option-1 question: of the blocks the extra lateral passes VISIT (every simulated block),
+        // how many realise negligible extra-pass flux? Those are the passes a "only rerun blocks
+        // still flowing laterally" rule would skip.
+        let mut extra_bins = [0usize; 5]; // none, <1e-4, <1e-3, <1e-2, >=1e-2 (sum over the block)
+        for b in 0..block_count {
+            if sim.active_blocks[b] == crate::BlockActivity::Inactive {
+                continue;
+            }
+            let s = extra_lateral.get(&b).copied().unwrap_or(0.0);
+            let bin = if s <= 0.0 { 0 } else if s < 1e-4 { 1 } else if s < 1e-3 { 2 } else if s < 1e-2 { 3 } else { 4 };
+            extra_bins[bin] += 1;
+        }
+        println!(
+            "   [{label}] tick={t} simulated blocks by extra-pass lateral flux (sum per block): none={} <1e-4={} <1e-3={} <1e-2={} >=1e-2={}",
+            extra_bins[0], extra_bins[1], extra_bins[2], extra_bins[3], extra_bins[4]
+        );
     }
 
     /// DIAGNOSTIC: the `lateral_substeps` measurement sweep, run in one process so every N shares
