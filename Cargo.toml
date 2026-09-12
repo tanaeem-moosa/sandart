@@ -4,7 +4,8 @@ members = [
     "sandart-render",
     "sandart-pattern",
     "sandart-wasm",
-    "sandart"
+    "sandart",
+    "sandart-kernel-bench"
 ]
 resolver = "2"
 

@@ -43,6 +43,26 @@ percent of real flow, i.e. stalls. **Not worth pursuing.**
 - **The BUDGETED tier** is empty at the floor. At full budget it holds 360-500 blocks, ~65% of them
   with no flux at all.
 
+## CORRECTION: the census timings are inflated; use the release-build numbers
+
+The census ran in a `cfg(test)` build, which does per-edge thread_local instrumentation checks, so its
+absolute times are ~2x the shipped build's. Measured without a profiler in the release profile, same
+scene, ticks 800-1800 (`SUBSTEPS_SWEEP=1 cargo run -p sandart-sim --release --example
+profile_sandfall_water`):
+
+    N   ms/tick   simulated cells/tick   ns per simulated cell per tick
+    1   10.6      33.8k                  314
+    2   17.2      36.8k                  467
+    3   24.7      39.4k                  625
+
+- **Marginal cost of one extra lateral pass:** ~155 ns per simulated cell in situ.
+- **Standalone comparison** (sandart-kernel-bench, same snapshot): today's pass ported as-is is
+  104-115 ns, and the array-form kernel A is 72-81 ns.
+- **So:** the in-situ overhead beyond the flux math is ~1.4x, not the 2.5-3x an early reading of the
+  census suggested.
+
+The percentages below are still a reasonable guide to relative cost.
+
 ## Cost split (native `Instant` proxy, not wasm)
 
     phase 0 (gravity-aligned)                        ~18%

@@ -18268,6 +18268,271 @@ mod tests {
              downstream_capacity={downstream_capacity:.5})"
         );
     }
+
+    /// KERNEL-BENCH SNAPSHOT DUMP. Not a test of anything -- `#[ignore]`d, asserts nothing -- it
+    /// exists solely to hand `sandart-kernel-bench` (a separate workspace member; see its own
+    /// README/doc comments) two binary snapshots of real mid-drain solver state, so that crate can
+    /// benchmark alternative array-oriented / SIMD implementations of the lateral (cross-gravity)
+    /// flux edge against this crate's own numbers, without that crate linking against
+    /// `sandart-sim` or duplicating scene setup.
+    ///
+    /// Scene: bit-for-bit `diag_lod_flux_budget_survey`'s own setup (see that test's doc comment
+    /// for the full justification of every choice) -- `DrawingSimulation`, `GRID_SIZE` (512),
+    /// `SandboxShape::MultiNeckHourglass`, `MaterialMode::Water`, upper half filled to 0.5,
+    /// `gravity_dir = (0.0, 0.04)`, `lateral_substeps = 2.5`, `budget_n = budget_throttles(4096).1`
+    /// (128, the controller's floor). Run for 1000 ticks with `last_frame_time_ms`/
+    /// `target_frame_time_ms` pinned at `0.0` (same reason: keeps `budget_n` from being touched by
+    /// the adaptive controller), then snapshotted -- "mid-drain" per the LOD-FLUX-BUDGET-SURVEY
+    /// report, which samples exactly this tick.
+    ///
+    /// A second snapshot repeats the same run but with `cell_props` overwritten by a DrySand ->
+    /// Water linear gradient across x (`gradient_props`, already defined in this module -- same
+    /// per-property lerp `sandart-wasm/web/demo.js`'s `generateMaterialProps('gradient', ...)`
+    /// performs: `t = x / (w - 1)`, each of wetness/threshold/flow_rate/grain_size lerped
+    /// independently), so the granular yield-stress and dispersion paths in the lateral edge are
+    /// exercised too, not just the liquid path Water alone would hit.
+    ///
+    /// **What "heights" means here.** The task asks for `temp_heights` as phase 1 would see it, or
+    /// `heightmap.data` post-phase-0 if that is simpler to reach -- it is: `settle_tick` has
+    /// already returned by the time this dumps anything (there is no hook into its interior
+    /// without editing it, which is out of scope), so the only reachable snapshot is the FULLY
+    /// SETTLED end-of-tick state, i.e. `sim.heightmap.data` after tick 1000's `update()` call has
+    /// returned. At that point `sim.temp_heights` is bit-identical to `sim.heightmap.data` (the
+    /// tick's last step copies one into the other), so the choice is moot for what's dumped, but
+    /// it is NOT literally "post-phase-0 of tick 1001" -- phase 0 of the tick the kernels'
+    /// benchmark pass stands in for has not actually run on this exact array. `edge_vel_h`,
+    /// `edge_vel_v` and `column_depth` ARE the genuine persistent values a real tick 1001 would
+    /// read at the top of its own phase 1, since all three are carried across ticks unmodified
+    /// between one tick's end and the next tick's phase-0 apply step.
+    ///
+    /// **`time_seed`.** Dumped as `sim.seed`, i.e. the raw value `update()` left behind after tick
+    /// 1000's own xorshift advance and use -- the literal `time_seed` tick 1000's `settle_tick`
+    /// was called with, NOT tick 1001's. A caller wanting to replicate what tick 1001's lateral
+    /// pass would draw must advance it one more step with the identical xorshift `update()` uses
+    /// (`x ^= x<<13; x ^= x>>17; x ^= x<<5`) before using it -- documented here rather than
+    /// pre-advanced in the dump, so the file's `time_seed` field always means one specific,
+    /// checkable thing: "the seed this snapshot's own state was produced under."
+    ///
+    /// **The simulated-block list.** `sim.active_blocks[b] != BlockActivity::Inactive` is exactly
+    /// `will_simulate[b]` for the tick just completed -- `active_blocks` is `settle_tick`'s own
+    /// classification output for that tick, not a separate recomputation.
+    ///
+    /// Binary format (little-endian, no external crate — plain `to_le_bytes` writes, so this file
+    /// has no serialization-format dependency to keep in sync): a fixed header, then flat arrays.
+    /// See the field order below; `sandart-kernel-bench`'s reader must match it exactly.
+    ///
+    ///   magic: [u8; 4] = *b"SKB1"
+    ///   w: u32, h: u32, block_size: u32, cols: u32, rows: u32
+    ///   time_seed: u32, tick_count: u32
+    ///   num_sim_blocks: u32, then that many u32 block indices (ascending)
+    ///   shape_mask: w*h bytes (u8)
+    ///   heights: w*h f32 (heightmap.data)
+    ///   cell_props: w*h*4 f32 (wetness, threshold, flow_rate, grain_size interleaved)
+    ///   cell_colors: w*h*4 u8 (RGBA interleaved)
+    ///   edge_vel_h: w*h f32
+    ///   edge_vel_v: w*h f32
+    ///   column_depth: w*h f32
+    ///
+    /// Output directory from env var `SANDART_KERNEL_BENCH_SNAPSHOT_DIR`, defaulting to this
+    /// session's scratchpad
+    /// (`/tmp/claude-1000/-home-deck-projects-sandart/f1b6526a-1df3-459e-85d7-c652aafd17ae/scratchpad`)
+    /// if unset, so the test is runnable without any environment setup during this task. Writes
+    /// `water_snapshot.bin` and `gradient_snapshot.bin`.
+    ///
+    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture dump_kernel_bench_snapshots
+    #[test]
+    #[ignore]
+    fn dump_kernel_bench_snapshots() {
+        fn write_u32(buf: &mut Vec<u8>, v: u32) {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        fn write_f32_slice(buf: &mut Vec<u8>, v: &[f32]) {
+            for x in v {
+                buf.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+
+        fn build_scene(gradient: bool) -> DrawingSimulation {
+            let block_size = crate::DEFAULT_BLOCK_SIZE;
+            let cols = (GRID_SIZE + block_size - 1) / block_size;
+            let rows = cols;
+            let block_count = cols * rows;
+            let (_, budget_floor, _, _) = crate::budget_throttles(block_count);
+
+            let mut sim = DrawingSimulation::new();
+            sim.sandbox_shape = SandboxShape::MultiNeckHourglass;
+            sim.apply_preset(MaterialMode::Water);
+            sim.generate_shape_mask();
+            sim.gravity_dir = glam::Vec2::new(0.0, 0.04);
+            sim.lateral_substeps = 2.5;
+            sim.budget_n = budget_floor;
+            sim.active_bounds.active = true;
+
+            if gradient {
+                let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32);
+                let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32);
+                sim.cell_props = gradient_props(GRID_SIZE, GRID_SIZE, dry_sand, water);
+            }
+
+            for y in 0..GRID_SIZE / 2 {
+                for x in 0..GRID_SIZE {
+                    let i = y * GRID_SIZE + x;
+                    if sim.shape_mask[i] != crate::MASK_OUTSIDE {
+                        sim.heightmap.data[i] = 0.5;
+                    }
+                }
+            }
+
+            for _ in 1..=1000u32 {
+                sim.update(
+                    1.0 / 60.0, &[None; 5], sim.marble_radius, sim.material_mode, sim.sandbox_shape,
+                    0.0, 0.0,
+                );
+            }
+            sim
+        }
+
+        fn dump(path: &std::path::Path, sim: &DrawingSimulation) {
+            let w = GRID_SIZE;
+            let h = GRID_SIZE;
+            let block_size = sim.block_size;
+            let cols = (w + block_size - 1) / block_size;
+            let rows = cols;
+
+            let mut sim_blocks: Vec<u32> = Vec::new();
+            for (b, activity) in sim.active_blocks.iter().enumerate() {
+                if *activity != crate::BlockActivity::Inactive {
+                    sim_blocks.push(b as u32);
+                }
+            }
+
+            let mut buf = Vec::new();
+            buf.extend_from_slice(b"SKB1");
+            write_u32(&mut buf, w as u32);
+            write_u32(&mut buf, h as u32);
+            write_u32(&mut buf, block_size as u32);
+            write_u32(&mut buf, cols as u32);
+            write_u32(&mut buf, rows as u32);
+            write_u32(&mut buf, sim.seed);
+            write_u32(&mut buf, sim.tick_count);
+            write_u32(&mut buf, sim_blocks.len() as u32);
+            for b in &sim_blocks {
+                write_u32(&mut buf, *b);
+            }
+            buf.extend_from_slice(&sim.shape_mask);
+            write_f32_slice(&mut buf, &sim.heightmap.data);
+            write_f32_slice(&mut buf, &sim.cell_props);
+            buf.extend_from_slice(&sim.cell_colors);
+            write_f32_slice(&mut buf, &sim.edge_vel_h);
+            write_f32_slice(&mut buf, &sim.edge_vel_v);
+            write_f32_slice(&mut buf, &sim.column_depth);
+
+            std::fs::create_dir_all(path.parent().unwrap()).expect("create snapshot dir");
+            std::fs::write(path, &buf).expect("write snapshot");
+            println!(
+                "wrote {} ({} bytes, {} simulated blocks of {})",
+                path.display(), buf.len(), sim_blocks.len(), cols * rows
+            );
+        }
+
+        let dir = std::env::var("SANDART_KERNEL_BENCH_SNAPSHOT_DIR").unwrap_or_else(|_| {
+            "/tmp/claude-1000/-home-deck-projects-sandart/f1b6526a-1df3-459e-85d7-c652aafd17ae/scratchpad".to_string()
+        });
+        let dir = std::path::Path::new(&dir);
+
+        let water_sim = build_scene(false);
+        dump(&dir.join("water_snapshot.bin"), &water_sim);
+
+        let gradient_sim = build_scene(true);
+        dump(&dir.join("gradient_snapshot.bin"), &gradient_sim);
+
+        // VALIDATION SNAPSHOT for kernel R: a scenario engineered so that a real, unmodified
+        // `TestSim::tick` call changes heights ONLY through the lateral (cross-gravity) edge --
+        // see `sandart-kernel-bench/src/lib.rs`'s module doc comment ("Validating kernel R
+        // against a real lateral pass") for the full argument. `w=64, h=3`, `shape_mask` INSIDE
+        // only on the middle row (row 0 and row 2 OUTSIDE): `in_transit_at`'s guard, phase 0's
+        // vertical-edge condition, and the granular CA's own per-cell body are all gated on an
+        // INSIDE cell existing directly above or below, which is false everywhere on this grid --
+        // so phase 0 and the granular CA are structurally no-ops here, and the tick's entire
+        // effect on `hm.data` is the phase-1 lateral edge.
+        //
+        // `TestSim`, not `DrawingSimulation`: its `tick()` derives `time_seed` from a fixed,
+        // reproducible formula (`12345 + tick_count + phase_offset(K_RNG_SEED)`, the latter 0 in
+        // a non-diagnostic test) rather than `DrawingSimulation`'s stateful xorshift, so this
+        // snapshot's `time_seed` field is exactly what the one real tick used -- no separate
+        // xorshift emulation needed on the `sandart-kernel-bench` side.
+        {
+            let w = 64usize;
+            let h = 3usize;
+            let block_size = 8usize;
+            let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32);
+            let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32);
+            let props = gradient_props(w, h, dry_sand, water);
+            let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+            for x in 0..w {
+                mask[w + x] = crate::MASK_INSIDE; // row 1 only
+            }
+            let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
+            for x in 0..w {
+                // A varying fill so the lateral edge has real driving heads to resolve, safely
+                // under every material's capacity (<= 1.5).
+                sim.hm.data[w + x] = 0.3 + 0.5 * (x as f32 / (w - 1) as f32);
+            }
+
+            let time_seed_used = 12345u32.wrapping_add(sim.tick_count).wrapping_add(phase_offset(K_RNG_SEED));
+
+            let pre_heights = sim.hm.data.clone();
+            let pre_props = sim.cell_props.clone();
+            let pre_colors = sim.cell_colors.clone();
+            let pre_edge_vel_h = sim.edge_vel_h.clone();
+            let pre_edge_vel_v = sim.edge_vel_v.clone();
+            let pre_column_depth = sim.column_depth.clone();
+
+            sim.tick(glam::Vec2::new(0.0, 0.04), usize::MAX);
+
+            let cols = (w + block_size - 1) / block_size;
+            let rows = (h + block_size - 1) / block_size;
+            let mut sim_blocks: Vec<u32> = Vec::new();
+            for (b, activity) in sim.active_blocks.iter().enumerate() {
+                if *activity != crate::BlockActivity::Inactive {
+                    sim_blocks.push(b as u32);
+                }
+            }
+
+            let mut buf = Vec::new();
+            buf.extend_from_slice(b"SKB1");
+            write_u32(&mut buf, w as u32);
+            write_u32(&mut buf, h as u32);
+            write_u32(&mut buf, block_size as u32);
+            write_u32(&mut buf, cols as u32);
+            write_u32(&mut buf, rows as u32);
+            write_u32(&mut buf, time_seed_used);
+            write_u32(&mut buf, 0u32); // tick_count as of the PRE-tick state
+            write_u32(&mut buf, sim_blocks.len() as u32);
+            for b in &sim_blocks {
+                write_u32(&mut buf, *b);
+            }
+            buf.extend_from_slice(&mask);
+            write_f32_slice(&mut buf, &pre_heights);
+            write_f32_slice(&mut buf, &pre_props);
+            buf.extend_from_slice(&pre_colors);
+            write_f32_slice(&mut buf, &pre_edge_vel_h);
+            write_f32_slice(&mut buf, &pre_edge_vel_v);
+            write_f32_slice(&mut buf, &pre_column_depth);
+            // Trailer: POST-tick ground truth, for `native_bench`'s validation path to compare
+            // `kernel_r::run_pass` (fed the prefix above) against.
+            write_f32_slice(&mut buf, &sim.hm.data);
+            write_f32_slice(&mut buf, &sim.cell_props);
+            buf.extend_from_slice(&sim.cell_colors);
+
+            let path = dir.join("validation_snapshot.bin");
+            std::fs::write(&path, &buf).expect("write validation snapshot");
+            println!(
+                "wrote {} ({} bytes, {} simulated blocks of {}, time_seed={time_seed_used})",
+                path.display(), buf.len(), sim_blocks.len(), cols * rows
+            );
+        }
+    }
 }
 
 // Task #55, step 2: the STATIC hydraulic head field itself (see that file's module doc comment
