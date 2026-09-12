@@ -299,6 +299,17 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_hypotrochoid_params(this.__wbg_ptr, r, d);
     }
     /**
+     * "Lateral substeps" slider: how many times the cross-gravity edge pass runs per tick, as a
+     * continuous dial, 1.0..=4.0. Plain field write, safe every frame. `1.0` (the default) is
+     * bit-identical to before this parameter existed. See `DrawingSimulation::lateral_substeps`'s
+     * doc comment for the mechanism and `physics::settle_tick`'s own parameter of the same name
+     * for the full reasoning.
+     * @param {number} substeps
+     */
+    set_lateral_substeps(substeps) {
+        wasm.wasmsimulationstate_set_lateral_substeps(this.__wbg_ptr, substeps);
+    }
+    /**
      * @param {number} r
      * @param {number} g
      * @param {number} b

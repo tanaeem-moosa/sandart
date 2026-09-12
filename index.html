@@ -836,6 +836,16 @@
                     <span id="fall-jitter-val" class="val-display">0.00</span>
                     <input type="range" id="fall-jitter-slider" min="0" max="0.6" step="0.02" value="0">
                 </div>
+                <!-- Fix for a settled liquid surface holding a straight ~45-degree facet instead
+                     of flattening: reruns the lateral (cross-gravity) edge pass extra times per
+                     tick, weighted by how wet (liquidity) the donor cell is. 1.0 (the default) is
+                     bit-identical to today's single pass. Dry material is always exactly 1.0 --
+                     see `DrawingSimulation::lateral_substeps`'s doc comment. -->
+                <div class="field row" id="lateral-substeps-row">
+                    <label for="lateral-substeps-slider" title="How many times the sideways (lateral) flow pass runs per tick, scaled by how wet each donor cell is. 1.0 is today's single pass. Higher values flatten a settled liquid surface instead of leaving a straight diagonal facet. Dry material is unaffected at every value.">Lateral substeps</label>
+                    <span id="lateral-substeps-val" class="val-display">1.0</span>
+                    <input type="range" id="lateral-substeps-slider" min="1.0" max="4.0" step="0.1" value="1.0">
+                </div>
             </div>
 
             <!-- ---- Sandbox: drawing ---- -->
