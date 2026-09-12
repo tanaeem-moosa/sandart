@@ -643,12 +643,16 @@ pub struct DrawingSimulation {
     /// degrees instead of flattening, since both the lateral and vertical edge solvers move at
     /// most one cell of fill per tick and a full donor cell has no room to pass mass through it
     /// sideways at the rate gravity keeps stacking it. `1.0` (the default here) is BIT-IDENTICAL
-    /// to before this field existed. Above `1.0`, `ceil(lateral_substeps) - 1` extra lateral
-    /// passes run each tick, and DRY material is completely unaffected at every value (the extra
-    /// weight is a continuous function of wetness with no liquid-only or sand-only gate -- see
-    /// `physics::settle_tick`'s `lateral_substeps` parameter doc comment for the full mechanism
-    /// and the traps it has to avoid). Not yet exposed to the UI beyond `set_lateral_substeps` in
-    /// `sandart-wasm`; the shipped default is chosen after measuring, not assumed here.
+    /// to before this field existed, and so is any integer value. A fractional dial's fractional
+    /// part is realised STOCHASTICALLY, once per tick, globally (never per block or per cell): the
+    /// tick runs `floor(lateral_substeps)` extra lateral passes, plus one more with probability
+    /// `fract(lateral_substeps)`, so expected pass count across many ticks equals the dial value
+    /// exactly, and a fully wet donor only ever pays for whole passes -- never a partial last one.
+    /// DRY material is completely unaffected at every value (the extra weight is a continuous
+    /// function of wetness with no liquid-only or sand-only gate -- see `physics::settle_tick`'s
+    /// `lateral_substeps` parameter doc comment for the full mechanism, the stochastic realisation,
+    /// and the traps both have to avoid). Not yet exposed to the UI beyond `set_lateral_substeps`
+    /// in `sandart-wasm`; the shipped default is chosen after measuring, not assumed here.
     pub lateral_substeps: f32,
 
 }

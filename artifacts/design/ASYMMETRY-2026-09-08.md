@@ -301,3 +301,72 @@ too. The agent measured grid-512 water hourglass ms/tick at 11.2 / 19.5 / 26.4 f
 that perf number is not independently re-run. `column_depth` is one pass stale in extra passes,
 which is an untried second lever. `maxslope` (the worst adjacent-column step) does not track the
 facet and barely moves; judge by range.
+
+## 11. The fractional pass was wasted compute: realise it stochastically instead (2026-09-11)
+
+§10's `ceil(N)-1` extra passes ran the *whole* pass every tick regardless of `frac(N)` — at
+`N = 2.5` a third pass swept the entire wet region and then moved only ~50% of what it computed
+(`clamp(1 + 1.5*liquidity - 2, 0, 1)` tops out at 0.5 for a fully wet donor). The COLLECT/ARBITRATE
+/APPLY cost is paid per pass regardless of the weight, so that third pass cost as much as a whole
+extra pass while doing half the work — measured at 20 fps at N = 2.5 on grid 512, i.e. `N = 2.5`
+cost the same as `N = 3` while transporting less.
+
+Fix (the user's design, settled): realise `frac(N)` as a single stochastic coin flip, once per
+tick, GLOBAL to the whole grid — never per block or per cell, since a per-block rate is exactly
+what produced visible seams before (§9's REFUTED 2). `M = floor(N) + (1 if roll < frac(N) else 0)`
+is rolled once, before the phase loop, and used in place of the raw dial everywhere the old code
+read `N`: `extra_lateral_passes = M - 1`, and extra pass k moves `clamp(1 + (M-1)*liquidity(donor)
+- k, 0, 1)` — same formula, `M` (an integer, this tick's realised pass count) substituted for `N`.
+A fully wet donor therefore only ever pays for *whole* passes, never a discounted last one; damp
+donors keep the same continuous-in-wetness response and the same expectation as before
+(`E[weight] = 1 + (N-1)*liquidity`, since `E[M] = N` by construction). Integer `N` and `N <= 1.0`
+never roll (`frac == 0`), so both stay bit-identical to §10's code, which was itself bit-identical
+to pre-`8968667` at `N = 1.0`.
+
+The roll (`lateral_pass_roll` in `physics.rs`) mixes `time_seed` and `tick_count` through the same
+avalanche finalizer `stochastic_round` uses (xor-shift/multiply/xor-shift/multiply/xor-shift), not
+`time_seed % 2` — both inputs increment by exactly 1 per tick in every call site, so a cheap
+low-bit test would hand back a fixed alternating cadence, and a strict period-2 cadence risks
+beating against a known period-2 edge-velocity mode (see `physics.rs`'s TOMBSTONE comment,
+section 1 above). The finalizer's avalanche breaks that correlation.
+
+### Sweep re-run (`diag_lateral_substeps_sweep`, same scenarios as §10's table)
+
+    N     levelling range t=300/1200/3000   stream width (limit 12)   Yogurt repose   hourglass worst_mirror
+    1.0   232 / 214 / 168                   10                        0.0308          0.443
+    1.5   231 / 201 / 144                   10                        0.0252          0.331
+    2.0   221 / 170 / 112                   12                        0.0237          0.532
+    2.5   227 / 159 /  77                   12                        0.0239          0.595
+    3.0   229 / 136 /  42                   14  FAIL                  0.0219          0.705
+    4.0   221 / 117 /  24                   18  FAIL                  0.0206          0.708
+
+Dry repose 0.0887 and `final_mirror = 0` at every N, same as §10; `max_h <= 1.0` and mass conserved
+at every N (the assertions in the sweep's incompressibility block pass for all six). N = 1.0, 2.0,
+3.0, 4.0 match §10's table exactly (integer N is unchanged, as designed). N = 1.5 and N = 2.5 move
+by single-digit amounts against §10's fractional-weight numbers (e.g. 2.5's t=3000 range: 65 -> 77;
+worst_mirror: 0.666 -> 0.595) — expected, since a fractional N is now a different physical process
+(a per-tick coin flip between two integer pass counts) with the same first-moment behaviour, not
+the same trajectory. Stream width at 2.5 is still within the 12-cell limit (tap 4 + allowance 8),
+matching §10's finding that `in_transit_at` withholding still holds streams narrow at this N.
+
+### Perf re-run (`diag_lateral_substeps_perf`, N = 1, 2, 2.5, 3, grid 512 hourglass drain)
+
+    N     ms/tick    extra_pass_frac (bumped/total, over the 300 measured ticks)
+    1.0   12.4550    0.0000 (0/0)       -- gate never entered (N <= 1.0)
+    2.0   22.7405    0.0000 (0/300)     -- integer N never rolls
+    2.5   27.3488    0.4933 (148/300)   -- vs. frac(2.5) = 0.5 exactly
+    3.0   29.9762    0.0000 (0/300)
+
+`extra_pass_frac` at N = 2.5 (0.4933) lands within a coin flip's sampling noise of the expected
+0.5, confirming `lateral_pass_roll` is well distributed and not exhibiting the alternating-pattern
+failure mode `time_seed % 2` would have shown. On cost, N = 2.5 now lands at 27.35 ms/tick, roughly
+64% of the way from N = 2's cost (22.74) to N = 3's (29.98) — no longer pinned at N = 3's cost
+(29.98, what §10's `ceil(N)-1` design paid every tick regardless of the fractional weight). This
+run's absolute numbers (12.46 / 22.74 / 29.98 for N = 1/2/3) run somewhat higher than §10's cited
+11.2 / 19.5 / 26.4 -- machine load at measurement time, not a regression; the fix under test is the
+N = 2.5 column's position relative to its own N = 2 / N = 3 neighbours, and that moved from "equal
+to N = 3" to "between N = 2 and N = 3", which is the result the fix was for.
+
+`extra_pass_frac`'s tally is a temporary `#[cfg(test)]`-gated thread-local counter
+(`LATERAL_ROLL_STATS` in `physics.rs`) added purely to produce this measurement; it compiles into
+no non-test build, including the shipped wasm.

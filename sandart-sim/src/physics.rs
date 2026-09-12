@@ -2588,6 +2588,44 @@ pub fn displace_line(
     }
 }
 
+/// Deterministic per-tick coin flip for `lateral_substeps`'s stochastic pass-count realisation
+/// (see that parameter's doc comment on `settle_tick`, "STOCHASTIC REALISATION"). Mixes
+/// `time_seed` and `tick_count` through the same avalanche finalizer `stochastic_round` uses
+/// above. Both inputs are, by construction, a linear function of the tick number (`time_seed` is
+/// `12345 + tick_count + ...` at every call site), so a cheap combination like `time_seed % 2`
+/// would hand back a fixed alternating pattern -- exactly what must be avoided, since a strict
+/// period-2 cadence could beat against a known period-2 edge-velocity mode. The finalizer's
+/// avalanche (each XOR-shift/multiply pair spreads every input bit across the whole word) breaks
+/// that: consecutive tick numbers, despite differing by exactly 1, produce uncorrelated outputs.
+/// Salted with a constant distinct from every other site in this file that hashes `time_seed` or
+/// `tick_count`, so this roll doesn't inherit correlation with theirs.
+fn lateral_pass_roll(time_seed: u32, tick_count: u32) -> f32 {
+    let mut h = time_seed.wrapping_mul(0x9E37_79B1) ^ tick_count.wrapping_mul(0x85EB_CA6B) ^ 0xC2B2_AE35;
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x7feb_352d);
+    h ^= h >> 15;
+    h = h.wrapping_mul(0x846c_a68b);
+    h ^= h >> 16;
+    (h >> 8) as f32 / 16_777_216.0 // [0, 1)
+}
+
+// TEMPORARY (cfg(test)-gated): tallies (times the roll bumped the pass count, times the roll was
+// considered at all) so `diag_lateral_substeps_perf` can report the empirical extra-pass fraction
+// as a check on `lateral_pass_roll`'s distribution against `frac(lateral_substeps)`. Never
+// compiled into the shipped wasm.
+#[cfg(test)]
+thread_local! {
+    static LATERAL_ROLL_STATS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+#[cfg(test)]
+fn lateral_roll_stats_reset() {
+    LATERAL_ROLL_STATS.with(|c| c.set((0, 0)));
+}
+#[cfg(test)]
+fn lateral_roll_stats_get() -> (u64, u64) {
+    LATERAL_ROLL_STATS.with(|c| c.get())
+}
+
 /// Deterministic pseudo-random float in [0, 1) from an integer seed. Used to give
 /// procedurally-generated shape features (staircase steps, etc.) organic variation
 /// while staying stable across repeated shape_mask regenerations.
@@ -3764,20 +3802,41 @@ pub fn settle_tick(
     //
     // `1.0` (the library default) is BIT-IDENTICAL to before this parameter existed: the phase
     // loop below runs exactly its original two phases and nothing in this function reads
-    // `lateral_substeps` at all in that case. Above `1.0`, `ceil(lateral_substeps) - 1` extra
-    // phases run after the normal phase 1, each numbered `phase = 2, 3, ...`; each one skips the
-    // whole per-cell traversal (the granular CA, the g=0 Sandbox liquid solver, and phase 0's
-    // gravity-aligned edges all run ONLY in their normal phase) and executes just the 2b lateral
-    // COLLECT followed by the existing ARBITRATE + APPLY. Extra pass `k` (`k = phase - 1`, so
-    // `k = 1, 2, ...`) moves `weight = clamp(s_donor - k, 0, 1)` of that edge's candidate flux,
-    // where `s_donor = 1 + (lateral_substeps - 1) * liquidity(donor_wetness)` and DONOR is
-    // whichever endpoint the candidate's sign says the flux leaves (never the average or the
-    // minimum of the two). A dry donor has `liquidity == 0`, hence `s_donor == 1`, hence
-    // `weight == 0` for every `k >= 1`: dry material never gets a nonzero weight in an extra pass
-    // and the edge is skipped before any of the (relatively expensive) per-edge work below runs,
-    // so a dry region pays nothing extra. There is no liquid-only or sand-only gate anywhere in
-    // this mechanism -- it is a pure function of wetness, continuous through the sand/water
+    // `lateral_substeps` at all in that case. Integer values above `1.0` also behave exactly as
+    // before this doc comment's revision.
+    //
+    // STOCHASTIC REALISATION (added after `8968667`): a fractional `N` used to run
+    // `ceil(N) - 1` extra passes every tick and scale the LAST one down by `frac(N)`, so at e.g.
+    // `N = 2.5` a third pass ran over the whole wet region and moved only half of what it
+    // computed -- wasted compute for exactly the fidelity of a coin flip. `N`'s fractional part is
+    // now instead realised as a single stochastic ONE-SHOT PER TICK, GLOBAL to the whole grid
+    // (never per block or per cell -- a per-block rate previously produced visible seams; see
+    // `lateral_pass_roll`'s own doc comment for why the roll is a proper hash mix of `time_seed`
+    // and `tick_count`, not `time_seed % 2`): `M = floor(N) + (1 if roll < frac(N) else 0)` is
+    // computed once, before this phase loop, as `lateral_passes_this_tick`. `M` extra passes --
+    // `M - 1` of them -- run after the normal phase 1, each numbered `phase = 2, 3, ...`; each one
+    // skips the whole per-cell traversal (the granular CA, the g=0 Sandbox liquid solver, and
+    // phase 0's gravity-aligned edges all run ONLY in their normal phase) and executes just the 2b
+    // lateral COLLECT followed by the existing ARBITRATE + APPLY. Extra pass `k` (`k = phase - 1`,
+    // so `k = 1, 2, ...`) moves `weight = clamp(s_donor - k, 0, 1)` of that edge's candidate flux,
+    // where `s_donor = 1 + (M - 1) * liquidity(donor_wetness)` -- `M` in place of the raw dial `N`
+    // -- and DONOR is whichever endpoint the candidate's sign says the flux leaves (never the
+    // average or the minimum of the two). A dry donor has `liquidity == 0`, hence `s_donor == 1`,
+    // hence `weight == 0` for every `k >= 1`: dry material never gets a nonzero weight in an extra
+    // pass and the edge is skipped before any of the (relatively expensive) per-edge work below
+    // runs, so a dry region pays nothing extra. There is no liquid-only or sand-only gate anywhere
+    // in this mechanism -- it is a pure function of wetness, continuous through the sand/water
     // preset boundary, by design (a gate would show visibly at a mixed-material boundary).
+    //
+    // For a fully wet donor (`liquidity == 1`) this means WHOLE passes only, never a partial last
+    // one, and expected transport across many ticks is exactly `N` (`E[M] == N` by construction).
+    // For a damp donor, expected transport is `1 + (E[M] - 1) * liquidity == 1 + (N - 1) *
+    // liquidity` -- identical in expectation to the old per-tick fractional weighting, and still
+    // continuous in wetness; only the per-tick realisation changed, not the long-run behaviour.
+    // `N <= 1.0` never rolls (`lateral_passes_this_tick` is set to `N` itself and never read,
+    // since `extra_lateral_passes` is forced to `0`), and integer `N` never rolls either
+    // (`frac(N) == 0.0`, so the roll condition `roll < frac(N)` can never hold) -- both keep this
+    // realisation a no-op exactly where it must be.
     //
     // The extra weight scales the MASS actually moved, never the edge's stored momentum
     // (`edge_vel_h`): `cand_h[idx]` holds the donor-weighted candidate (what arbitration budgets
@@ -4260,12 +4319,39 @@ pub fn settle_tick(
     // a stretched 0.10-fill smear. Sweeping bottom-to-top empties the acceptor before the donor
     // is considered, which is the CFL-respecting order: mass advances at most one cell per tick
     // and a saturated stream stays saturated (peak fill 1.0).
-    // `lateral_substeps` extra-pass count -- see that parameter's own doc comment. Extra passes
-    // only make sense under gravity (2b, the thing they re-run, is itself gated on
-    // `gravity_active`) and only above `1.0` (`ceil(1.0) - 1 == 0`, so this is `2` -- the original
-    // phase count -- whenever `lateral_substeps <= 1.0`, which is what keeps `1.0` bit-identical).
+    // `lateral_substeps`'s STOCHASTIC REALISATION -- see that parameter's own doc comment. The
+    // dial `N` (`lateral_substeps`) need not be an integer; its fractional part is realised as a
+    // single GLOBAL coin flip for the whole tick, not spread across blocks or cells (a per-block
+    // rate previously produced visible seams -- see the doc comment). `lateral_passes_this_tick`
+    // (`M`) is the actual whole-number pass count for this tick: `floor(N)`, plus one more with
+    // probability `frac(N)`. Every extra pass's weight formula below reads `M` in place of the
+    // raw `N`, so a fully wet donor gets `M` whole passes (never a partial last one) and, in
+    // expectation over many ticks, `E[M] == N`. Extra passes only make sense under gravity (2b,
+    // the thing they re-run, is itself gated on `gravity_active`) and only above `1.0` -- `N <=
+    // 1.0` never rolls and never reads `lateral_passes_this_tick`, which is what keeps `1.0`
+    // bit-identical. Integer `N` also never rolls (`frac == 0.0`), so it behaves exactly as
+    // before this realisation existed.
+    let lateral_passes_this_tick: f32 = if gravity_active && lateral_substeps > 1.0 {
+        let floor_n = lateral_substeps.floor();
+        let frac = lateral_substeps - floor_n;
+        let bump = if frac > 0.0 && lateral_pass_roll(time_seed, tick_count) < frac { 1.0 } else { 0.0 };
+        // TEMPORARY (cfg(test)-gated, not compiled into the shipped wasm): tallies how often the
+        // roll bumps the pass count, so a diagnostic can report the empirical extra-pass fraction
+        // against `frac(lateral_substeps)` as a check on `lateral_pass_roll`'s distribution. See
+        // `diag_lateral_substeps_perf`.
+        #[cfg(test)]
+        {
+            LATERAL_ROLL_STATS.with(|c| {
+                let (bumped, total) = c.get();
+                c.set((bumped + bump as u64, total + 1));
+            });
+        }
+        floor_n + bump
+    } else {
+        lateral_substeps
+    };
     let extra_lateral_passes = if gravity_active && lateral_substeps > 1.0 {
-        (lateral_substeps.ceil() as usize).saturating_sub(1)
+        (lateral_passes_this_tick as usize).saturating_sub(1)
     } else {
         0
     };
@@ -5447,7 +5533,7 @@ pub fn settle_tick(
                             let liq_b_cheap = liquidity(cell_props[(center_idx + 1) * 4 + PROP_WETNESS]);
                             let max_liq = cell_liquidity.max(liq_b_cheap);
                             let k = (phase - 1) as f32;
-                            (1.0 + (lateral_substeps - 1.0) * max_liq - k) > 0.0
+                            (1.0 + (lateral_passes_this_tick - 1.0) * max_liq - k) > 0.0
                         })
                     {
                         let nb_idx = center_idx + 1;
@@ -5809,15 +5895,19 @@ pub fn settle_tick(
                                 }
                             } else {
                                 // DONOR = the cell the flux leaves, i.e. the sign of the candidate
-                                // (never the average or the minimum). `s_donor = 1 + (lateral_substeps
-                                // - 1) * liquidity(donor)`; this pass (`k = phase - 1`) moves
-                                // `clamp(s_donor - k, 0, 1)` of the candidate. A dry donor has
-                                // `liquidity == 0` hence `s_donor == 1` hence `weight == 0` for every
-                                // `k >= 1` -- exactly the early cheap-skip's bound, now evaluated
-                                // exactly rather than as the two-endpoint upper bound that check used.
+                                // (never the average or the minimum). `s_donor = 1 +
+                                // (lateral_passes_this_tick - 1) * liquidity(donor)`, where
+                                // `lateral_passes_this_tick` (`M`) is this tick's stochastically
+                                // realised whole-number pass count (see the "STOCHASTIC
+                                // REALISATION" comment above the phase loop) -- NOT the raw dial
+                                // `lateral_substeps`. This pass (`k = phase - 1`) moves `clamp(s_donor
+                                // - k, 0, 1)` of the candidate. A dry donor has `liquidity == 0`
+                                // hence `s_donor == 1` hence `weight == 0` for every `k >= 1` --
+                                // exactly the early cheap-skip's bound, now evaluated exactly rather
+                                // than as the two-endpoint upper bound that check used.
                                 let donor_liquidity = if candidate >= 0.0 { cell_liquidity } else { liq_b };
                                 let k = (phase - 1) as f32;
-                                let weight = (1.0 + (lateral_substeps - 1.0) * donor_liquidity - k).clamp(0.0, 1.0);
+                                let weight = (1.0 + (lateral_passes_this_tick - 1.0) * donor_liquidity - k).clamp(0.0, 1.0);
                                 if weight > 0.0 {
                                     let weighted = candidate * weight;
                                     // Mass moved is the WEIGHTED candidate (`cand_h`, read back by
@@ -11559,7 +11649,7 @@ mod tests {
     fn diag_lateral_substeps_perf() {
         let bs = crate::DEFAULT_BLOCK_SIZE;
         let grid = 512usize;
-        for &n in &[1.0f32, 2.0, 3.0] {
+        for &n in &[1.0f32, 2.0, 2.5, 3.0] {
             let mask = make_test_mask(grid, grid, SandboxShape::Hourglass, 0.04, 1.0);
             let props = get_test_props(MaterialMode::Water, grid * grid);
             let mut sim = TestSim::new(grid, grid, props, mask, bs);
@@ -11576,13 +11666,22 @@ mod tests {
             let ticks = 300u32;
             // Warm-up tick, excluded from timing (first tick pays one-off allocations).
             sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+            // Reset just before the timed loop so the tally below covers exactly the measured
+            // ticks (see `lateral_roll_stats_reset`'s doc comment) -- a check on
+            // `lateral_pass_roll`'s distribution, not a timed quantity itself.
+            lateral_roll_stats_reset();
             let start = std::time::Instant::now();
             for _ in 0..ticks {
                 sim.tick(glam::Vec2::new(0.0, 0.04), budget);
             }
             let elapsed = start.elapsed();
             let ms_per_tick = elapsed.as_secs_f64() * 1000.0 / ticks as f64;
-            println!("SWEEP N={:.1} PERF grid=512 hourglass drain ms/tick={:.4}", n, ms_per_tick);
+            let (bumped, total) = lateral_roll_stats_get();
+            let extra_pass_frac = if total > 0 { bumped as f64 / total as f64 } else { 0.0 };
+            println!(
+                "SWEEP N={:.1} PERF grid=512 hourglass drain ms/tick={:.4} extra_pass_frac={:.4} ({}/{})",
+                n, ms_per_tick, extra_pass_frac, bumped, total
+            );
         }
     }
 

@@ -809,9 +809,11 @@ impl WasmSimulationState {
 
     /// "Lateral substeps" slider: how many times the cross-gravity edge pass runs per tick, as a
     /// continuous dial, 1.0..=4.0. Plain field write, safe every frame. `1.0` (the default) is
-    /// bit-identical to before this parameter existed. See `DrawingSimulation::lateral_substeps`'s
-    /// doc comment for the mechanism and `physics::settle_tick`'s own parameter of the same name
-    /// for the full reasoning.
+    /// bit-identical to before this parameter existed, and so is any integer value; a fractional
+    /// value is realised stochastically, once per tick and globally across the whole grid, so the
+    /// expected pass count matches the dial exactly without ever running a wasted partial pass.
+    /// See `DrawingSimulation::lateral_substeps`'s doc comment for the mechanism and
+    /// `physics::settle_tick`'s own parameter of the same name for the full reasoning.
     pub fn set_lateral_substeps(&mut self, substeps: f32) {
         self.sim.lateral_substeps = substeps;
     }
