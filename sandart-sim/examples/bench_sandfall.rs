@@ -37,7 +37,6 @@ fn parse_material(s: &str) -> MaterialMode {
         "finepowder" => MaterialMode::FinePowder,
         "snow" => MaterialMode::Snow,
         "moondust" => MaterialMode::MoonDust,
-        "oobleck" => MaterialMode::Oobleck,
         "buttercream" => MaterialMode::ButterCream,
         "water" => MaterialMode::Water,
         "calmwater" => MaterialMode::CalmWater,

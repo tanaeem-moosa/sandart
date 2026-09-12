@@ -2113,6 +2113,18 @@ fn note_phase_flow(phase: usize, flux: f32) {
 #[allow(dead_code)]
 fn note_phase_flow(_phase: usize, _flux: f32) {}
 
+// TOMBSTONE (2026-09-12): a temporary `oobleck_diag` instrumentation module lived here for one
+// diagnostic run (Oobleck-removal task, step 1 addendum) to measure, before removal, which lateral
+// solver a band-adjacent edge actually went through. It found that the granular CA was NOT dead
+// for band cells (it moved a large and growing amount of mass OUT of the band over time) but was
+// donor-only: it could push mass out of a band cell but never pull mass in from a higher
+// neighbour, and the Stage C flux edge unconditionally skipped any edge whose owner (left
+// endpoint) was a band cell regardless of which side was higher. Roughly a quarter to a third of
+// those owner-skipped edges had the non-band neighbour already higher -- a one-directional block
+// at the band's trailing edge that matched the observed residual cliff there. See
+// `diag_gradient_cliffs`'s before/after report for the measured before/after effect of removing
+// the band entirely.
+
 /// MEASUREMENT-ONLY DIAGNOSTIC (LOD-FLUX-BUDGET-SURVEY, see `diag_lod_flux_budget_survey` in
 /// `tests`). `#[cfg(test)]`-gated and thread-local like `phase_flow_stats`/`BIND_CENSUS`, so it
 /// costs nothing in production and cannot interact with parallel tests. Disabled (`ENABLED ==
@@ -2303,19 +2315,8 @@ fn get_ca_params(
     grain_size: f32,
     higher_neighbors: usize,
     sliding_active: bool,
-    closest_marble_vel: f32,
     gravity_active: bool,
 ) -> (f32, f32, f32, Option<f32>) {
-    // Oobleck shear-thickening
-    if wetness >= 0.50 && wetness < 0.65 {
-        let t = ((closest_marble_vel - 0.03) / 0.12).clamp(0.0, 1.0);
-        let t_steep = t * t;
-        let threshold = 0.005 + (0.32 - 0.005) * t_steep;
-        let alpha = 0.40 + (0.005 - 0.40) * t_steep;
-        let lock_chance = 0.02 + (0.98 - 0.02) * t_steep;
-        return (threshold, alpha, lock_chance, None);
-    }
-
     // Continuous liquid weight for this cell (see `liquidity` doc comment). Used below to blend
     // the granular and liquid CA parameters instead of hard-switching on `wetness >= 0.75`.
     let liquidity = liquidity(wetness);
@@ -2527,11 +2528,7 @@ pub fn displace_line(
                 let wetness = cell_props[current_idx * 4 + PROP_WETNESS];
 
                 // Continuous residual_factor mapping based on wetness
-                let residual_factor = if wetness >= 0.50 && wetness < 0.65 {
-                    let speed = (end - start).length();
-                    let t = (speed / 0.01).clamp(0.0, 1.0);
-                    0.50 * t * t
-                } else if wetness >= 0.70 {
+                let residual_factor = if wetness >= 0.70 {
                     0.0
                 } else if wetness < 0.45 {
                     0.20 + (0.35 - 0.20) * (wetness / 0.45)
@@ -5047,18 +5044,20 @@ pub fn settle_tick(
                     // bit-identical to before for sand.
                     let granular_share = if gravity_active { 1.0 - cell_liquidity } else { 1.0 };
 
-                    // Stage C carve-out: Oobleck's shear-thickening (`get_ca_params`'s
-                    // `wetness >= 0.50 && wetness < 0.65` branch, driven by `closest_marble_vel`)
-                    // is a marble/mouse-interaction feature, not a repose/yield-stress question,
-                    // and no test in this suite exercises it under gravity. Rather than guess at
-                    // how a viscosity that depends on a dragged marble's speed should interact with
-                    // a yield-stress lateral edge, Stage C leaves Oobleck's gravity-mode lateral
-                    // transport entirely on the CA (bit-identical to pre-Stage-C), and the new
-                    // combined lateral flux edge below is gated to skip it. `liquidity(0.55) == 0`,
-                    // so Oobleck was already 100% CA-carried before this change; this keeps it that
-                    // way rather than silently folding it into a mechanism that was never measured
-                    // against it.
-                    let is_oobleck_band = wetness >= 0.50 && wetness < 0.65;
+                    // TOMBSTONE (2026-09-12): a `is_oobleck_band` carve-out lived here, gating the
+                    // Oobleck material's `wetness in [0.50, 0.65)` slice out of the Stage C lateral
+                    // flux edge and onto the old granular CA instead. Removed along with the
+                    // Oobleck material itself: it was a hard, discontinuous solver switch (the
+                    // project's standing rule is that behaviour must be continuous in wetness), and
+                    // it was the confirmed cause of a standing cliff wherever a "Linear gradient"
+                    // distribution's wetness passed through that band -- see
+                    // `diag_gradient_cliffs` and its removed `oobleck_diag` companion measurement
+                    // for the before/after and the mechanism (the carve-out's flux-edge gate
+                    // excluded any edge owned by a band cell regardless of which side was higher,
+                    // and the CA it fell back to is donor-only, so mass could not flow back INTO a
+                    // band cell from a higher non-band neighbour). Every wetness now takes the
+                    // Stage C lateral flux edge and gravity bail-out below unconditionally, like
+                    // every other material.
 
                     // Per-edge RNG seed, hoisted from the main flow loop below (it used to be
                     // computed just before that loop) so the new combined lateral flux edge can
@@ -5143,20 +5142,18 @@ pub fn settle_tick(
                     // granular CA's own lateral moves, which is still correct and is independent of
                     // where this edge is computed.
 
-                    // Stage C bail-out: for any non-Oobleck material under gravity, the lateral
-                    // (x) edge is now entirely owned by the combined flux call just above — both
-                    // the liquid share (as before Stage C) and the granular share (new). The
-                    // granular CA below (avalanche valve + main flow loop) only ever touched the
-                    // `ndy == 0` lateral edge under gravity (the `ndy != 0` vertical edge has been
-                    // phase-0's since Stage B) so, with the lateral edge now also handled above,
-                    // that whole remaining CA body would be pure redundant work at best and a
-                    // double-counted transfer at worst if left reachable here. `sliding` is reset
-                    // to `false` rather than left stale, matching the `granular_share <= 0.0`
-                    // bail-out this one now supersedes for the gravity case (see its comment just
-                    // below, now dead code for every material except Oobleck under gravity, which
-                    // this bail-out deliberately does not touch — see `is_oobleck_band`'s comment
-                    // above).
-                    if gravity_active && !is_oobleck_band {
+                    // Stage C bail-out: under gravity, the lateral (x) edge is entirely owned by
+                    // the combined flux call just above — both the liquid share (as before Stage
+                    // C) and the granular share (new). The granular CA below (avalanche valve +
+                    // main flow loop) only ever touched the `ndy == 0` lateral edge under gravity
+                    // (the `ndy != 0` vertical edge has been phase-0's since Stage B) so, with the
+                    // lateral edge now also handled above, that whole remaining CA body would be
+                    // pure redundant work at best and a double-counted transfer at worst if left
+                    // reachable here. `sliding` is reset to `false` rather than left stale, matching
+                    // the `granular_share <= 0.0` bail-out this one now supersedes for the gravity
+                    // case (see its comment just below). Unconditional for every material now that
+                    // Oobleck's `is_oobleck_band` carve-out is gone -- see the tombstone above.
+                    if gravity_active {
                         sliding[center_idx] = false;
                         continue;
                     }
@@ -5328,28 +5325,6 @@ pub fn settle_tick(
                         }
                     }
 
-                    let mut closest_marble_idx = None;
-                    let mut min_dist_to_marble = f32::MAX;
-                    if !active_marbles.is_empty() {
-                        let cell_x = (x as f32 / w as f32) * 2.0 - 1.0;
-                        let cell_y = 1.0 - (y as f32 / h as f32) * 2.0;
-                        let cell_pos = Vec2::new(cell_x, cell_y);
-
-                        for (idx, m) in active_marbles.iter().enumerate() {
-                            let dist = (cell_pos - m.pos).length();
-                            if dist < min_dist_to_marble {
-                                min_dist_to_marble = dist;
-                                closest_marble_idx = Some(idx);
-                            }
-                        }
-                    }
-
-                    let closest_marble_vel = if let Some(idx) = closest_marble_idx {
-                        active_marbles[idx].vel
-                    } else {
-                        0.0
-                    };
-
                     let (threshold, alpha, lock_chance, quantize_size) = get_ca_params(
                         wetness,
                         threshold_prop,
@@ -5357,7 +5332,6 @@ pub fn settle_tick(
                         grain_size,
                         higher_neighbors,
                         sliding[center_idx],
-                        closest_marble_vel,
                         gravity_active,
                     );
 
@@ -5615,7 +5589,6 @@ pub fn settle_tick(
                             let wetness = cell_props[center_idx * 4 + PROP_WETNESS];
                             let cell_liquidity = liquidity(wetness);
                             let granular_share = if gravity_active { 1.0 - cell_liquidity } else { 1.0 };
-                            let is_oobleck_band = wetness >= 0.50 && wetness < 0.65;
                             let cell_capacity = 1.5 * (1.0 - cell_liquidity) + 1.0 * cell_liquidity;
                             // Identical expression to the traversal body's. It is a pure function
                             // of (x, y, time_seed), so moving the edge to this pass does not change
@@ -5630,7 +5603,7 @@ pub fn settle_tick(
                                 ^ if phase >= 2 { (phase as u32).wrapping_mul(0x9E37_79B1) } else { 0 };
                             let _ = (granular_share, lateral_boost, by, cell_capacity, seed);
 
-                    if gravity_active && !is_oobleck_band && x + 1 < w && is_inside(x + 1, y)
+                    if gravity_active && x + 1 < w && is_inside(x + 1, y)
                         // `lateral_substeps` cheap early skip (see that parameter's doc comment,
                         // point 3): in an extra pass, an edge whose better-case donor still cannot
                         // reach a positive weight this pass can never move anything, so skip the
@@ -6423,7 +6396,6 @@ mod tests {
             crate::MaterialMode::FinePowder => (0.00, 0.05, 0.30, 0.05),
             crate::MaterialMode::Snow => (0.05, 0.15, 0.20, 0.20),
             crate::MaterialMode::MoonDust => (0.00, 0.20, 0.20, 0.10),
-            crate::MaterialMode::Oobleck => (0.55, 0.04, 0.12, 0.15),
             crate::MaterialMode::ButterCream => (0.70, 0.04, 0.15, 0.08),
             crate::MaterialMode::Water => (1.00, 0.00, 0.00, 0.00),
             crate::MaterialMode::CalmWater => (0.90, 0.00, 0.00, 0.00),
@@ -7052,7 +7024,6 @@ mod tests {
             MaterialMode::KineticSand,
             MaterialMode::WetSand,
             MaterialMode::FinePowder,
-            MaterialMode::Oobleck,
             MaterialMode::MoonDust,
             MaterialMode::Water,
             MaterialMode::Milk,
@@ -11583,6 +11554,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Builds `cell_props` exactly the way the web UI's "Linear gradient" distribution does
+    /// (`generateMaterialProps`, pattern `'gradient'`, in `sandart-wasm/web/demo.js`): each of the
+    /// 4 props lerped by `t = x / (w - 1)` between `mat1` (column 0) and `mat2` (column `w - 1`),
+    /// uniformly down every row.
+    fn gradient_props(w: usize, h: usize, mat1: (f32, f32, f32, f32), mat2: (f32, f32, f32, f32)) -> Vec<f32> {
+        let mut props = vec![0.0f32; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let t = x as f32 / (w - 1) as f32;
+                let i = (y * w + x) * 4;
+                props[i + PROP_WETNESS] = mat1.0 * (1.0 - t) + mat2.0 * t;
+                props[i + PROP_THRESHOLD] = mat1.1 * (1.0 - t) + mat2.1 * t;
+                props[i + PROP_FLOW_RATE] = mat1.2 * (1.0 - t) + mat2.2 * t;
+                props[i + PROP_GRAIN_SIZE] = mat1.3 * (1.0 - t) + mat2.3 * t;
+            }
+        }
+        props
+    }
+
+    /// DIAGNOSTIC (2026-09-12, Oobleck-removal task, step 1). Measures BEFORE any removal the
+    /// standing "vertical cliff" reported with a "Linear gradient" DrySand -> Water distribution in
+    /// a MultiNeckHourglass. Leading theory: `is_oobleck_band` (wetness in [0.50, 0.65)) routes
+    /// that slice of the gradient onto the old granular CA instead of the Stage C lateral flux edge
+    /// every other material uses, so it stands as a slab on its own solver.
+    ///
+    /// Reports, per column and at a few checkpoints, the surface height (topmost cell with
+    /// h > 0.05) in the upper and lower chamber, the worst adjacent-column step, and every
+    /// adjacent-column step >= 6 cells with its column x and that column's initial wetness `t` --
+    /// so a band-caused cliff can be told apart from an ordinary vessel-shape step by whether `t`
+    /// lands in or at the edge of [0.50, 0.65). Runs the same scenario with single-material fills
+    /// (all DrySand, all Water) as controls.
+    ///
+    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_gradient_cliffs
+    #[test]
+    #[ignore]
+    fn diag_gradient_cliffs() {
+        let grid = 256usize;
+        let bs = crate::DEFAULT_BLOCK_SIZE;
+        let mask = make_test_mask(grid, grid, SandboxShape::MultiNeckHourglass, 0.04, 1.0);
+        let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32);
+        let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32);
+        let t_of = |x: usize| -> f32 { x as f32 / (grid - 1) as f32 };
+
+        let run = |label: &str, props: Vec<f32>| {
+            let mut sim = TestSim::new(grid, grid, props, mask.clone(), bs);
+            sim.lateral_substeps = 2.5;
+            // Fill the upper half.
+            for y in 0..grid / 2 {
+                for x in 0..grid {
+                    let i = y * grid + x;
+                    if sim.mask[i] != crate::MASK_OUTSIDE {
+                        sim.hm.data[i] = 0.5;
+                    }
+                }
+            }
+
+            let surface = |s: &TestSim, y_range: std::ops::Range<usize>| -> Vec<Option<usize>> {
+                (0..grid).map(|x| {
+                    y_range.clone().find(|&y| {
+                        let i = y * grid + x;
+                        s.mask[i] != crate::MASK_OUTSIDE && s.hm.data[i] > 0.05
+                    })
+                }).collect()
+            };
+
+            let budget = (grid / bs) * (grid / bs);
+            for t in 1..=3000u32 {
+                sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+                if t == 500 || t == 1500 || t == 3000 {
+                    for (chamber, y_range) in [("upper", 0..grid / 2), ("lower", grid / 2..grid)] {
+                        let surf = surface(&sim, y_range);
+                        let mut worst_step = 0usize;
+                        let mut big_steps = Vec::new();
+                        for x in 0..grid - 1 {
+                            if let (Some(a), Some(b)) = (surf[x], surf[x + 1]) {
+                                let step = (a as i64 - b as i64).unsigned_abs() as usize;
+                                worst_step = worst_step.max(step);
+                                if step >= 6 {
+                                    big_steps.push((x, step, t_of(x)));
+                                }
+                            }
+                        }
+                        println!(
+                            "DIAGCLIFF {} chamber={} t={} worst_step={} big_steps(>=6)={}",
+                            label, chamber, t, worst_step, big_steps.len()
+                        );
+                        for (x, step, tx) in &big_steps {
+                            println!(
+                                "  DIAGCLIFF {} chamber={} t={} step_at_x={} step={} t_x={:.3}",
+                                label, chamber, t, x, step, tx
+                            );
+                        }
+                    }
+                }
+            }
+        };
+
+        run("gradient", gradient_props(grid, grid, dry_sand, water));
+        run("all_dry_sand", get_test_props(MaterialMode::DrySand, grid * grid));
+        run("all_water", get_test_props(MaterialMode::Water, grid * grid));
     }
 
     /// MEASUREMENT-ONLY DIAGNOSTIC (LOD-FLUX-BUDGET-SURVEY). Answers: how much of the block-LOD

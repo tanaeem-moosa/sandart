@@ -184,7 +184,6 @@ pub enum MaterialMode {
     ButterCream,
     Snow,
     FinePowder,
-    Oobleck,
     MoonDust,
     Water,
     Milk,
@@ -203,7 +202,7 @@ impl MaterialMode {
     /// Every material, in menu order. Single source of truth for anything that needs to
     /// enumerate materials (e.g. populating a UI select) — iterate this rather than hand-writing
     /// a parallel list, so there is nothing to fall out of sync.
-    pub const ALL: [MaterialMode; 14] = [
+    pub const ALL: [MaterialMode; 13] = [
         MaterialMode::DrySand,
         MaterialMode::KineticSand,
         MaterialMode::WetSand,
@@ -211,7 +210,6 @@ impl MaterialMode {
         MaterialMode::ButterCream,
         MaterialMode::Snow,
         MaterialMode::FinePowder,
-        MaterialMode::Oobleck,
         MaterialMode::MoonDust,
         MaterialMode::Water,
         MaterialMode::Milk,
@@ -233,7 +231,6 @@ impl MaterialMode {
             MaterialMode::ButterCream => "butter_cream",
             MaterialMode::Snow => "snow",
             MaterialMode::FinePowder => "fine_powder",
-            MaterialMode::Oobleck => "oobleck",
             MaterialMode::MoonDust => "moon_dust",
             MaterialMode::Water => "water",
             MaterialMode::Milk => "milk",
@@ -255,7 +252,6 @@ impl MaterialMode {
             "butter_cream" => MaterialMode::ButterCream,
             "snow" => MaterialMode::Snow,
             "fine_powder" => MaterialMode::FinePowder,
-            "oobleck" => MaterialMode::Oobleck,
             "moon_dust" => MaterialMode::MoonDust,
             "water" => MaterialMode::Water,
             "milk" => MaterialMode::Milk,
@@ -276,7 +272,6 @@ impl MaterialMode {
             MaterialMode::ButterCream => "Buttercream",
             MaterialMode::Snow => "Snow",
             MaterialMode::FinePowder => "Fine powder",
-            MaterialMode::Oobleck => "Oobleck",
             MaterialMode::MoonDust => "Moon dust",
             MaterialMode::Water => "Water",
             MaterialMode::Milk => "Milk",
@@ -299,7 +294,6 @@ impl MaterialMode {
             MaterialMode::FinePowder => (0.00, 0.05, 0.30, 0.05),
             MaterialMode::Snow => (0.05, 0.15, 0.20, 0.20),
             MaterialMode::MoonDust => (0.00, 0.20, 0.20, 0.10),
-            MaterialMode::Oobleck => (0.55, 0.04, 0.12, 0.15),
             MaterialMode::ButterCream => (0.70, 0.04, 0.15, 0.08),
             MaterialMode::Water => (1.00, 0.00, 0.00, 0.00),
             MaterialMode::CalmWater => (0.90, 0.00, 0.00, 0.00),

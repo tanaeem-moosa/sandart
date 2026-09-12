@@ -55,6 +55,23 @@ percent of real flow, i.e. stalls. **Not worth pursuing.**
   largest single cost.
 - **Caveat:** whether the timing tick rolled 1 or 2 extra passes is not recorded.
 
+## Option 1: how many simulated blocks do the extra lateral passes do nothing in?
+
+Simulated blocks (MUST + STALE) bucketed by the lateral flux realised in the extra passes, summed
+per block over the tick. Budget 128, from a second run:
+
+    tick   simulated   extra-pass flux: none   < 1e-2   >= 1e-2
+    200    1245        292 (23%)               42       911
+    1000    553        153 (28%)               19       381
+    3000    442        160 (36%)               10       272
+
+- **The upper bound for "rerun only blocks still flowing laterally":** ~25-36% of extra-pass block
+  visits, which is ~12-18% of tick time given the ~49% cost share.
+- **Caveats:**
+  - "none" includes the STALE blocks, which carry nothing anyway.
+  - A real rule must PREDICT from earlier passes. This counts blocks that turned out to realise
+    nothing over the whole tick, so the saving it measures is an upper bound.
+
 ## Implication
 
 The remaining levers are per-block cost, not block selection:

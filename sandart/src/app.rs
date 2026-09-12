@@ -792,7 +792,6 @@ impl eframe::App for SandArtApp {
                             crate::config::MaterialMode::KineticSand => "Kinetic Sand",
                             crate::config::MaterialMode::WetSand => "Wet Sand",
                             crate::config::MaterialMode::FinePowder => "Fine Powder",
-                            crate::config::MaterialMode::Oobleck => "Oobleck (Non-Newtonian)",
                             crate::config::MaterialMode::MoonDust => "Moon Dust",
                             crate::config::MaterialMode::Water => "Water (Ripples)",
                             crate::config::MaterialMode::Milk => "Milk (Thick Liquid)",
@@ -809,7 +808,6 @@ impl eframe::App for SandArtApp {
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::ButterCream, "Butter-Cream (Viscous)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Snow, "Snow (Cohesive)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::FinePowder, "Fine Powder");
-                            ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Oobleck, "Oobleck (Non-Newtonian)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::MoonDust, "Moon Dust");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Water, "Water (Ripples)");
                             ui.selectable_value(&mut self.config.material_mode, crate::config::MaterialMode::Milk, "Milk (Thick Liquid)");
