@@ -59,7 +59,7 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **99 passed / 4 failed on `main`**, and that is the current expected state:
+The library suite is **98 passed / 5 failed on `main`**, and that is the current expected state:
 
 - `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
   keep failing. See HANDOVER.md §1.
@@ -83,6 +83,17 @@ The library suite is **99 passed / 4 failed on `main`**, and that is the current
   has NOT been re-derived, so at `w=64, chambers=11, neck_width=0.06` the wall between adjacent
   necks opens and chambers merge. Hourglass and MultiNeckHourglass are unaffected. Do not "fix"
   this by reverting the axis.
+- `task55_head_spec::test_task55_dynamic_transport_spec_scoreboard`: **fifth failure since the
+  array-form lateral pass landed (2026-09-13), and only `spec_draining_vessel_surface_dips` with
+  `head_field_transport=true`**, a debug toggle the app does not use.
+  - The spec reads the surface dip at ONE tick (150).
+  - At w=512 that quantity swings between 0 and ~28 cells from tick to tick, in BOTH the old and
+    new solver (traced ticks 111-150).
+  - The old build read 0.99 at tick 150 but 0.00 at ticks 118, 127 and 144; the new build reads
+    0.016 at tick 150.
+  - So this is a sampling artefact over a PRE-EXISTING oscillation, not a regression. The
+    oscillation itself is an open defect in the head-field path.
+  - Pending decision: change the spec to measure over a window of ticks. Do not loosen `tol`.
 
 **`test_sandbox_wave_reach_is_budget_independent` was resolved on 2026-09-02, by fixing the test.**
 Its bit-identical-amplitude-across-budgets assertion was wrong in principle: `budget_n` exists to

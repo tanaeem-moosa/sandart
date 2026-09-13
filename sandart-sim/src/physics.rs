@@ -3796,6 +3796,592 @@ mod solver_scratch {
     }
 }
 
+/// One contiguous run of lateral-pass edges on grid row `y`: every column in the owned range
+/// `[x_start, x_owned_end)` belongs to a block this tick's `will_simulate` marks simulated, plus
+/// one extra readable "acceptor-only" column at `x_owned_end` when `has_extra` (`x_owned_end <
+/// w`) -- the edge from the run's last owned column into that column is still active (it is owned
+/// by `block(x_owned_end - 1)` alone; the acceptor's own block status never gates it), it just
+/// never starts a further edge of its own. Ported by hand from
+/// `sandart-kernel-bench/src/row_span.rs`'s identical construction (kernel A) -- that crate is
+/// deliberately not a dependency of this one (see `artifacts/design/KERNEL-BENCH-2026-09-13.md`),
+/// so the span finder is duplicated here rather than shared.
+#[derive(Clone, Copy)]
+struct LateralSpan {
+    y: usize,
+    x_start: usize,
+    x_owned_end: usize,
+    has_extra: bool,
+}
+
+impl LateralSpan {
+    #[inline]
+    fn data_end(&self) -> usize {
+        self.x_owned_end + if self.has_extra { 1 } else { 0 }
+    }
+}
+
+/// Builds every lateral-pass span for this tick's `will_simulate` list, appending to `out` (caller
+/// clears first). Depends only on `will_simulate`, which is fixed for the whole `settle_tick`
+/// call -- built ONCE before the phase loop and reused by every lateral pass this tick (the base
+/// pass and every `lateral_substeps` extra pass), never rebuilt per phase.
+fn build_lateral_spans(
+    cols: usize,
+    rows: usize,
+    block_size: usize,
+    w: usize,
+    h: usize,
+    will_simulate: &[bool],
+    out: &mut Vec<LateralSpan>,
+) {
+    out.clear();
+    for by in 0..rows {
+        let mut bx = 0usize;
+        while bx < cols {
+            if !will_simulate[by * cols + bx] {
+                bx += 1;
+                continue;
+            }
+            let run_start_bx = bx;
+            while bx < cols && will_simulate[by * cols + bx] {
+                bx += 1;
+            }
+            let run_end_bx = bx;
+            let x_start = run_start_bx * block_size;
+            let x_owned_end = (run_end_bx * block_size).min(w);
+            let has_extra = x_owned_end < w;
+            let start_y = by * block_size;
+            let end_y = ((by + 1) * block_size).min(h);
+            for y in start_y..end_y {
+                out.push(LateralSpan { y, x_start, x_owned_end, has_extra });
+            }
+        }
+    }
+}
+
+/// Row-local scratch for `run_lateral_edge_pass`, pooled tick-to-tick like `SolverScratch`. Every
+/// buffer is sized to the widest span seen so far (at most `w + 1` cells: a span's `data_end() -
+/// x_start` can be at most `w`) and reused for every span in every lateral pass this tick -- never
+/// grid-sized, unlike `SolverScratch`'s buffers.
+#[derive(Default)]
+struct LateralScratch {
+    // Per-cell (indexed 0..n_data within the current span).
+    inside: Vec<bool>,
+    h: Vec<f32>,
+    wetness: Vec<f32>,
+    threshold: Vec<f32>,
+    flow_rate: Vec<f32>,
+    grain_size: Vec<f32>,
+    colors: Vec<u32>,
+    liq: Vec<f32>,
+    cap: Vec<f32>,
+    avail: Vec<f32>,
+    freecap: Vec<f32>,
+    head_base: Vec<f32>,
+    head_base_field: Vec<f32>,
+    eta_base: Vec<f32>,
+    conveyance: Vec<f32>,
+    pressure_rate: Vec<f32>,
+    out_total: Vec<f32>,
+    in_total: Vec<f32>,
+    out_total_jit: Vec<f32>,
+    in_total_jit: Vec<f32>,
+    total_out_flow: Vec<f32>,
+    total_in_flow: Vec<f32>,
+    // Per-edge (indexed 0..n_edges, allocated to the same length as the per-cell buffers).
+    live: Vec<bool>,
+    candidate: Vec<f32>, // unweighted candidate
+    weighted: Vec<f32>,  // donor-weighted candidate (== candidate outside extra passes)
+    final_flux: Vec<f32>,
+}
+
+impl LateralScratch {
+    fn ensure_len(&mut self, n: usize) {
+        if self.inside.len() < n {
+            self.inside.resize(n, false);
+            self.h.resize(n, 0.0);
+            self.wetness.resize(n, 0.0);
+            self.threshold.resize(n, 0.0);
+            self.flow_rate.resize(n, 0.0);
+            self.grain_size.resize(n, 0.0);
+            self.colors.resize(n, 0);
+            self.liq.resize(n, 0.0);
+            self.cap.resize(n, 0.0);
+            self.avail.resize(n, 0.0);
+            self.freecap.resize(n, 0.0);
+            self.head_base.resize(n, 0.0);
+            self.head_base_field.resize(n, 0.0);
+            self.eta_base.resize(n, 0.0);
+            self.conveyance.resize(n, 0.0);
+            self.pressure_rate.resize(n, 0.0);
+            self.out_total.resize(n, 0.0);
+            self.in_total.resize(n, 0.0);
+            self.out_total_jit.resize(n, 0.0);
+            self.in_total_jit.resize(n, 0.0);
+            self.total_out_flow.resize(n, 0.0);
+            self.total_in_flow.resize(n, 0.0);
+            self.live.resize(n, false);
+            self.candidate.resize(n, 0.0);
+            self.weighted.resize(n, 0.0);
+            self.final_flux.resize(n, 0.0);
+        }
+    }
+}
+
+mod lateral_scratch {
+    use super::LateralScratch;
+    use std::cell::RefCell;
+    thread_local! {
+        static POOL: RefCell<Option<LateralScratch>> = const { RefCell::new(None) };
+    }
+    pub fn take() -> LateralScratch {
+        POOL.with(|p| p.borrow_mut().take()).unwrap_or_default()
+    }
+    pub fn put(s: LateralScratch) {
+        POOL.with(|p| *p.borrow_mut() = Some(s));
+    }
+}
+
+/// The lateral (cross-gravity) edge pass -- COLLECT + ARBITRATE + APPLY over contiguous per-row
+/// spans of this tick's simulated blocks, replacing the former per-edge, red-black-coloured,
+/// touched-list-driven "2b. RED-BLACK EDGE COLOURING" sweep. Array-form, branch-free where the
+/// per-cell/per-edge math allows it -- kernel A in `sandart-kernel-bench` (see
+/// `artifacts/design/KERNEL-BENCH-2026-09-13.md`), rebuilt here against the full production
+/// configuration space (the bench only ported the production-default branches:
+/// `head_field_active = false`, `multiplicative_lateral_gate` off, `pressure_sensitive_flow =
+/// false`).
+///
+/// **Structure.** For each span: stage 1 computes every per-cell frozen quantity once (avail,
+/// freecap, the additive/field/multiplicative head terms, granular share, ...); stage 2 computes
+/// each edge's candidate flux from those frozen values, with the SAME lock/sleep/dispersion
+/// hashes, `flux_edge_candidate` math and `lateral_substeps` extra-pass weighting `settle_tick`
+/// used inline; stage 3 sums per-cell donor/acceptor totals and applies the single-pass Zalesak
+/// scale (`edge_arbitration_scale`) wherever a cell is oversubscribed, then finalises each live
+/// edge (`edge_vel_h`, wake bookkeeping, `#[cfg(test)]` diagnostics -- everything
+/// `flux_edge_apply` used to do except mutate height/props/colour state); stages 4+5 apply the
+/// aggregated height delta per cell and Jacobi-mix props/colours from each cell's OWN frozen state
+/// plus every live inflow's DONOR frozen state, weight-averaged in one shot -- deliberately not
+/// bit-identical to the old sequential, order-dependent `advect_properties` chain (a cell with two
+/// live inflows in the same pass is exactly where the two diverge; see
+/// `sandart-kernel-bench/src/lib.rs`'s module doc comment for why that divergence was accepted).
+///
+/// **No red-black colouring.** The colouring existed only to make the old per-edge, in-place
+/// `cell_avail`/`cell_freecap` writes order-independent -- see the comment this replaced. Stage 1
+/// computes both exactly once per cell, before any edge candidate exists, so there is no
+/// shared-mutable-write ordering problem left for a colouring to solve.
+///
+/// **Frozen reads without a grid clone.** Nothing in this pass mutates any row other than the one
+/// currently being processed (a lateral edge only ever connects two cells in the SAME row), and
+/// spans are visited in non-decreasing `y` order (`build_lateral_spans` walks `by` then `y` inside
+/// it) -- so whenever this pass reads a NEIGHBOUR row (`in_transit_at`'s `y + 1`, always downward
+/// regardless of gravity direction) that row has not been touched yet this call, and reading it
+/// live reproduces exactly the frozen pre-pass value a whole-grid clone would also have produced.
+/// `edge_vel_v`, `column_depth`, `head_field`, `shape_mask` and (for the base pass) the pre-tick
+/// `heightmap_data` are never mutated by any lateral pass at all, so they are always safe to read
+/// live too. Only THIS row's own cells need an explicit frozen copy (stage 1's per-span scratch,
+/// sized to at most `w + 1` cells), since stages 4+5 mutate them in place before the pass moves to
+/// the next span, and no two spans ever share a column (a run of simulated blocks is separated
+/// from the next by at least one non-simulated block).
+#[allow(clippy::too_many_arguments)]
+fn run_lateral_edge_pass(
+    w: usize,
+    h: usize,
+    cols: usize,
+    rows: usize,
+    block_size: usize,
+    phase: usize,
+    gravity_dir: Vec2,
+    time_seed: u32,
+    lateral_passes_this_tick: f32,
+    head_field_active: bool,
+    pressure_sensitive_flow: bool,
+    shape_mask: &[u8],
+    column_depth: &[f32],
+    head_field: &[f32],
+    heightmap_data: &[f32],
+    temp_heights: &mut [f32],
+    cell_props: &mut CellProps,
+    cell_colors: &mut [u32],
+    edge_vel_h: &mut [f32],
+    edge_vel_v: &[f32],
+    spans: &[LateralSpan],
+    scratch: &mut LateralScratch,
+    modified: &mut Vec<bool>,
+    next_displacements: &mut Vec<f32>,
+    total_flow: &mut f32,
+    flow_occurred: &mut bool,
+) {
+    const MIN_FLUX: f32 = 1e-7;
+    let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
+    let head_scale = GRAVITY_HEAD_SCALE / depth_scale;
+    let mult_gate_on = multiplicative_lateral_gate::is_enabled();
+
+    for span in spans {
+        let y = span.y;
+        let row_offset = y * w;
+        let n_data = span.data_end() - span.x_start;
+        let n_edges = span.x_owned_end - span.x_start;
+        scratch.ensure_len(n_data.max(1));
+
+        // ---- Stage 1: per-cell frozen arrays ----
+        for i in 0..n_data {
+            let x = span.x_start + i;
+            let idx = row_offset + x;
+            let inside = shape_mask[idx] != crate::MASK_OUTSIDE;
+            scratch.inside[i] = inside;
+            let hh = temp_heights[idx];
+            scratch.h[i] = hh;
+            let wetness = cell_props.wetness[idx];
+            scratch.wetness[i] = wetness;
+            scratch.threshold[i] = cell_props.threshold[idx];
+            scratch.flow_rate[i] = cell_props.flow_rate[idx];
+            scratch.grain_size[i] = cell_props.grain_size[idx];
+            scratch.colors[i] = cell_colors[idx];
+            if !inside {
+                scratch.avail[i] = 0.0;
+                scratch.freecap[i] = 0.0;
+                continue;
+            }
+            let liq = liquidity(wetness);
+            scratch.liq[i] = liq;
+            let cap = cell_capacity_for(wetness);
+            scratch.cap[i] = cap;
+            let avail = (hh
+                - in_transit_at(idx, w, h, temp_heights, heightmap_data, cell_props, edge_vel_v, shape_mask))
+                .max(0.0);
+            scratch.avail[i] = avail;
+            scratch.freecap[i] = (cap - hh).max(0.0);
+            let k = k_of_liquidity(liq);
+            let depth = janssen_effective_depth(column_depth[idx], liq);
+            // The base pass (`phase < 2`) reads the tick's pre-tick, frozen `heightmap_data` for
+            // the driving-head terms below (bit-identical to before this pass existed); an extra
+            // pass (`phase >= 2`) reads `temp_heights` -- the previous pass's own movement, which
+            // lives only there. See `lateral_substeps`'s doc comment on `settle_tick`.
+            let h_for_head = if phase >= 2 { hh } else { heightmap_data[idx] };
+            scratch.head_base[i] = h_for_head + k * LATERAL_PRESSURE_SCALE * depth;
+            if head_field_active {
+                scratch.head_base_field[i] = head_field[idx] * head_scale;
+            }
+            if mult_gate_on {
+                let h_ref = h_for_head * depth_scale;
+                scratch.eta_base[i] = h_ref + column_depth[idx];
+                scratch.conveyance[i] = mult_lateral_conveyance(h_ref, column_depth[idx], k, liq);
+            }
+            if pressure_sensitive_flow {
+                scratch.pressure_rate[i] =
+                    pressure_rate_factor(task55_head_field::rows_of_head_at(idx, w, head_field));
+            }
+        }
+
+        // ---- Stage 2: candidate flux per edge ----
+        for e in 0..n_edges {
+            scratch.live[e] = false;
+            let x = span.x_start + e;
+            let idx = row_offset + x;
+            if !(scratch.inside[e] && x + 1 < w && scratch.inside[e + 1]) {
+                continue;
+            }
+            let liq_a = scratch.liq[e];
+            let liq_b = scratch.liq[e + 1];
+            // `lateral_substeps` cheap early skip (extra passes only) -- see that parameter's doc
+            // comment on `settle_tick`, point 3. A no-op for `phase < 2`.
+            if phase >= 2 {
+                let max_liq = liq_a.max(liq_b);
+                let k = (phase - 1) as f32;
+                if (1.0 + (lateral_passes_this_tick - 1.0) * max_liq - k) <= 0.0 {
+                    continue;
+                }
+            }
+            let nb_idx = idx + 1;
+            let granular_share = 1.0 - liq_a;
+            let tau = GRANULAR_TAU_SCALE * scratch.threshold[e] * granular_share;
+            let seed = (x as u32).wrapping_mul(1299689)
+                ^ (y as u32).wrapping_mul(314159)
+                ^ time_seed.wrapping_mul(7213)
+                ^ if phase >= 2 { (phase as u32).wrapping_mul(0x9E37_79B1) } else { 0 };
+            let disp_roll = ((seed ^ (nb_idx as u32).wrapping_mul(823)) & 0xFF) as f32 / 255.0;
+            let dispersion = (disp_roll - 0.5) * 2.0 * DISPERSION_TAU_FRAC * tau;
+
+            let (head_a, head_b_full, tau_eff) = if head_field_active
+                && liq_a >= LIQUID_ELLIPTIC_THRESHOLD
+                && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
+            {
+                let head_a_field = scratch.head_base_field[e] + gravity_dir.x * GRAVITY_HEAD_SCALE + dispersion;
+                let head_b_field = scratch.head_base_field[e + 1];
+                (head_a_field, head_b_field, tau)
+            } else if mult_gate_on {
+                let eta_a = scratch.eta_base[e] + gravity_dir.x * GRAVITY_HEAD_SCALE;
+                let eta_b = scratch.eta_base[e + 1];
+                let conveyance = 0.5 * (scratch.conveyance[e] + scratch.conveyance[e + 1]);
+                let driving = MULT_LATERAL_SCALE * conveyance * (eta_a - eta_b) + dispersion;
+                (driving, 0.0, tau)
+            } else {
+                (
+                    scratch.head_base[e] + gravity_dir.x * GRAVITY_HEAD_SCALE + dispersion,
+                    scratch.head_base[e + 1],
+                    tau,
+                )
+            };
+
+            let lock_roll = ((seed ^ (nb_idx as u32).wrapping_mul(577)) & 0xFFFF) as f32 / 65535.0;
+            let locked = lock_roll < GRAVITY_LOCK_CHANCE * granular_share;
+
+            if locked
+                || edge_sleeps(
+                    head_a - head_b_full,
+                    tau_eff,
+                    edge_vel_h[idx],
+                    scratch.h[e],
+                    scratch.h[e + 1],
+                    scratch.freecap[e],
+                    scratch.freecap[e + 1],
+                )
+            {
+                edge_vel_h[idx] = 0.0;
+                continue;
+            }
+
+            let pressure_weight = if pressure_sensitive_flow
+                && liq_a >= LIQUID_ELLIPTIC_THRESHOLD
+                && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
+            {
+                scratch.pressure_rate[e]
+            } else {
+                1.0
+            };
+            let (c_sq, damping) = wave_params(scratch.wetness[e]);
+            let candidate = flux_edge_candidate(
+                head_a,
+                head_b_full,
+                c_sq,
+                damping,
+                tau_eff,
+                scratch.avail[e],
+                scratch.avail[e + 1],
+                scratch.freecap[e + 1],
+                scratch.freecap[e],
+                pressure_weight,
+                edge_vel_h[idx],
+            );
+
+            if phase < 2 {
+                scratch.candidate[e] = candidate;
+                scratch.weighted[e] = candidate;
+                scratch.live[e] = true;
+            } else {
+                let donor_liquidity = if candidate >= 0.0 { liq_a } else { liq_b };
+                let k = (phase - 1) as f32;
+                let weight = (1.0 + (lateral_passes_this_tick - 1.0) * donor_liquidity - k).clamp(0.0, 1.0);
+                if weight > 0.0 {
+                    scratch.candidate[e] = candidate;
+                    scratch.weighted[e] = candidate * weight;
+                    scratch.live[e] = true;
+                }
+            }
+        }
+
+        // ---- Stage 3: per-cell out/in totals, the Zalesak scale, and per-edge finalise ----
+        for i in 0..n_data {
+            scratch.out_total[i] = 0.0;
+            scratch.in_total[i] = 0.0;
+        }
+        let mut oversubscribed = false;
+        for e in 0..n_edges {
+            if !scratch.live[e] {
+                continue;
+            }
+            let wc = scratch.weighted[e];
+            let (donor, acceptor, mag) = if wc >= 0.0 { (e, e + 1, wc) } else { (e + 1, e, -wc) };
+            scratch.out_total[donor] += mag;
+            scratch.in_total[acceptor] += mag;
+            oversubscribed |= scratch.out_total[donor] > scratch.avail[donor]
+                || scratch.in_total[acceptor] > scratch.freecap[acceptor];
+        }
+        if oversubscribed {
+            for i in 0..n_data {
+                scratch.out_total_jit[i] = 0.0;
+                scratch.in_total_jit[i] = 0.0;
+            }
+            for e in 0..n_edges {
+                if !scratch.live[e] {
+                    continue;
+                }
+                let wc = scratch.weighted[e];
+                let x = span.x_start + e;
+                let idx = row_offset + x;
+                let (donor_i, acceptor_i, mag) = if wc >= 0.0 { (e, e + 1, wc) } else { (e + 1, e, -wc) };
+                let donor_idx = row_offset + span.x_start + donor_i;
+                let jit = edge_share_jitter(cell_props, donor_idx, idx, EDGE_SALT_H.wrapping_add(phase as u32), time_seed);
+                scratch.out_total_jit[donor_i] += mag * jit;
+                scratch.in_total_jit[acceptor_i] += mag * jit;
+            }
+        }
+
+        for i in 0..n_data {
+            scratch.total_out_flow[i] = 0.0;
+            scratch.total_in_flow[i] = 0.0;
+        }
+        let by = y / block_size;
+        for e in 0..n_edges {
+            if !scratch.live[e] {
+                continue;
+            }
+            let x = span.x_start + e;
+            let idx = row_offset + x;
+            let wc = scratch.weighted[e];
+            let (donor_i, acceptor_i, _mag) = if wc >= 0.0 { (e, e + 1, wc) } else { (e + 1, e, -wc) };
+            let scale = if oversubscribed {
+                let donor_idx = row_offset + span.x_start + donor_i;
+                let jit = edge_share_jitter(cell_props, donor_idx, idx, EDGE_SALT_H.wrapping_add(phase as u32), time_seed);
+                edge_arbitration_scale(
+                    scratch.out_total[donor_i],
+                    scratch.out_total_jit[donor_i],
+                    scratch.avail[donor_i],
+                    scratch.in_total[acceptor_i],
+                    scratch.in_total_jit[acceptor_i],
+                    scratch.freecap[acceptor_i],
+                    jit,
+                )
+            } else {
+                1.0
+            };
+            let final_flux = wc * scale;
+            scratch.final_flux[e] = final_flux;
+
+            // Everything `flux_edge_apply` used to do except mutate height/props/colour state
+            // (deferred to stages 4+5's per-cell aggregate, below).
+            edge_vel_h[idx] = final_flux;
+            if phase >= 2 {
+                // `lateral_substeps`: restore the edge's momentum integrator to what it would see
+                // had the full (unweighted) candidate been realised -- see that parameter's doc
+                // comment on `settle_tick` for why velocity and mass must diverge here.
+                edge_vel_h[idx] = scratch.candidate[e] * scale;
+            }
+            #[cfg(test)]
+            note_phase_flow(phase, final_flux);
+
+            let mag = final_flux.abs();
+            if mag > MIN_FLUX {
+                scratch.total_out_flow[donor_i] += mag;
+                scratch.total_in_flow[acceptor_i] += mag;
+                *total_flow += mag;
+                *flow_occurred = true;
+
+                let a_b = by * cols + (x / block_size);
+                let b_b = by * cols + ((x + 1) / block_size);
+                flux_dir_record(mag, true, a_b != b_b);
+                activate_neighbor(a_b, mag, modified, next_displacements);
+                activate_neighbor(b_b, mag, modified, next_displacements);
+
+                #[cfg(test)]
+                if lod_diag::is_enabled() {
+                    lod_diag::note_total(mag);
+                    lod_diag::note_flux(a_b, mag, a_b != b_b, phase);
+                    if b_b != a_b {
+                        lod_diag::note_flux(b_b, mag, true, phase);
+                    }
+                }
+
+                if !upstream_wake_gate::is_disabled() {
+                    let up_x = if final_flux > 0.0 {
+                        x.checked_sub(1)
+                    } else {
+                        (x + 2 < w).then_some(x + 2)
+                    };
+                    if let Some(up_x) = up_x {
+                        let up_b = by * cols + (up_x / block_size);
+                        activate_neighbor_upstream(up_b, modified, next_displacements);
+                    }
+                    let donor_bx = (span.x_start + donor_i) / block_size;
+                    if by > 0 {
+                        activate_neighbor_side((by - 1) * cols + donor_bx, modified, next_displacements);
+                    }
+                    if by + 1 < rows {
+                        activate_neighbor_side((by + 1) * cols + donor_bx, modified, next_displacements);
+                    }
+                }
+            }
+        }
+
+        // ---- Stages 4+5: apply heights, Jacobi-mix props/colours, stochastic-round colours ----
+        for i in 0..n_data {
+            let out_flow = scratch.total_out_flow[i];
+            let in_flow = scratch.total_in_flow[i];
+            if out_flow == 0.0 && in_flow == 0.0 {
+                continue;
+            }
+            let x = span.x_start + i;
+            let idx = row_offset + x;
+            let h_old = scratch.h[i];
+            let h_new = (h_old - out_flow + in_flow).max(0.0);
+            temp_heights[idx] = h_new;
+            if in_flow <= 0.0 {
+                // Pure donor this pass: keeps its own (frozen, unchanged) props/colours.
+                continue;
+            }
+            let kept = (h_old - out_flow).max(0.0);
+            // Inflow sources: the left edge (i-1, if it donated rightward into i) and the right
+            // edge (i, if it donated leftward into i) -- same convention as kernel A.
+            let mut mixed_props = [0.0f32; 4];
+            let mut mixed_colors = [0.0f32; 3];
+            let mut add_source = |src_i: usize, amount: f32| {
+                mixed_props[0] += scratch.wetness[src_i] * amount;
+                mixed_props[1] += scratch.threshold[src_i] * amount;
+                mixed_props[2] += scratch.flow_rate[src_i] * amount;
+                mixed_props[3] += scratch.grain_size[src_i] * amount;
+                let (r, g, b, _a) = unpack_rgba(scratch.colors[src_i]);
+                mixed_colors[0] += r as f32 * amount;
+                mixed_colors[1] += g as f32 * amount;
+                mixed_colors[2] += b as f32 * amount;
+            };
+            if i > 0 {
+                let left_edge = i - 1;
+                if left_edge < n_edges && scratch.live[left_edge] {
+                    let left_flux = scratch.final_flux[left_edge];
+                    if left_flux > MIN_FLUX {
+                        add_source(i - 1, left_flux);
+                    }
+                }
+            }
+            if i < n_edges && scratch.live[i] {
+                let right_flux = scratch.final_flux[i];
+                if right_flux < -MIN_FLUX {
+                    add_source(i + 1, -right_flux);
+                }
+            }
+            let own_amount = if h_new > 1e-6 { kept } else { 0.0 };
+            let total_amount = own_amount + in_flow;
+            let own_props = [scratch.wetness[i], scratch.threshold[i], scratch.flow_rate[i], scratch.grain_size[i]];
+            let new_props: [f32; 4] = std::array::from_fn(|ch| {
+                if total_amount > 1e-6 {
+                    (own_props[ch] * own_amount + mixed_props[ch]) / total_amount
+                } else {
+                    own_props[ch]
+                }
+            });
+            cell_props.wetness[idx] = new_props[0];
+            cell_props.threshold[idx] = new_props[1];
+            cell_props.flow_rate[idx] = new_props[2];
+            cell_props.grain_size[idx] = new_props[3];
+
+            let (own_r, own_g, own_b, _own_a) = unpack_rgba(scratch.colors[i]);
+            let own_channels = [own_r as f32, own_g as f32, own_b as f32];
+            let mut new_color = scratch.colors[i];
+            for ch in 0..3 {
+                let new_val = if total_amount > 1e-6 {
+                    (own_channels[ch] * own_amount + mixed_colors[ch]) / total_amount
+                } else {
+                    own_channels[ch]
+                };
+                let entropy = h_new.to_bits() ^ (idx as u32).wrapping_mul(2_654_435_761) ^ (ch as u32).wrapping_mul(97);
+                new_color = set_color_channel(new_color, ch, stochastic_round(new_val.clamp(0.0, 255.0), entropy));
+            }
+            new_color = set_color_channel(new_color, 3, 255);
+            cell_colors[idx] = new_color;
+        }
+    }
+}
+
+
 /// Perform a single gravity flow/settling iteration inside the active bounding box.
 pub fn settle_tick(
     heightmap: &mut Heightmap,
@@ -4245,6 +4831,18 @@ pub fn settle_tick(
     temp_heights.copy_from_slice(&heightmap.data);
 
     let gravity_active = gravity_dir.length_squared() > 1e-6;
+
+    // Lateral-pass spans (`run_lateral_edge_pass`, replacing the old red-black "2b" sweep) depend
+    // only on `will_simulate`, which is fixed for this whole call -- built ONCE here, before the
+    // phase loop, and reused by the base pass and every `lateral_substeps` extra pass this tick.
+    // Never built at all when gravity is off (2b never ran at g=0 either; see that branch's own
+    // gate). `lateral_scratch_buf` is the row-local scratch every call to
+    // `run_lateral_edge_pass` reuses, pooled tick-to-tick like `SolverScratch`.
+    let mut lateral_spans: Vec<LateralSpan> = Vec::new();
+    if gravity_active {
+        build_lateral_spans(cols, rows, block_size, w, h, &will_simulate, &mut lateral_spans);
+    }
+    let mut lateral_scratch_buf = lateral_scratch::take();
 
     // FALLBACK CONFIGURATION (Task #54): by default (`fresh_pressure_field == false`),
     // `column_depth` (depth-integrated lateral pressure; see `LATERAL_PRESSURE_SCALE`'s doc
@@ -5566,470 +6164,13 @@ pub fn settle_tick(
     // unchanged in effect from `phase == 1 && gravity_active` for every phase that existed before
     // this parameter did.
     if phase >= 1 && gravity_active {
-        for colour in 0..2usize {
-            for b in 0..expected_len {
-                if !will_simulate[b] {
-                    continue;
-                }
-                let bx = b % cols;
-                let by = b / cols;
-                let lateral_boost = 1.0f32;
-                let start_x = bx * block_size;
-                let end_x = ((bx + 1) * block_size).min(w);
-                let start_y = by * block_size;
-                let end_y = ((by + 1) * block_size).min(h);
-                for y in start_y..end_y {
-                    let row_offset = y * w;
-                    // Stride straight onto this colour's absolute-x parity rather than visiting
-                    // every column and skipping half of them.
-                    let first_x = if start_x % 2 == colour { start_x } else { start_x + 1 };
-                    let mut x = first_x;
-                    while x < end_x {
-                        let center_idx = row_offset + x;
-                        if is_inside(x, y) {
-                            // Per-cell locals the moved block used to inherit from the traversal
-                            // body. Same expressions as their originals there.
-                            let wetness = cell_props.wetness[center_idx];
-                            let cell_liquidity = liquidity(wetness);
-                            let granular_share = if gravity_active { 1.0 - cell_liquidity } else { 1.0 };
-                            let cell_capacity = 1.5 * (1.0 - cell_liquidity) + 1.0 * cell_liquidity;
-                            // Identical expression to the traversal body's. It is a pure function
-                            // of (x, y, time_seed), so moving the edge to this pass does not change
-                            // a single roll -- the dispersion and lock draws stay exactly what they
-                            // were for this cell on this tick.
-                            // `lateral_substeps`: salted with the phase index for an extra pass
-                            // (`phase >= 2`) so its dispersion/lock rolls differ from pass 0's and
-                            // from each other, instead of silently repeating them -- see that
-                            // parameter's doc comment. A no-op (`^ 0`) for `phase <= 1`, so pass
-                            // 0's own rolls, and hence `1.0`'s bit-identity, are untouched.
-                            let seed = (x as u32).wrapping_mul(1299689) ^ (y as u32).wrapping_mul(314159) ^ time_seed.wrapping_mul(7213)
-                                ^ if phase >= 2 { (phase as u32).wrapping_mul(0x9E37_79B1) } else { 0 };
-                            let _ = (granular_share, lateral_boost, by, cell_capacity, seed);
-
-                    if gravity_active && x + 1 < w && is_inside(x + 1, y)
-                        // `lateral_substeps` cheap early skip (see that parameter's doc comment,
-                        // point 3): in an extra pass, an edge whose better-case donor still cannot
-                        // reach a positive weight this pass can never move anything, so skip the
-                        // whole (relatively expensive) edge body -- dispersion/lock rolls,
-                        // `flux_edge_candidate`, the two `in_transit_at` calls -- before paying for
-                        // any of it. Uses `max(cell_liquidity, liq_b_cheap)` -- an upper bound on
-                        // whichever endpoint turns out to be the actual donor -- since the donor
-                        // itself is only known after `flux_edge_candidate` returns a signed
-                        // candidate, below. A no-op for `phase <= 1` (short-circuits to `true`
-                        // immediately), so pass 0 never evaluates this at all.
-                        && (phase < 2 || {
-                            let liq_b_cheap = liquidity(cell_props.wetness[center_idx + 1]);
-                            let max_liq = cell_liquidity.max(liq_b_cheap);
-                            let k = (phase - 1) as f32;
-                            (1.0 + (lateral_passes_this_tick - 1.0) * max_liq - k) > 0.0
-                        })
-                    {
-                        let nb_idx = center_idx + 1;
-                        let h_a = temp_heights[center_idx];
-                        let h_b = temp_heights[nb_idx];
-                        let cap_b = cell_capacity_for(cell_props.wetness[nb_idx]);
-
-                        // `tau` — the yield stress — is `PROP_THRESHOLD` (the material's own
-                        // declared repose threshold, e.g. 0.08 for DrySand; see
-                        // `MaterialMode::preset_props`), scaled by `GRANULAR_TAU_SCALE` (see that
-                        // constant's doc comment for where to move this single value to retune
-                        // repose angle later) and by `granular_share` (`1 - cell_liquidity`, and
-                        // always available here since this whole branch requires `gravity_active`)
-                        // so a fully liquid cell keeps zero yield stress (unchanged liquid
-                        // behaviour) and a fully granular cell gets the whole of it. Deliberately
-                        // NOT also multiplied by the CA's old in-gravity `* 0.35` discount
-                        // (`get_ca_params`: "Lower friction/repose angle in Sand-fall mode for
-                        // realistic fluid flow") — undoing that discount, which is precisely what
-                        // made sand behave like a liquid under gravity, is the fix Stage C exists
-                        // to make.
-                        let threshold_prop = cell_props.threshold[center_idx];
-                        let tau = GRANULAR_TAU_SCALE * threshold_prop * granular_share;
-
-                        // `lateral_substeps`: an extra pass (`phase >= 2`) must see the PREVIOUS
-                        // pass's own movement, which lives only in `temp_heights` -- `heightmap.data`
-                        // is the pre-tick snapshot and is not updated until step 3, after the whole
-                        // phase loop, so reading it here would show every extra pass the identical
-                        // head and overshoot. `h_a`/`h_b` just above already ARE `temp_heights`
-                        // reads, so reusing them costs nothing extra. Pass 0 (`phase <= 1`) is
-                        // untouched: bit-identical `heightmap.data` reads, exactly as before this
-                        // parameter existed.
-                        let (h_a_frozen, h_b_frozen) = if phase >= 2 {
-                            (h_a, h_b)
-                        } else {
-                            (heightmap.data[center_idx], heightmap.data[nb_idx])
-                        };
-
-                        // Lateral dispersion (see `DISPERSION_TAU_FRAC`'s doc comment): a small,
-                        // signed, per-edge-per-tick random perturbation of the driving head,
-                        // scaled to a FRACTION OF THIS EDGE'S OWN `tau` rather than a fixed
-                        // magnitude. The old CA's dispersion term (`perp_dot * 3.5 *
-                        // dispersion_noise`, up to 3.5 against a ~0.06-0.08 effective threshold)
-                        // is exactly what made `tau` inoperative if ported unchanged — see the
-                        // Stage C task brief. Scaling it to `tau` instead of a constant keeps it
-                        // proportionate for every material's own threshold, and keeps a real yield
-                        // stress that actually gates flow rather than being swamped by noise.
-                        // Computed once and reused by both `edge_sleeps` and
-                        // `flux_edge_candidate` below — both must see the identical driving term,
-                        // per `edge_sleeps`'s own doc comment on why a mismatch there is unsound.
-                        // Free-fall dispersion is not separately scaled down here (the old CA used
-                        // a gentler `* 0.8` in free fall against `* 3.5` on the bed): the in-transit
-                        // donor limit (`avail_a`/`avail_b` below) already suppresses a genuinely
-                        // free-falling stream's lateral spread structurally (a saturated stream has
-                        // `avail ~= 0` on this edge regardless of what drives it), so a second,
-                        // separate free-fall tier here would be redundant with a mechanism that is
-                        // already doing that job.
-                        let disp_roll = ((seed ^ (nb_idx as u32).wrapping_mul(823)) & 0xFF) as f32 / 255.0;
-                        let dispersion = (disp_roll - 0.5) * 2.0 * DISPERSION_TAU_FRAC * tau;
-
-                        // `head_b_full` folds the neighbour's own depth-integrated overburden in
-                        // (see `LATERAL_PRESSURE_SCALE`), symmetrically with `head_a` below, so the
-                        // driving term compares total column pressure rather than local fill alone.
-                        // `column_depth[nb_idx]` may be a tick stale if the neighbour's block ran
-                        // after this one, or hasn't run yet this tick — harmless, since (like
-                        // `GRAVITY_HEAD_SCALE`) it only ever feeds `driving`, never the mass limits.
-                        // `column_depth` itself is now computed for EVERY material in the
-                        // standalone pass near the top of this function (see that pass's doc
-                        // comment) -- a pure granular cell gets its own genuine overburden here,
-                        // not the `== 0` a stale comment used to claim.
-                        //
-                        // TASK #54 STEP 4: the depth term below is `janssen_effective_depth(...)`,
-                        // not raw `column_depth`, for BOTH endpoints -- see that function's doc
-                        // comment. Raw `column_depth` is a linear, unbounded, hydrostatic ramp:
-                        // the right physical model for liquid, and known-wrong for granular
-                        // material, whose vertical stress saturates with depth (Janssen) because
-                        // wall friction carries load that would otherwise keep accumulating
-                        // straight down. `k_of_liquidity` (below) still does the SEPARATE job of
-                        // discounting how much of that (now depth-shaped) overburden reads through
-                        // laterally at all -- a liquid is isotropic (K = 1, full transmission,
-                        // `LATERAL_EARTH_PRESSURE_K` untouched); a granular medium's grain contacts
-                        // and wall friction carry part of the load sideways too, hence K < 1. The
-                        // two mechanisms are independent: the Janssen transform shapes HOW the raw
-                        // overburden itself behaves with depth, `k_of_liquidity` then discounts HOW
-                        // MUCH of that (already-shaped) result pushes sideways. Both blended by each
-                        // cell's own liquidity, so a fully liquid cell is bit-identical to before
-                        // this step (`janssen_effective_depth` is the identity transform at
-                        // `liquidity == 1.0`, `k_of_liquidity` is exactly `1.0`).
-                        let liq_b = liquidity(cell_props.wetness[nb_idx]);
-                        let k_a = k_of_liquidity(cell_liquidity);
-                        let k_b = k_of_liquidity(liq_b);
-                        let depth_a = janssen_effective_depth(column_depth[center_idx], cell_liquidity);
-                        let depth_b = janssen_effective_depth(column_depth[nb_idx], liq_b);
-
-                        // TASK #55, gated (default OFF -- see `multiplicative_lateral_gate`):
-                        // `head_a`/`head_b_full` below are ADDITIVE (fill + independently-scaled
-                        // depth bonus). The gated alternative is MULTIPLICATIVE
-                        // (`mult_lateral_conveyance(depth) * grad(eta)`, see that function's doc
-                        // comment for the full reasoning) -- folded entirely into `head_a`, with
-                        // `head_b_full` left at `0.0`, so the single `driving = head_a - head_b`
-                        // read by `edge_sleeps` and `flux_edge_candidate` below is unaffected by
-                        // which branch produced it and neither of those two functions needs to
-                        // know this gate exists.
-                        let (cap_a_eff, cap_b_eff) = (cell_capacity, cap_b);
-
-                        let (head_a, head_b_full, tau_eff) = if head_field_active
-                            && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
-                            && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
-                        {
-                            // TASK #55 step 3, LIQUID ONLY: the driving head is the unified
-                            // hydraulic head field itself, in place of the local-fill-plus-
-                            // overburden approximation both branches below build by hand
-                            // (`h + k*LATERAL_PRESSURE_SCALE*depth`, additive, or the
-                            // `mult_lateral_conveyance` product, multiplicative) -- the field
-                            // already IS the physically correct unified head (elevation + Pascal-
-                            // transmitted pressure), which is exactly what those two branches were
-                            // each independently approximating. Do NOT also add
-                            // `k_a * LATERAL_PRESSURE_SCALE * depth_a` alongside it -- that is the
-                            // overburden term the field replaces, and adding both would
-                            // double-count it.
-                            //
-                            // Liquid-only, exactly the head field's own domain
-                            // restriction (`LIQUID_ELLIPTIC_THRESHOLD`): the field has no yield
-                            // criterion, so a granular pile at its angle of repose is a permanent
-                            // surface gradient that must produce ZERO flow -- see
-                            // `test_dry_sand_has_angle_of_repose`, run with this toggle forced ON,
-                            // as this restriction's own non-regression check.
-                            //
-                            // `gravity_dir.x * GRAVITY_HEAD_SCALE` and `dispersion` are kept
-                            // (unlike the overburden term, neither is part of what the field
-                            // models): the field's own `z` term only carries VERTICAL
-                            // (`-row * depth_scale`) gravitational potential, so a lateral gravity
-                            // component -- never exercised by the shipped app today, always
-                            // `gravity_dir.x == 0.0` -- would otherwise silently vanish; dispersion
-                            // is a per-tick stochastic perturbation orthogonal to the physics the
-                            // field computes and both other branches add it in exactly this spot.
-                            //
-                            // UNIT CONVERSION: `head_field` is in `task55_head_field`'s
-                            // reference-row units (`depth_scale = REFERENCE_GRID_HEIGHT / w`);
-                            // `head_a`/`head_b_full` must be in the SAME local-cell units
-                            // `h_a_frozen`/`cell_capacity` and `flux_edge_candidate`'s `c_sq`/`tau`
-                            // are calibrated against, so the FIELD SIDE is divided by `depth_scale`
-                            // to convert reference-row units down to local-cell units -- the
-                            // inverse of `recompute_column_depth`'s own local -> reference-row
-                            // multiplication, and the same conversion the vertical (phase 0) edge
-                            // site performs for the identical reason.
-                            // ...AND MULTIPLIED BY `GRAVITY_HEAD_SCALE` for the same reason the
-                            // vertical (phase 0) site does it: dividing by `depth_scale` alone
-                            // leaves the field in CELLS OF ELEVATION, 25x weaker than the
-                            // `gravity_dir.x * GRAVITY_HEAD_SCALE` term sitting right beside it
-                            // here and than the `else` branches drive the same geometry with. See
-                            // the vertical site's own comment for the measurement (a completely
-                            // frozen simulation, `total_flow = 0.0000`) that exposed the omission.
-                            let head_scale =
-                                GRAVITY_HEAD_SCALE / (REFERENCE_GRID_HEIGHT as f32 / w as f32);
-                            let head_a_field = head_field[center_idx] * head_scale
-                                + gravity_dir.x * GRAVITY_HEAD_SCALE
-                                + dispersion;
-                            let head_b_field = head_field[nb_idx] * head_scale;
-                            (head_a_field, head_b_field, tau)
-                        } else if multiplicative_lateral_gate::is_enabled() {
-                            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-                            let h_a_ref = h_a_frozen * depth_scale;
-                            let h_b_ref = h_b_frozen * depth_scale;
-                            let eta_a = h_a_ref + gravity_dir.x * GRAVITY_HEAD_SCALE
-                                + column_depth[center_idx];
-                            let eta_b = h_b_ref + column_depth[nb_idx];
-                            let conveyance_a =
-                                mult_lateral_conveyance(h_a_ref, column_depth[center_idx], k_a, cell_liquidity);
-                            let conveyance_b =
-                                mult_lateral_conveyance(h_b_ref, column_depth[nb_idx], k_b, liq_b);
-                            let conveyance = 0.5 * (conveyance_a + conveyance_b);
-                            let driving = MULT_LATERAL_SCALE * conveyance * (eta_a - eta_b) + dispersion;
-                            (driving, 0.0, tau)
-                        } else {
-                            (
-                                h_a_frozen + gravity_dir.x * GRAVITY_HEAD_SCALE
-                                    + k_a * LATERAL_PRESSURE_SCALE * depth_a + dispersion,
-                                h_b_frozen + k_b * LATERAL_PRESSURE_SCALE * depth_b,
-                                tau,
-                            )
-                        };
-
-                        // Stochastic locking (see `GRAVITY_LOCK_CHANCE`'s doc comment):
-                        // reproduces the CA's flat 0.05 `lock_chance` under gravity ("Low locking
-                        // under gravity so sand avalanches smoothly"), scaled by `granular_share`
-                        // so a fully liquid cell is never locked (matching its old behaviour of
-                        // never passing through this mechanism at all) and a fully granular cell
-                        // keeps the original flat rate. A locked edge is treated exactly like a
-                        // sleeping one below (zero flux, velocity cleared) rather than as stored,
-                        // undischarged momentum — matching the old CA, where a locked tick's
-                        // would-be transfer was simply skipped, not deferred.
-                        let lock_roll = ((seed ^ (nb_idx as u32).wrapping_mul(577)) & 0xFFFF) as f32 / 65535.0;
-                        let locked = lock_roll < GRAVITY_LOCK_CHANCE * granular_share;
-
-                        // Sleeping edge (see `edge_sleeps`), tested *before* the in-transit
-                        // computation below rather than after, because that computation is the
-                        // expensive part of this edge: two neighbour loads, a capacity lookup and
-                        // two edge-velocity reads per endpoint. A sleeping edge must not pay for a
-                        // donor limit whose only use is to be clamped to zero.
-                        //
-                        // Testing first means the predicate cannot see the in-transit reduction,
-                        // so it is handed `h_a` / `h_b` — an *upper* bound on `avail_a` / `avail_b`
-                        // (`in_transit >= 0`). Overstating `avail` can only suppress branch 1, so
-                        // this is sound; the edges it gives up on are cells that received mass from
-                        // above this tick, which are moving anyway and would not have slept for long.
-                        // The cases branch 1 exists for are untouched by the bound: a pooled
-                        // interior sleeps on `room_a == room_b == 0` and empty space on
-                        // `h_a == h_b == 0`, neither of which involves `in_transit` at all.
-                        //
-                        // The driving term passed here must be `head_a - head_b_full` — the exact
-                        // quantity `flux_edge` will compute internally below — or branch 2 could
-                        // sleep an edge the depth-pressure/dispersion terms would in fact have moved.
-                        if locked || edge_sleeps(
-                            head_a - head_b_full, tau_eff, edge_vel_h[center_idx],
-                            h_a, h_b, cap_a_eff - h_a, cap_b_eff - h_b,
-                        ) {
-                            if edge_vel_h[center_idx] != 0.0 {
-                                edge_vel_h[center_idx] = 0.0;
-                            }
-                        } else {
-                            let (liquid_c_sq, liquid_damping) = wave_params(wetness);
-                            let (c_sq, damping) = (liquid_c_sq, liquid_damping);
-                            // TASK #63: pressure-sensitive flow rate -- see the phase-0 vertical
-                            // site's own comment for the full reasoning (the flux and not `c_sq`;
-                            // donor and not average; free fall exempt by construction; the driving
-                            // head untouched).
-                            //
-                            // Note this limiter and `avail_a` below are independent and both
-                            // wanted. `avail_a` removes mass that is still in transit downward (a
-                            // falling parcel cannot push sideways at all); this scales how hard
-                            // RESTING material pushes, by the head it carries.
-                            let pressure_weight = if pressure_sensitive_flow
-                                && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
-                                && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
-                            {
-                                pressure_rate_factor(task55_head_field::rows_of_head_at(
-                                        center_idx, w, head_field,
-                                    ))
-                            } else {
-                                1.0
-                            };
-                            // Mass that arrived from upstream during phase 0 is still falling; it is
-                            // unsupported and cannot push sideways (see `flux_edge`'s `avail_*`).
-                            // `edge_vel_v[i - w]` is exactly the flux phase 0 realised on the
-                            // gravity-aligned edge feeding cell `i`, and `edge_vel_v[i]` the flux it
-                            // realised on the edge draining `i`.
-                            //
-                            // The inflow alone is the right limit for a free-falling parcel and the
-                            // wrong one for a supported parcel, and it used to be subtracted
-                            // unconditionally. A cell standing on a full column — or on the container
-                            // floor, or on casing — bears the hydrostatic head of everything in it and
-                            // must spread sideways at the normal rate however hard it is being fed
-                            // from above. Subtracting the inflow there re-suppressed the motion the
-                            // phase ordering already suppresses, and did so *permanently* under any
-                            // continuous feed: a cell under a running pour receives from above on
-                            // every single tick, so `avail_*` never recovered and lateral flow was
-                            // dead at every depth of the pour rather than only in its falling part.
-                            //
-                            // The limit is therefore not the inflow but the amount of that inflow
-                            // that can actually keep going down:
-                            //
-                            //     in_transit = min(inflow, outflow + room_below)
-                            //
-                            // `outflow` is what already left through the bottom this tick and
-                            // `room_below` is the free space still under the cell, so the second term
-                            // is everything the cell has any downstream route for. Inflow beyond it
-                            // landed on a column that cannot take it any further: it is at rest, and
-                            // it presses sideways like any other resting mass.
-                            //
-                            // The tempting simpler test — "is the cell below full?" — does not work
-                            // here, and it is worth recording why. A *saturated* falling stream passes
-                            // it at every interior cell: phase 0 sweeps bottom-to-top, so each stream
-                            // cell hands `f` downward and is refilled by `f` from above, leaving every
-                            // cell (hence every cell's below-neighbour) back at capacity by the time
-                            // phase 1 reads it. By height alone a saturated stream is
-                            // indistinguishable from a standing column; gating on height alone fanned
-                            // the stream from 8 cells wide to 16. The `outflow` term is what separates
-                            // them: the stream moved its whole content down, the pooled cell moved
-                            // nothing. And `room_below` is what keeps the *front* of a stream falling
-                            // — its edge momentum has not spun up, so it moves little downward on the
-                            // tick it appears, but the empty space beneath it is a route all the same.
-                            //
-                            // Every case in free fall reproduces the old value exactly (in the stream
-                            // interior `outflow = inflow` and `room_below = 0`; at the front
-                            // `room_below` is a whole cell), so this is a strict relaxation. Stage C
-                            // extends it from "liquid share only" to this whole edge (see this
-                            // block's opening comment) — the function itself was already
-                            // material-agnostic (`cell_capacity_for` handles the granular 1.5 cap
-                            // fine), it just was not reached for a pure granular cell before.
-                            //
-                            // (`in_transit` itself is defined above, alongside `column_depth`,
-                            // since that bookkeeping needs it for every liquid cell regardless of
-                            // whether this edge sleeps.)
-                            let avail_a = (h_a
-                                - in_transit_at(center_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask))
-                                .max(0.0);
-                            let avail_b = (h_b
-                                - in_transit_at(nb_idx, w, h, temp_heights, &heightmap.data, cell_props, edge_vel_v, shape_mask))
-                                .max(0.0);
-                            // COLLECT only — see the phase-loop buffer comment and
-                            // `flux_edge_candidate`'s doc comment. Under gravity this is the only
-                            // owned edge this cell has in phase 1 (its vertical edge belongs to
-                            // phase 0, already fully resolved), but it can still be the ACCEPTOR
-                            // of up to two live edges this phase — its own, run in reverse (if the
-                            // neighbour is higher), and its left neighbour's owned edge — which is
-                            // exactly the multi-edge case arbitration exists for.
-                            let (max_accept_fwd, max_accept_bwd) = ((cap_b - h_b).max(0.0), (cell_capacity - h_a).max(0.0));
-                            let candidate = flux_edge_candidate(
-                                head_a,
-                                head_b_full,
-                                // LATERAL-COARSE-CORRECTION.md: the lateral conveyance boost. This edge is horizontal
-                                // (`nb_idx == center_idx + 1`), so it is exactly the transport the coarse level has an
-                                // opinion about. Scaling `c_sq` raises how much this edge MAY move; every other term --
-                                // availability, acceptor headroom, the yield stress, the +/-1 clamp -- is untouched, so
-                                // the fine solver still decides whether and where anything actually moves.
-                                c_sq * lateral_boost, damping, tau_eff,
-                                avail_a, avail_b,
-                                max_accept_fwd, max_accept_bwd,
-                                pressure_weight,
-                                edge_vel_h[center_idx],
-                            );
-                            // `lateral_substeps`: pass 0 (`phase <= 1`) is bit-identical to before
-                            // this parameter existed -- the candidate is recorded and totalled
-                            // unweighted, exactly as always. An extra pass (`phase >= 2`) instead
-                            // weights the candidate by the DONOR's wetness before it is either
-                            // recorded (as the mass that will actually move) or totalled (as what
-                            // arbitration budgets against) -- see that parameter's doc comment for
-                            // the full reasoning, including why `edge_vel_h` must NOT see this
-                            // weight (handled at APPLY, in the `touched_h` loop below, via
-                            // `cand_h_unweighted`).
-                            if phase < 2 {
-                                cand_h[center_idx] = candidate;
-                                edge_h_active[center_idx] = true;
-                                touched_h.push(center_idx);
-                                cell_avail[center_idx] = avail_a;
-                                // Pure function of the cell, same contract and same fix as the
-                                // gravity-aligned pass above -- the lateral copy had the identical
-                                // per-edge write. It bites far less often here (a lateral neighbour
-                                // usually HAS mass, so the clobbering write is not zero) which is
-                                // precisely why the defect read as "sideways works, upward does not".
-                                cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
-                                cell_avail[nb_idx] = avail_b;
-                                cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
-                                // Cell-level band -- see the gravity-aligned pass. Reads `temp_heights`
-                                // rather than `heightmap.data` because this phase runs AFTER phase 0's
-                                // apply step, so the frozen snapshot for lateral edges is the
-                                // post-gravity state, not the tick's opening state.
-
-                                touched_cells.push(center_idx);
-                                touched_cells.push(nb_idx);
-                                // See the vertical-edge site above for why this is summed here
-                                // rather than in a second pass over the touched lists.
-                                {
-                                    accumulate_edge_totals(
-                                        candidate, center_idx, nb_idx,
-                                        &mut cell_out_total, &mut cell_in_total,
-                                        &cell_avail, &cell_freecap, &mut oversubscribed,
-                                    );
-                                }
-                            } else {
-                                // DONOR = the cell the flux leaves, i.e. the sign of the candidate
-                                // (never the average or the minimum). `s_donor = 1 +
-                                // (lateral_passes_this_tick - 1) * liquidity(donor)`, where
-                                // `lateral_passes_this_tick` (`M`) is this tick's stochastically
-                                // realised whole-number pass count (see the "STOCHASTIC
-                                // REALISATION" comment above the phase loop) -- NOT the raw dial
-                                // `lateral_substeps`. This pass (`k = phase - 1`) moves `clamp(s_donor
-                                // - k, 0, 1)` of the candidate. A dry donor has `liquidity == 0`
-                                // hence `s_donor == 1` hence `weight == 0` for every `k >= 1` --
-                                // exactly the early cheap-skip's bound, now evaluated exactly rather
-                                // than as the two-endpoint upper bound that check used.
-                                let donor_liquidity = if candidate >= 0.0 { cell_liquidity } else { liq_b };
-                                let k = (phase - 1) as f32;
-                                let weight = (1.0 + (lateral_passes_this_tick - 1.0) * donor_liquidity - k).clamp(0.0, 1.0);
-                                if weight > 0.0 {
-                                    let weighted = candidate * weight;
-                                    // Mass moved is the WEIGHTED candidate (`cand_h`, read back by
-                                    // both arbitration and the APPLY loop below as `raw` -- final
-                                    // mass flux is `weighted * arb_scale`). `cand_h_unweighted` keeps
-                                    // the UNWEIGHTED candidate so APPLY can still set `edge_vel_h` to
-                                    // `unweighted * arb_scale` -- the edge's momentum integrator must
-                                    // not see this pass's partial realisation as if it were the whole
-                                    // edge's throughput.
-                                    cand_h[center_idx] = weighted;
-                                    cand_h_unweighted[center_idx] = candidate;
-                                    edge_h_active[center_idx] = true;
-                                    touched_h.push(center_idx);
-                                    cell_avail[center_idx] = avail_a;
-                                    cell_freecap[center_idx] = (cap_a_eff - h_a).max(0.0);
-                                    cell_avail[nb_idx] = avail_b;
-                                    cell_freecap[nb_idx] = (cap_b_eff - h_b).max(0.0);
-                                    touched_cells.push(center_idx);
-                                    touched_cells.push(nb_idx);
-                                    accumulate_edge_totals(
-                                        weighted, center_idx, nb_idx,
-                                        &mut cell_out_total, &mut cell_in_total,
-                                        &cell_avail, &cell_freecap, &mut oversubscribed,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                        }
-                        x += 2;
-                    }
-                }
-            }
-        }
+        run_lateral_edge_pass(
+            w, h, cols, rows, block_size, phase, gravity_dir, time_seed, lateral_passes_this_tick,
+            head_field_active, pressure_sensitive_flow, shape_mask, column_depth, head_field,
+            &heightmap.data, temp_heights, cell_props, cell_colors, edge_vel_h, edge_vel_v,
+            &lateral_spans, &mut lateral_scratch_buf, &mut modified, &mut next_displacements,
+            &mut total_flow, &mut flow_occurred,
+        );
     }
 
 
@@ -6381,6 +6522,7 @@ pub fn settle_tick(
     scratch.touched_cells = touched_cells;
     scratch.g0_liquid_cells = g0_liquid_cells;
     solver_scratch::put(scratch);
+    lateral_scratch::put(lateral_scratch_buf);
 
     total_flow
 }
