@@ -16,7 +16,7 @@
 //!   5. `cell_count_<k>()` returns the denominator for ns/cell/pass.
 
 use crate::snapshot::{self, State};
-use crate::{kernel_a, kernel_b, kernel_r};
+use crate::{kernel_a, kernel_b, kernel_c, kernel_c8, kernel_d, kernel_r};
 use std::cell::RefCell;
 
 struct Loaded<S> {
@@ -29,6 +29,20 @@ thread_local! {
     static R: RefCell<Option<Loaded<kernel_r::Scratch>>> = RefCell::new(None);
     static A: RefCell<Option<Loaded<kernel_a::Scratch>>> = RefCell::new(None);
     static B: RefCell<Option<Loaded<kernel_b::Scratch>>> = RefCell::new(None);
+    // kernel_c8 reuses kernel_c's Scratch type verbatim (see kernel_c8.rs's module doc comment) --
+    // only run_pass differs.
+    static C: RefCell<Option<Loaded<kernel_c::Scratch>>> = RefCell::new(None);
+    static C8: RefCell<Option<Loaded<kernel_c::Scratch>>> = RefCell::new(None);
+    static D: RefCell<Option<Loaded<kernel_d::Scratch>>> = RefCell::new(None);
+    // A bare `State` (no scratch/no full Scratch::new) so `run_precompute_c` can be timed
+    // repeatedly from JS (bracketed with `performance.now()`, same as every `run_*` export) as
+    // its own isolated cost -- see kernel_c.rs's module doc comment point 2 on why this is
+    // reported separately from ns/cell/pass rather than folded into `init_c`.
+    static PRECOMPUTE_STATE: RefCell<Option<State>> = RefCell::new(None);
+    // Same idea for D's precompute, but it also needs the span list (it only visits span cells --
+    // see `kernel_d::precompute_head_static_d`), built once here so repeated timed calls don't pay
+    // `build_spans` too.
+    static PRECOMPUTE_STATE_D: RefCell<Option<(State, Vec<crate::row_span::Span>)>> = RefCell::new(None);
 }
 
 /// Allocates `len` bytes inside wasm linear memory and leaks them to the caller; paired with
@@ -73,6 +87,88 @@ pub unsafe extern "C" fn init_b(ptr: *mut u8, len: usize) {
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_c(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let state = snapshot::parse(&bytes);
+    let scratch = kernel_c::Scratch::new(&state);
+    C.with(|c| *c.borrow_mut() = Some(Loaded { bytes, state, scratch }));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_c8(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let state = snapshot::parse(&bytes);
+    let scratch = kernel_c::Scratch::new(&state);
+    C8.with(|c| *c.borrow_mut() = Some(Loaded { bytes, state, scratch }));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_d(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let state = snapshot::parse(&bytes);
+    let scratch = kernel_d::Scratch::new(&state);
+    D.with(|c| *c.borrow_mut() = Some(Loaded { bytes, state, scratch }));
+}
+
+/// Loads a bare `State` (no `Scratch`, so no precompute has happened yet) for
+/// `run_precompute_c` to repeatedly precompute FROM, isolating that one-time cost from
+/// `init_c`'s full `Scratch::new` (which also builds `row_span`'s spans and the noise table).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_precompute_c(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let state = snapshot::parse(&bytes);
+    PRECOMPUTE_STATE.with(|c| *c.borrow_mut() = Some(state));
+}
+
+/// Runs ONLY `kernel_c::precompute_head_static`, timed by bracketing this call with
+/// `performance.now()` from JS exactly like `run_r`/`run_a`/`run_b`/`run_c`. Returns the first
+/// output element so the whole computation cannot be dead-code-eliminated as an unused result.
+#[unsafe(no_mangle)]
+pub extern "C" fn run_precompute_c() -> f32 {
+    PRECOMPUTE_STATE.with(|c| {
+        let b = c.borrow();
+        let state = b.as_ref().expect("init_precompute_c not called");
+        let out = kernel_c::precompute_head_static(state);
+        out[0]
+    })
+}
+
+/// D's precompute analogue of `init_precompute_c`/`run_precompute_c`: loads a bare `State` plus
+/// its span list (no full `Scratch::new`), so `run_precompute_d` can be timed repeatedly in
+/// isolation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_precompute_d(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let state = snapshot::parse(&bytes);
+    let spans = crate::row_span::build_spans(&state);
+    PRECOMPUTE_STATE_D.with(|c| *c.borrow_mut() = Some((state, spans)));
+}
+
+/// Runs ONLY `kernel_d::precompute_head_static_d`, timed by bracketing this call with
+/// `performance.now()` from JS exactly like `run_precompute_c`. Returns the first output element
+/// so the computation cannot be dead-code-eliminated as unused.
+#[unsafe(no_mangle)]
+pub extern "C" fn run_precompute_d() -> f32 {
+    PRECOMPUTE_STATE_D.with(|c| {
+        let b = c.borrow();
+        let (state, spans) = b.as_ref().expect("init_precompute_d not called");
+        let out = kernel_d::precompute_head_static_d(state, spans);
+        out[0]
+    })
+}
+
+/// Denominator for `run_precompute_d`'s ns/cell cost: the number of cells the precompute actually
+/// visits (simulated cells + each span's acceptor column), NOT `w*h`.
+#[unsafe(no_mangle)]
+pub extern "C" fn precompute_cell_count_d() -> u32 {
+    PRECOMPUTE_STATE_D.with(|c| {
+        let b = c.borrow();
+        let (_, spans) = b.as_ref().expect("init_precompute_d not called");
+        kernel_d::precompute_cell_count(spans) as u32
+    })
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn run_r() -> f64 {
     R.with(|c| {
         let mut b = c.borrow_mut();
@@ -96,6 +192,83 @@ pub extern "C" fn run_b() -> f64 {
         let mut b = c.borrow_mut();
         let l = b.as_mut().expect("init_b not called");
         kernel_b::run_pass(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_c() -> f64 {
+    C.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_c not called");
+        kernel_c::run_pass(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_c8() -> f64 {
+    C8.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_c8 not called");
+        kernel_c8::run_pass(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_d() -> f64 {
+    D.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_d not called");
+        kernel_d::run_pass(&mut l.state, &mut l.scratch)
+    })
+}
+
+/// D's five stages, exposed individually so `bench_wasm.mjs` can bracket each with
+/// `performance.now()` in sequence -- together they are exactly one `run_d()` (see
+/// `kernel_d::run_pass`), so calling all five per iteration in order reproduces the same state
+/// evolution as `run_d` while attributing time per stage (task: "For wasm, split stages into
+/// `#[inline(never)]` functions and time them from JS").
+#[unsafe(no_mangle)]
+pub extern "C" fn run_d_copy_in() {
+    D.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_d not called");
+        kernel_d::run_copy_in(&l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_d_stage2() {
+    D.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_d not called");
+        kernel_d::run_stage2(&l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_d_stage3() -> f64 {
+    D.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_d not called");
+        kernel_d::run_stage3(&mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_d_stage45() {
+    D.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_d not called");
+        kernel_d::run_stage45(&mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_d_copy_out() {
+    D.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_d not called");
+        kernel_d::run_copy_out(&mut l.state, &l.scratch);
     })
 }
 
@@ -127,6 +300,33 @@ pub extern "C" fn reset_b() {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn reset_c() {
+    C.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_c not called");
+        l.state = snapshot::parse(&l.bytes);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reset_c8() {
+    C8.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_c8 not called");
+        l.state = snapshot::parse(&l.bytes);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reset_d() {
+    D.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_d not called");
+        l.state = snapshot::parse(&l.bytes);
+    });
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn cell_count_r() -> u32 {
     R.with(|c| kernel_r::simulated_cell_count(&c.borrow().as_ref().expect("init_r not called").state) as u32)
 }
@@ -139,4 +339,19 @@ pub extern "C" fn cell_count_a() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn cell_count_b() -> u32 {
     B.with(|c| kernel_b::simulated_cell_count(&c.borrow().as_ref().expect("init_b not called").scratch) as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cell_count_c() -> u32 {
+    C.with(|c| kernel_c::simulated_cell_count(&c.borrow().as_ref().expect("init_c not called").scratch) as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cell_count_c8() -> u32 {
+    C8.with(|c| kernel_c8::simulated_cell_count(&c.borrow().as_ref().expect("init_c8 not called").scratch) as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cell_count_d() -> u32 {
+    D.with(|c| kernel_d::simulated_cell_count(&c.borrow().as_ref().expect("init_d not called").scratch) as u32)
 }

@@ -59,11 +59,16 @@
 //! any cell with two live inflows in the same pass, which is exactly the "floating-point order and
 //! simultaneous mixing" divergence the task calls out as acceptable.
 
+pub mod bf_math;
 pub mod consts;
 pub mod kernel_a;
 pub mod kernel_b;
+pub mod kernel_c;
+pub mod kernel_c8;
+pub mod kernel_d;
 pub mod kernel_r;
 pub mod metrics;
+pub mod noise;
 pub mod row_span;
 pub mod scalar_math;
 pub mod snapshot;

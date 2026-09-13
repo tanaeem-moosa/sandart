@@ -5,7 +5,7 @@
 //! Usage: `cargo run -p sandart-kernel-bench --release --bin native_bench -- [snapshot_dir]`
 //! (defaults to this session's scratchpad, matching `dump_kernel_bench_snapshots`'s own default).
 
-use sandart_kernel_bench::{kernel_a, kernel_b, kernel_r, metrics, snapshot};
+use sandart_kernel_bench::{kernel_a, kernel_b, kernel_c, kernel_c8, kernel_d, metrics, kernel_r, snapshot};
 use std::time::Instant;
 
 fn read_file(path: &std::path::Path) -> Vec<u8> {
@@ -95,11 +95,42 @@ fn run_equivalence(label: &str, bytes: &[u8]) {
             kernel_b::run_pass(&mut b_state, &mut b_scratch);
         }
 
+        let mut c_state = snapshot::parse(bytes);
+        let mut c_scratch = kernel_c::Scratch::new(&c_state);
+        for _ in 0..passes {
+            kernel_c::run_pass(&mut c_state, &mut c_scratch);
+        }
+
+        let mut c8_state = snapshot::parse(bytes);
+        let mut c8_scratch = kernel_c::Scratch::new(&c8_state);
+        for _ in 0..passes {
+            kernel_c8::run_pass(&mut c8_state, &mut c8_scratch);
+        }
+
+        let mut d_state = snapshot::parse(bytes);
+        let mut d_scratch = kernel_d::Scratch::new(&d_state);
+        for _ in 0..passes {
+            kernel_d::run_pass(&mut d_state, &mut d_scratch);
+        }
+
         let rep_a = metrics::compare(&r_state, &a_state);
         let rep_b = metrics::compare(&r_state, &b_state);
+        let rep_c = metrics::compare(&r_state, &c_state);
+        let rep_c8 = metrics::compare(&r_state, &c8_state);
+        let rep_d = metrics::compare(&r_state, &d_state);
+        let rep_c_vs_a = metrics::compare(&a_state, &c_state);
+        let rep_d_vs_c = metrics::compare(&c_state, &d_state);
 
         println!("-- after {passes} pass(es) --");
-        for (name, rep) in [("A vs R", &rep_a), ("B vs R", &rep_b)] {
+        for (name, rep) in [
+            ("A vs R", &rep_a),
+            ("B vs R", &rep_b),
+            ("C vs R", &rep_c),
+            ("C8 vs R", &rep_c8),
+            ("D vs R", &rep_d),
+            ("C vs A", &rep_c_vs_a),
+            ("D vs C", &rep_d_vs_c),
+        ] {
             println!(
                 "  {name}: mass R={:.6} test={:.6} delta={:.3e} | max|dh|={:.3e} mean|dh|={:.3e} | \
                  max(h-cap) R={:.3e} test={:.3e} | max|dwet|={:.3e} mean|dwet|={:.3e} | mean|dcolor|={:.3e} | \
@@ -142,6 +173,95 @@ fn run_timing(label: &str, bytes: &[u8]) {
         let mut state = state0;
         let ns = median_ns_per_call(|| kernel_b::run_pass(&mut state, &mut scratch), 5, 51);
         println!("  B: {:.2} ns/pass, {:.2} ns/cell/pass ({cells} cells)", ns, ns / cells as f64);
+    }
+    {
+        // Precompute cost, isolated: `kernel_c::precompute_head_static` alone, called on a fresh
+        // parse each time (not fed back into a Scratch) -- the one-time, per-snapshot-load cost
+        // the report keeps separate from ns/cell/pass. See kernel_c.rs's module doc comment.
+        let state0 = snapshot::parse(bytes);
+        let n = state0.w * state0.h;
+        let ns = median_ns_per_call(|| kernel_c::precompute_head_static(&state0).len() as f64, 5, 51);
+        println!("  C precompute: {:.2} ns/call, {:.3} ns/cell ({n} cells)", ns, ns / n as f64);
+    }
+    {
+        let state0 = snapshot::parse(bytes);
+        let mut scratch = kernel_c::Scratch::new(&state0);
+        let cells = kernel_c::simulated_cell_count(&scratch);
+        let mut state = state0;
+        let ns = median_ns_per_call(|| kernel_c::run_pass(&mut state, &mut scratch), 5, 51);
+        println!("  C: {:.2} ns/pass, {:.2} ns/cell/pass ({cells} cells)", ns, ns / cells as f64);
+    }
+    {
+        let state0 = snapshot::parse(bytes);
+        let mut scratch = kernel_c::Scratch::new(&state0);
+        let cells = kernel_c8::simulated_cell_count(&scratch);
+        let mut state = state0;
+        let ns = median_ns_per_call(|| kernel_c8::run_pass(&mut state, &mut scratch), 5, 51);
+        println!("  C8: {:.2} ns/pass, {:.2} ns/cell/pass ({cells} cells)", ns, ns / cells as f64);
+    }
+    {
+        // D's precompute cost, isolated exactly like C's: fresh parse each call, not fed into a
+        // Scratch, denominator is the cells the precompute ACTUALLY visits (span cells), not w*h.
+        let state0 = snapshot::parse(bytes);
+        let spans = sandart_kernel_bench::row_span::build_spans(&state0);
+        let n = kernel_d::precompute_cell_count(&spans);
+        let ns = median_ns_per_call(|| kernel_d::precompute_head_static_d(&state0, &spans).len() as f64, 5, 51);
+        println!("  D precompute: {:.2} ns/call, {:.3} ns/cell ({n} simulated cells)", ns, ns / n.max(1) as f64);
+    }
+    {
+        let state0 = snapshot::parse(bytes);
+        let mut scratch = kernel_d::Scratch::new(&state0);
+        let cells = kernel_d::simulated_cell_count(&scratch);
+        let mut state = state0;
+        let ns = median_ns_per_call(|| kernel_d::run_pass(&mut state, &mut scratch), 5, 51);
+        println!("  D: {:.2} ns/pass, {:.2} ns/cell/pass ({cells} cells)", ns, ns / cells as f64);
+    }
+    {
+        // D's per-stage split, native `Instant` around each stage's own whole-pass runner (task:
+        // "time inside Rust via a cheap counter... Native `Instant` is fine"). Each sample re-runs
+        // ALL FIVE stages in sequence (so the state stays valid pass-over-pass, matching `run_d`'s
+        // own evolution) but only the named stage's own call is timed.
+        let state0 = snapshot::parse(bytes);
+        let mut scratch = kernel_d::Scratch::new(&state0);
+        let mut state = state0;
+        let warmup = 5usize;
+        let iters = 51usize;
+        let mut t_copy_in = Vec::with_capacity(iters);
+        let mut t_stage2 = Vec::with_capacity(iters);
+        let mut t_stage3 = Vec::with_capacity(iters);
+        let mut t_stage45 = Vec::with_capacity(iters);
+        let mut t_copy_out = Vec::with_capacity(iters);
+        for i in 0..warmup + iters {
+            let t0 = Instant::now();
+            kernel_d::run_copy_in(&state, &mut scratch);
+            let t1 = Instant::now();
+            kernel_d::run_stage2(&state, &mut scratch);
+            let t2 = Instant::now();
+            std::hint::black_box(kernel_d::run_stage3(&mut scratch));
+            let t3 = Instant::now();
+            kernel_d::run_stage45(&mut scratch);
+            let t4 = Instant::now();
+            kernel_d::run_copy_out(&mut state, &scratch);
+            let t5 = Instant::now();
+            if i >= warmup {
+                t_copy_in.push((t1 - t0).as_nanos() as f64);
+                t_stage2.push((t2 - t1).as_nanos() as f64);
+                t_stage3.push((t3 - t2).as_nanos() as f64);
+                t_stage45.push((t4 - t3).as_nanos() as f64);
+                t_copy_out.push((t5 - t4).as_nanos() as f64);
+            }
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let cells = kernel_d::simulated_cell_count(&scratch).max(1);
+        let (mi, m2, m3, m45, mo) = (median(&mut t_copy_in), median(&mut t_stage2), median(&mut t_stage3), median(&mut t_stage45), median(&mut t_copy_out));
+        let total = mi + m2 + m3 + m45 + mo;
+        println!("  D per-stage (median ns/pass, share of D's own stage total, ns/cell/pass):");
+        for (name, ns) in [("copy-in", mi), ("stage2", m2), ("stage3", m3), ("stage4+5", m45), ("copy-out", mo)] {
+            println!("    {name:10}: {ns:8.1} ns  ({:5.1}%)  {:.3} ns/cell/pass", 100.0 * ns / total, ns / cells as f64);
+        }
     }
 }
 
