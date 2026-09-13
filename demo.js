@@ -299,9 +299,12 @@ function tick(now) {
         statFps.innerText = `${frameCount}`;
         statFps.parentElement.title =
             `EMA ${emaMs.toFixed(1)} ms · target ${targetFps.toFixed(0)} fps · budget N ${budgetN}`;
-        statMs.innerText = avgTotalTime.toFixed(1);
+        // Always visible, not hover-only. "step" is state.step() (the simulation). "render" is the
+        // state.render() CALL: mostly CPU-side texture prep and upload queueing. The GPU executes
+        // asynchronously afterwards and is not included.
+        statMs.innerText = `${avgStepTime.toFixed(1)} · ${avgRenderTime.toFixed(1)}`;
         statMs.parentElement.title =
-            `CPU ${avgStepTime.toFixed(1)} ms · GPU ${avgRenderTime.toFixed(1)} ms`;
+            `step ${avgStepTime.toFixed(1)} ms · render call ${avgRenderTime.toFixed(1)} ms · total ${avgTotalTime.toFixed(1)} ms/frame`;
 
         const blockCounts = state.get_active_block_counts();
         const inactive = blockCounts[0];
