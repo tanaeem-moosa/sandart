@@ -107,6 +107,15 @@ pub struct Scratch {
     noise_r: Vec<f32>,
     noise_g: Vec<f32>,
     noise_b: Vec<f32>,
+
+    // ---- Hypothesis-3 experiment only (see `stage5_props_e2_copy_variant`): padded per-span
+    // copies of the 4 prop channel windows, D-style, tested against E2's real-row-window read to
+    // isolate whether locality (small reused buffer vs. a window into the whole-grid SoA row) is
+    // what makes E2's stage4+5 cost more than D's despite removing the AoS<->SoA copies.
+    prop_win0: Vec<f32>,
+    prop_win1: Vec<f32>,
+    prop_win2: Vec<f32>,
+    prop_win3: Vec<f32>,
 }
 
 impl Scratch {
@@ -173,6 +182,10 @@ impl Scratch {
             noise_r: vec![0.0; flat_len],
             noise_g: vec![0.0; flat_len],
             noise_b: vec![0.0; flat_len],
+            prop_win0: vec![0.0; pad_len],
+            prop_win1: vec![0.0; pad_len],
+            prop_win2: vec![0.0; pad_len],
+            prop_win3: vec![0.0; pad_len],
         }
     }
 }
@@ -478,6 +491,179 @@ pub(crate) fn stage5_props_e2<const RECIP: bool>(state: &mut StateE, scratch: &S
     }
 }
 
+/// Hypothesis-3 experiment: same math as `stage5_props_e2`, but each channel's window is first
+/// copied into a small, per-span-reused padded buffer (`scratch.prop_win{0..3}`, D's own scheme)
+/// before mixing, instead of mixing directly off a window into the real, whole-grid `state.prop[ch]`
+/// row. Isolates whether reading a small L1-resident buffer beats reading a window of a large
+/// array touched by many other spans this same pass -- never wired into `run_pass`; only reachable
+/// via `run_stage45_copy_variant`, a timing-only alternate path.
+#[inline(never)]
+pub(crate) fn stage5_props_e2_copy_variant<const RECIP: bool>(state: &mut StateE, scratch: &mut Scratch, span: Span, w: usize, n_data: usize, bp: usize, bf: usize) {
+    let row = span.y * w;
+    let x0 = span.x_start;
+    let lo = row + x0 - 1;
+    let hi = row + x0 + n_data + 1;
+    let n_win = hi - lo;
+    for (ch, dst) in [&mut scratch.prop_win0, &mut scratch.prop_win1, &mut scratch.prop_win2, &mut scratch.prop_win3].into_iter().enumerate() {
+        let src = &state.prop[ch][lo..hi];
+        dst[bp..bp + n_win].copy_from_slice(src);
+    }
+    let ff = bf..bf + n_data;
+    let pp = bp..bp + n_win;
+    for ch in 0..4 {
+        let window: &[f32] = match ch {
+            0 => &scratch.prop_win0[pp.clone()],
+            1 => &scratch.prop_win1[pp.clone()],
+            2 => &scratch.prop_win2[pp.clone()],
+            _ => &scratch.prop_win3[pp.clone()],
+        };
+        let out = &mut state.prop_b[ch][row + x0..row + x0 + n_data];
+        mix_prop_channel_e2::<RECIP>(window, &scratch.own_amount[ff.clone()], &scratch.left_amt[ff.clone()], &scratch.right_amt[ff.clone()], &scratch.safe_total[ff.clone()], &scratch.inv_total[ff.clone()], &scratch.has_amount[ff.clone()], n_data, out);
+    }
+}
+
+/// Kernel F (hypothesis-1 hybrid): the fixed chunk width tested for a cheap chunk-level "any flow
+/// in this chunk?" test before paying for the branch-free mixing math.
+/// Swept 8/32/64 (see the report): 8 was noise-dominated and sometimes SLOWER than E2 (per-chunk
+/// overhead -- the `.any()` scan, the small stack-array colour unpack, breaking one span-wide
+/// vectorisable loop into many tiny ones -- ate most of the skip's benefit, especially on the
+/// gradient scene where only ~7% of 8-cell chunks are entirely flow-free). 32 was the best of the
+/// three, a small (~1-5%) but consistent win on both scenes; 64 was no better than 32.
+const F_CHUNK: usize = 32;
+
+/// Kernel F, props: identical to `stage5_props_e2`'s math, restructured into `F_CHUNK`-cell
+/// chunks. When `has_amount` is `0.0` for EVERY cell in a chunk, `mix_prop_channel_e2` would write
+/// exactly `own_val` for every channel and cell in it (see `select`'s definition: the `computed`
+/// branch is never selected) -- so that case is replaced with a straight `copy_from_slice` of the
+/// frozen `state.prop[ch]` row into `state.prop_b[ch]`, skipping the mixed-value arithmetic
+/// entirely. A chunk with ANY flowing cell still runs the exact same branch-free math as E2, on a
+/// `len`-wide (<= `F_CHUNK`) window instead of the whole span -- same formula, smaller slice.
+#[inline(never)]
+pub(crate) fn stage5_props_e2_chunked<const RECIP: bool>(state: &mut StateE, scratch: &Scratch, span: Span, w: usize, n_data: usize, bf: usize) {
+    let row = span.y * w;
+    let x0 = span.x_start;
+    let mut i = 0;
+    while i < n_data {
+        let len = F_CHUNK.min(n_data - i);
+        let ff = bf + i..bf + i + len;
+        let any_flow = scratch.has_amount[ff.clone()].iter().any(|&a| a != 0.0);
+        let base = row + x0 + i;
+        if !any_flow {
+            for ch in 0..4 {
+                state.prop_b[ch][base..base + len].copy_from_slice(&state.prop[ch][base..base + len]);
+            }
+            i += len;
+            continue;
+        }
+        let lo = base - 1;
+        let hi = base + len + 1;
+        for ch in 0..4 {
+            let window = &state.prop[ch][lo..hi];
+            let out_vals = {
+                let mut tmp = [0.0f32; F_CHUNK];
+                mix_prop_channel_e2::<RECIP>(window, &scratch.own_amount[ff.clone()], &scratch.left_amt[ff.clone()], &scratch.right_amt[ff.clone()], &scratch.safe_total[ff.clone()], &scratch.inv_total[ff.clone()], &scratch.has_amount[ff.clone()], len, &mut tmp[..len]);
+                tmp
+            };
+            state.prop_b[ch][base..base + len].copy_from_slice(&out_vals[..len]);
+        }
+        i += len;
+    }
+}
+
+/// Kernel F, colours: same chunk-skip idea as `stage5_props_e2_chunked`, but colour needs its own
+/// small stack-allocated unpack (the packed-`u32` layout has no per-channel real array to window
+/// into at chunk granularity the way props does). Draws noise from the SAME whole-span
+/// `row_offset`/`slice` E2 uses (computed once, outside the chunk loop) so a flowing chunk
+/// consumes EXACTLY the same table entries at the same (cell, channel) position as E2 -- required
+/// for bit-identical output, not just "close".
+#[inline(never)]
+pub(crate) fn stage5_colours_e2_chunked<const RECIP: bool>(state: &mut StateE, scratch: &Scratch, span: Span, w: usize, n_data: usize, bf: usize) {
+    let row = span.y * w;
+    let x0 = span.x_start;
+    let off_col = scratch.noise.row_offset(span.y, SALT_COLOR, (n_data * 4).max(1));
+    let color_noise = scratch.noise.slice(off_col, n_data * 4);
+
+    let mut i = 0;
+    while i < n_data {
+        let len = F_CHUNK.min(n_data - i);
+        let ff = bf + i..bf + i + len;
+        let any_flow = scratch.has_amount[ff.clone()].iter().any(|&a| a != 0.0);
+        let base = row + x0 + i;
+        if !any_flow {
+            state.colors_b[base..base + len].copy_from_slice(&state.colors[base..base + len]);
+            i += len;
+            continue;
+        }
+        let lo = base - 1;
+        let win_len = len + 2;
+        let mut col_r = [0.0f32; F_CHUNK + 2];
+        let mut col_g = [0.0f32; F_CHUNK + 2];
+        let mut col_b = [0.0f32; F_CHUNK + 2];
+        for k in 0..win_len {
+            let c = state.colors[lo + k];
+            col_r[k] = (c & 0xFF) as f32;
+            col_g[k] = ((c >> 8) & 0xFF) as f32;
+            col_b[k] = ((c >> 16) & 0xFF) as f32;
+        }
+        let mut noise_r = [0.0f32; F_CHUNK];
+        let mut noise_g = [0.0f32; F_CHUNK];
+        let mut noise_b = [0.0f32; F_CHUNK];
+        let noise_slice = &color_noise[i * 4..(i + len) * 4];
+        for k in 0..len {
+            noise_r[k] = noise_slice[k * 4];
+            noise_g[k] = noise_slice[k * 4 + 1];
+            noise_b[k] = noise_slice[k * 4 + 2];
+        }
+        let mut new_r = [0u8; F_CHUNK];
+        let mut new_g = [0u8; F_CHUNK];
+        let mut new_b = [0u8; F_CHUNK];
+        mix_color_channel_e2::<RECIP>(&col_r[..win_len], &scratch.own_amount[ff.clone()], &scratch.left_amt[ff.clone()], &scratch.right_amt[ff.clone()], &scratch.safe_total[ff.clone()], &scratch.inv_total[ff.clone()], &scratch.has_amount[ff.clone()], &noise_r[..len], len, &mut new_r[..len]);
+        mix_color_channel_e2::<RECIP>(&col_g[..win_len], &scratch.own_amount[ff.clone()], &scratch.left_amt[ff.clone()], &scratch.right_amt[ff.clone()], &scratch.safe_total[ff.clone()], &scratch.inv_total[ff.clone()], &scratch.has_amount[ff.clone()], &noise_g[..len], len, &mut new_g[..len]);
+        mix_color_channel_e2::<RECIP>(&col_b[..win_len], &scratch.own_amount[ff.clone()], &scratch.left_amt[ff.clone()], &scratch.right_amt[ff.clone()], &scratch.safe_total[ff.clone()], &scratch.inv_total[ff.clone()], &scratch.has_amount[ff.clone()], &noise_b[..len], len, &mut new_b[..len]);
+        for k in 0..len {
+            let idx = base + k;
+            state.colors_b[idx] = (new_r[k] as u32) | ((new_g[k] as u32) << 8) | ((new_b[k] as u32) << 16) | (255u32 << 24);
+        }
+        i += len;
+    }
+}
+
+/// Kernel F's stage4+5: E2's own stage4 (realize/gather/amounts, unchanged -- every cell's
+/// `has_amount` flag must be computed before any chunk can be skipped, so there is nothing to
+/// skip there) followed by the two chunked mixing stages above.
+#[inline(never)]
+pub(crate) fn stage45_f(state: &mut StateE, scratch: &mut Scratch, span: Span, w: usize, n_data: usize, n_edges: usize, bp: usize, bf: usize) {
+    stage4_realized_e2(scratch, n_edges, bp);
+    stage4_gather_e2(scratch, n_data, bp, bf);
+    stage4_amounts_e2::<false>(state, scratch, span, w, n_data, bp, bf);
+    stage5_props_e2_chunked::<false>(state, scratch, span, w, n_data, bf);
+    stage5_colours_e2_chunked::<false>(state, scratch, span, w, n_data, bf);
+}
+
+pub fn run_stage45_f(state: &mut StateE, scratch: &mut Scratch) {
+    let w = state.w;
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_data = span.data_end() - span.x_start;
+        let n_edges = span.x_owned_end - span.x_start;
+        let bp = scratch.pad_off[si];
+        let bf = scratch.flat_off[si];
+        stage45_f(state, scratch, span, w, n_data, n_edges, bp, bf);
+    }
+}
+
+/// Kernel F, full pass: E2's stage1/2/3 (unchanged -- hypothesis 1's sparsity in the ARBITRATION
+/// stages is real too, but restructuring those safely was out of scope for this experiment; see
+/// the report) plus the chunked stage4+5 above.
+pub fn run_pass_f(state: &mut StateE, scratch: &mut Scratch) -> f64 {
+    run_stage1(state, scratch);
+    run_stage2(state, scratch);
+    let total_flow = run_stage3(state, scratch);
+    run_stage45_f(state, scratch);
+    kernel_e::run_swap(state);
+    total_flow
+}
+
 /// Colour, part 1: unpack r/g/b lane-wise from the frozen packed `u32` row into padded scratch
 /// (D's `col_r`/`col_g`/`col_b` fields) -- the one small, span-sized conversion the packed layout
 /// makes unavoidable (not a whole-grid copy). Ghost slots get real casing-cell bytes, same
@@ -565,6 +751,41 @@ pub(crate) fn stage45_e2_recip(state: &mut StateE, scratch: &mut Scratch, span: 
     stage5_colours_e2::<true>(state, scratch, span, w, n_data, bp, bf);
 }
 
+/// Hypothesis-3 experiment: `stage45_e2` with `stage5_props_e2_copy_variant` in place of
+/// `stage5_props_e2` -- everything else (stage4, colours) identical. Timing-only; never called by
+/// `run_pass`.
+#[inline(never)]
+pub(crate) fn stage45_e2_copy_variant(state: &mut StateE, scratch: &mut Scratch, span: Span, w: usize, n_data: usize, n_edges: usize, bp: usize, bf: usize) {
+    stage4_realized_e2(scratch, n_edges, bp);
+    stage4_gather_e2(scratch, n_data, bp, bf);
+    stage4_amounts_e2::<false>(state, scratch, span, w, n_data, bp, bf);
+    stage5_props_e2_copy_variant::<false>(state, scratch, span, w, n_data, bp, bf);
+    stage5_colours_e2::<false>(state, scratch, span, w, n_data, bp, bf);
+}
+
+pub fn run_stage45_copy_variant(state: &mut StateE, scratch: &mut Scratch) {
+    let w = state.w;
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_data = span.data_end() - span.x_start;
+        let n_edges = span.x_owned_end - span.x_start;
+        let bp = scratch.pad_off[si];
+        let bf = scratch.flat_off[si];
+        stage45_e2_copy_variant(state, scratch, span, w, n_data, n_edges, bp, bf);
+    }
+}
+
+/// Full pass using the copy-variant stage4+5, for equivalence checking against `run_pass` (must
+/// be bit-identical -- the copy is a pure data-movement change, same values, same math).
+pub fn run_pass_copy_variant(state: &mut StateE, scratch: &mut Scratch) -> f64 {
+    run_stage1(state, scratch);
+    run_stage2(state, scratch);
+    let total_flow = run_stage3(state, scratch);
+    run_stage45_copy_variant(state, scratch);
+    kernel_e::run_swap(state);
+    total_flow
+}
+
 pub fn run_stage1(state: &StateE, scratch: &mut Scratch) {
     let w = state.w;
     for si in 0..scratch.spans.len() {
@@ -599,6 +820,47 @@ pub fn run_stage3(state: &mut StateE, scratch: &mut Scratch) -> f64 {
     total
 }
 
+/// Hypothesis-3/4 diagnostic: `run_stage45`'s first three sub-steps only (realize/gather/amounts,
+/// no prop or colour mixing) -- timing-only, isolates how much of stage4+5's cost is the
+/// arithmetic BEFORE any per-channel mixing loop runs.
+pub fn run_stage4_only(state: &mut StateE, scratch: &mut Scratch) {
+    let w = state.w;
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_data = span.data_end() - span.x_start;
+        let n_edges = span.x_owned_end - span.x_start;
+        let bp = scratch.pad_off[si];
+        let bf = scratch.flat_off[si];
+        stage4_realized_e2(scratch, n_edges, bp);
+        stage4_gather_e2(scratch, n_data, bp, bf);
+        stage4_amounts_e2::<false>(state, scratch, span, w, n_data, bp, bf);
+    }
+}
+
+/// Hypothesis-3/4 diagnostic: the 4-prop-channel mixing loops alone (needs `run_stage4_only` to
+/// have already populated `own_amount`/`left_amt`/`right_amt`/`safe_total`/`has_amount`).
+pub fn run_stage5_props_only(state: &mut StateE, scratch: &mut Scratch) {
+    let w = state.w;
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_data = span.data_end() - span.x_start;
+        let bf = scratch.flat_off[si];
+        stage5_props_e2::<false>(state, scratch, span, w, n_data, bf);
+    }
+}
+
+/// Hypothesis-3/4 diagnostic: colour unpack + mix + repack alone (same precondition as above).
+pub fn run_stage5_colours_only(state: &mut StateE, scratch: &mut Scratch) {
+    let w = state.w;
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_data = span.data_end() - span.x_start;
+        let bp = scratch.pad_off[si];
+        let bf = scratch.flat_off[si];
+        stage5_colours_e2::<false>(state, scratch, span, w, n_data, bp, bf);
+    }
+}
+
 pub fn run_stage45(state: &mut StateE, scratch: &mut Scratch) {
     let w = state.w;
     for si in 0..scratch.spans.len() {
@@ -630,6 +892,95 @@ pub fn run_pass(state: &mut StateE, scratch: &mut Scratch) -> f64 {
     run_stage45(state, scratch);
     kernel_e::run_swap(state);
     total_flow
+}
+
+/// Hypothesis-1/2 diagnostic for E2: runs the real stage functions (so the counted values are
+/// exactly what `run_pass` computes), then reads the post-stage scratch/state to count sparsity
+/// and subnormals. Safe to call once on a fresh `Scratch`/`StateE` the way `run_pass` is; does not
+/// call `run_swap`, so it leaves `state`'s "next" buffers populated but does not commit them --
+/// call this INSTEAD of `run_pass` for a census, never in addition to it on the same state.
+pub fn census_pass(state: &mut StateE, scratch: &mut Scratch) -> crate::census::Census {
+    use crate::census::{is_subnormal, Census};
+    let mut census = Census::default();
+    let w = state.w;
+
+    run_stage1(state, scratch);
+
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_data = span.data_end() - span.x_start;
+        let bp = scratch.pad_off[si];
+        for i in 0..n_data {
+            let p = bp + i + 1;
+            if is_subnormal(scratch.head[p]) || is_subnormal(scratch.avail[p]) || is_subnormal(scratch.freecap[p]) {
+                census.subnormal_head_avail_freecap += 1;
+            }
+        }
+    }
+
+    run_stage2(state, scratch);
+
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_edges = span.x_owned_end - span.x_start;
+        let bp = scratch.pad_off[si];
+        for e in 0..n_edges {
+            let p = bp + e + 1;
+            let c = scratch.f[p];
+            census.edges_total += 1;
+            if c != 0.0 {
+                census.edges_nonzero_candidate += 1;
+                if is_subnormal(c) {
+                    census.subnormal_candidate += 1;
+                }
+            }
+        }
+    }
+
+    let _ = run_stage3(state, scratch);
+
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_edges = span.x_owned_end - span.x_start;
+        let row = span.y * w;
+        let x0 = span.x_start;
+        let bp = scratch.pad_off[si];
+        for e in 0..n_edges {
+            let idx = row + x0 + e;
+            let f = state.edge_vel_h[idx];
+            if f.abs() > MIN_FLUX {
+                census.edges_nonzero_final += 1;
+            }
+            if is_subnormal(f) {
+                census.subnormal_final += 1;
+            }
+            let p = bp + e + 1;
+            if is_subnormal(scratch.pos[p]) || is_subnormal(scratch.neg[p]) || is_subnormal(scratch.pos_jit[p]) || is_subnormal(scratch.neg_jit[p]) {
+                census.subnormal_pos_neg += 1;
+            }
+        }
+    }
+
+    run_stage45(state, scratch);
+
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_data = span.data_end() - span.x_start;
+        let bf = scratch.flat_off[si];
+        for i in 0..n_data {
+            census.cells_total += 1;
+            let o = scratch.out2[bf + i];
+            let inn = scratch.in2[bf + i];
+            if o != 0.0 || inn != 0.0 {
+                census.cells_with_flow += 1;
+            }
+            if is_subnormal(o) || is_subnormal(inn) || is_subnormal(scratch.own_amount[bf + i]) || is_subnormal(scratch.left_amt[bf + i]) || is_subnormal(scratch.right_amt[bf + i]) {
+                census.subnormal_mix_amounts += 1;
+            }
+        }
+    }
+
+    census
 }
 
 pub fn run_pass_recip(state: &mut StateE, scratch: &mut Scratch) -> f64 {

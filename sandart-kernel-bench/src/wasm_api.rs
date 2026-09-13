@@ -56,6 +56,9 @@ thread_local! {
     static E: RefCell<Option<LoadedE>> = RefCell::new(None);
     static E_RECIP: RefCell<Option<LoadedE>> = RefCell::new(None);
     static E2: RefCell<Option<LoadedE2>> = RefCell::new(None);
+    // Kernel F (hypothesis-1 hybrid, `kernel_e2::run_pass_f`) -- same state/scratch shape as E2,
+    // separate slot so timing F doesn't disturb E2's own loaded state.
+    static F: RefCell<Option<LoadedE2>> = RefCell::new(None);
     // A bare `State` (no scratch/no full Scratch::new) so `run_precompute_c` can be timed
     // repeatedly from JS (bracketed with `performance.now()`, same as every `run_*` export) as
     // its own isolated cost -- see kernel_c.rs's module doc comment point 2 on why this is
@@ -157,6 +160,39 @@ pub unsafe extern "C" fn init_e2(ptr: *mut u8, len: usize) {
     let state = kernel_e::StateE::from_state(&raw);
     let scratch = kernel_e2::Scratch::new(&state);
     E2.with(|c| *c.borrow_mut() = Some(LoadedE2 { bytes, state, scratch }));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_f(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let raw = snapshot::parse(&bytes);
+    let state = kernel_e::StateE::from_state(&raw);
+    let scratch = kernel_e2::Scratch::new(&state);
+    F.with(|c| *c.borrow_mut() = Some(LoadedE2 { bytes, state, scratch }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_f() -> f64 {
+    F.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_f not called");
+        kernel_e2::run_pass_f(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reset_f() {
+    F.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_f not called");
+        let raw = snapshot::parse(&l.bytes);
+        l.state = kernel_e::StateE::from_state(&raw);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cell_count_f() -> u32 {
+    F.with(|c| kernel_e2::simulated_cell_count(&c.borrow().as_ref().expect("init_f not called").scratch) as u32)
 }
 
 /// Loads a bare `State` (no `Scratch`, so no precompute has happened yet) for

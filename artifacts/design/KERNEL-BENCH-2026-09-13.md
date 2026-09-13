@@ -70,7 +70,7 @@ The vectorised kernels really do emit SIMD.
    - branch-free on per-channel scratch (D);
    - branch-free on the production SoA layout with no copies (E2).
    Removing the state copies (D -> E2) gained ~5% natively and nothing in wasm.
-3. **Hypothesis, not measured:** A keeps early-outs on zero candidates, and in these scenes most edges
+3. **CONFIRMED later the same day; see "Why E2 is slow" below. Original hypothesis:** A keeps early-outs on zero candidates, and in these scenes most edges
    are asleep, blocked or pooled. The branch-free kernels do the full arbitration and mixing work on
    every edge and cell. The flux field is sparse, and skipping is worth more than 4-lane SIMD on dense
    work. A per-stage count of nonzero candidates would test it.
@@ -79,3 +79,36 @@ The vectorised kernels really do emit SIMD.
 5. **If the lateral pass is rewritten, A's structure is the candidate, not E2's.** Rebench A on the SoA
    layout first; it was measured on the old interleaved layout. A changes behaviour (Jacobi mixing, and
    noise-table RNG if adopted), so it needs the full physics gate list.
+
+## Why E2 is slow (investigated 2026-09-13)
+
+Measured with `cargo run -p sandart-kernel-bench --release --bin census_bench` (re-run independently).
+Counts are within simulated spans.
+
+    scene      pass   edges w/ nonzero candidate   edges w/ final flux > MIN_FLUX   cells with any flow
+    water        1        5.5%                           4.7%                              5.5%
+    water      200       13.4%                          12.7%                             13.0%
+    gradient     1       23.2%                          22.6%                             28.1%
+    gradient   200       20.5%                          17.2%                             17.8%
+
+1. **Sparsity: CONFIRMED, dominant.** 72-95% of lateral edges and cells do no work on a given pass.
+   - A's `if c == 0.0 { continue }` and the no-flow skip in mixing avoid almost all of that work.
+   - D, E2 and F do full work on every cell. Colour unpack, mix and repack is the largest single
+     sub-stage.
+2. **Subnormal floats: REFUTED.** There are zero subnormals in any intermediate array, in both
+   scenes, at pass 1 and pass 200. Native FTZ+DAZ timing differences are noise.
+3. **Stage 4+5 locality: REFUTED.** Mixing from a small warm buffer instead of the whole-grid SoA
+   row makes no consistent difference. E2's larger stage-4+5 figure partly reflects stage boundaries:
+   D counts its colour unpack inside copy-in.
+4. **Kernel F** (E2 with a chunk-level skip in mixing) is bit-identical to E2.
+   - It gains 1-5% natively at chunk 32.
+   - It is 1.6-8.4% SLOWER in wasm.
+   - Retrofitting skips onto an unconditional vector kernel does not close the gap.
+
+**Implication.** The lateral pass is a SPARSE problem, so the lever is not doing work for inactive
+edges at all. SIMD width is not the lever.
+- A still computes per-cell stage-1 terms (`in_transit_at`, capacity, head) for every cell in every
+  simulated span, including the ~90% that turn out inactive.
+- An active-edge set, e.g. edges that moved last pass plus their neighbours, could skip that stage-1
+  work too.
+- It is untested, and it must not reintroduce the settled-block problems from the LOD history.

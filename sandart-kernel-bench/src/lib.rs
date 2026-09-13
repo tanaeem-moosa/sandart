@@ -60,6 +60,7 @@
 //! simultaneous mixing" divergence the task calls out as acceptable.
 
 pub mod bf_math;
+pub mod census;
 pub mod consts;
 pub mod kernel_a;
 pub mod kernel_b;

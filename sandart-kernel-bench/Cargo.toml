@@ -21,6 +21,26 @@ wide = "1.7.0"
 name = "native_bench"
 path = "src/bin/native_bench.rs"
 
+[[bin]]
+name = "census_bench"
+path = "src/bin/census_bench.rs"
+
+[[bin]]
+name = "ftz_daz_bench"
+path = "src/bin/ftz_daz_bench.rs"
+
+[[bin]]
+name = "copy_variant_bench"
+path = "src/bin/copy_variant_bench.rs"
+
+[[bin]]
+name = "stage45_breakdown_bench"
+path = "src/bin/stage45_breakdown_bench.rs"
+
+[[bin]]
+name = "kernel_f_bench"
+path = "src/bin/kernel_f_bench.rs"
+
 # This crate is a benchmarking harness, not shipped simulation code: keep it fast to iterate on
 # and easy to disassemble (no LTO stripping symbols, no panic=abort swallowing bugs). Does NOT
 # inherit the workspace's [profile.release] tuning by virtue of being a workspace member -- that
