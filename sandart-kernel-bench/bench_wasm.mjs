@@ -155,7 +155,7 @@ async function main() {
     // Fresh instance per snapshot per kernel: run_* mutates state in place across the timed
     // iterations (same choice as native_bench's timing loop -- see its module doc comment), and
     // a fresh instance avoids any cross-kernel/cross-snapshot memory-growth interaction.
-    for (const kernel of ["r", "a", "b", "c", "c8", "d", "e", "e_recip", "e2"]) {
+    for (const kernel of ["r", "a", "a_soa", "b", "c", "c8", "d", "e", "e_recip", "e2"]) {
       const instance = await loadInstance();
       loadSnapshotIntoWasm(instance, file, kernel);
       const { ns, cells, nsPerCell } = timeKernel(instance, kernel);

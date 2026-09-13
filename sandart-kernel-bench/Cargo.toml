@@ -41,6 +41,18 @@ path = "src/bin/stage45_breakdown_bench.rs"
 name = "kernel_f_bench"
 path = "src/bin/kernel_f_bench.rs"
 
+[[bin]]
+name = "sparsity_bench"
+path = "src/bin/sparsity_bench.rs"
+
+[[bin]]
+name = "a_soa_bench"
+path = "src/bin/a_soa_bench.rs"
+
+[[bin]]
+name = "packed_estimate_bench"
+path = "src/bin/packed_estimate_bench.rs"
+
 # This crate is a benchmarking harness, not shipped simulation code: keep it fast to iterate on
 # and easy to disassemble (no LTO stripping symbols, no panic=abort swallowing bugs). Does NOT
 # inherit the workspace's [profile.release] tuning by virtue of being a workspace member -- that

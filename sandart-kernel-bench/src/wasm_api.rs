@@ -16,7 +16,7 @@
 //!   5. `cell_count_<k>()` returns the denominator for ns/cell/pass.
 
 use crate::snapshot::{self, State};
-use crate::{kernel_a, kernel_b, kernel_c, kernel_c8, kernel_d, kernel_e, kernel_e2, kernel_r};
+use crate::{kernel_a, kernel_a_soa, kernel_b, kernel_c, kernel_c8, kernel_d, kernel_e, kernel_e2, kernel_r};
 use std::cell::RefCell;
 
 struct Loaded<S> {
@@ -44,6 +44,14 @@ struct LoadedE2 {
     scratch: kernel_e2::Scratch,
 }
 
+/// Task item 4: kernel A ported to `kernel_e::StateE` (production-style SoA, double-buffered) --
+/// same `Loaded<S>`-over-`StateE` shape as `LoadedE2`.
+struct LoadedASoa {
+    bytes: Vec<u8>,
+    state: kernel_e::StateE,
+    scratch: kernel_a_soa::Scratch,
+}
+
 thread_local! {
     static R: RefCell<Option<Loaded<kernel_r::Scratch>>> = RefCell::new(None);
     static A: RefCell<Option<Loaded<kernel_a::Scratch>>> = RefCell::new(None);
@@ -59,6 +67,7 @@ thread_local! {
     // Kernel F (hypothesis-1 hybrid, `kernel_e2::run_pass_f`) -- same state/scratch shape as E2,
     // separate slot so timing F doesn't disturb E2's own loaded state.
     static F: RefCell<Option<LoadedE2>> = RefCell::new(None);
+    static A_SOA: RefCell<Option<LoadedASoa>> = RefCell::new(None);
     // A bare `State` (no scratch/no full Scratch::new) so `run_precompute_c` can be timed
     // repeatedly from JS (bracketed with `performance.now()`, same as every `run_*` export) as
     // its own isolated cost -- see kernel_c.rs's module doc comment point 2 on why this is
@@ -193,6 +202,39 @@ pub extern "C" fn reset_f() {
 #[unsafe(no_mangle)]
 pub extern "C" fn cell_count_f() -> u32 {
     F.with(|c| kernel_e2::simulated_cell_count(&c.borrow().as_ref().expect("init_f not called").scratch) as u32)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_a_soa(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let raw = snapshot::parse(&bytes);
+    let state = kernel_e::StateE::from_state(&raw);
+    let scratch = kernel_a_soa::Scratch::new(&state);
+    A_SOA.with(|c| *c.borrow_mut() = Some(LoadedASoa { bytes, state, scratch }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_a_soa() -> f64 {
+    A_SOA.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_a_soa not called");
+        kernel_a_soa::run_pass(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reset_a_soa() {
+    A_SOA.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_a_soa not called");
+        let raw = snapshot::parse(&l.bytes);
+        l.state = kernel_e::StateE::from_state(&raw);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cell_count_a_soa() -> u32 {
+    A_SOA.with(|c| kernel_a_soa::simulated_cell_count(&c.borrow().as_ref().expect("init_a_soa not called").scratch) as u32)
 }
 
 /// Loads a bare `State` (no `Scratch`, so no precompute has happened yet) for

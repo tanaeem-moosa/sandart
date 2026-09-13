@@ -292,6 +292,261 @@ pub fn run_pass(state: &mut State, scratch: &mut Scratch) -> f64 {
     total_flow
 }
 
+/// Task item 1/2/3 diagnostic: per-span, per-edge/per-cell activity + predicate record, for chunk
+/// activity, predicate accuracy and run-length clustering. Same duplication convention as
+/// `census_pass` below (a SEPARATE traversal of `run_pass`'s exact math, real mutation of `state`,
+/// never called alongside `run_pass`/`census_pass` on the same state/pass).
+#[derive(Clone)]
+pub struct SpanActivity {
+    pub y: usize,
+    pub x_start: usize,
+    pub n_data: usize,
+    pub n_edges: usize,
+    /// Per-edge: pre-arbitration candidate flux nonzero.
+    pub edge_nonzero_candidate: Vec<bool>,
+    /// Per-edge: post-arbitration final flux magnitude > MIN_FLUX.
+    pub edge_nonzero_final: Vec<bool>,
+    /// Per-edge: `predicate::could_flow`'s verdict, evaluated with the SAME per-edge scalars the
+    /// real candidate computation used this pass (including whether the edge is even `edge_ok`).
+    pub edge_predicate: Vec<bool>,
+    /// Per-cell: any nonzero realised out-flow or in-flow this pass (same bar `run_pass`'s stage
+    /// 4+5 skip uses).
+    pub cell_has_flow: Vec<bool>,
+}
+
+pub fn activity_pass(state: &mut State, scratch: &mut Scratch) -> Vec<SpanActivity> {
+    let w = state.w;
+    let h_grid = state.h;
+    let time_seed = state.time_seed;
+    let mut out = Vec::with_capacity(scratch.spans.len());
+
+    let frozen_heights = state.heights.clone();
+    let frozen_props = state.cell_props.clone();
+    let frozen_colors = state.cell_colors.clone();
+
+    for si in 0..scratch.spans.len() {
+        let span = scratch.spans[si];
+        let n_data = span.data_end() - span.x_start;
+        let n_edges = span.x_owned_end - span.x_start;
+
+        for i in 0..n_data {
+            let x = span.x_start + i;
+            let idx = span.y * w + x;
+            let inside = state.shape_mask[idx] != MASK_OUTSIDE;
+            let hh = frozen_heights[idx];
+            let wetness = frozen_props[idx * 4 + PROP_WETNESS];
+            let liq = liquidity(wetness);
+            let cap = 1.5 * (1.0 - liq) + liq;
+            let avail = if inside {
+                (hh - in_transit_at(idx, w, h_grid, &frozen_heights, &frozen_props, &state.edge_vel_v, &state.shape_mask)).max(0.0)
+            } else {
+                0.0
+            };
+            scratch.h[i] = hh;
+            scratch.wetness[i] = wetness;
+            scratch.threshold[i] = frozen_props[idx * 4 + PROP_THRESHOLD];
+            scratch.liq[i] = liq;
+            scratch.cap[i] = cap;
+            scratch.avail[i] = avail;
+            scratch.freecap[i] = if inside { (cap - hh).max(0.0) } else { 0.0 };
+            let k = k_of_liquidity(liq);
+            let depth = janssen_effective_depth(state.column_depth[idx], liq);
+            scratch.head_base[i] = hh + k * LATERAL_PRESSURE_SCALE * depth;
+            scratch.granular_share[i] = 1.0 - liq;
+            scratch.active[i] = inside;
+        }
+
+        let mut edge_nonzero_candidate = vec![false; n_edges];
+        let mut edge_predicate = vec![false; n_edges];
+
+        for e in 0..n_edges {
+            let x = span.x_start + e;
+            let idx = span.y * w + x;
+            let nb_idx = idx + 1;
+            let edge_ok = scratch.active[e] && x + 1 < w && scratch.active[e + 1];
+            let tau = GRANULAR_TAU_SCALE * scratch.threshold[e] * scratch.granular_share[e];
+            let v_prev = state.edge_vel_h[idx];
+            edge_predicate[e] = edge_ok
+                && crate::predicate::could_flow(
+                    scratch.h[e], scratch.h[e + 1],
+                    scratch.freecap[e], scratch.freecap[e + 1],
+                    scratch.head_base[e], scratch.head_base[e + 1],
+                    tau, v_prev,
+                );
+            if !edge_ok {
+                scratch.candidate[e] = 0.0;
+                continue;
+            }
+            let seed = cell_seed(x, span.y, time_seed);
+            let dispersion = dispersion_roll(seed, nb_idx, tau);
+            let head_a = scratch.head_base[e] + dispersion;
+            let head_b_full = scratch.head_base[e + 1];
+            let driving = head_a - head_b_full;
+            let lock = lock_roll(seed, nb_idx) < GRAVITY_LOCK_CHANCE * scratch.granular_share[e];
+            let sleeps = edge_sleeps(
+                driving, tau, v_prev,
+                scratch.h[e], scratch.h[e + 1],
+                scratch.freecap[e], scratch.freecap[e + 1],
+            );
+            if lock || sleeps {
+                scratch.candidate[e] = 0.0;
+                state.edge_vel_h[idx] = 0.0;
+            } else {
+                let (c_sq, damping) = wave_params(scratch.wetness[e]);
+                scratch.candidate[e] = flux_edge_candidate(
+                    head_a, head_b_full, c_sq, damping, tau,
+                    scratch.avail[e], scratch.avail[e + 1],
+                    scratch.freecap[e + 1], scratch.freecap[e],
+                    1.0, v_prev,
+                );
+            }
+            edge_nonzero_candidate[e] = scratch.candidate[e] != 0.0;
+        }
+
+        for i in 0..n_data {
+            scratch.out_total[i] = 0.0;
+            scratch.in_total[i] = 0.0;
+            scratch.out_total_jit[i] = 0.0;
+            scratch.in_total_jit[i] = 0.0;
+        }
+        let mut oversubscribed = false;
+        for e in 0..n_edges {
+            let c = scratch.candidate[e];
+            if c == 0.0 {
+                continue;
+            }
+            let (donor, acceptor, mag) = if c >= 0.0 { (e, e + 1, c) } else { (e + 1, e, -c) };
+            scratch.out_total[donor] += mag;
+            scratch.in_total[acceptor] += mag;
+            oversubscribed |= scratch.out_total[donor] > scratch.avail[donor] || scratch.in_total[acceptor] > scratch.freecap[acceptor];
+        }
+        if oversubscribed {
+            for e in 0..n_edges {
+                let c = scratch.candidate[e];
+                if c == 0.0 {
+                    continue;
+                }
+                let x = span.x_start + e;
+                let idx = span.y * w + x;
+                let (donor_i, acceptor_i, mag) = if c >= 0.0 { (e, e + 1, c) } else { (e + 1, e, -c) };
+                let donor_idx = span.y * w + span.x_start + donor_i;
+                let jit = edge_share_jitter(&frozen_props, donor_idx, idx, EDGE_SALT_H.wrapping_add(PHASE), time_seed);
+                scratch.out_total_jit[donor_i] += mag * jit;
+                scratch.in_total_jit[acceptor_i] += mag * jit;
+            }
+        }
+
+        for i in 0..n_data {
+            scratch.total_out_flow[i] = 0.0;
+            scratch.total_in_flow[i] = 0.0;
+        }
+        let mut edge_nonzero_final = vec![false; n_edges];
+        for e in 0..n_edges {
+            let c = scratch.candidate[e];
+            if c == 0.0 {
+                continue;
+            }
+            let x = span.x_start + e;
+            let idx = span.y * w + x;
+            let (donor_i, acceptor_i, _mag) = if c >= 0.0 { (e, e + 1, c) } else { (e + 1, e, -c) };
+            let scale = if oversubscribed {
+                let donor_idx = span.y * w + span.x_start + donor_i;
+                let jit = edge_share_jitter(&frozen_props, donor_idx, idx, EDGE_SALT_H.wrapping_add(PHASE), time_seed);
+                edge_arbitration_scale(
+                    scratch.out_total[donor_i], scratch.out_total_jit[donor_i], scratch.avail[donor_i],
+                    scratch.in_total[acceptor_i], scratch.in_total_jit[acceptor_i], scratch.freecap[acceptor_i],
+                    jit,
+                )
+            } else {
+                1.0
+            };
+            let final_flux = c * scale;
+            scratch.candidate[e] = final_flux;
+            state.edge_vel_h[idx] = final_flux;
+            if final_flux.abs() > MIN_FLUX {
+                scratch.total_out_flow[donor_i] += final_flux.abs();
+                scratch.total_in_flow[acceptor_i] += final_flux.abs();
+                edge_nonzero_final[e] = true;
+            }
+        }
+
+        let mut cell_has_flow = vec![false; n_data];
+        for i in 0..n_data {
+            let x = span.x_start + i;
+            let idx = span.y * w + x;
+            let out_flow = scratch.total_out_flow[i];
+            let in_flow = scratch.total_in_flow[i];
+            if out_flow == 0.0 && in_flow == 0.0 {
+                continue;
+            }
+            cell_has_flow[i] = true;
+            let h_old = scratch.h[i];
+            let h_new = (h_old - out_flow + in_flow).max(0.0);
+            state.heights[idx] = h_new;
+            if in_flow <= 0.0 {
+                continue;
+            }
+            let kept = (h_old - out_flow).max(0.0);
+            let mut mixed_props = [0.0f32; 4];
+            let mut mixed_colors = [0.0f32; 4];
+            let mut add_source = |src_i: usize, amount: f32| {
+                let src_idx = span.y * w + span.x_start + src_i;
+                for ch in 0..4 {
+                    mixed_props[ch] += frozen_props[src_idx * 4 + ch] * amount;
+                    mixed_colors[ch] += frozen_colors[src_idx * 4 + ch] as f32 * amount;
+                }
+            };
+            if i > 0 {
+                let left_edge = i - 1;
+                let left_flux = scratch.candidate[left_edge];
+                if left_flux > MIN_FLUX {
+                    add_source(i - 1, left_flux);
+                }
+            }
+            if i < n_edges {
+                let right_flux = scratch.candidate[i];
+                if right_flux < -MIN_FLUX {
+                    add_source(i + 1, -right_flux);
+                }
+            }
+            for ch in 0..4 {
+                let own_amount = if h_new > 1e-6 { kept } else { 0.0 };
+                let total_amount = own_amount + in_flow;
+                let own_val = frozen_props[idx * 4 + ch];
+                let new_prop = if total_amount > 1e-6 {
+                    (own_val * own_amount + mixed_props[ch]) / total_amount
+                } else {
+                    own_val
+                };
+                state.cell_props[idx * 4 + ch] = new_prop;
+
+                let own_color = frozen_colors[idx * 4 + ch] as f32;
+                let new_color_f = if total_amount > 1e-6 {
+                    (own_color * own_amount + mixed_colors[ch]) / total_amount
+                } else {
+                    own_color
+                };
+                let entropy = (h_new.to_bits()) ^ (idx as u32).wrapping_mul(2_654_435_761) ^ (ch as u32).wrapping_mul(97);
+                state.cell_colors[idx * 4 + ch] = stochastic_round(new_color_f.clamp(0.0, 255.0), entropy);
+            }
+            state.cell_colors[idx * 4 + 3] = 255;
+        }
+
+        out.push(SpanActivity {
+            y: span.y,
+            x_start: span.x_start,
+            n_data,
+            n_edges,
+            edge_nonzero_candidate,
+            edge_nonzero_final,
+            edge_predicate,
+            cell_has_flow,
+        });
+    }
+
+    out
+}
+
 /// Hypothesis-1 diagnostic: `run_pass`'s exact math (never call both on the same `state`/`scratch`
 /// in one pass -- this is a SEPARATE traversal, not an instrumented `run_pass`), plus counts of
 /// how many edges/cells this scene actually gives A something to skip. See `census.rs`.
