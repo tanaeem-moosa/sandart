@@ -1390,17 +1390,32 @@ fn spec_draining_vessel_surface_dips(head_field_transport: bool) -> Result<(), S
         let far_x = s.left + 2;
         let mass_near_initial = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
         let mass_far_initial = column_mass(&sim.hm.data, w, far_x, s.fill_row, s.basin_floor);
+        // WINDOWED, not a single sample. The near-neck column's mass pulses tick to tick: a strict
+        // period-2 pulse of ~2 vs ~35-48 cells on the shipped path, and irregular 0..~28 with
+        // head_field_transport, identically before and after the array-form lateral pass
+        // (traced 2026-09-13, ticks 111-150, w=512). A dip read at ONE tick therefore measured
+        // which phase tick 150 landed on. The pre-array-form build read 0.00 at ticks 118/127/144
+        // and would have failed there. Averaging over the last DIP_WINDOW ticks measures what this
+        // spec is named for, whether the surface dips while draining, against the same `tol`.
+        // The pulse itself is guarded separately by `test_neck_pulse_does_not_grow`.
+        const DIP_WINDOW: usize = 50;
         let mut total_flow = 0.0f64;
-        for _ in 0..TICKS {
+        let mut dip_sum = 0.0f64;
+        for t in 0..TICKS {
             total_flow += sim.tick(Vec2::new(0.0, DYN_GRAVITY), head_field_transport) as f64;
+            if t + DIP_WINDOW >= TICKS {
+                let near = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+                let far = column_mass(&sim.hm.data, w, far_x, s.fill_row, s.basin_floor);
+                dip_sum += (far - near) as f64;
+            }
         }
         let mass_near_final = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
         let mass_far_final = column_mass(&sim.hm.data, w, far_x, s.fill_row, s.basin_floor);
-        let dip = mass_far_final - mass_near_final;
+        let dip = (dip_sum / DIP_WINDOW as f64) as f32;
         let tol = identity_tol(w);
         table.push_str(&format!(
             "w={w} head_field_transport={head_field_transport}: near(x={near_x}) {mass_near_initial:.4}->{mass_near_final:.4} \
-             far(x={far_x}) {mass_far_initial:.4}->{mass_far_final:.4} dip={dip:.5} cells tol={tol:.5} \
+             far(x={far_x}) {mass_far_initial:.4}->{mass_far_final:.4} mean_dip(last 50 ticks)={dip:.5} cells tol={tol:.5} \
              total_flow={total_flow:.2} neck=[{},{})\n",
             s.neck_left, s.neck_right
         ));
@@ -1810,6 +1825,58 @@ fn test_task55_dynamic_transport_spec_scoreboard() {
          never remove a pair to silence a regression the other way.\n\n\
          Full table:\n{report}"
     );
+}
+
+/// REGRESSION GUARD, not a spec: the near-neck column pulse must not GROW.
+///
+/// In `build_drain_scenario`, the column next to the neck swings in mass from tick to tick. On the
+/// shipped path (`head_field_transport=false`) it is a strict period-2 pulse, with the dip
+/// alternating ~2 and ~35-48 cells at w=512. It predates the array-form lateral pass: identical
+/// before and after it (traced 2026-09-13).
+///
+/// The user reviewed it and accepted it at the current level ("I am not concerned with oscillation
+/// at this level"). They asked for a test that fails if it gets worse. So this measures the mean
+/// absolute tick-to-tick change of that column's mass over the last `WINDOW` ticks, and asserts it
+/// stays within `GROWTH_ALLOWANCE` of the value measured when the guard was written.
+///
+/// If a change REDUCES the pulse, lower the baseline. Never raise it to silence a regression;
+/// that would re-accept a larger oscillation without the user seeing it.
+#[test]
+fn test_neck_pulse_does_not_grow() {
+    const TICKS: usize = 150;
+    const WINDOW: usize = 50;
+    const GROWTH_ALLOWANCE: f32 = 1.25;
+    // (w, mean |near(t) - near(t-1)| over the last WINDOW ticks), measured 2026-09-13 at eeefce7.
+    const BASELINE: [(usize, f32); 2] = [(64, 6.4508), (512, 37.8867)];
+    let mut report = String::new();
+    let mut fail = false;
+    for &(w, baseline) in &BASELINE {
+        let h = w;
+        let s = build_drain_scenario(w, h);
+        let cell_props = build_water_cell_props(w * h);
+        let mut sim = DynSim::new(w, h, s.mask.clone(), s.heights.clone(), cell_props);
+        let near_x = s.neck_left.saturating_sub(2).max(s.left);
+        let mut prev = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+        let mut pulse_sum = 0.0f64;
+        for t in 0..TICKS {
+            sim.tick(Vec2::new(0.0, DYN_GRAVITY), false);
+            let m = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+            if t + WINDOW >= TICKS {
+                pulse_sum += (m - prev).abs() as f64;
+            }
+            prev = m;
+        }
+        let pulse = (pulse_sum / WINDOW as f64) as f32;
+        let ceiling = baseline * GROWTH_ALLOWANCE;
+        report.push_str(&format!(
+            "w={w}: near-neck pulse {pulse:.4} cells/tick (baseline {baseline:.4}, ceiling {ceiling:.4})\n"
+        ));
+        if pulse > ceiling {
+            fail = true;
+        }
+    }
+    println!("{report}");
+    assert!(!fail, "near-neck tick-to-tick pulse grew past its accepted level:\n{report}");
 }
 
 // =================================================================================================

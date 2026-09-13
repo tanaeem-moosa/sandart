@@ -59,7 +59,7 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **98 passed / 5 failed on `main`**, and that is the current expected state:
+The library suite is **100 passed / 4 failed on `main`**, and that is the current expected state:
 
 - `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
   keep failing. See HANDOVER.md §1.
@@ -83,28 +83,17 @@ The library suite is **98 passed / 5 failed on `main`**, and that is the current
   has NOT been re-derived, so at `w=64, chambers=11, neck_width=0.06` the wall between adjacent
   necks opens and chambers merge. Hourglass and MultiNeckHourglass are unaffected. Do not "fix"
   this by reverting the axis.
-- `task55_head_spec::test_task55_dynamic_transport_spec_scoreboard`: **fifth failure since the
-  array-form lateral pass landed (2026-09-13), and only `spec_draining_vessel_surface_dips` with
-  `head_field_transport=true`**, a debug toggle the app does not use.
-  - The spec reads the surface dip at ONE tick (150).
-  - At w=512 that quantity swings between 0 and ~28 cells from tick to tick, in BOTH the old and
-    new solver (traced ticks 111-150).
-  - The old build read 0.99 at tick 150 but 0.00 at ticks 118, 127 and 144; the new build reads
-    0.016 at tick 150.
-  - So this is a sampling artefact over a PRE-EXISTING oscillation, not a regression.
-  - **The oscillation is NOT confined to the debug path.** With `head_field_transport=false` (the
-    shipped path) the same spec's dip is a strict PERIOD-2 pulse, ~2 cells on even ticks and 35-48
-    cells on odd ticks (ticks 111-150, w=512).
-  - That pulse is identical in the pre-array-form build and the new one, so it predates
-    eeefce7. The near-neck column's mass swings by ~40 cells every tick, i.e. lateral sloshing next
-    to the neck.
-  - It is plausibly the edge-level alternating mode HANDOVER.md §10 recorded when the velocity EMA
-    was removed (velocity parity 0.87), and may be the "drainage lines" seen above the necks.
-    Unconfirmed.
-  - The spec passes on the shipped path only because tick 150 is even.
-  - Pending decision: change the spec to measure over a window of ticks (do not loosen `tol`), AND
-    add a spec that fails on period-2 pulsing, so the oscillation stays visible rather than
-    averaged away.
+
+**The near-neck pulse is a known, ACCEPTED oscillation, guarded rather than failing (2026-09-13).**
+In `build_drain_scenario` the column next to the neck swings in mass from tick to tick.
+- On the shipped path it is a strict period-2 pulse: ~6.5 cells/tick at w=64, ~38 at w=512.
+- It predates the array-form lateral pass (eeefce7); traced identical before and after.
+- The user reviewed it and accepted it at this level.
+- `test_neck_pulse_does_not_grow` fails if it exceeds 1.25x that baseline. If a change REDUCES it,
+  lower the baseline. Never raise the baseline to silence a failure.
+- `spec_draining_vessel_surface_dips` used to read the dip at ONE tick, so it was measuring which
+  phase of the pulse tick 150 landed on. It failed with `head_field_transport=true` after eeefce7
+  for that reason alone. It now averages over the last 50 ticks against the unchanged `tol`.
 
 **`test_sandbox_wave_reach_is_budget_independent` was resolved on 2026-09-02, by fixing the test.**
 Its bit-identical-amplitude-across-budgets assertion was wrong in principle: `budget_n` exists to
