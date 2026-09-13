@@ -127,6 +127,183 @@ pub const PROP_THRESHOLD: usize = 1;
 pub const PROP_FLOW_RATE: usize = 2;
 pub const PROP_GRAIN_SIZE: usize = 3;
 
+/// Per-cell physics & render properties, one `Vec<f32>` per channel (structure-of-arrays)
+/// instead of the historical `[wetness, threshold, flow_rate, grain_size]`-interleaved
+/// `Vec<f32>`. Pure storage-layout change -- see `to_interleaved`/`copy_from_interleaved` for
+/// the historical layout, still used at the JS-facing `set_cell_props` boundary and by
+/// diagnostics/dumpers that hash or persist that exact byte order. Channel order (0..=3) still
+/// matches `PROP_WETNESS..PROP_GRAIN_SIZE`, so `get`/`set` stay a drop-in replacement for the old
+/// `props[i * 4 + PROP_X]` indexing wherever the channel is a runtime variable rather than a
+/// constant.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CellProps {
+    pub wetness: Vec<f32>,
+    pub threshold: Vec<f32>,
+    pub flow_rate: Vec<f32>,
+    pub grain_size: Vec<f32>,
+}
+
+impl CellProps {
+    pub fn new(len: usize) -> Self {
+        Self {
+            wetness: vec![0.0; len],
+            threshold: vec![0.0; len],
+            flow_rate: vec![0.0; len],
+            grain_size: vec![0.0; len],
+        }
+    }
+
+    /// All `len` cells set to the same four values -- the common case (a material preset
+    /// applied uniformly).
+    pub fn filled(len: usize, wetness: f32, threshold: f32, flow_rate: f32, grain_size: f32) -> Self {
+        Self {
+            wetness: vec![wetness; len],
+            threshold: vec![threshold; len],
+            flow_rate: vec![flow_rate; len],
+            grain_size: vec![grain_size; len],
+        }
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.wetness.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.wetness.is_empty()
+    }
+
+    /// Read channel `ch` (0=wetness, 1=threshold, 2=flow_rate, 3=grain_size) of cell `i`. For
+    /// call sites where the channel is a runtime variable rather than a `PROP_*` constant.
+    #[inline]
+    pub fn get(&self, i: usize, ch: usize) -> f32 {
+        match ch {
+            0 => self.wetness[i],
+            1 => self.threshold[i],
+            2 => self.flow_rate[i],
+            3 => self.grain_size[i],
+            _ => panic!("CellProps channel out of range: {ch}"),
+        }
+    }
+
+    #[inline]
+    pub fn set(&mut self, i: usize, ch: usize, v: f32) {
+        match ch {
+            0 => self.wetness[i] = v,
+            1 => self.threshold[i] = v,
+            2 => self.flow_rate[i] = v,
+            3 => self.grain_size[i] = v,
+            _ => panic!("CellProps channel out of range: {ch}"),
+        }
+    }
+
+    /// Copies all four channels of `src` onto `dst`, in the same wetness/threshold/flow_rate/
+    /// grain_size order the old `for ch in 0..4 { props[dst*4+ch] = props[src*4+ch] }` used.
+    #[inline]
+    pub fn copy_cell(&mut self, dst: usize, src: usize) {
+        self.wetness[dst] = self.wetness[src];
+        self.threshold[dst] = self.threshold[src];
+        self.flow_rate[dst] = self.flow_rate[src];
+        self.grain_size[dst] = self.grain_size[src];
+    }
+
+    #[inline]
+    pub fn swap_cell(&mut self, a: usize, b: usize) {
+        self.wetness.swap(a, b);
+        self.threshold.swap(a, b);
+        self.flow_rate.swap(a, b);
+        self.grain_size.swap(a, b);
+    }
+
+    /// The historical interleaved `[wetness, threshold, flow_rate, grain_size] * len` layout,
+    /// for the JS-facing boundary and any diagnostic that hashes/dumps that exact byte order.
+    pub fn to_interleaved(&self) -> Vec<f32> {
+        let n = self.len();
+        let mut out = vec![0.0f32; n * 4];
+        for i in 0..n {
+            out[i * 4] = self.wetness[i];
+            out[i * 4 + 1] = self.threshold[i];
+            out[i * 4 + 2] = self.flow_rate[i];
+            out[i * 4 + 3] = self.grain_size[i];
+        }
+        out
+    }
+
+    /// Copies from the historical interleaved layout, reproducing the old
+    /// `self.cell_props[..len].copy_from_slice(&data[..len])` boundary semantics exactly --
+    /// including a partial final cell when `data.len()` is not a multiple of 4.
+    pub fn copy_from_interleaved(&mut self, data: &[f32]) {
+        let total_len = self.len() * 4;
+        let len = total_len.min(data.len());
+        for flat in 0..len {
+            self.set(flat / 4, flat % 4, data[flat]);
+        }
+    }
+
+    pub fn from_interleaved(data: &[f32]) -> Self {
+        let mut out = Self::new(data.len() / 4);
+        out.copy_from_interleaved(data);
+        out
+    }
+}
+
+/// Packs one cell's RGBA bytes into a single `u32`, little-endian byte order `[r, g, b, a]` --
+/// i.e. `bytemuck::cast_slice::<u32, u8>` on a whole `Vec<u32>` of these reproduces exactly the
+/// historical RGBA-interleaved `Vec<u8>` layout on the little-endian targets this project ships
+/// to (wasm32 and x86_64).
+#[inline]
+pub fn pack_rgba(r: u8, g: u8, b: u8, a: u8) -> u32 {
+    r as u32 | (g as u32) << 8 | (b as u32) << 16 | (a as u32) << 24
+}
+
+#[inline]
+pub fn unpack_rgba(c: u32) -> (u8, u8, u8, u8) {
+    (c as u8, (c >> 8) as u8, (c >> 16) as u8, (c >> 24) as u8)
+}
+
+/// Read one byte channel (0=r, 1=g, 2=b, 3=a) out of a packed cell color.
+#[inline]
+pub fn color_channel(c: u32, ch: usize) -> u8 {
+    (c >> (ch * 8)) as u8
+}
+
+/// Returns `c` with byte channel `ch` (0=r, 1=g, 2=b, 3=a) replaced by `v`, other channels
+/// untouched -- a read-modify-write for call sites that used to write one interleaved byte at a
+/// time.
+#[inline]
+pub fn set_color_channel(c: u32, ch: usize, v: u8) -> u32 {
+    let shift = ch * 8;
+    (c & !(0xFFu32 << shift)) | ((v as u32) << shift)
+}
+
+/// Overwrites packed colors from the historical RGBA-interleaved `u8` layout, reproducing the
+/// old `self.cell_colors[..len].copy_from_slice(&data[..len])` boundary semantics exactly --
+/// including a partial final cell when `data.len()` is not a multiple of 4.
+pub fn colors_from_interleaved(dst: &mut [u32], data: &[u8]) {
+    let total_len = dst.len() * 4;
+    let len = total_len.min(data.len());
+    for flat in 0..len {
+        let i = flat / 4;
+        let ch = flat % 4;
+        dst[i] = set_color_channel(dst[i], ch, data[flat]);
+    }
+}
+
+/// The historical RGBA-interleaved `u8` layout, for diagnostics/dumpers that hash or persist
+/// that exact byte order.
+pub fn colors_to_interleaved(src: &[u32]) -> Vec<u8> {
+    let mut out = vec![0u8; src.len() * 4];
+    for (i, &c) in src.iter().enumerate() {
+        let (r, g, b, a) = unpack_rgba(c);
+        out[i * 4] = r;
+        out[i * 4 + 1] = g;
+        out[i * 4 + 2] = b;
+        out[i * 4 + 3] = a;
+    }
+    out
+}
+
 /// How often (in ticks) the quantile-line overlay pays a full `O(width*height)` row-mass
 /// recompute, independent of `active_blocks`. See the call site in `update` for why this is
 /// necessary in addition to the cheap every-5-tick `refresh_quantiles_partial` path: that path
@@ -361,10 +538,10 @@ pub struct DrawingSimulation {
     /// `physics::advect_properties` blends in f32 internally and rounds back to `u8`
     /// *stochastically*, which is what keeps sub-LSB increments from being systematically
     /// discarded; see `physics::stochastic_round`.
-    pub cell_colors: Vec<u8>,
-    /// Per-cell physics & render properties. Advected with height.
-    /// Layout: [wetness, threshold, flow_rate, grain_size] interleaved.
-    pub cell_props: Vec<f32>,
+    pub cell_colors: Vec<u32>,
+    /// Per-cell physics & render properties. Advected with height. Structure-of-arrays: see
+    /// `CellProps`.
+    pub cell_props: CellProps,
     /// Current position of the primary marble (backward compatibility).
     pub marble_pos: Vec2,
     /// Previous position of the primary marble (backward compatibility).
@@ -769,21 +946,9 @@ impl DrawingSimulation {
         let edge_vel_v = vec![0.0f32; grid_size * grid_size];
         let column_depth = vec![0.0f32; grid_size * grid_size];
         let head_field = vec![0.0f32; grid_size * grid_size];
-        let mut cell_colors = vec![0u8; grid_size * grid_size * 4];
-        for chunk in cell_colors.chunks_exact_mut(4) {
-            chunk[0] = 210;
-            chunk[1] = 180;
-            chunk[2] = 140;
-            chunk[3] = 255;
-        }
-        let mut cell_props = vec![0.0f32; grid_size * grid_size * 4];
+        let cell_colors = vec![pack_rgba(210, 180, 140, 255); grid_size * grid_size];
         // Initialize with default DrySand preset
-        for chunk in cell_props.chunks_exact_mut(4) {
-            chunk[PROP_WETNESS] = 0.00;
-            chunk[PROP_THRESHOLD] = 0.08;
-            chunk[PROP_FLOW_RATE] = 0.25;
-            chunk[PROP_GRAIN_SIZE] = 0.45;
-        }
+        let cell_props = CellProps::filled(grid_size * grid_size, 0.00, 0.08, 0.25, 0.45);
 
         // See the doc comment above: this scales with grid_size so the block-count (and
         // therefore the meaning of budget_n, and the heat-map overlay's fixed-size texture
@@ -1076,12 +1241,8 @@ impl DrawingSimulation {
                 // (edge momentum is not mirrored here — it is cleared after the loop)
                 self.sliding.swap(i1, i2);
 
-                for ch in 0..4 {
-                    self.cell_colors.swap(i1 * 4 + ch, i2 * 4 + ch);
-                }
-                for ch in 0..4 {
-                    self.cell_props.swap(i1 * 4 + ch, i2 * 4 + ch);
-                }
+                self.cell_colors.swap(i1, i2);
+                self.cell_props.swap_cell(i1, i2);
             }
         }
 
@@ -1181,25 +1342,25 @@ impl DrawingSimulation {
     /// Apply a preset to the per-cell properties buffer.
     pub fn apply_preset(&mut self, mode: MaterialMode) {
         let (wetness, threshold, flow_rate, grain_size) = mode.preset_props();
-        for chunk in self.cell_props.chunks_exact_mut(4) {
-            chunk[PROP_WETNESS] = wetness;
-            chunk[PROP_THRESHOLD] = threshold;
-            chunk[PROP_FLOW_RATE] = flow_rate;
-            chunk[PROP_GRAIN_SIZE] = grain_size;
-        }
+        self.cell_props.wetness.fill(wetness);
+        self.cell_props.threshold.fill(threshold);
+        self.cell_props.flow_rate.fill(flow_rate);
+        self.cell_props.grain_size.fill(grain_size);
         self.material_mode = mode;
     }
 
-    /// Copy color patterns into CPU color buffer
+    /// Copy color patterns into CPU color buffer. `rgba_data` stays RGBA-interleaved -- the
+    /// JS-facing contract is unchanged; it is converted to the packed-`u32` storage at this
+    /// boundary.
     pub fn set_cell_colors(&mut self, rgba_data: &[u8]) {
-        let len = self.cell_colors.len().min(rgba_data.len());
-        self.cell_colors[..len].copy_from_slice(&rgba_data[..len]);
+        colors_from_interleaved(&mut self.cell_colors, rgba_data);
     }
 
-    /// Copy per-cell properties from a custom buffer
+    /// Copy per-cell properties from a custom buffer. `props_data` stays
+    /// [wetness, threshold, flow_rate, grain_size]-interleaved -- the JS-facing contract is
+    /// unchanged; it is converted to the structure-of-arrays storage at this boundary.
     pub fn set_cell_props(&mut self, props_data: &[f32]) {
-        let len = self.cell_props.len().min(props_data.len());
-        self.cell_props[..len].copy_from_slice(&props_data[..len]);
+        self.cell_props.copy_from_interleaved(props_data);
     }
 
     /// Convert normalized Cartesian coordinates ([-1.0, 1.0]) to grid index coordinates.
@@ -1874,8 +2035,8 @@ mod tests {
             let mut red_mass = 0.0f64;
             let mut green_mass = 0.0f64;
             for (idx, &h) in s.heightmap.data.iter().enumerate() {
-                let r = s.cell_colors[idx * 4 + 0] as f64;
-                let g = s.cell_colors[idx * 4 + 1] as f64;
+                let r = color_channel(s.cell_colors[idx], 0) as f64;
+                let g = color_channel(s.cell_colors[idx], 1) as f64;
                 red_mass += r * h as f64;
                 green_mass += g * h as f64;
             }
@@ -1932,8 +2093,8 @@ mod tests {
             let mut red_mass = 0.0f64;
             let mut green_mass = 0.0f64;
             for (idx, &h) in s.heightmap.data.iter().enumerate() {
-                let r = s.cell_colors[idx * 4 + 0] as f64;
-                let g = s.cell_colors[idx * 4 + 1] as f64;
+                let r = color_channel(s.cell_colors[idx], 0) as f64;
+                let g = color_channel(s.cell_colors[idx], 1) as f64;
                 red_mass += r * h as f64;
                 green_mass += g * h as f64;
             }

@@ -33,12 +33,19 @@ fn checksum(sim: &DrawingSimulation) -> u64 {
     }
     let mut hash: u64 = 0xcbf29ce484222325;
     hash = fnv1a(bytemuck_cast_f32(&sim.heightmap.data), hash);
-    hash = fnv1a(&sim.cell_colors, hash);
-    hash = fnv1a(bytemuck_cast_f32(&sim.cell_props), hash);
+    hash = fnv1a(bytemuck_cast_u32(&sim.cell_colors), hash);
+    hash = fnv1a(bytemuck_cast_f32(&sim.cell_props.to_interleaved()), hash);
     hash
 }
 
 fn bytemuck_cast_f32(data: &[f32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
+}
+
+// Tiny local stand-in for `bytemuck::cast_slice` over the packed-u32 color buffer, same
+// rationale as `bytemuck_cast_f32` above (u32 has no padding/alignment surprises worth
+// guarding against here either).
+fn bytemuck_cast_u32(data: &[u32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
 }
 

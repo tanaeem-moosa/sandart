@@ -1006,15 +1006,19 @@ impl WasmSimulationState {
         if self.full_upload_needed {
             let mut interleaved = vec![0.0f32; grid_size * grid_size * 4];
             for i in 0..grid_size * grid_size {
-                let wetness = self.sim.cell_props[i * 4 + sandart_sim::PROP_WETNESS];
+                let wetness = self.sim.cell_props.wetness[i];
                 let cap = sandart_sim::physics::cell_capacity_for(wetness);
                 interleaved[i * 4 + 0] = self.sim.heightmap.data[i].min(cap);
                 interleaved[i * 4 + 1] = wetness;
-                interleaved[i * 4 + 2] = self.sim.cell_props[i * 4 + sandart_sim::PROP_GRAIN_SIZE];
+                interleaved[i * 4 + 2] = self.sim.cell_props.grain_size[i];
                 interleaved[i * 4 + 3] = 1.0;
             }
             self.renderer.update_heightmap(&self.queue, &interleaved);
-            self.renderer.update_colormap(&self.queue, &self.sim.cell_colors);
+            // `cell_colors` is one packed `u32` (`r | g<<8 | b<<16 | a<<24`) per cell; on the
+            // little-endian targets this ships to (wasm32, x86_64) that is byte-for-byte the
+            // same RGBA-interleaved layout `update_colormap` expects, so this is a reinterpret,
+            // not a copy/interleave step.
+            self.renderer.update_colormap(&self.queue, bytemuck::cast_slice::<u32, u8>(&self.sim.cell_colors));
             self.full_upload_needed = false;
             // Anything that forces a full heightmap re-upload -- reset, resolution change, shape
             // change, material change -- has also invalidated whatever the pressure overlay last
@@ -1045,11 +1049,11 @@ impl WasmSimulationState {
                     for x in bounds.min_x..=bounds.max_x {
                         let src_idx = src_row_offset + x;
                         let dest_idx = dest_row_offset + (x - bounds.min_x);
-                        let wetness = self.sim.cell_props[src_idx * 4 + sandart_sim::PROP_WETNESS];
+                        let wetness = self.sim.cell_props.wetness[src_idx];
                         let cap = sandart_sim::physics::cell_capacity_for(wetness);
                         interleaved[dest_idx * 4 + 0] = self.sim.heightmap.data[src_idx].min(cap);
                         interleaved[dest_idx * 4 + 1] = wetness;
-                        interleaved[dest_idx * 4 + 2] = self.sim.cell_props[src_idx * 4 + sandart_sim::PROP_GRAIN_SIZE];
+                        interleaved[dest_idx * 4 + 2] = self.sim.cell_props.grain_size[src_idx];
                         interleaved[dest_idx * 4 + 3] = 1.0;
                     }
                 }
@@ -1059,18 +1063,18 @@ impl WasmSimulationState {
                     render_bounds,
                 );
 
-                let mut colormap_sub = vec![0u8; sub_width * sub_height * 4];
+                let mut colormap_sub = vec![0u32; sub_width * sub_height];
                 for y in bounds.min_y..=bounds.max_y {
-                    let src_row_offset = y * grid_size * 4;
-                    let dest_row_offset = (y - bounds.min_y) * sub_width * 4;
-                    let bytes_to_copy = sub_width * 4;
-                    colormap_sub[dest_row_offset..(dest_row_offset + bytes_to_copy)].copy_from_slice(
-                        &self.sim.cell_colors[src_row_offset + bounds.min_x * 4..src_row_offset + (bounds.max_x + 1) * 4]
+                    let src_row_offset = y * grid_size;
+                    let dest_row_offset = (y - bounds.min_y) * sub_width;
+                    colormap_sub[dest_row_offset..(dest_row_offset + sub_width)].copy_from_slice(
+                        &self.sim.cell_colors[src_row_offset + bounds.min_x..src_row_offset + bounds.max_x + 1]
                     );
                 }
+                // Same reinterpret as the full-upload path above -- no interleave/copy step.
                 self.renderer.update_colormap_partial(
                     &self.queue,
-                    &colormap_sub,
+                    bytemuck::cast_slice::<u32, u8>(&colormap_sub),
                     render_bounds,
                 );
             }

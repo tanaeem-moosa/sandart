@@ -207,7 +207,7 @@ pub(crate) fn advance_head_field(
     h: usize,
     shape_mask: &[u8],
     heights: &[f32],
-    cell_props: &[f32],
+    cell_props: &crate::CellProps,
     head: &mut [f32],
 ) -> f32 {
     let cell_count = w * h;

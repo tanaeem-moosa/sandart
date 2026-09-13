@@ -2987,6 +2987,7 @@ dependencies = [
 name = "sandart-wasm"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "console_error_panic_hook",
  "glam",
  "js-sys",

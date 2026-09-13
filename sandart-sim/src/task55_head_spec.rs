@@ -84,10 +84,10 @@ fn frac_idx(frac: f32, n: usize) -> usize {
 /// `preset_props() => (1.00, 0.00, 0.00, 0.00)`) at every cell -- fully liquid water, matching
 /// the brief's instruction not to invent a synthetic material. Shared by both head sources below
 /// so `legacy_head_source` and `new_head_source` see an identical material field.
-fn build_water_cell_props(cell_count: usize) -> Vec<f32> {
-    let mut cell_props = vec![0.0f32; cell_count * 4];
+fn build_water_cell_props(cell_count: usize) -> crate::CellProps {
+    let mut cell_props = crate::CellProps::new(cell_count);
     for c in 0..cell_count {
-        cell_props[c * 4 + PROP_WETNESS] = 1.0;
+        cell_props.wetness[c] = 1.0;
     }
     cell_props
 }
@@ -188,7 +188,7 @@ fn run_head_field_to_steady_state(
     h: usize,
     mask: &[u8],
     heights: &[f32],
-    cell_props: &[f32],
+    cell_props: &crate::CellProps,
 ) -> (Vec<f32>, usize) {
     let mut head = vec![0.0f32; w * h];
     let tol = HEAD_FIELD_SPEC_SETTLE_TOL_FRACTION * depth_scale(w);
@@ -1070,8 +1070,8 @@ fn test_task55_head_spec_scoreboard() {
 struct DynSim {
     hm: Heightmap,
     temp_heights: Vec<f32>,
-    cell_colors: Vec<u8>,
-    cell_props: Vec<f32>,
+    cell_colors: Vec<u32>,
+    cell_props: crate::CellProps,
     sliding: Vec<bool>,
     bounds: ActiveBounds,
     active_blocks: Vec<crate::BlockActivity>,
@@ -1091,7 +1091,7 @@ struct DynSim {
 }
 
 impl DynSim {
-    fn new(w: usize, h: usize, mask: Vec<u8>, heights: Vec<f32>, cell_props: Vec<f32>) -> Self {
+    fn new(w: usize, h: usize, mask: Vec<u8>, heights: Vec<f32>, cell_props: crate::CellProps) -> Self {
         let block_size = 32;
         let cols = (w + block_size - 1) / block_size;
         let rows = (h + block_size - 1) / block_size;
@@ -1101,7 +1101,7 @@ impl DynSim {
         DynSim {
             temp_heights: heights.clone(),
             hm,
-            cell_colors: vec![0u8; w * h * 4],
+            cell_colors: vec![0u32; w * h],
             cell_props,
             sliding: vec![false; w * h],
             bounds: ActiveBounds {
