@@ -66,6 +66,8 @@ pub mod kernel_b;
 pub mod kernel_c;
 pub mod kernel_c8;
 pub mod kernel_d;
+pub mod kernel_e;
+pub mod kernel_e2;
 pub mod kernel_r;
 pub mod metrics;
 pub mod noise;

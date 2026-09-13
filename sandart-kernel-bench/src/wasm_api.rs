@@ -16,13 +16,32 @@
 //!   5. `cell_count_<k>()` returns the denominator for ns/cell/pass.
 
 use crate::snapshot::{self, State};
-use crate::{kernel_a, kernel_b, kernel_c, kernel_c8, kernel_d, kernel_r};
+use crate::{kernel_a, kernel_b, kernel_c, kernel_c8, kernel_d, kernel_e, kernel_e2, kernel_r};
 use std::cell::RefCell;
 
 struct Loaded<S> {
     bytes: Vec<u8>,
     state: State,
     scratch: S,
+}
+
+/// Same idea as `Loaded`, but for kernel E's own `StateE` (SoA, double-buffered) instead of the
+/// snapshot's AoS `State`. Two independent instances (`E`/`E_RECIP`) so E-recip's separate
+/// `stage45_e_recip` run doesn't disturb E's own timed state.
+struct LoadedE {
+    bytes: Vec<u8>,
+    state: kernel_e::StateE,
+    scratch: kernel_e::Scratch,
+}
+
+/// Same idea, for kernel E2's `Scratch` (D-sized/D-shaped temporaries over `kernel_e::StateE`).
+/// These exports exist only so E2's stage functions survive dead-code elimination in the wasm
+/// build for the v128 op count -- no wasm timing is taken for E2 (see native_bench's own timing,
+/// which is authoritative for this round).
+struct LoadedE2 {
+    bytes: Vec<u8>,
+    state: kernel_e::StateE,
+    scratch: kernel_e2::Scratch,
 }
 
 thread_local! {
@@ -34,6 +53,9 @@ thread_local! {
     static C: RefCell<Option<Loaded<kernel_c::Scratch>>> = RefCell::new(None);
     static C8: RefCell<Option<Loaded<kernel_c::Scratch>>> = RefCell::new(None);
     static D: RefCell<Option<Loaded<kernel_d::Scratch>>> = RefCell::new(None);
+    static E: RefCell<Option<LoadedE>> = RefCell::new(None);
+    static E_RECIP: RefCell<Option<LoadedE>> = RefCell::new(None);
+    static E2: RefCell<Option<LoadedE2>> = RefCell::new(None);
     // A bare `State` (no scratch/no full Scratch::new) so `run_precompute_c` can be timed
     // repeatedly from JS (bracketed with `performance.now()`, same as every `run_*` export) as
     // its own isolated cost -- see kernel_c.rs's module doc comment point 2 on why this is
@@ -108,6 +130,33 @@ pub unsafe extern "C" fn init_d(ptr: *mut u8, len: usize) {
     let state = snapshot::parse(&bytes);
     let scratch = kernel_d::Scratch::new(&state);
     D.with(|c| *c.borrow_mut() = Some(Loaded { bytes, state, scratch }));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_e(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let raw = snapshot::parse(&bytes);
+    let state = kernel_e::StateE::from_state(&raw);
+    let scratch = kernel_e::Scratch::new(&state);
+    E.with(|c| *c.borrow_mut() = Some(LoadedE { bytes, state, scratch }));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_e_recip(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let raw = snapshot::parse(&bytes);
+    let state = kernel_e::StateE::from_state(&raw);
+    let scratch = kernel_e::Scratch::new(&state);
+    E_RECIP.with(|c| *c.borrow_mut() = Some(LoadedE { bytes, state, scratch }));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn init_e2(ptr: *mut u8, len: usize) {
+    let bytes = unsafe { take_bytes(ptr, len) };
+    let raw = snapshot::parse(&bytes);
+    let state = kernel_e::StateE::from_state(&raw);
+    let scratch = kernel_e2::Scratch::new(&state);
+    E2.with(|c| *c.borrow_mut() = Some(LoadedE2 { bytes, state, scratch }));
 }
 
 /// Loads a bare `State` (no `Scratch`, so no precompute has happened yet) for
@@ -228,6 +277,158 @@ pub extern "C" fn run_d() -> f64 {
 /// evolution as `run_d` while attributing time per stage (task: "For wasm, split stages into
 /// `#[inline(never)]` functions and time them from JS").
 #[unsafe(no_mangle)]
+pub extern "C" fn run_e() -> f64 {
+    E.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e not called");
+        kernel_e::run_pass(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e_recip() -> f64 {
+    E_RECIP.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e_recip not called");
+        kernel_e::run_pass_recip(&mut l.state, &mut l.scratch)
+    })
+}
+
+/// E's five stages, exposed individually so `bench_wasm.mjs` can bracket each with
+/// `performance.now()` in sequence -- same rationale as D's `run_d_*` exports.
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e_precompute() {
+    E.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e not called");
+        kernel_e::run_precompute(&l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e_stage2() {
+    E.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e not called");
+        kernel_e::run_stage2(&mut l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e_stage3() -> f64 {
+    E.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e not called");
+        kernel_e::run_stage3(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e_stage45() {
+    E.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e not called");
+        kernel_e::run_stage45(&mut l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e_swap() {
+    E.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e not called");
+        kernel_e::run_swap(&mut l.state);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e2() -> f64 {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        kernel_e2::run_pass(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e2_recip() -> f64 {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        kernel_e2::run_pass_recip(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e2_stage1() {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        kernel_e2::run_stage1(&l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e2_stage2() {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        kernel_e2::run_stage2(&l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e2_stage3() -> f64 {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        kernel_e2::run_stage3(&mut l.state, &mut l.scratch)
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e2_stage45() {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        kernel_e2::run_stage45(&mut l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e2_stage45_recip() {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        kernel_e2::run_stage45_recip(&mut l.state, &mut l.scratch);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn run_e2_swap() {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        kernel_e::run_swap(&mut l.state);
+    })
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reset_e2() {
+    E2.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e2 not called");
+        let raw = snapshot::parse(&l.bytes);
+        l.state = kernel_e::StateE::from_state(&raw);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cell_count_e2() -> u32 {
+    E2.with(|c| kernel_e2::simulated_cell_count(&c.borrow().as_ref().expect("init_e2 not called").scratch) as u32)
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn run_d_copy_in() {
     D.with(|c| {
         let mut b = c.borrow_mut();
@@ -327,6 +528,26 @@ pub extern "C" fn reset_d() {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn reset_e() {
+    E.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e not called");
+        let raw = snapshot::parse(&l.bytes);
+        l.state = kernel_e::StateE::from_state(&raw);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn reset_e_recip() {
+    E_RECIP.with(|c| {
+        let mut b = c.borrow_mut();
+        let l = b.as_mut().expect("init_e_recip not called");
+        let raw = snapshot::parse(&l.bytes);
+        l.state = kernel_e::StateE::from_state(&raw);
+    });
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn cell_count_r() -> u32 {
     R.with(|c| kernel_r::simulated_cell_count(&c.borrow().as_ref().expect("init_r not called").state) as u32)
 }
@@ -354,4 +575,14 @@ pub extern "C" fn cell_count_c8() -> u32 {
 #[unsafe(no_mangle)]
 pub extern "C" fn cell_count_d() -> u32 {
     D.with(|c| kernel_d::simulated_cell_count(&c.borrow().as_ref().expect("init_d not called").scratch) as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cell_count_e() -> u32 {
+    E.with(|c| kernel_e::simulated_cell_count(&c.borrow().as_ref().expect("init_e not called").scratch) as u32)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cell_count_e_recip() -> u32 {
+    E_RECIP.with(|c| kernel_e::simulated_cell_count(&c.borrow().as_ref().expect("init_e_recip not called").scratch) as u32)
 }

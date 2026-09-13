@@ -233,3 +233,44 @@ pub fn in_transit_row_bf(
         out[j] = raw * interior * below_inside * row_below_valid * row_above_valid;
     }
 }
+
+/// Same law as `in_transit_row_bf`, for a caller (`kernel_e`) whose wetness lives in its own
+/// contiguous `Vec<f32>` (`StateE::prop[PROP_WETNESS]`) rather than interleaved `cell_props` --
+/// identical arithmetic, just one slice instead of `cell_props[idx*4+PROP_WETNESS]`.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn in_transit_row_bf_soa(
+    x_start: usize,
+    n: usize,
+    y: usize,
+    w: usize,
+    h_grid: usize,
+    heights: &[f32],
+    wetness: &[f32],
+    edge_vel_v: &[f32],
+    shape_mask: &[u8],
+    out: &mut [f32],
+) {
+    let below_y = (y + 1).min(h_grid - 1);
+    let below_row_off = below_y * w;
+    let row_below_valid = mask_lt((y + 1) as f32, h_grid as f32);
+    let above_row_off = if y > 0 { (y - 1) * w } else { 0 };
+    let row_above_valid = mask_gt(y as f32, 0.0);
+
+    for j in 0..n {
+        let x = x_start + j;
+        let idx = y * w + x;
+        let below_idx = below_row_off + x;
+        let above_idx = above_row_off + x;
+        let interior = mask_gt(x as f32, 0.0) * mask_lt((x + 1) as f32, w as f32);
+        let below_inside = mask_ne(shape_mask[below_idx] as f32, MASK_OUTSIDE as f32);
+
+        let h_below = heights[below_idx];
+        let wet_below = wetness[below_idx];
+        let cap_below = crate::scalar_math::cell_capacity_for(wet_below);
+        let downstream_route = edge_vel_v[idx].max(0.0) + (cap_below - h_below).max(0.0);
+        let raw = edge_vel_v[above_idx].max(0.0).min(downstream_route);
+
+        out[j] = raw * interior * below_inside * row_below_valid * row_above_valid;
+    }
+}

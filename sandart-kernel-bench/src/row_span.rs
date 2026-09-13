@@ -41,13 +41,15 @@ impl Span {
 /// (the block list never changes across repeated passes in this benchmark -- see
 /// `snapshot::State::sim_blocks`'s doc comment), not once per pass.
 pub fn build_spans(state: &State) -> Vec<Span> {
-    let cols = state.cols;
-    let rows = state.rows;
-    let block_size = state.block_size;
-    let w = state.w;
+    build_spans_raw(state.cols, state.rows, state.block_size, state.w, state.h, &state.sim_blocks)
+}
 
+/// Same logic as `build_spans`, taking the handful of primitive fields it needs directly instead
+/// of a `snapshot::State` -- so `kernel_e`'s own `StateE` (an SoA layout with no `snapshot::State`
+/// inside it) can build the identical span list without an adapter struct.
+pub fn build_spans_raw(cols: usize, rows: usize, block_size: usize, w: usize, h: usize, sim_blocks: &[u32]) -> Vec<Span> {
     let mut block_active = vec![false; cols * rows];
-    for &b in &state.sim_blocks {
+    for &b in sim_blocks {
         block_active[b as usize] = true;
     }
 
@@ -69,7 +71,7 @@ pub fn build_spans(state: &State) -> Vec<Span> {
             let x_owned_end = (run_end_bx * block_size).min(w);
             let has_extra = x_owned_end < w;
             let start_y = by * block_size;
-            let end_y = ((by + 1) * block_size).min(state.h);
+            let end_y = ((by + 1) * block_size).min(h);
             for y in start_y..end_y {
                 spans.push(Span { y, x_start, x_owned_end, has_extra });
             }

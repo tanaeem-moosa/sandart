@@ -5,7 +5,7 @@
 //! Usage: `cargo run -p sandart-kernel-bench --release --bin native_bench -- [snapshot_dir]`
 //! (defaults to this session's scratchpad, matching `dump_kernel_bench_snapshots`'s own default).
 
-use sandart_kernel_bench::{kernel_a, kernel_b, kernel_c, kernel_c8, kernel_d, metrics, kernel_r, snapshot};
+use sandart_kernel_bench::{kernel_a, kernel_b, kernel_c, kernel_c8, kernel_d, kernel_e, kernel_e2, metrics, kernel_r, snapshot};
 use std::time::Instant;
 
 fn read_file(path: &std::path::Path) -> Vec<u8> {
@@ -113,13 +113,22 @@ fn run_equivalence(label: &str, bytes: &[u8]) {
             kernel_d::run_pass(&mut d_state, &mut d_scratch);
         }
 
+        let mut e_state = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+        let mut e_scratch = kernel_e::Scratch::new(&e_state);
+        for _ in 0..passes {
+            kernel_e::run_pass(&mut e_state, &mut e_scratch);
+        }
+        let e_as_state = e_state.to_state();
+
         let rep_a = metrics::compare(&r_state, &a_state);
         let rep_b = metrics::compare(&r_state, &b_state);
         let rep_c = metrics::compare(&r_state, &c_state);
         let rep_c8 = metrics::compare(&r_state, &c8_state);
         let rep_d = metrics::compare(&r_state, &d_state);
+        let rep_e = metrics::compare(&r_state, &e_as_state);
         let rep_c_vs_a = metrics::compare(&a_state, &c_state);
         let rep_d_vs_c = metrics::compare(&c_state, &d_state);
+        let rep_e_vs_d = metrics::compare(&d_state, &e_as_state);
 
         println!("-- after {passes} pass(es) --");
         for (name, rep) in [
@@ -128,8 +137,10 @@ fn run_equivalence(label: &str, bytes: &[u8]) {
             ("C vs R", &rep_c),
             ("C8 vs R", &rep_c8),
             ("D vs R", &rep_d),
+            ("E vs R", &rep_e),
             ("C vs A", &rep_c_vs_a),
             ("D vs C", &rep_d_vs_c),
+            ("E vs D", &rep_e_vs_d),
         ] {
             println!(
                 "  {name}: mass R={:.6} test={:.6} delta={:.3e} | max|dh|={:.3e} mean|dh|={:.3e} | \
@@ -143,8 +154,96 @@ fn run_equivalence(label: &str, bytes: &[u8]) {
                 rep.mirror_asymmetry_a, rep.mirror_asymmetry_b,
             );
         }
+
+        // E vs D, full precision: max |dh| / max |dprop| over all 4 channels / max |dcolor| over
+        // all 4 channels (metrics::compare only reports wetness and MEAN |dcolor|) -- the task's
+        // "equivalence to float noise" bar is a MAX, not a mean.
+        let n = d_state.w * d_state.h;
+        let mut max_dh = 0.0f32;
+        let mut max_dprop = 0.0f32;
+        let mut max_dcolor = 0i32;
+        for i in 0..n {
+            max_dh = max_dh.max((d_state.heights[i] - e_as_state.heights[i]).abs());
+            for ch in 0..4 {
+                max_dprop = max_dprop.max((d_state.cell_props[i * 4 + ch] - e_as_state.cell_props[i * 4 + ch]).abs());
+                max_dcolor = max_dcolor.max((d_state.cell_colors[i * 4 + ch] as i32 - e_as_state.cell_colors[i * 4 + ch] as i32).abs());
+            }
+        }
+        println!("  E vs D (max over ALL channels, after {passes} pass(es)): max|dh|={max_dh:e} max|dprop|={max_dprop:e} max|dcolor|={max_dcolor}");
+
+        let mut e2_state = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+        let mut e2_scratch = kernel_e2::Scratch::new(&e2_state);
+        for _ in 0..passes {
+            kernel_e2::run_pass(&mut e2_state, &mut e2_scratch);
+        }
+        let e2_as_state = e2_state.to_state();
+        let mut max_dh2 = 0.0f32;
+        let mut max_dprop2 = 0.0f32;
+        let mut max_dcolor2 = 0i32;
+        for i in 0..n {
+            max_dh2 = max_dh2.max((d_state.heights[i] - e2_as_state.heights[i]).abs());
+            for ch in 0..4 {
+                max_dprop2 = max_dprop2.max((d_state.cell_props[i * 4 + ch] - e2_as_state.cell_props[i * 4 + ch]).abs());
+                max_dcolor2 = max_dcolor2.max((d_state.cell_colors[i * 4 + ch] as i32 - e2_as_state.cell_colors[i * 4 + ch] as i32).abs());
+            }
+        }
+        println!("  E2 vs D (max over ALL channels, after {passes} pass(es)): max|dh|={max_dh2:e} max|dprop|={max_dprop2:e} max|dcolor|={max_dcolor2}");
     }
     let _ = base;
+}
+
+/// E-recip vs E, after exactly 1 pass (task: "report its max difference vs E after 1 pass").
+fn run_e_recip_check(label: &str, bytes: &[u8]) {
+    println!("\n=== E-recip vs E -- {label} (1 pass) ===");
+    let mut e_state = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+    let mut e_scratch = kernel_e::Scratch::new(&e_state);
+    kernel_e::run_pass(&mut e_state, &mut e_scratch);
+    let e_as_state = e_state.to_state();
+
+    let mut r_state = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+    let mut r_scratch = kernel_e::Scratch::new(&r_state);
+    kernel_e::run_pass_recip(&mut r_state, &mut r_scratch);
+    let r_as_state = r_state.to_state();
+
+    let n = e_as_state.w * e_as_state.h;
+    let mut max_dh = 0.0f32;
+    let mut max_dprop = 0.0f32;
+    let mut max_dcolor = 0i32;
+    for i in 0..n {
+        max_dh = max_dh.max((e_as_state.heights[i] - r_as_state.heights[i]).abs());
+        for ch in 0..4 {
+            max_dprop = max_dprop.max((e_as_state.cell_props[i * 4 + ch] - r_as_state.cell_props[i * 4 + ch]).abs());
+            max_dcolor = max_dcolor.max((e_as_state.cell_colors[i * 4 + ch] as i32 - r_as_state.cell_colors[i * 4 + ch] as i32).abs());
+        }
+    }
+    println!("  max|dh|={max_dh:e} max|dprop|={max_dprop:e} max|dcolor|={max_dcolor}");
+}
+
+/// E2-recip vs E2, after exactly 1 pass.
+fn run_e2_recip_check(label: &str, bytes: &[u8]) {
+    println!("\n=== E2-recip vs E2 -- {label} (1 pass) ===");
+    let mut e2_state = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+    let mut e2_scratch = kernel_e2::Scratch::new(&e2_state);
+    kernel_e2::run_pass(&mut e2_state, &mut e2_scratch);
+    let e2_as_state = e2_state.to_state();
+
+    let mut r_state = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+    let mut r_scratch = kernel_e2::Scratch::new(&r_state);
+    kernel_e2::run_pass_recip(&mut r_state, &mut r_scratch);
+    let r_as_state = r_state.to_state();
+
+    let n = e2_as_state.w * e2_as_state.h;
+    let mut max_dh = 0.0f32;
+    let mut max_dprop = 0.0f32;
+    let mut max_dcolor = 0i32;
+    for i in 0..n {
+        max_dh = max_dh.max((e2_as_state.heights[i] - r_as_state.heights[i]).abs());
+        for ch in 0..4 {
+            max_dprop = max_dprop.max((e2_as_state.cell_props[i * 4 + ch] - r_as_state.cell_props[i * 4 + ch]).abs());
+            max_dcolor = max_dcolor.max((e2_as_state.cell_colors[i * 4 + ch] as i32 - r_as_state.cell_colors[i * 4 + ch] as i32).abs());
+        }
+    }
+    println!("  max|dh|={max_dh:e} max|dprop|={max_dprop:e} max|dcolor|={max_dcolor}");
 }
 
 fn run_timing(label: &str, bytes: &[u8]) {
@@ -263,6 +362,126 @@ fn run_timing(label: &str, bytes: &[u8]) {
             println!("    {name:10}: {ns:8.1} ns  ({:5.1}%)  {:.3} ns/cell/pass", 100.0 * ns / total, ns / cells as f64);
         }
     }
+    {
+        let state0 = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+        let mut scratch = kernel_e::Scratch::new(&state0);
+        let cells = kernel_e::simulated_cell_count(&scratch);
+        let mut state = state0;
+        let ns = median_ns_per_call(|| kernel_e::run_pass(&mut state, &mut scratch), 5, 51);
+        println!("  E: {:.2} ns/pass, {:.2} ns/cell/pass ({cells} cells)", ns, ns / cells as f64);
+    }
+    {
+        let state0 = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+        let mut scratch = kernel_e::Scratch::new(&state0);
+        let cells = kernel_e::simulated_cell_count(&scratch);
+        let mut state = state0;
+        let ns = median_ns_per_call(|| kernel_e::run_pass_recip(&mut state, &mut scratch), 5, 51);
+        println!("  E-recip: {:.2} ns/pass, {:.2} ns/cell/pass ({cells} cells)", ns, ns / cells as f64);
+    }
+    {
+        // E's per-stage split, native `Instant`, same shape as D's block above.
+        let state0 = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+        let mut scratch = kernel_e::Scratch::new(&state0);
+        let mut state = state0;
+        let warmup = 5usize;
+        let iters = 51usize;
+        let mut t_pre = Vec::with_capacity(iters);
+        let mut t_stage2 = Vec::with_capacity(iters);
+        let mut t_stage3 = Vec::with_capacity(iters);
+        let mut t_stage45 = Vec::with_capacity(iters);
+        let mut t_swap = Vec::with_capacity(iters);
+        for i in 0..warmup + iters {
+            let t0 = Instant::now();
+            kernel_e::run_precompute(&state, &mut scratch);
+            let t1 = Instant::now();
+            kernel_e::run_stage2(&mut state, &mut scratch);
+            let t2 = Instant::now();
+            std::hint::black_box(kernel_e::run_stage3(&mut state, &mut scratch));
+            let t3 = Instant::now();
+            kernel_e::run_stage45(&mut state, &mut scratch);
+            let t4 = Instant::now();
+            kernel_e::run_swap(&mut state);
+            let t5 = Instant::now();
+            if i >= warmup {
+                t_pre.push((t1 - t0).as_nanos() as f64);
+                t_stage2.push((t2 - t1).as_nanos() as f64);
+                t_stage3.push((t3 - t2).as_nanos() as f64);
+                t_stage45.push((t4 - t3).as_nanos() as f64);
+                t_swap.push((t5 - t4).as_nanos() as f64);
+            }
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let cells = kernel_e::simulated_cell_count(&scratch).max(1);
+        let (mp, m2, m3, m45, msw) = (median(&mut t_pre), median(&mut t_stage2), median(&mut t_stage3), median(&mut t_stage45), median(&mut t_swap));
+        let total = mp + m2 + m3 + m45 + msw;
+        println!("  E per-stage (median ns/pass, share of E's own stage total, ns/cell/pass):");
+        for (name, ns) in [("precompute", mp), ("stage2", m2), ("stage3", m3), ("stage4+5", m45), ("swap", msw)] {
+            println!("    {name:10}: {ns:8.1} ns  ({:5.1}%)  {:.3} ns/cell/pass", 100.0 * ns / total, ns / cells as f64);
+        }
+    }
+    {
+        let state0 = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+        let mut scratch = kernel_e2::Scratch::new(&state0);
+        let cells = kernel_e2::simulated_cell_count(&scratch);
+        let mut state = state0;
+        let ns = median_ns_per_call(|| kernel_e2::run_pass(&mut state, &mut scratch), 5, 51);
+        println!("  E2: {:.2} ns/pass, {:.2} ns/cell/pass ({cells} cells)", ns, ns / cells as f64);
+    }
+    {
+        let state0 = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+        let mut scratch = kernel_e2::Scratch::new(&state0);
+        let cells = kernel_e2::simulated_cell_count(&scratch);
+        let mut state = state0;
+        let ns = median_ns_per_call(|| kernel_e2::run_pass_recip(&mut state, &mut scratch), 5, 51);
+        println!("  E2-recip: {:.2} ns/pass, {:.2} ns/cell/pass ({cells} cells)", ns, ns / cells as f64);
+    }
+    {
+        // E2's per-stage split, native `Instant`, same shape as D's/E's blocks above.
+        let state0 = kernel_e::StateE::from_state(&snapshot::parse(bytes));
+        let mut scratch = kernel_e2::Scratch::new(&state0);
+        let mut state = state0;
+        let warmup = 5usize;
+        let iters = 51usize;
+        let mut t_pre = Vec::with_capacity(iters);
+        let mut t_stage2 = Vec::with_capacity(iters);
+        let mut t_stage3 = Vec::with_capacity(iters);
+        let mut t_stage45 = Vec::with_capacity(iters);
+        let mut t_swap = Vec::with_capacity(iters);
+        for i in 0..warmup + iters {
+            let t0 = Instant::now();
+            kernel_e2::run_stage1(&state, &mut scratch);
+            let t1 = Instant::now();
+            kernel_e2::run_stage2(&state, &mut scratch);
+            let t2 = Instant::now();
+            std::hint::black_box(kernel_e2::run_stage3(&mut state, &mut scratch));
+            let t3 = Instant::now();
+            kernel_e2::run_stage45(&mut state, &mut scratch);
+            let t4 = Instant::now();
+            sandart_kernel_bench::kernel_e::run_swap(&mut state);
+            let t5 = Instant::now();
+            if i >= warmup {
+                t_pre.push((t1 - t0).as_nanos() as f64);
+                t_stage2.push((t2 - t1).as_nanos() as f64);
+                t_stage3.push((t3 - t2).as_nanos() as f64);
+                t_stage45.push((t4 - t3).as_nanos() as f64);
+                t_swap.push((t5 - t4).as_nanos() as f64);
+            }
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let cells = kernel_e2::simulated_cell_count(&scratch).max(1);
+        let (mp, m2, m3, m45, msw) = (median(&mut t_pre), median(&mut t_stage2), median(&mut t_stage3), median(&mut t_stage45), median(&mut t_swap));
+        let total = mp + m2 + m3 + m45 + msw;
+        println!("  E2 per-stage (median ns/pass, share of E2's own stage total, ns/cell/pass):");
+        for (name, ns) in [("stage1", mp), ("stage2", m2), ("stage3", m3), ("stage4+5", m45), ("swap", msw)] {
+            println!("    {name:10}: {ns:8.1} ns  ({:5.1}%)  {:.3} ns/cell/pass", 100.0 * ns / total, ns / cells as f64);
+        }
+    }
 }
 
 fn main() {
@@ -280,6 +499,12 @@ fn main() {
 
     for s in &snaps {
         run_equivalence(s.name, &s.bytes);
+    }
+    for s in &snaps {
+        run_e_recip_check(s.name, &s.bytes);
+    }
+    for s in &snaps {
+        run_e2_recip_check(s.name, &s.bytes);
     }
     for s in &snaps {
         run_timing(s.name, &s.bytes);

@@ -117,6 +117,32 @@ function timeDStages(instance, { warmup = 10, iters = 60 } = {}) {
   }));
 }
 
+// E's per-stage split: same shape as timeDStages, but the 5 stages are precompute/stage2/stage3/
+// stage4+5/swap (see kernel_e.rs's module doc comment) -- `run_e_swap` is the whole point of E's
+// design (O(1) mem::swap instead of D's O(n) copy-out), so its own median should be near-zero.
+function timeEStages(instance, { warmup = 10, iters = 60 } = {}) {
+  const stages = ["precompute", "stage2", "stage3", "stage45", "swap"];
+  const exportsByStage = stages.map((s) => instance.exports[`run_e_${s}`]);
+  for (let i = 0; i < warmup; i++) for (const fn of exportsByStage) fn();
+  const samples = stages.map(() => []);
+  for (let i = 0; i < iters; i++) {
+    for (let s = 0; s < stages.length; s++) {
+      const t0 = performance.now();
+      exportsByStage[s]();
+      samples[s].push((performance.now() - t0) * 1e6);
+    }
+  }
+  const cells = instance.exports.cell_count_e();
+  const medians = samples.map(median);
+  const total = medians.reduce((a, b) => a + b, 0);
+  return stages.map((name, i) => ({
+    name,
+    ns: medians[i],
+    share: medians[i] / total,
+    nsPerCell: medians[i] / cells,
+  }));
+}
+
 async function main() {
   console.log(`wasm module: ${wasmPath}`);
   const snapshots = [
@@ -129,7 +155,7 @@ async function main() {
     // Fresh instance per snapshot per kernel: run_* mutates state in place across the timed
     // iterations (same choice as native_bench's timing loop -- see its module doc comment), and
     // a fresh instance avoids any cross-kernel/cross-snapshot memory-growth interaction.
-    for (const kernel of ["r", "a", "b", "c", "c8", "d"]) {
+    for (const kernel of ["r", "a", "b", "c", "c8", "d", "e", "e_recip", "e2"]) {
       const instance = await loadInstance();
       loadSnapshotIntoWasm(instance, file, kernel);
       const { ns, cells, nsPerCell } = timeKernel(instance, kernel);
@@ -173,6 +199,17 @@ async function main() {
       loadSnapshotIntoWasm(instance, file, "d");
       const stages = timeDStages(instance);
       console.log(`  D per-stage (median ns/pass, share of D's own stage total, ns/cell/pass):`);
+      for (const s of stages) {
+        console.log(`    ${s.name.padEnd(10)}: ${s.ns.toFixed(1).padStart(8)} ns  (${(100 * s.share).toFixed(1).padStart(5)}%)  ${s.nsPerCell.toFixed(3)} ns/cell/pass`);
+      }
+    }
+
+    // E's per-stage split.
+    {
+      const instance = await loadInstance();
+      loadSnapshotIntoWasm(instance, file, "e");
+      const stages = timeEStages(instance);
+      console.log(`  E per-stage (median ns/pass, share of E's own stage total, ns/cell/pass):`);
       for (const s of stages) {
         console.log(`    ${s.name.padEnd(10)}: ${s.ns.toFixed(1).padStart(8)} ns  (${(100 * s.share).toFixed(1).padStart(5)}%)  ${s.nsPerCell.toFixed(3)} ns/cell/pass`);
       }
