@@ -91,9 +91,20 @@ The library suite is **98 passed / 5 failed on `main`**, and that is the current
     new solver (traced ticks 111-150).
   - The old build read 0.99 at tick 150 but 0.00 at ticks 118, 127 and 144; the new build reads
     0.016 at tick 150.
-  - So this is a sampling artefact over a PRE-EXISTING oscillation, not a regression. The
-    oscillation itself is an open defect in the head-field path.
-  - Pending decision: change the spec to measure over a window of ticks. Do not loosen `tol`.
+  - So this is a sampling artefact over a PRE-EXISTING oscillation, not a regression.
+  - **The oscillation is NOT confined to the debug path.** With `head_field_transport=false` (the
+    shipped path) the same spec's dip is a strict PERIOD-2 pulse, ~2 cells on even ticks and 35-48
+    cells on odd ticks (ticks 111-150, w=512).
+  - That pulse is identical in the pre-array-form build and the new one, so it predates
+    eeefce7. The near-neck column's mass swings by ~40 cells every tick, i.e. lateral sloshing next
+    to the neck.
+  - It is plausibly the edge-level alternating mode HANDOVER.md §10 recorded when the velocity EMA
+    was removed (velocity parity 0.87), and may be the "drainage lines" seen above the necks.
+    Unconfirmed.
+  - The spec passes on the shipped path only because tick 150 is even.
+  - Pending decision: change the spec to measure over a window of ticks (do not loosen `tol`), AND
+    add a spec that fails on period-2 pulsing, so the oscillation stays visible rather than
+    averaged away.
 
 **`test_sandbox_wave_reach_is_budget_independent` was resolved on 2026-09-02, by fixing the test.**
 Its bit-identical-amplitude-across-budgets assertion was wrong in principle: `budget_n` exists to
