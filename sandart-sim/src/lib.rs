@@ -2389,41 +2389,47 @@ mod tests {
     // The metric is what the user actually sees: a column of the board with no obstruction
     // anywhere down it. Measured on the shipped geometry before the fix, four such shafts about
     // 4.2 cells wide sat between every pair of peg columns.
+    // Re-run at every "Simulation downscale" size the app offers (64/128/256/512, i.e.
+    // `scale = w / 512` in {1/8, 1/4, 1/2, 1}) -- the GaltonBoard arm of `eval_sandbox_shape`
+    // scales its peg lattice with `w` (2026-09-14) precisely so this holds at every S, not just
+    // the shipped default. Assertion per size is unchanged from the original single-512 version.
     fn test_galton_board_has_no_clear_vertical_shafts() {
-        let mut sim = super::DrawingSimulation::new();
-        sim.sandbox_shape = SandboxShape::GaltonBoard;
-        sim.generate_shape_mask();
+        for w in [64usize, 128, 256, 512] {
+            let mut sim = super::DrawingSimulation::new_with_size(w);
+            sim.sandbox_shape = SandboxShape::GaltonBoard;
+            sim.generate_shape_mask();
 
-        let w = GRID_SIZE;
-        let h = GRID_SIZE;
-        // The peg field lives below the neck, in `dy` in (6, 0.38 * h) — see the GaltonBoard arm
-        // of `eval_sandbox_shape`. Sample the interior of that band only, so the funnel's own
-        // taper cannot be mistaken for an obstruction.
-        let y_lo = h / 2 + 8;
-        let y_hi = h / 2 + (0.34 * h as f32) as usize;
+            let h = w;
+            // The peg field lives below the neck, in `dy` in (field_start, 0.38 * h) — see the
+            // GaltonBoard arm of `eval_sandbox_shape`. Sample the interior of that band only, so
+            // the funnel's own taper cannot be mistaken for an obstruction.
+            let y_lo = h / 2 + 8;
+            let y_hi = h / 2 + (0.34 * h as f32) as usize;
 
-        let mut open_shafts = Vec::new();
-        for x in 0..w {
-            // Only columns that are actually open at the top of the band can be a shaft; a column
-            // buried in the wall is not sand's path.
-            if sim.shape_mask[y_lo * w + x] == MASK_OUTSIDE {
-                continue;
+            let mut open_shafts = Vec::new();
+            for x in 0..w {
+                // Only columns that are actually open at the top of the band can be a shaft; a
+                // column buried in the wall is not sand's path.
+                if sim.shape_mask[y_lo * w + x] == MASK_OUTSIDE {
+                    continue;
+                }
+                let blocked = (y_lo..y_hi).any(|y| sim.shape_mask[y * w + x] == MASK_OUTSIDE);
+                if !blocked {
+                    open_shafts.push(x);
+                }
             }
-            let blocked = (y_lo..y_hi).any(|y| sim.shape_mask[y * w + x] == MASK_OUTSIDE);
-            if !blocked {
-                open_shafts.push(x);
-            }
+
+            assert!(
+                open_shafts.is_empty(),
+                "w={}: sand falls straight through the Galton board at {} column(s) {:?} — no peg \
+                 obstructs them anywhere between rows {} and {}",
+                w,
+                open_shafts.len(),
+                open_shafts,
+                y_lo,
+                y_hi
+            );
         }
-
-        assert!(
-            open_shafts.is_empty(),
-            "Sand falls straight through the Galton board at {} column(s) {:?} — no peg obstructs \
-             them anywhere between rows {} and {}",
-            open_shafts.len(),
-            open_shafts,
-            y_lo,
-            y_hi
-        );
     }
 
     #[test]

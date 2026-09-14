@@ -3170,39 +3170,80 @@ pub fn eval_sandbox_shape(
                     return (false, false);
                 }
                 
-                if dy > 6.0 && dy < 0.38 * h_f {
-                    // Pegs sit on a fixed lattice with a genuine half-spacing stagger between
-                    // consecutive rows, so no column of the board is ever clear from top to
-                    // bottom.
-                    //
-                    // The previous arrangement centred each row on its own peg count and then
-                    // added an explicit half-spacing offset on odd rows. `(count - 1) / 2` with
-                    // `count = row + 3` is a half-integer on exactly those odd rows, so it had
-                    // already shifted them by half a spacing and the explicit offset cancelled it:
-                    // every peg of every row landed on a multiple of `spacing`, leaving open
-                    // shafts 4.2 cells wide that sand fell straight down without ever being
-                    // deflected. The same count-based centring also pushed the odd rows off-axis
-                    // (row 1 spanned -8..16 rather than being symmetric about 0).
-                    //
-                    // Deriving the peg from the lattice instead of enumerating a row's pegs also
-                    // drops the inner loop: the only candidate is the nearest lattice column.
-                    // The triangular Galton silhouette still emerges on its own, because the
-                    // `allowed_hw` test above has already rejected anything outside the funnel and
-                    // the funnel widens with depth.
-                    const PEG_SPACING: f32 = 8.0;
-                    // Staggered rows only close the gap if a peg is at least a quarter of a
-                    // spacing wide: even rows cover `[j*s - r, j*s + r]`, odd rows the same
-                    // shifted by `s/2`, and the union has no gap exactly when `r >= s/4`. At the
-                    // old `r = 1.8` against `s = 8` a 0.4-wide shaft survived at every `8j +- 2`
-                    // even once the stagger was fixed, so the radius has to move too.
-                    const PEG_RADIUS: f32 = 2.2;
-                    let row = ((dy - 6.0) / PEG_SPACING).round();
-                    let row_y = 6.0 + row * PEG_SPACING;
-                    let stagger = if (row as i32) % 2 != 0 { PEG_SPACING * 0.5 } else { 0.0 };
-                    let peg_x = ((dx - stagger) / PEG_SPACING).round() * PEG_SPACING + stagger;
+                // Pegs sit on a fixed lattice with a genuine half-spacing stagger between
+                // consecutive rows, so no column of the board is ever clear from top to
+                // bottom.
+                //
+                // The previous arrangement centred each row on its own peg count and then
+                // added an explicit half-spacing offset on odd rows. `(count - 1) / 2` with
+                // `count = row + 3` is a half-integer on exactly those odd rows, so it had
+                // already shifted them by half a spacing and the explicit offset cancelled it:
+                // every peg of every row landed on a multiple of `spacing`, leaving open
+                // shafts 4.2 cells wide that sand fell straight down without ever being
+                // deflected. The same count-based centring also pushed the odd rows off-axis
+                // (row 1 spanned -8..16 rather than being symmetric about 0).
+                //
+                // Deriving the peg from the lattice instead of enumerating a row's pegs also
+                // drops the inner loop: the only candidate is the nearest lattice column.
+                // The triangular Galton silhouette still emerges on its own, because the
+                // `allowed_hw` test above has already rejected anything outside the funnel and
+                // the funnel widens with depth.
+                //
+                // Every constant below used to be fixed in CELLS, so at simulation size S < 512
+                // (the "Simulation downscale" feature) the pegs were the same PHYSICAL size and
+                // spacing as at 512 -- twice as big and half as numerous on screen at S = 256.
+                // `scale = w / 512` brings the whole lattice down with the grid, so the board
+                // keeps the same peg COUNT at every S, matching what #90f9904/#e6e064e already do
+                // for the vessel outline itself. `scale == 1.0` at the shipped default (w = 512),
+                // and every formula below reduces to exactly the old literal there (see the
+                // bit-identity check in `test_galton_board_has_no_clear_vertical_shafts`), so nothing
+                // changes at today's default resolution.
+                let scale = w_f / 512.0;
+                // The user's chosen floor: below 2 cells a "peg" is smaller than the grid can
+                // even render as a lattice rather than noise, regardless of what closes shafts.
+                const PEG_SPACING_MIN: f32 = 2.0;
+                let spacing = (8.0 * scale).max(PEG_SPACING_MIN);
+                // Staggered rows only close the gap if a peg is at least a quarter of a
+                // spacing wide: even rows cover `[j*s - r, j*s + r]`, odd rows the same
+                // shifted by `s/2`, and the union has no gap exactly when `r >= s/4`. At the
+                // old `r = 1.8` against `s = 8` a 0.4-wide shaft survived at every `8j +- 2`
+                // even once the stagger was fixed, so the radius has to move too. That alone,
+                // though, is not the binding floor once `spacing` shrinks -- see below.
+                //
+                // Cell centres in x sit on a half-integer axis (`center_x = (w - 1) / 2` for
+                // even `w`). At every `scale` in {1/8, 1/4, 1/2, 1} (S in {64,128,256,512})
+                // `spacing` above lands on an even integer, so `peg_x` (a multiple of `spacing`
+                // plus a stagger of 0 or `spacing / 2`, both integers) is always an integer too --
+                // meaning `pdx = dx - peg_x` is always an exact half-integer: |pdx| >= 0.5 for
+                // EVERY cell, never less, never exactly on the peg. A radius that never clears
+                // that 0.5 floor rasterises a peg as a circle with no cell inside it -- present in
+                // the formula, invisible on the grid.
+                //
+                // `field_start` (below) is rounded to the nearest integer cell for the matching
+                // reason on the y axis: `dy` is already integer, and an unrounded fractional
+                // `field_start` can put the row lattice at exactly the same half-cell remove from
+                // every `dy`, the y-axis mirror of the x problem above -- at S = 128 unrounded
+                // (`field_start = 1.5`) `pdy` was an exact +-0.5 for every row with no variation,
+                // making the whole peg band either fully solid or fully empty depending on radius,
+                // no radius giving actual pegs in between. Rounding gives `pdy` a real 0-vs-1
+                // alternation between rows instead, the way the x axis already had one between
+                // `pdx`'s own possible residues at every `spacing` above 2.
+                //
+                // With that fix, swept numerically (0.01 steps) against
+                // `test_galton_board_has_no_clear_vertical_shafts`'s own shaft check, the worst
+                // case (S = 64/128/256) needs r > 0.51; `0.6` is that with margin, still well
+                // under 2.2 so `scale == 1` (S = 512, spacing = 8, needs r > 1.51) is untouched.
+                const PEG_RADIUS_MIN: f32 = 0.6;
+                let radius = (2.2 * scale).max(PEG_RADIUS_MIN);
+                let field_start = (6.0 * scale).round();
+                if dy > field_start && dy < 0.38 * h_f {
+                    let row = ((dy - field_start) / spacing).round();
+                    let row_y = field_start + row * spacing;
+                    let stagger = if (row as i32) % 2 != 0 { spacing * 0.5 } else { 0.0 };
+                    let peg_x = ((dx - stagger) / spacing).round() * spacing + stagger;
                     let pdx = dx - peg_x;
                     let pdy = dy - row_y;
-                    if pdx * pdx + pdy * pdy < PEG_RADIUS * PEG_RADIUS {
+                    if pdx * pdx + pdy * pdy < radius * radius {
                         return (false, false);
                     }
                 }
