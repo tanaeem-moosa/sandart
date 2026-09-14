@@ -5,7 +5,8 @@ members = [
     "sandart-pattern",
     "sandart-wasm",
     "sandart",
-    "sandart-kernel-bench"
+    "sandart-kernel-bench",
+    "sandart-phase-bench"
 ]
 resolver = "2"
 

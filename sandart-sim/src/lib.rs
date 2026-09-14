@@ -1,4 +1,5 @@
 pub mod grid;
+pub mod phase_timing;
 pub mod physics;
 pub mod quantiles;
 
@@ -1673,6 +1674,7 @@ impl DrawingSimulation {
                 }
             }
 
+            let __pt_t0 = phase_timing::start();
             let fresh_active = physics::compute_fresh_active(
                 w,
                 h,
@@ -1686,6 +1688,8 @@ impl DrawingSimulation {
                 &self.edge_vel_v,
                 &self.last_displacements,
             );
+            phase_timing::add(phase_timing::SEC_FRESH_ACTIVE, __pt_t0);
+            let __pt_t0 = phase_timing::start();
             settle_tick(
                     &mut self.heightmap,
                     &mut self.temp_heights,
@@ -1716,6 +1720,7 @@ impl DrawingSimulation {
                     self.liquid_fall_jitter,
                     self.lateral_substeps,
                 );
+            phase_timing::add(phase_timing::SEC_SETTLE_TICK_TOTAL, __pt_t0);
         } else {
             self.active_bounds.active = false;
         }

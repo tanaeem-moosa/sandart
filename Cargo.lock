@@ -2963,6 +2963,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sandart-phase-bench"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "sandart-sim",
+]
+
+[[package]]
 name = "sandart-render"
 version = "0.1.0"
 dependencies = [

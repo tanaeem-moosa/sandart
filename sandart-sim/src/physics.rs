@@ -4747,6 +4747,7 @@ pub fn settle_tick(
     // With both, that same settled pool measures 0 MUST block-ticks at 0.35 *and* at 0.50
     // (`test_settled_sandbox_pool_does_not_stay_hot`) and reach stops depending on the budget at
     // all (`test_sandbox_wave_reach_is_budget_independent`).
+    let __pt_cls_t0 = crate::phase_timing::start();
     let active_threshold = MUST_SIMULATE_THRESHOLD;
     for b in 0..expected_len {
         let displacement = last_displacements[b];
@@ -4773,6 +4774,7 @@ pub fn settle_tick(
 
     // Quick exit check if no blocks are active
     if must_simulate.is_empty() && stale_simulate.is_empty() && rest_candidates.is_empty() {
+        crate::phase_timing::add(crate::phase_timing::SEC_CLASSIFICATION, __pt_cls_t0);
         active_bounds.active = false;
         active_blocks.fill(crate::BlockActivity::Inactive);
         return 0.0;
@@ -4818,6 +4820,7 @@ pub fn settle_tick(
     for &b in &budget_simulate {
         active_blocks[b] = crate::BlockActivity::Medium;
     }
+    crate::phase_timing::add(crate::phase_timing::SEC_CLASSIFICATION, __pt_cls_t0);
 
     // Use precomputed shape mask instead of per-frame eval_sandbox_shape
     // shape_mask values: 0 = OUTSIDE (wall), 1 = INSIDE (safe), 2 = BOUNDARY (inside, near wall)
@@ -4828,7 +4831,9 @@ pub fn settle_tick(
     let mut modified = will_simulate.clone();
 
     // 1. Copy heightmap to working buffer at start of frame
+    let __pt_copy_t0 = crate::phase_timing::start();
     temp_heights.copy_from_slice(&heightmap.data);
+    crate::phase_timing::add(crate::phase_timing::SEC_TEMP_HEIGHTS_COPY, __pt_copy_t0);
 
     let gravity_active = gravity_dir.length_squared() > 1e-6;
 
@@ -5106,6 +5111,7 @@ pub fn settle_tick(
     // whole traversal -- the granular CA, the g=0 Sandbox liquid solver and phase 0's
     // gravity-aligned edges all run exactly once per tick, only in their normal phase -- and go
     // straight to section 2b's lateral COLLECT below.
+    let __pt_trav_t0 = crate::phase_timing::start();
     if phase <= 1 {
     for idx_b in 0..b_len {
         let b = if phase == 0 {
@@ -6117,6 +6123,11 @@ pub fn settle_tick(
         }
     }
     } // end `if phase <= 1` -- the per-cell traversal only runs in the two normal phases.
+    if phase == 0 {
+        crate::phase_timing::add(crate::phase_timing::SEC_PHASE0_COLLECT, __pt_trav_t0);
+    } else if phase == 1 {
+        crate::phase_timing::add(crate::phase_timing::SEC_PHASE1_TRAVERSAL, __pt_trav_t0);
+    }
 
     // 2b. RED-BLACK EDGE COLOURING of the liquid+granular lateral (cross-gravity) edge.
     //
@@ -6164,6 +6175,7 @@ pub fn settle_tick(
     // unchanged in effect from `phase == 1 && gravity_active` for every phase that existed before
     // this parameter did.
     if phase >= 1 && gravity_active {
+        let __pt_lat_t0 = crate::phase_timing::start();
         run_lateral_edge_pass(
             w, h, cols, rows, block_size, phase, gravity_dir, time_seed, lateral_passes_this_tick,
             head_field_active, pressure_sensitive_flow, shape_mask, column_depth, head_field,
@@ -6171,6 +6183,7 @@ pub fn settle_tick(
             &lateral_spans, &mut lateral_scratch_buf, &mut modified, &mut next_displacements,
             &mut total_flow, &mut flow_occurred,
         );
+        crate::phase_timing::add(crate::phase_timing::SEC_LATERAL_EDGE_PASS, __pt_lat_t0);
     }
 
 
@@ -6194,6 +6207,7 @@ pub fn settle_tick(
     // whether any cell did. That one bool is what lets both APPLY loops below skip
     // `edge_share_jitter` and `edge_arbitration_scale` entirely in the common case -- see
     // `accumulate_edge_jitter`'s doc comment for what that is worth and why it is exact.
+    let __pt_apply_t0 = crate::phase_timing::start();
     if oversubscribed {
         for &idx in &touched_h {
             accumulate_edge_jitter(
@@ -6436,11 +6450,15 @@ pub fn settle_tick(
     if let Some(__t0) = __lod_diag_phase_t0 {
         lod_diag::note_phase_cost(phase, __t0.elapsed().as_nanos());
     }
+    if phase == 0 {
+        crate::phase_timing::add(crate::phase_timing::SEC_PHASE0_APPLY, __pt_apply_t0);
+    }
 
     } // end `for phase` — body left at the original indentation so the operator split reads as a
       // wrapper rather than as a 600-line reformat of the solver.
 
     // 3. Copy back updated blocks
+    let __pt_copyback_t0 = crate::phase_timing::start();
     for b in 0..expected_len {
         if modified[b] {
             let bx = b % cols;
@@ -6456,6 +6474,7 @@ pub fn settle_tick(
             }
         }
     }
+    crate::phase_timing::add(crate::phase_timing::SEC_COPY_BACK, __pt_copyback_t0);
 
     // Compute updated active bounds for this frame
     let mut min_bx = cols;

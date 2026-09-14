@@ -7,6 +7,13 @@ edition = "2024"
 glam = "0.29.0"
 serde = { version = "1.0.217", features = ["derive"] }
 
+[features]
+# Opt-in, off by default, and never enabled for wasm (std::time::Instant panics on
+# wasm32-unknown-unknown without a JS shim). Times a handful of sections inside
+# settle_tick/update and accumulates them into a thread-local an example can read and print.
+# With the feature off, every site compiles to nothing -- see `phase_timing` module.
+phase-timing = []
+
 [dev-dependencies]
 pprof = { version = "0.13.0", features = ["flamegraph"] }
 sandart-pattern = { path = "../sandart-pattern" }
