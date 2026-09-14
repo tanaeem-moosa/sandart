@@ -144,6 +144,16 @@ fn hue_to_rgb(h: f32) -> vec3<f32> {
 
 // Manual Bilinear Texture Filtering to support linear height interpolation
 // on platforms without float32_filterable extension support
+//
+// NOT given the mask-aware treatment `fs_main` gets below (at `m > 1`, dropping OUTSIDE
+// corners from this blend so a wall-adjacent height doesn't sag toward 0): that would need
+// `shape_mask_tex` bound into the VERTEX stage, and its bind group entry
+// (`sandart-render/src/lib.rs`) is FRAGMENT-only -- doing it here would mean a Rust-side
+// binding-visibility change, which this pass is scoped to avoid. The mesh is also a fixed
+// 1024x1024 regardless of `sim_size`, so any resulting sag is at most a fraction of one sim
+// cell's width at the vessel rim, and that rim is where the fragment shader's `in_casing` test
+// (mask-based, not height-based) already paints flat casing/LED colour over the geometry
+// underneath -- so a slight dip in the mesh right there has no visible surface to show through.
 fn sample_height_bilinear(uv: vec2<f32>) -> f32 {
     let tex_size = uniforms.sim_size;
     let texel_coords = uv * tex_size - 0.5;
@@ -245,12 +255,88 @@ fn fs_main(
     // Determine casing and LED channel from the precomputed shape mask texture
     // Mask values: 0 = OUTSIDE (wall/casing), 1 = INSIDE (safe), 2 = BOUNDARY (inside, near wall → LED strip)
     let sim_size_i = i32(uniforms.sim_size);
-    let mask_coord = vec2<i32>(i32(uv.x * uniforms.sim_size), i32(uv.y * uniforms.sim_size));
-    let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(sim_size_i - 1)), 0).r;
 
-    var in_casing = mask_val == 0u;
-    // LED strip: boundary cells (mask=2) OR outside cells adjacent to inside cells
-    var in_led = mask_val == 2u;
+    // At `render_size > sim_size` (`m > 1`) a nearest lookup of the sim mask below just paints
+    // m x m render-pixel staircase blocks (see the sim-downscale commit this follows). Every
+    // downscale-only code path added below and further down this function is gated on
+    // `smooth_mask`; when it's false (the `m == 1` default, and the only path before this
+    // change existed) each one degenerates to exactly the expression it replaced, so the
+    // shipped default stays pixel-for-pixel unchanged.
+    let smooth_mask = uniforms.render_size > uniforms.sim_size;
+
+    // Inside flags for the 2x2 sim-mask quad straddling this fragment, shared between the
+    // outline test right below and the height/colour taps far below (~"1. Compute finite
+    // difference normal") -- both sample the identical `uv * sim_size - 0.5` lattice, so the
+    // mask is loaded once here and the flags threaded down instead of re-reading it there. Left
+    // at their (inert) default when `smooth_mask` is false.
+    var quad_inside00 = true;
+    var quad_inside10 = true;
+    var quad_inside01 = true;
+    var quad_inside11 = true;
+
+    var in_casing: bool;
+    var in_led: bool;
+    if (smooth_mask) {
+        // Bilinearly blend the INSIDE indicator (mask != 0, i.e. MASK_INSIDE or MASK_BOUNDARY)
+        // over the 4 sim texels around this fragment and threshold at 0.5. On a straight wall
+        // all 4 texels agree on one side or the other, so the 0.5 crossing lands exactly on the
+        // shared cell edge (the lattice point `k + 0.5` between texel centres `k` and `k + 1`),
+        // reproducing the sim mask's straight edges exactly; only where the 2x2 neighbourhood
+        // disagrees in both axes -- an outer or inner staircase corner -- does the contour cut a
+        // chamfer across that corner cell, which is the wanted rounding.
+        //
+        // A 1-sim-cell-wide neck stays open under this rule: take a lone INSIDE texel flanked on
+        // both sides by OUTSIDE texels. Sweeping across it, the interpolated indicator rises
+        // linearly from exactly 0.5 at the texel's own left edge to 1.0 at its centre, then back
+        // down to exactly 0.5 at its right edge -- it never dips below 0.5 anywhere inside the
+        // cell. Since `in_casing` below is `< 0.5` (not `<= 0.5`), the whole cell classifies as
+        // inside, edge to edge, with no gap.
+        let mtc = uv * uniforms.sim_size - 0.5;
+        let midx = floor(mtc);
+        let mf = fract(mtc);
+        let mi0 = clamp(vec2<i32>(midx), vec2<i32>(0), vec2<i32>(sim_size_i - 1));
+        let mi1 = clamp(vec2<i32>(midx) + vec2<i32>(1, 0), vec2<i32>(0), vec2<i32>(sim_size_i - 1));
+        let mi2 = clamp(vec2<i32>(midx) + vec2<i32>(0, 1), vec2<i32>(0), vec2<i32>(sim_size_i - 1));
+        let mi3 = clamp(vec2<i32>(midx) + vec2<i32>(1, 1), vec2<i32>(0), vec2<i32>(sim_size_i - 1));
+        let mm00 = textureLoad(shape_mask_tex, mi0, 0).r;
+        let mm10 = textureLoad(shape_mask_tex, mi1, 0).r;
+        let mm01 = textureLoad(shape_mask_tex, mi2, 0).r;
+        let mm11 = textureLoad(shape_mask_tex, mi3, 0).r;
+
+        quad_inside00 = mm00 != 0u;
+        quad_inside10 = mm10 != 0u;
+        quad_inside01 = mm01 != 0u;
+        quad_inside11 = mm11 != 0u;
+
+        let fi00 = select(0.0, 1.0, quad_inside00);
+        let fi10 = select(0.0, 1.0, quad_inside10);
+        let fi01 = select(0.0, 1.0, quad_inside01);
+        let fi11 = select(0.0, 1.0, quad_inside11);
+        let inside_frac = mix(mix(fi00, fi10, mf.x), mix(fi01, fi11, mf.x), mf.y);
+        in_casing = inside_frac < 0.5;
+
+        // Boundary/LED band derived the same way, from the mask == 2 (MASK_BOUNDARY) indicator
+        // instead of != 0, so its blended width in render pixels roughly matches the 1-sim-cell
+        // band the nearest lookup gives at m == 1. Note `in_led` is only ever consulted inside
+        // `if (in_casing)` below, and MASK_BOUNDARY cells count as INSIDE for `in_casing`'s own
+        // indicator above -- so, exactly as at m == 1 (`mask_val` can't equal both 0u and 2u at
+        // once), `in_led` can't fire while `in_casing` is true here either. Whether that nesting
+        // is itself the intended behaviour is a pre-existing question outside this change's
+        // scope; this just keeps the two resolutions' behaviour identical rather than silently
+        // widening or narrowing the band.
+        let fb00 = select(0.0, 1.0, mm00 == 2u);
+        let fb10 = select(0.0, 1.0, mm10 == 2u);
+        let fb01 = select(0.0, 1.0, mm01 == 2u);
+        let fb11 = select(0.0, 1.0, mm11 == 2u);
+        let boundary_frac = mix(mix(fb00, fb10, mf.x), mix(fb01, fb11, mf.x), mf.y);
+        in_led = boundary_frac >= 0.5;
+    } else {
+        let mask_coord = vec2<i32>(i32(uv.x * uniforms.sim_size), i32(uv.y * uniforms.sim_size));
+        let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(sim_size_i - 1)), 0).r;
+        in_casing = mask_val == 0u;
+        // LED strip: boundary cells (mask=2) OR outside cells adjacent to inside cells
+        in_led = mask_val == 2u;
+    }
 
     let angle_light = atan2(uniforms.light_dir.y, uniforms.light_dir.x);
     let dir_light = vec2<f32>(cos(angle_light), -sin(angle_light));
@@ -429,8 +515,31 @@ fn fs_main(
     let h01 = sample01.r;
     let h11 = sample11.r;
 
-    let h_center = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
-    let props = mix(mix(sample00, sample10, f.x), mix(sample01, sample11, f.x), f.y);
+    var h_center = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    var props = mix(mix(sample00, sample10, f.x), mix(sample01, sample11, f.x), f.y);
+
+    // Mask-aware renormalisation: drop OUTSIDE corners from the blend above instead of
+    // averaging in their (texture-clear, effectively 0) height/wetness/grain -- next to a wall
+    // that averaging is exactly what drags the interpolated surface down and desaturates it.
+    // `in_casing` above is `inside_frac < 0.5` for this SAME quad's SAME bilinear weights, so
+    // reaching this line (`in_casing` false, i.e. this fragment is being shaded as sand at all)
+    // already proves at least one corner is inside and `w_sum` below can't be 0 -- the
+    // `max(w_sum, 1e-4)` is defensive insurance, not a path actually reachable from here.
+    var quad_all_inside = true;
+    if (smooth_mask) {
+        let w00 = (1.0 - f.x) * (1.0 - f.y);
+        let w10 = f.x * (1.0 - f.y);
+        let w01 = (1.0 - f.x) * f.y;
+        let w11 = f.x * f.y;
+        let iw00 = w00 * select(0.0, 1.0, quad_inside00);
+        let iw10 = w10 * select(0.0, 1.0, quad_inside10);
+        let iw01 = w01 * select(0.0, 1.0, quad_inside01);
+        let iw11 = w11 * select(0.0, 1.0, quad_inside11);
+        let w_sum = max(iw00 + iw10 + iw01 + iw11, 1e-4);
+        props = (sample00 * iw00 + sample10 * iw10 + sample01 * iw01 + sample11 * iw11) / w_sum;
+        h_center = props.r;
+        quad_all_inside = quad_inside00 && quad_inside10 && quad_inside01 && quad_inside11;
+    }
     let wetness = props.g;
     let grain_size = props.b;
 
@@ -440,7 +549,24 @@ fn fs_main(
     var dh_dy: f32;
     let depth_factor = 14.0;
     let is_water = step(0.85, wetness);
-    if (is_water > 0.5) {
+
+    // Mask-aware corner heights for the narrow (dry) finite difference below: an OUTSIDE
+    // corner's raw height (~0, see above) is replaced with the mask-aware `h_center` blend, so
+    // the gradient right at a wall degrades toward flat instead of a fake cliff toward 0. These
+    // equal the raw h00/h10/h01/h11 exactly whenever the whole quad is inside (away from any
+    // wall), and always at m == 1 since `smooth_mask` is false there.
+    var h00m = h00;
+    var h10m = h10;
+    var h01m = h01;
+    var h11m = h11;
+    if (smooth_mask) {
+        h00m = select(h_center, h00, quad_inside00);
+        h10m = select(h_center, h10, quad_inside10);
+        h01m = select(h_center, h01, quad_inside01);
+        h11m = select(h_center, h11, quad_inside11);
+    }
+
+    if (is_water > 0.5 && (!smooth_mask || quad_all_inside)) {
         let u_prev = clamp((index.x - 0.5) / tex_size, 0.0, 1.0);
         let u_next = clamp((index.x + 2.5) / tex_size, 0.0, 1.0);
         let v_prev = clamp((index.y - 0.5) / tex_size, 0.0, 1.0);
@@ -453,11 +579,18 @@ fn fs_main(
         let hB1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v_prev), 0.0).r;
         let hT0 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v_next), 0.0).r;
         let hT1 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v_next), 0.0).r;
-        dh_dx = (mix(hR0, hR1, f.y) - mix(hL0, hL1, f.y)) * 0.5 + (h10 - h00) * 0.5;
-        dh_dy = (mix(hT0, hT1, f.x) - mix(hB0, hB1, f.x)) * 0.5 + (h01 - h00) * 0.5;
+        dh_dx = (mix(hR0, hR1, f.y) - mix(hL0, hL1, f.y)) * 0.5 + (h10m - h00m) * 0.5;
+        dh_dy = (mix(hT0, hT1, f.x) - mix(hB0, hB1, f.x)) * 0.5 + (h01m - h00m) * 0.5;
     } else {
-        dh_dx = mix(h10 - h00, h11 - h01, f.y);
-        dh_dy = mix(h01 - h00, h11 - h10, f.x);
+        // Also the near-wall water fallback (`is_water` true but `quad_all_inside` false): skip
+        // the wide Sobel taps rather than mask-testing all 8 of them too. They're exactly the
+        // taps that would reach across the wall into a masked-OUTSIDE texel, water resting
+        // against a wall is a common case rather than a rare one, and this keeps the extra
+        // texture reads `smooth_mask` costs small instead of doubling them to fix a second-order
+        // effect (wave-normal smoothness) right where it matters least. `h*m` above already give
+        // this branch a safe, wall-aware narrow difference either way.
+        dh_dx = mix(h10m - h00m, h11m - h01m, f.y);
+        dh_dy = mix(h01m - h00m, h11m - h10m, f.x);
     }
 
     var normal = normalize(vec3<f32>(
@@ -482,7 +615,30 @@ fn fs_main(
 
     var dry_color = uniforms.sand_color.rgb;
     if (uniforms.color_mode > 0u) {
-        dry_color = textureSampleLevel(colormap_tex, heightmap_sampler, uv, 0.0).rgb;
+        if (smooth_mask) {
+            // Manual 4-tap bilinear at the same texel-center lattice as the height/props quad
+            // above (`colormap_tex` is `sim_size` x `sim_size` too, per the module header), so
+            // `u0/v0/u1/v1` and the mask-derived `quad_insideXX` flags are reused rather than
+            // resampled. Mask-aware for the same reason `props` above is: an OUTSIDE corner has
+            // no real painted colour, and unrenormalised would tint the wall-adjacent rim
+            // towards whatever default colour happens to sit in that unused texel.
+            let c00 = textureSampleLevel(colormap_tex, heightmap_sampler, vec2<f32>(u0, v0), 0.0);
+            let c10 = textureSampleLevel(colormap_tex, heightmap_sampler, vec2<f32>(u1, v0), 0.0);
+            let c01 = textureSampleLevel(colormap_tex, heightmap_sampler, vec2<f32>(u0, v1), 0.0);
+            let c11 = textureSampleLevel(colormap_tex, heightmap_sampler, vec2<f32>(u1, v1), 0.0);
+            let cw00 = (1.0 - f.x) * (1.0 - f.y);
+            let cw10 = f.x * (1.0 - f.y);
+            let cw01 = (1.0 - f.x) * f.y;
+            let cw11 = f.x * f.y;
+            let ciw00 = cw00 * select(0.0, 1.0, quad_inside00);
+            let ciw10 = cw10 * select(0.0, 1.0, quad_inside10);
+            let ciw01 = cw01 * select(0.0, 1.0, quad_inside01);
+            let ciw11 = cw11 * select(0.0, 1.0, quad_inside11);
+            let c_w_sum = max(ciw00 + ciw10 + ciw01 + ciw11, 1e-4);
+            dry_color = (c00.rgb * ciw00 + c10.rgb * ciw10 + c01.rgb * ciw01 + c11.rgb * ciw11) / c_w_sum;
+        } else {
+            dry_color = textureSampleLevel(colormap_tex, heightmap_sampler, uv, 0.0).rgb;
+        }
     } else {
         // Continuous color mapping for solid/preset colors based on wetness & grain_size
         let dry_sand = uniforms.sand_color.rgb;
