@@ -1,11 +1,10 @@
 @group(0) @binding(0) var heightmap_tex: texture_2d<f32>;
 @group(0) @binding(1) var heightmap_sampler: sampler;
 @group(0) @binding(4) var colormap_tex: texture_2d<f32>;
-// Sized `uniforms.sim_size` x `uniforms.sim_size`, NOT `uniforms.render_size` -- uploaded straight
-// from `sim.shape_mask`, so `mask_coord` in `fs_main` below indexes it with `sim_size`. See
-// `HeightmapRenderer::shape_mask_texture`'s doc comment (sandart-render/src/lib.rs) for why the
-// vessel outline is never re-rasterized at display resolution: it would risk disagreeing with
-// where the simulation actually lets material go.
+// Sized `uniforms.sim_size` x `uniforms.sim_size`, uploaded straight from `sim.shape_mask`. The
+// PHYSICS mask -- at `smooth_mask` (`m > 1`) this is consulted as a veto over `fine_mask_tex`
+// below, not as the primary outline source. See `HeightmapRenderer::shape_mask_texture`'s doc
+// comment (sandart-render/src/lib.rs).
 @group(0) @binding(5) var shape_mask_tex: texture_2d<u32>;
 // Block-simulation heat-map debug overlay. Always a fixed 64x64 texels (see `HEAT_GRID_SIZE` in
 // sandart-render/src/lib.rs) regardless of `uniforms.sim_size` -- the LOD scheduler's block
@@ -33,9 +32,38 @@
 // diverging quantity, not a sequential one like `coarse_eta_tex`/`block_heat_tex`, and its colour
 // ramp below reflects that.
 @group(0) @binding(9) var coarse_delta_tex: texture_2d<f32>;
+// The vessel outline re-rasterized at RENDER resolution (`uniforms.render_size` x
+// `uniforms.render_size`), via the SAME `sandart_sim::DrawingSimulation::rasterize_shape_mask`
+// function `shape_mask_tex` above comes from -- just sampled at a finer lattice, not a second copy
+// of the shape math. Same 0/1/2 semantics as `shape_mask_tex`. Only meaningful when `smooth_mask`
+// is true (`uniforms.render_size > uniforms.sim_size`, i.e. `m > 1`); at `m == 1` this is an
+// unused 1x1 placeholder that `fs_main` never reads (every read of this binding is gated behind
+// `smooth_mask` below). FRAGMENT-only, no sampler needed (read via `textureLoad`).
+@group(0) @binding(10) var fine_mask_tex: texture_2d<u32>;
 
 const PI: f32 = 3.14159265359;
 const Z_SCALE: f32 = 0.009; // Unified heightmap displacement scale
+
+// How far the fine (render-resolution) mask and the sim mask are allowed to disagree, in the same
+// [0,1] "fraction of the bilinear quad that's on the INSIDE/BOUNDARY side" units both indicators
+// below are expressed in, before the sim mask overrules the fine one. ~0.1 is "about half a sim
+// cell's worth of confidence" -- small enough that ordinary bilinear blending near a wall (which
+// the fine mask does too, just at a finer lattice) never trips it, large enough that a feature the
+// SIM genuinely doesn't resolve (a peg smaller than one sim cell, a neck the sim can't open) reads
+// as confidently one-sided against it. See `resolve_smooth_flag`.
+const TAU: f32 = 0.1;
+
+// Shared by `in_casing` (fine/sim INSIDE indicators) and `in_led` (fine/sim BOUNDARY indicators)
+// in `fs_main`'s `smooth_mask` branch: the fine (render-resolution) mask decides by default --
+// it's what carries curves and corners finer than one sim cell -- UNLESS the sim mask confidently
+// disagrees (more than `TAU` past its own 0.5 threshold), in which case the physics wins instead.
+// That's why a peg or a closed neck the sim doesn't have is never drawn (fine says outside, sim
+// confidently says inside -> sim wins, opens it) and a peg or wall only the sim resolves is never
+// smoothed away by the fine mask's own bilinear blur (fine says inside, sim confidently says
+// outside -> sim wins, closes it).
+fn resolve_smooth_flag(fine_frac: f32, sim_frac: f32) -> bool {
+    return select(sim_frac <= TAU, sim_frac < 1.0 - TAU, fine_frac < 0.5);
+}
 
 struct MarbleUniform {
     pos: vec2<f32>,
@@ -60,9 +88,9 @@ struct LightingUniforms {
     quantile_count: u32,
     // Simulation grid resolution `S`. Mirrors the Rust-side `LightingUniforms::sim_size` in
     // sandart-render/src/lib.rs exactly -- see that field's doc comment for why every
-    // texel-per-cell texture (heightmap, pressure heat-map) and the shape mask (NOT re-rasterized
-    // at render resolution, see `shape_mask_tex`'s binding comment above) all read this field, not
-    // `render_size` below.
+    // texel-per-cell texture (heightmap, pressure heat-map, `shape_mask_tex`) reads this field,
+    // not `render_size` below. `fine_mask_tex` is the one texture that reads `render_size`
+    // instead -- see its binding comment above.
     sim_size: f32,
     // Quantile line positions, normalised 0.0 (top row edge) .. 1.0 (bottom row edge), packed
     // 3 lines per vec4 (12 slots total, only the first `quantile_count` used). Must mirror the
@@ -278,19 +306,15 @@ fn fs_main(
     var in_led: bool;
     if (smooth_mask) {
         // Bilinearly blend the INSIDE indicator (mask != 0, i.e. MASK_INSIDE or MASK_BOUNDARY)
-        // over the 4 sim texels around this fragment and threshold at 0.5. On a straight wall
-        // all 4 texels agree on one side or the other, so the 0.5 crossing lands exactly on the
-        // shared cell edge (the lattice point `k + 0.5` between texel centres `k` and `k + 1`),
-        // reproducing the sim mask's straight edges exactly; only where the 2x2 neighbourhood
-        // disagrees in both axes -- an outer or inner staircase corner -- does the contour cut a
-        // chamfer across that corner cell, which is the wanted rounding.
-        //
-        // A 1-sim-cell-wide neck stays open under this rule: take a lone INSIDE texel flanked on
-        // both sides by OUTSIDE texels. Sweeping across it, the interpolated indicator rises
-        // linearly from exactly 0.5 at the texel's own left edge to 1.0 at its centre, then back
-        // down to exactly 0.5 at its right edge -- it never dips below 0.5 anywhere inside the
-        // cell. Since `in_casing` below is `< 0.5` (not `<= 0.5`), the whole cell classifies as
-        // inside, edge to edge, with no gap.
+        // over the 4 sim texels around this fragment. On a straight wall all 4 texels agree on
+        // one side or the other, so the 0.5 crossing lands exactly on the shared cell edge (the
+        // lattice point `k + 0.5` between texel centres `k` and `k + 1`), reproducing the sim
+        // mask's straight edges exactly; only where the 2x2 neighbourhood disagrees in both axes
+        // -- an outer or inner staircase corner -- does the contour cut a chamfer across that
+        // corner cell. This SIM-resolution indicator (`sim_in_frac`) is no longer the primary
+        // outline (see `fine_in_frac` below) -- it's the veto `resolve_smooth_flag` checks the
+        // fine mask against -- but it is still what the mask-aware height/colour taps further
+        // down use (they are about sim texels), so `quad_insideXX` is still computed here.
         let mtc = uv * uniforms.sim_size - 0.5;
         let midx = floor(mtc);
         let mf = fract(mtc);
@@ -312,24 +336,52 @@ fn fs_main(
         let fi10 = select(0.0, 1.0, quad_inside10);
         let fi01 = select(0.0, 1.0, quad_inside01);
         let fi11 = select(0.0, 1.0, quad_inside11);
-        let inside_frac = mix(mix(fi00, fi10, mf.x), mix(fi01, fi11, mf.x), mf.y);
-        in_casing = inside_frac < 0.5;
+        let sim_in_frac = mix(mix(fi00, fi10, mf.x), mix(fi01, fi11, mf.x), mf.y);
 
-        // Boundary/LED band derived the same way, from the mask == 2 (MASK_BOUNDARY) indicator
-        // instead of != 0, so its blended width in render pixels roughly matches the 1-sim-cell
-        // band the nearest lookup gives at m == 1. Note `in_led` is only ever consulted inside
-        // `if (in_casing)` below, and MASK_BOUNDARY cells count as INSIDE for `in_casing`'s own
-        // indicator above -- so, exactly as at m == 1 (`mask_val` can't equal both 0u and 2u at
-        // once), `in_led` can't fire while `in_casing` is true here either. Whether that nesting
-        // is itself the intended behaviour is a pre-existing question outside this change's
-        // scope; this just keeps the two resolutions' behaviour identical rather than silently
-        // widening or narrowing the band.
         let fb00 = select(0.0, 1.0, mm00 == 2u);
         let fb10 = select(0.0, 1.0, mm10 == 2u);
         let fb01 = select(0.0, 1.0, mm01 == 2u);
         let fb11 = select(0.0, 1.0, mm11 == 2u);
-        let boundary_frac = mix(mix(fb00, fb10, mf.x), mix(fb01, fb11, mf.x), mf.y);
-        in_led = boundary_frac >= 0.5;
+        let sim_led_frac = mix(mix(fb00, fb10, mf.x), mix(fb01, fb11, mf.x), mf.y);
+
+        // Same bilinear blend, over the fine (render-resolution) mask's own 2x2 quad instead of
+        // the sim mask's. This is what actually carries curves and corners finer than one sim
+        // cell -- e.g. a Galton peg circle, or a shallow hourglass taper -- since `fine_mask_tex`
+        // was rasterized at `render_size`, not `sim_size`. Same 1-cell-wide-neck-stays-open
+        // argument as the (former) sim-mask version above applies here too, just at the finer
+        // lattice: a lone INSIDE fine texel's interpolated indicator never dips below 0.5 inside
+        // its own cell, so `fine_in_frac < 0.5` (not `<=`) never closes a 1-fine-cell gap.
+        let ftc = uv * uniforms.render_size - 0.5;
+        let fidx = floor(ftc);
+        let ff = fract(ftc);
+        let render_size_i = i32(uniforms.render_size);
+        let fj0 = clamp(vec2<i32>(fidx), vec2<i32>(0), vec2<i32>(render_size_i - 1));
+        let fj1 = clamp(vec2<i32>(fidx) + vec2<i32>(1, 0), vec2<i32>(0), vec2<i32>(render_size_i - 1));
+        let fj2 = clamp(vec2<i32>(fidx) + vec2<i32>(0, 1), vec2<i32>(0), vec2<i32>(render_size_i - 1));
+        let fj3 = clamp(vec2<i32>(fidx) + vec2<i32>(1, 1), vec2<i32>(0), vec2<i32>(render_size_i - 1));
+        let fm00 = textureLoad(fine_mask_tex, fj0, 0).r;
+        let fm10 = textureLoad(fine_mask_tex, fj1, 0).r;
+        let fm01 = textureLoad(fine_mask_tex, fj2, 0).r;
+        let fm11 = textureLoad(fine_mask_tex, fj3, 0).r;
+
+        let ffi00 = select(0.0, 1.0, fm00 != 0u);
+        let ffi10 = select(0.0, 1.0, fm10 != 0u);
+        let ffi01 = select(0.0, 1.0, fm01 != 0u);
+        let ffi11 = select(0.0, 1.0, fm11 != 0u);
+        let fine_in_frac = mix(mix(ffi00, ffi10, ff.x), mix(ffi01, ffi11, ff.x), ff.y);
+
+        let ffb00 = select(0.0, 1.0, fm00 == 2u);
+        let ffb10 = select(0.0, 1.0, fm10 == 2u);
+        let ffb01 = select(0.0, 1.0, fm01 == 2u);
+        let ffb11 = select(0.0, 1.0, fm11 == 2u);
+        // The LED band is fine-mask ==2 bilinear >= 0.5 (matching the ~1-render-pixel band the
+        // nearest lookup gives at m == 1), gated through the same fine/sim guard as `in_casing`
+        // so a boundary strip the sim doesn't actually have (or has but the fine rasterisation at
+        // this exact corner doesn't) can't light up on its own.
+        let fine_led_frac = mix(mix(ffb00, ffb10, ff.x), mix(ffb01, ffb11, ff.x), ff.y);
+
+        in_casing = resolve_smooth_flag(fine_in_frac, sim_in_frac);
+        in_led = resolve_smooth_flag(fine_led_frac, sim_led_frac);
     } else {
         let mask_coord = vec2<i32>(i32(uv.x * uniforms.sim_size), i32(uv.y * uniforms.sim_size));
         let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(sim_size_i - 1)), 0).r;
@@ -521,10 +573,14 @@ fn fs_main(
     // Mask-aware renormalisation: drop OUTSIDE corners from the blend above instead of
     // averaging in their (texture-clear, effectively 0) height/wetness/grain -- next to a wall
     // that averaging is exactly what drags the interpolated surface down and desaturates it.
-    // `in_casing` above is `inside_frac < 0.5` for this SAME quad's SAME bilinear weights, so
-    // reaching this line (`in_casing` false, i.e. this fragment is being shaded as sand at all)
-    // already proves at least one corner is inside and `w_sum` below can't be 0 -- the
-    // `max(w_sum, 1e-4)` is defensive insurance, not a path actually reachable from here.
+    // `quad_insideXX`/`sim_in_frac` above are this SAME sim-mask quad's SAME bilinear weights, and
+    // `resolve_smooth_flag` only lets `in_casing` be false (i.e. this fragment reaches this line
+    // as sand at all) when EITHER `sim_in_frac >= 1 - TAU` (`fine_in_frac < 0.5` branch) OR
+    // `sim_in_frac > TAU` (`fine_in_frac >= 0.5` branch, since that branch's `in_casing` is
+    // `sim_in_frac <= TAU`) -- both require `sim_in_frac > 0`, which is impossible if all 4
+    // corners were OUTSIDE (`sim_in_frac` would be exactly 0). So `w_sum` below can't be 0 either
+    // way -- the `max(w_sum, 1e-4)` is defensive insurance, not a path actually reachable from
+    // here.
     var quad_all_inside = true;
     if (smooth_mask) {
         let w00 = (1.0 - f.x) * (1.0 - f.y);

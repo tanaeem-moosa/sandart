@@ -2971,9 +2971,46 @@ pub(crate) const U_TUBE_RECTS: [[f32; 4]; 5] = [
 /// `initialize_hourglass` prefills.
 pub(crate) const U_TUBE_RESERVOIR_RECT: usize = 0;
 
+/// Integer-cell entry point: forwards straight to `eval_sandbox_shape_at` as `(cx as f32, cy as
+/// f32)`, so every existing call site (the sim's own mask generation, every shape test) is
+/// unchanged. See that function for the actual geometry -- this wrapper exists only so
+/// `rasterize_shape_mask` (sandart-sim's `lib.rs`) can evaluate the SAME geometry at continuous,
+/// non-integer coordinates when it samples a shape at an output resolution other than `w`/`h`.
 pub fn eval_sandbox_shape(
     cx: usize,
     cy: usize,
+    w: usize,
+    h: usize,
+    shape: crate::SandboxShape,
+    neck_width: f32,
+    hourglass_curve: f32,
+    multistage_chambers: u32,
+    flipped: bool,
+) -> (bool, bool) {
+    eval_sandbox_shape_at(
+        cx as f32,
+        cy as f32,
+        w,
+        h,
+        shape,
+        neck_width,
+        hourglass_curve,
+        multistage_chambers,
+        flipped,
+    )
+}
+
+/// The actual vessel geometry, in CONTINUOUS sim-cell coordinates: `px`/`py` need not be integers
+/// or even land inside `0..w`/`0..h`. Every shape below was already float math on `dx`/`dy`
+/// (`w`/`h` only ever enter as `w_f`/`h_f` fractions) -- `eval_sandbox_shape`'s old `cx: usize, cy:
+/// usize` signature just forced the caller to always ask at an integer cell centre. Splitting the
+/// coordinate out as `f32` is what lets `rasterize_shape_mask` sample this exact same function at
+/// an arbitrary output resolution (the render-resolution outline, sandart-sim's `lib.rs`) instead
+/// of maintaining a second, WGSL- or JS-side copy of the shape math -- the vessel structure stays
+/// defined exactly once.
+pub fn eval_sandbox_shape_at(
+    px: f32,
+    py: f32,
     w: usize,
     h: usize,
     shape: crate::SandboxShape,
@@ -2989,14 +3026,14 @@ pub fn eval_sandbox_shape(
     // `test_vessel_masks_are_left_right_symmetric`.
     let center_x = (w - 1) as f32 / 2.0;
     let center_y = h as f32 / 2.0;
-    let dx = cx as f32 - center_x;
+    let dx = px - center_x;
     // Turning the apparatus over inverts the *structure*, not just its contents. Every shape
     // below is written in terms of `dy`, so negating it here mirrors the geometry about
     // `center_y` and nothing else needs to know. Negating the continuous `dy` rather than
     // remapping the integer row is what keeps this consistent with `flip_hourglass`'s content
     // mirror (`y2 = h - y`, i.e. the same axis at `h / 2`) and well defined for row 0, which
     // has no partner row under that mapping.
-    let dy = (cy as f32 - center_y) * if flipped { -1.0 } else { 1.0 };
+    let dy = (py - center_y) * if flipped { -1.0 } else { 1.0 };
     let w_f = w as f32;
     let h_f = h as f32;
 

@@ -97,7 +97,7 @@ impl SandArtApp {
         if let Some(wgpu_state) = &cc.wgpu_render_state {
             let device = &wgpu_state.device;
             let target_format = wgpu_state.target_format;
-            let mut resources = crate::renderer::HeightmapRenderer::new(device, target_format, sandart_sim::GRID_SIZE);
+            let mut resources = crate::renderer::HeightmapRenderer::new(device, target_format, sandart_sim::GRID_SIZE, sandart_sim::GRID_SIZE);
             let default_color = vec![255u8; sandart_sim::GRID_SIZE * sandart_sim::GRID_SIZE * 4];
             resources.update_colormap(&wgpu_state.queue, &default_color);
             wgpu_state

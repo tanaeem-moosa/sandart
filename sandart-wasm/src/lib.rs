@@ -219,7 +219,7 @@ impl WasmSimulationState {
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = HeightmapRenderer::new(&device, target_format, GRID_SIZE);
+        let renderer = HeightmapRenderer::new(&device, target_format, GRID_SIZE, GRID_SIZE);
         let sim = DrawingSimulation::new();
         let playback = PlaybackController::new();
 
@@ -499,7 +499,7 @@ impl WasmSimulationState {
         self.render_size = new_render_size;
         self.sim_downscale = new_sim_downscale;
         self.sim_size = size;
-        self.renderer = HeightmapRenderer::new(&self.device, self.target_format, size);
+        self.renderer = HeightmapRenderer::new(&self.device, self.target_format, size, new_render_size);
         self.full_upload_needed = true;
         self.playback.state = PlaybackState::Stopped;
         self.playback.current_indices = [0; 5];
@@ -1099,6 +1099,17 @@ impl WasmSimulationState {
 
         if self.sim.shape_mask_dirty {
             self.renderer.update_shape_mask(&self.queue, &self.sim.shape_mask);
+            // Only at `m > 1`: at `m == 1` `fine_mask_texture` is the 1x1 placeholder
+            // `HeightmapRenderer::new` allocates then (see its doc comment) and the shader never
+            // reads it (`smooth_mask` in `fs_main` gates every read), so rasterizing and
+            // uploading it here would cost real time (a full `render_size^2` sweep of
+            // `eval_sandbox_shape_at`) for a texture nothing looks at. Re-runs on every shape/neck/
+            // curve/chamber-count/flip change (whatever set `shape_mask_dirty`) and on every
+            // `apply_grid_dims` rebuild, since that also leaves the sim's mask dirty.
+            if self.sim_downscale > 1 {
+                let fine_mask = self.sim.rasterize_shape_mask(self.render_size);
+                self.renderer.update_fine_mask(&self.queue, &fine_mask);
+            }
             self.sim.shape_mask_dirty = false;
         }
 

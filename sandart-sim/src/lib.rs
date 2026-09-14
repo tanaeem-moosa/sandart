@@ -1038,46 +1038,89 @@ impl DrawingSimulation {
     /// Regenerate the shape mask from the current sandbox_shape, neck_width, hourglass_curve,
     /// and (for MultiStageHourglass) multistage_chambers. Call this whenever these parameters
     /// change. Sets shape_mask_dirty for GPU re-upload.
+    ///
+    /// The `out_size == sim size` case of `rasterize_shape_mask` below -- kept as its own method
+    /// (rather than a one-line call site) since `self.shape_mask`/`shape_mask_dirty` are the sim's
+    /// own fields, not something a generic rasteriser should reach into.
     pub fn generate_shape_mask(&mut self) {
         let w = self.heightmap.width;
-        let h = self.heightmap.height;
+        debug_assert_eq!(w, self.heightmap.height, "sandbox grid is always square");
+        self.shape_mask = self.rasterize_shape_mask(w);
+        self.shape_mask_dirty = true;
+    }
 
-        // Pass 1: Evaluate inside/safe for every cell using the existing physics evaluator
-        for y in 0..h {
-            let offset = y * w;
-            for x in 0..w {
-                let (inside, _safe) = physics::eval_sandbox_shape(
-                    x, y, w, h,
+    /// Rasterize the CURRENT vessel shape (sandbox_shape, neck_width, hourglass_curve,
+    /// multistage_chambers, flipped) at an arbitrary square output resolution `out_size`,
+    /// returning a fresh `MASK_OUTSIDE`/`MASK_INSIDE`/`MASK_BOUNDARY` buffer -- the same values
+    /// `shape_mask` holds, just not written into it.
+    ///
+    /// Always evaluates the geometry in SIM-cell coordinates (`w = h = S`, the actual simulation
+    /// grid, i.e. `self.heightmap.width`), regardless of `out_size`: output pixel `(i, j)` samples
+    /// the continuous sim-cell position `((i + 0.5) * S / out_size - 0.5, (j + 0.5) * S /
+    /// out_size - 0.5)` via `physics::eval_sandbox_shape_at` -- the pixel-CENTRE convention that
+    /// makes `out_size == S` sample EXACTLY the integer cell centres `eval_sandbox_shape` itself
+    /// uses (`(i + 0.5) * S / S - 0.5 == i` bit-for-bit: `S / S` is exactly `1.0` for any nonzero
+    /// float, and `i + 0.5 - 0.5` round-trips exactly for every representable `i` in this range).
+    /// That is what makes `generate_shape_mask` above (`out_size = S`) bit-identical to the mask
+    /// this crate produced before this function existed -- see
+    /// `test_rasterize_shape_mask_matches_discrete_eval_at_sim_size`.
+    ///
+    /// This is the ONE place the vessel outline is rasterized at a resolution other than the sim
+    /// grid (the render-resolution "fine mask" `sandart-wasm` uploads when downscaled, `out_size =
+    /// render_size`) -- reusing `eval_sandbox_shape_at` rather than a second copy of the shape math
+    /// is what keeps the render-resolution outline unable to drift from the physics: any new shape
+    /// parameter added to `eval_sandbox_shape_at` reaches both masks through this one function.
+    ///
+    /// Pass 2 (boundary detection) runs at `out_size` too, so a `MASK_BOUNDARY` cell in the
+    /// returned buffer means "adjacent to an OUTSIDE cell AT THIS RESOLUTION", not a resampling of
+    /// the sim's own boundary cells.
+    pub fn rasterize_shape_mask(&self, out_size: usize) -> Vec<u8> {
+        let s = self.heightmap.width;
+        debug_assert_eq!(s, self.heightmap.height, "sandbox grid is always square");
+        let s_f = s as f32;
+        let out_f = out_size as f32;
+
+        let mut mask = vec![MASK_OUTSIDE; out_size * out_size];
+
+        // Pass 1: evaluate inside/safe for every output pixel, sampled at its centre in sim-cell
+        // coordinates, using the existing physics evaluator.
+        for j in 0..out_size {
+            let py = (j as f32 + 0.5) * s_f / out_f - 0.5;
+            let offset = j * out_size;
+            for i in 0..out_size {
+                let px = (i as f32 + 0.5) * s_f / out_f - 0.5;
+                let (inside, _safe) = physics::eval_sandbox_shape_at(
+                    px, py, s, s,
                     self.sandbox_shape,
                     self.neck_width,
                     self.hourglass_curve,
                     self.multistage_chambers,
                     self.flipped,
                 );
-                self.shape_mask[offset + x] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
+                mask[offset + i] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
             }
         }
 
-        // Pass 2: Mark boundary cells - any INSIDE cell with at least one OUTSIDE neighbor
-        // We need a temporary copy to avoid read/write conflict
-        let snapshot = self.shape_mask.clone();
-        for y in 0..h {
-            let offset = y * w;
-            for x in 0..w {
+        // Pass 2: mark boundary cells - any INSIDE cell with at least one OUTSIDE neighbor, at
+        // `out_size` resolution. We need a temporary copy to avoid read/write conflict.
+        let snapshot = mask.clone();
+        for y in 0..out_size {
+            let offset = y * out_size;
+            for x in 0..out_size {
                 if snapshot[offset + x] == MASK_INSIDE {
                     let has_outside_neighbor =
                         (x == 0 || snapshot[offset + x - 1] == MASK_OUTSIDE) ||
-                        (x + 1 >= w || snapshot[offset + x + 1] == MASK_OUTSIDE) ||
-                        (y == 0 || snapshot[(y - 1) * w + x] == MASK_OUTSIDE) ||
-                        (y + 1 >= h || snapshot[(y + 1) * w + x] == MASK_OUTSIDE);
+                        (x + 1 >= out_size || snapshot[offset + x + 1] == MASK_OUTSIDE) ||
+                        (y == 0 || snapshot[(y - 1) * out_size + x] == MASK_OUTSIDE) ||
+                        (y + 1 >= out_size || snapshot[(y + 1) * out_size + x] == MASK_OUTSIDE);
                     if has_outside_neighbor {
-                        self.shape_mask[offset + x] = MASK_BOUNDARY;
+                        mask[offset + x] = MASK_BOUNDARY;
                     }
                 }
             }
         }
 
-        self.shape_mask_dirty = true;
+        mask
     }
 
     /// Return a pointer to the shape mask data for WASM/GPU access.
@@ -2870,5 +2913,72 @@ mod tests {
             }
         }
         assert!(worst.is_empty(), "Vessel masks are not left-right symmetric:\n  {}", worst.join("\n  "));
+    }
+
+    /// `rasterize_shape_mask(out_size = S)` (what `generate_shape_mask` now calls) must be
+    /// bit-identical to the mask this crate produced before that refactor: a discrete pass over
+    /// `physics::eval_sandbox_shape`'s integer-cell API, computed independently right here rather
+    /// than by calling `rasterize_shape_mask` a second time (which would just prove the function
+    /// agrees with itself). Covers every `SandboxShape` at both ends of the resolution range the
+    /// UI offers (64, 512) -- see `HANDOVER`/commit message for the same comparison re-run against
+    /// the pre-refactor tree with an external checksum tool.
+    #[test]
+    fn test_rasterize_shape_mask_matches_discrete_eval_at_sim_size() {
+        for w in [64usize, 512] {
+            for shape in [
+                SandboxShape::Circle,
+                SandboxShape::Square,
+                SandboxShape::Oval,
+                SandboxShape::Hourglass,
+                SandboxShape::MultiStageHourglass,
+                SandboxShape::GaltonBoard,
+                SandboxShape::StaircaseCascade,
+                SandboxShape::ProceduralFunnel,
+                SandboxShape::MultiNeckHourglass,
+                SandboxShape::UTubeFlowThrough,
+            ] {
+                let mut sim = DrawingSimulation::new_with_size(w);
+                sim.sandbox_shape = shape;
+                sim.neck_width = 0.06;
+                sim.hourglass_curve = 0.8;
+                sim.multistage_chambers = 8;
+                sim.generate_shape_mask();
+
+                // Independent discrete reimplementation of the old two-pass algorithm, using the
+                // integer-cell `eval_sandbox_shape` entry point directly.
+                let h = w;
+                let mut expected = vec![MASK_OUTSIDE; w * h];
+                for y in 0..h {
+                    for x in 0..w {
+                        let (inside, _safe) = physics::eval_sandbox_shape(
+                            x, y, w, h, shape, sim.neck_width, sim.hourglass_curve,
+                            sim.multistage_chambers, sim.flipped,
+                        );
+                        expected[y * w + x] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
+                    }
+                }
+                let snapshot = expected.clone();
+                for y in 0..h {
+                    for x in 0..w {
+                        if snapshot[y * w + x] == MASK_INSIDE {
+                            let has_outside_neighbor =
+                                (x == 0 || snapshot[y * w + x - 1] == MASK_OUTSIDE) ||
+                                (x + 1 >= w || snapshot[y * w + x + 1] == MASK_OUTSIDE) ||
+                                (y == 0 || snapshot[(y - 1) * w + x] == MASK_OUTSIDE) ||
+                                (y + 1 >= h || snapshot[(y + 1) * w + x] == MASK_OUTSIDE);
+                            if has_outside_neighbor {
+                                expected[y * w + x] = MASK_BOUNDARY;
+                            }
+                        }
+                    }
+                }
+
+                assert_eq!(
+                    sim.shape_mask, expected,
+                    "{:?} at w={}: rasterize_shape_mask(S) diverged from the discrete-eval mask",
+                    shape, w
+                );
+            }
+        }
     }
 }

@@ -1,9 +1,10 @@
 use wgpu;
 
-/// Default/shipped grid resolution. `HeightmapRenderer::new` now takes an explicit `sim_size`
-/// so the renderer's textures can be sized for 64/128/256/512 (see the resolution selector in
-/// `sandart-wasm`); this constant remains the value used wherever a caller doesn't need a
-/// different size (tests, the desktop app).
+/// Default/shipped grid resolution. `HeightmapRenderer::new` takes explicit `sim_size` and
+/// `render_size` arguments so the renderer's textures can be sized for 64/128/256/512 (and, for
+/// `render_size`, 1024) -- see the resolution and simulation-downscale selectors in
+/// `sandart-wasm`; this constant remains the value used wherever a caller doesn't need a
+/// different size (tests, the desktop app), passed for both.
 pub const GRID_SIZE: usize = 512;
 
 /// The LOD scheduler's block grid edge length -- always 64x64 blocks regardless of simulation
@@ -164,17 +165,24 @@ pub struct HeightmapRenderer {
     pub pipeline: wgpu::RenderPipeline,
     pub heightmap_texture: wgpu::Texture,
     pub colormap_texture: wgpu::Texture,
-    /// Sized `sim_size` x `sim_size`, uploaded straight from `sim.shape_mask` -- NOT re-rasterized
-    /// at the render resolution `n`, even though `n` is what the vessel outline actually displays
-    /// at. The vessel shape is physics, not decoration: an independently re-rasterized mask at `n`
-    /// could disagree with where the simulation actually lets material go (a neck open on screen
-    /// could be closed at `S`, or a mask feature narrower than one sim cell could be impossible to
-    /// represent at `S` at all), so the screen must never be able to contradict what the sim
-    /// itself thinks is inside the vessel. At `m > 1` this means the outline the shader draws
-    /// staircases in blocks of `m` render cells per sim cell; smoothing that staircase (in the
-    /// shader, still reading from this same sim-sized mask) is a follow-up, not part of this sizing
-    /// change.
+    /// Sized `sim_size` x `sim_size`, uploaded straight from `sim.shape_mask`. This is the
+    /// PHYSICS mask, and stays the authority `fs_main` falls back to whenever the fine mask below
+    /// disagrees with it by more than `TAU` (a neck open on screen but closed at `S`, or vice
+    /// versa, is never drawn contrary to what the sim itself thinks is inside the vessel) -- see
+    /// `fine_mask_texture`'s doc comment for the mask that now supplies the everyday outline.
     pub shape_mask_texture: wgpu::Texture,
+    /// The vessel outline re-rasterized at RENDER resolution (`render_size` x `render_size`, or a
+    /// tiny unused placeholder at `m == 1` when `render_size == sim_size`) via
+    /// `sandart_sim::DrawingSimulation::rasterize_shape_mask` -- the SAME shape function
+    /// `shape_mask_texture` above is built from, just sampled at a finer lattice, so there is no
+    /// second copy of the shape math anywhere and no way for the two to drift apart on a new shape
+    /// parameter. This is what lets `fs_main` draw curves and corners finer than one sim cell (the
+    /// whole point of this texture: user feedback at `m > 1` was that curves weren't smooth and
+    /// edges weren't pointy, which a mask with one bit per SIM cell cannot carry) while
+    /// `shape_mask_texture` still vetoes it
+    /// wherever the two disagree enough to matter. Only uploaded (`update_fine_mask`) when `m > 1`
+    /// -- see that method's doc comment.
+    pub fine_mask_texture: wgpu::Texture,
     /// Block-simulation heat-map debug overlay texture. Fixed 64x64 (`HEAT_GRID_SIZE`) rather
     /// than `sim_size` x `sim_size` like the textures above -- the LOD scheduler's block grid
     /// is always exactly 64x64 regardless of simulation resolution (see the `block_size`
@@ -208,23 +216,26 @@ pub struct HeightmapRenderer {
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
-    /// Simulation grid resolution every GPU texture in this struct was allocated at -- `S` in the
+    /// Simulation grid resolution every per-sim-cell GPU texture in this struct (heightmap,
+    /// colormap, `shape_mask_texture`, the heat-map overlays) was allocated at -- `S` in the
     /// sim-downscale scheme (`sandart-wasm`'s `set_sim_downscale`/`set_grid_size`):
     /// `S = render_size / m`. Renamed from `grid_size` when the render resolution `n` and the sim
-    /// resolution `S` decoupled. The shape mask stays sized at `S`, uploaded straight from
-    /// `sim.shape_mask`, exactly as before that split -- an analytically re-rasterized mask at `n`
-    /// could disagree with where the simulation actually lets material go (a neck open on screen
-    /// could be closed at `S`), so the vessel outline the mask draws must come from the physics,
-    /// not be redrawn independently at display resolution. `render_size` (`n`) is therefore not a
-    /// GPU resource size anywhere in this crate; it exists only as a `LightingUniforms` scalar for
-    /// the handful of shader quantities that are genuinely per-render-pixel (the grain hash) -- see
-    /// that struct's doc comment. Changing `sim_size` requires a full `HeightmapRenderer::new`
-    /// teardown/rebuild (textures cannot be resized in place), not a mutation of this field alone.
+    /// resolution `S` decoupled.
     pub sim_size: usize,
+    /// Render/display grid resolution `fine_mask_texture` was allocated at -- `n` in the
+    /// sim-downscale scheme, i.e. `render_size >= sim_size` always, with equality at `m == 1`.
+    /// Unlike `sim_size` above, `render_size` sizes exactly one GPU resource in this crate
+    /// (`fine_mask_texture`); every other texture stays `sim_size`-scaled. Changing either field
+    /// requires a full `HeightmapRenderer::new` teardown/rebuild (textures cannot be resized in
+    /// place), not a mutation of this field alone.
+    pub render_size: usize,
 }
 
 impl HeightmapRenderer {
-    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, sim_size: usize) -> Self {
+    /// `render_size` is the display/render resolution `n` (>= `sim_size`, equal to it at `m ==
+    /// 1`) -- see `fine_mask_texture`'s doc comment for what it sizes and why. Callers that never
+    /// downscale (the desktop app, most tests) pass `sim_size` for both.
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, sim_size: usize, render_size: usize) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("sand_art_shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
@@ -326,6 +337,31 @@ impl HeightmapRenderer {
 
         let shape_mask_texture_view =
             shape_mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create the fine (render-resolution) shape mask texture -- same R8Uint format and
+        // 0/1/2 semantics as `shape_mask_texture` above, just sized `render_size` x `render_size`
+        // instead of `sim_size` x `sim_size`. At `m == 1` (`render_size == sim_size`) this is
+        // never uploaded to or read by the shader (`smooth_mask` in `fs_main` gates both), so it
+        // is sized 1x1 rather than wasting a full `sim_size`-sized allocation on a texture nothing
+        // touches -- see `update_fine_mask`'s doc comment.
+        let fine_mask_size = if render_size > sim_size { render_size } else { 1 };
+        let fine_mask_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("fine_mask_texture"),
+            size: wgpu::Extent3d {
+                width: fine_mask_size as u32,
+                height: fine_mask_size as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Uint,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let fine_mask_texture_view =
+            fine_mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create block-simulation heat-map texture (HEAT_GRID_SIZE x HEAT_GRID_SIZE R8Unorm).
         // R8Unorm (not R8Uint like shape_mask_texture) because the shader reads it as a
@@ -540,6 +576,21 @@ impl HeightmapRenderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    // FRAGMENT-only, like `shape_mask_tex` -- nothing in `vs_main` needs the
+                    // render-resolution outline (vertex displacement stays sim-mask/heightmap
+                    // driven, unchanged by this feature).
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        // Read via `textureLoad` (integer texel coords, no sampler), same as
+                        // `shape_mask_tex`.
+                        sample_type: wgpu::TextureSampleType::Uint,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -587,6 +638,10 @@ impl HeightmapRenderer {
                 wgpu::BindGroupEntry {
                     binding: 9,
                     resource: wgpu::BindingResource::TextureView(&coarse_delta_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&fine_mask_texture_view),
                 },
             ],
         });
@@ -644,6 +699,7 @@ impl HeightmapRenderer {
             heightmap_texture,
             colormap_texture,
             shape_mask_texture,
+            fine_mask_texture,
             block_heat_texture,
             pressure_heat_texture,
             coarse_eta_texture,
@@ -655,6 +711,7 @@ impl HeightmapRenderer {
             index_buffer,
             num_indices,
             sim_size,
+            render_size,
         }
     }
 
@@ -701,6 +758,38 @@ impl HeightmapRenderer {
             wgpu::Extent3d {
                 width: sim_size,
                 height: sim_size,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+
+    /// Upload the fine (render-resolution) shape mask (R8Uint) to GPU. `data` must be
+    /// `render_size * render_size` bytes, row-major -- `sandart_sim::DrawingSimulation::
+    /// rasterize_shape_mask(render_size)` produces exactly that.
+    ///
+    /// Callers must only call this at `m > 1` (`render_size > sim_size`): at `m == 1`
+    /// `fine_mask_texture` is a 1x1 placeholder (see `new`'s doc comment on that field) that this
+    /// write would overrun, and the shader never reads this binding at `m == 1` anyway
+    /// (`smooth_mask` in `fs_main` gates it) -- exactly the same "gate the upload, not just the
+    /// shader read" contract `update_block_heat` below already follows for its own overlay.
+    pub fn update_fine_mask(&mut self, queue: &wgpu::Queue, data: &[u8]) {
+        let render_size = self.render_size as u32;
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.fine_mask_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(render_size), // 1 byte per pixel for R8Uint
+                rows_per_image: Some(render_size),
+            },
+            wgpu::Extent3d {
+                width: render_size,
+                height: render_size,
                 depth_or_array_layers: 1,
             },
         );
@@ -1102,7 +1191,7 @@ mod tests {
             device.push_error_scope(wgpu::ErrorFilter::Validation);
 
             let target_format = wgpu::TextureFormat::Rgba8Unorm;
-            let _resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE);
+            let _resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE, GRID_SIZE);
 
             let error = device.pop_error_scope().await;
             assert!(
@@ -1125,7 +1214,7 @@ mod tests {
             let height = 256;
             let target_format = wgpu::TextureFormat::Rgba8Unorm;
 
-            let mut resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE);
+            let mut resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE, GRID_SIZE);
 
             let mut heightmap_data = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
             for y in 0..256 {
@@ -1321,7 +1410,7 @@ mod tests {
             let height = 512;
             let target_format = wgpu::TextureFormat::Rgba8Unorm;
 
-            let mut resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE);
+            let mut resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE, GRID_SIZE);
 
             let camera_uniforms = CameraUniforms {
                 view_proj: [
