@@ -53,14 +53,23 @@ const Z_SCALE: f32 = 0.009; // Unified heightmap displacement scale
 // as confidently one-sided against it. See `resolve_smooth_flag`.
 const TAU: f32 = 0.1;
 
-// Shared by `in_casing` (fine/sim INSIDE indicators) and `in_led` (fine/sim BOUNDARY indicators)
-// in `fs_main`'s `smooth_mask` branch: the fine (render-resolution) mask decides by default --
-// it's what carries curves and corners finer than one sim cell -- UNLESS the sim mask confidently
-// disagrees (more than `TAU` past its own 0.5 threshold), in which case the physics wins instead.
-// That's why a peg or a closed neck the sim doesn't have is never drawn (fine says outside, sim
-// confidently says inside -> sim wins, opens it) and a peg or wall only the sim resolves is never
-// smoothed away by the fine mask's own bilinear blur (fine says inside, sim confidently says
-// outside -> sim wins, closes it).
+// Returns whether `fine_frac`/`sim_frac` (bilinear "fraction of the quad on the LIT side of the
+// 0.5 threshold" for some binary mask condition -- `!= 0` for INSIDE, `== 2` for BOUNDARY) is
+// confidently BELOW 0.5, i.e. the "OFF" side of that condition: the fine (render-resolution) mask
+// decides by default -- it's what carries curves and corners finer than one sim cell -- UNLESS the
+// sim mask confidently disagrees (more than `TAU` past its own 0.5 threshold), in which case the
+// physics wins instead.
+//
+// `in_casing` in `fs_main`'s `smooth_mask` branch wants exactly this ("OFF" = not inside = wall)
+// and uses the return value directly: a peg or closed neck the sim doesn't have is never drawn
+// (fine says outside/OFF, sim confidently says inside -> sim wins, this returns false, opens it),
+// and a peg or wall only the sim resolves is never smoothed away by the fine mask's own bilinear
+// blur (fine says inside/ON, sim confidently says outside -> sim wins, this returns true, closes
+// it).
+//
+// `in_led` wants the OPPOSITE polarity -- true when the BOUNDARY condition is confidently ON, not
+// off -- so it negates this call (`!resolve_smooth_flag(fine_led_frac, sim_led_frac)`) rather than
+// getting its own copy of the same fine/sim/TAU logic inverted by hand.
 fn resolve_smooth_flag(fine_frac: f32, sim_frac: f32) -> bool {
     return select(sim_frac <= TAU, sim_frac < 1.0 - TAU, fine_frac < 0.5);
 }
@@ -381,7 +390,30 @@ fn fs_main(
         let fine_led_frac = mix(mix(ffb00, ffb10, ff.x), mix(ffb01, ffb11, ff.x), ff.y);
 
         in_casing = resolve_smooth_flag(fine_in_frac, sim_in_frac);
-        in_led = resolve_smooth_flag(fine_led_frac, sim_led_frac);
+        // NEGATED, unlike `in_casing` just above: `resolve_smooth_flag` returns true for the
+        // "OFF" (confidently-below-0.5) side of whatever fraction it's given, but `in_led` wants
+        // the opposite polarity -- true when the BOUNDARY fraction is confidently ON (mask == 2
+        // present), not off. Un-negated this was `sim_led_frac` near 0 (i.e. "confidently NOT
+        // boundary") reading as true across the entire casing, painting the whole wall as the LED
+        // ring at m > 1 (rainbow in the default `led_mode` 1) instead of leaving `in_led` false
+        // there the way `mask_val == 2u` structurally can at m == 1.
+        //
+        // With the negation, `in_casing && in_led` is providably impossible here, matching m ==
+        // 1's own guarantee (`mask_val` can't equal both 0u and 2u) exactly rather than merely
+        // approximately: BOUNDARY implies INSIDE pointwise at every mask texel (mask == 2 is a
+        // subset of mask != 0), so bilinearly blending preserves the same order,
+        // `fine_led_frac <= fine_in_frac` and `sim_led_frac <= sim_in_frac` always. Split
+        // `resolve_smooth_flag`'s behaviour into the three zones its `select` calls define on
+        // `sim_frac` (<= TAU: always true; >= 1 - TAU: always false; the open middle: `fine_frac <
+        // 0.5`) and check both indicators against them: whenever `sim_in_frac <= TAU` makes
+        // `in_casing` true, `sim_led_frac <= sim_in_frac <= TAU` forces `in_led` false the same
+        // way; whenever `sim_in_frac` is in the open middle and `fine_in_frac < 0.5` makes
+        // `in_casing` true, `fine_led_frac <= fine_in_frac < 0.5` forces `in_led` false too
+        // (either because `sim_led_frac <= TAU` outright, or because it's also in the open middle
+        // where `in_led`'s condition is exactly `fine_led_frac < 0.5`, which just held). So no
+        // sim-veto sliver can ever show an LED pixel that m == 1 wouldn't -- this is not a
+        // separate design choice from `in_casing`'s, it falls out of the same guard.
+        in_led = !resolve_smooth_flag(fine_led_frac, sim_led_frac);
     } else {
         let mask_coord = vec2<i32>(i32(uv.x * uniforms.sim_size), i32(uv.y * uniforms.sim_size));
         let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(sim_size_i - 1)), 0).r;
