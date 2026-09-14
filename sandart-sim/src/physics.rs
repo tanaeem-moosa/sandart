@@ -3236,41 +3236,45 @@ pub fn eval_sandbox_shape_at(
                 // bit-identity check in `test_galton_board_has_no_clear_vertical_shafts`), so nothing
                 // changes at today's default resolution.
                 let scale = w_f / 512.0;
-                // The user's chosen floor: below 2 cells a "peg" is smaller than the grid can
-                // even render as a lattice rather than noise, regardless of what closes shafts.
-                const PEG_SPACING_MIN: f32 = 2.0;
+                // The user's "min 2 cell spacing" reads as the GAP between pegs, not the lattice
+                // PERIOD -- a peg has to have some width too, so the period floors at roughly
+                // 2 (peg) + 2 (gap) = 4. A floor of 2.0 (this constant's first value) shipped a
+                // real bug, not just smaller pegs: cell centres in x sit on a half-integer axis
+                // (`center_x = (w - 1) / 2` for even `w`), and at `spacing == 2` (an even
+                // integer) `dx mod spacing` has only TWO possible residues, +-0.5, the SAME for
+                // every column -- so `pdx` never varies along a row and ANY radius above 0.5
+                // covers the entire row at once, sealing it, rather than leaving gaps between
+                // discrete pegs. At `spacing == 4` there are four residues (+-0.5, +-1.5), so
+                // pdx genuinely varies column to column again and a mid-sized radius (see
+                // `PEG_RADIUS_MIN` below) leaves real gaps -- confirmed by dumping the mask: at
+                // the OLD floor, S = 64 had 12 peg-band rows with no INSIDE cell at all and
+                // S = 128 had 22; at `PEG_SPACING_MIN = 4.0` neither does, matching the discrete
+                // 2-cell-peg/2-cell-gap pattern S = 256 already showed unfloored (`8 * 0.5 = 4`).
+                const PEG_SPACING_MIN: f32 = 4.0;
                 let spacing = (8.0 * scale).max(PEG_SPACING_MIN);
                 // Staggered rows only close the gap if a peg is at least a quarter of a
                 // spacing wide: even rows cover `[j*s - r, j*s + r]`, odd rows the same
                 // shifted by `s/2`, and the union has no gap exactly when `r >= s/4`. At the
                 // old `r = 1.8` against `s = 8` a 0.4-wide shaft survived at every `8j +- 2`
-                // even once the stagger was fixed, so the radius has to move too. That alone,
-                // though, is not the binding floor once `spacing` shrinks -- see below.
+                // even once the stagger was fixed, so the radius has to move too.
                 //
-                // Cell centres in x sit on a half-integer axis (`center_x = (w - 1) / 2` for
-                // even `w`). At every `scale` in {1/8, 1/4, 1/2, 1} (S in {64,128,256,512})
-                // `spacing` above lands on an even integer, so `peg_x` (a multiple of `spacing`
-                // plus a stagger of 0 or `spacing / 2`, both integers) is always an integer too --
-                // meaning `pdx = dx - peg_x` is always an exact half-integer: |pdx| >= 0.5 for
-                // EVERY cell, never less, never exactly on the peg. A radius that never clears
-                // that 0.5 floor rasterises a peg as a circle with no cell inside it -- present in
-                // the formula, invisible on the grid.
+                // `field_start` (below) is rounded to the nearest integer cell so the row lattice
+                // doesn't land at an exact half-cell remove from every `dy` (`dy` is already
+                // integer) -- unrounded, S = 128 put `pdy` at an exact +-0.5 for every row with
+                // no row-to-row variation, which combined with the old spacing-2 bug to make the
+                // whole peg band either fully solid or fully empty depending on radius, no radius
+                // giving actual pegs in between.
                 //
-                // `field_start` (below) is rounded to the nearest integer cell for the matching
-                // reason on the y axis: `dy` is already integer, and an unrounded fractional
-                // `field_start` can put the row lattice at exactly the same half-cell remove from
-                // every `dy`, the y-axis mirror of the x problem above -- at S = 128 unrounded
-                // (`field_start = 1.5`) `pdy` was an exact +-0.5 for every row with no variation,
-                // making the whole peg band either fully solid or fully empty depending on radius,
-                // no radius giving actual pegs in between. Rounding gives `pdy` a real 0-vs-1
-                // alternation between rows instead, the way the x axis already had one between
-                // `pdx`'s own possible residues at every `spacing` above 2.
-                //
-                // With that fix, swept numerically (0.01 steps) against
-                // `test_galton_board_has_no_clear_vertical_shafts`'s own shaft check, the worst
-                // case (S = 64/128/256) needs r > 0.51; `0.6` is that with margin, still well
-                // under 2.2 so `scale == 1` (S = 512, spacing = 8, needs r > 1.51) is untouched.
-                const PEG_RADIUS_MIN: f32 = 0.6;
+                // `PEG_RADIUS_MIN` keeps the SAME radius/spacing ratio the shipped, unscaled
+                // defaults already use (`2.2 / 8 == 0.275`), so `4.0 * 0.275 == 1.1`: pegs at
+                // every floored `S` look like the same shape as the S = 512 default, just
+                // smaller, rather than an independently-tuned size. Swept numerically (0.01
+                // steps, checking BOTH "no open vertical shaft" and "no peg-band row with zero
+                // INSIDE cells") at `spacing == 4`, the valid window is r in (0.51, 1.50] at every
+                // one of S = 64/128/256 -- 1.1 sits centred in it with margin both ways. At
+                // `scale == 1` (S = 512, spacing = 8) the valid window is (1.51, 3.50], and 1.1 <
+                // 2.2 leaves the shipped default untouched.
+                const PEG_RADIUS_MIN: f32 = 1.1;
                 let radius = (2.2 * scale).max(PEG_RADIUS_MIN);
                 let field_start = (6.0 * scale).round();
                 if dy > field_start && dy < 0.38 * h_f {

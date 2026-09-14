@@ -2472,6 +2472,70 @@ mod tests {
                 y_lo,
                 y_hi
             );
+
+            // "No open shaft" alone missed the actual regression a spacing floor of 2 cells
+            // caused (2026-09-14): at spacing 2 on the half-integer x axis, `dx mod spacing` has
+            // only two residues (+-0.5, the SAME for every column), so any peg radius above 0.5
+            // seals an ENTIRE row at once rather than leaving gaps between discrete pegs -- every
+            // column in that row reports "blocked", so no column is ever an open SHAFT, but sand
+            // cannot get through the row either. Assert directly against that failure mode: no
+            // row in the peg band may have zero INSIDE/BOUNDARY cells across the whole width.
+            let mut sealed_rows = Vec::new();
+            for y in y_lo..y_hi {
+                let any_inside = (0..w).any(|x| sim.shape_mask[y * w + x] != MASK_OUTSIDE);
+                if !any_inside {
+                    sealed_rows.push(y);
+                }
+            }
+            assert!(
+                sealed_rows.is_empty(),
+                "w={}: peg band row(s) {:?} have NO inside/boundary cell anywhere across the \
+                 width — the board is sealed there, not just missing a stray obstruction",
+                w,
+                sealed_rows
+            );
+
+            // Stronger than both checks above: a 4-neighbour flood fill over every non-OUTSIDE
+            // cell, restricted to the peg band's own rows, must connect the band's top row to its
+            // bottom row. Neither "no open shaft" nor "no sealed row" alone rules out a board
+            // that is locally open everywhere but globally disconnected (e.g. two isolated
+            // pockets with no path between them) -- this is the actual "can sand get from the top
+            // of the peg field to the bottom" property the previous two are proxies for.
+            let band_h = y_hi - y_lo;
+            let mut visited = vec![false; w * band_h];
+            let mut stack: Vec<(usize, usize)> = Vec::new();
+            for x in 0..w {
+                if sim.shape_mask[y_lo * w + x] != MASK_OUTSIDE {
+                    visited[x] = true;
+                    stack.push((x, y_lo));
+                }
+            }
+            while let Some((x, y)) = stack.pop() {
+                let candidates = [
+                    (x.wrapping_sub(1), y),
+                    (x + 1, y),
+                    (x, y.wrapping_sub(1)),
+                    (x, y + 1),
+                ];
+                for (nx, ny) in candidates {
+                    if nx < w && ny >= y_lo && ny < y_hi {
+                        let vi = (ny - y_lo) * w + nx;
+                        if !visited[vi] && sim.shape_mask[ny * w + nx] != MASK_OUTSIDE {
+                            visited[vi] = true;
+                            stack.push((nx, ny));
+                        }
+                    }
+                }
+            }
+            let bottom_row = y_hi - 1;
+            let bottom_connected = (0..w).any(|x| visited[(bottom_row - y_lo) * w + x]);
+            assert!(
+                bottom_connected,
+                "w={}: no path of INSIDE/BOUNDARY cells connects the top of the peg band (row \
+                 {}) to its bottom (row {}) — the board is disconnected even though no single \
+                 column or row check above caught it",
+                w, y_lo, bottom_row
+            );
         }
     }
 
