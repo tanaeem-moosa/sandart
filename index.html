@@ -787,7 +787,16 @@
                  A debugging/perf instrument first, a quality knob second: it lets the
                  same simulation be compared at different grid resolutions instead of
                  just run faster. Options are fixed (not populated from Rust like the
-                 material select), since the set of supported sizes is small and static. -->
+                 material select), since the set of supported sizes is small and static.
+
+                 "Grid" is the RENDER/display resolution `n`; "Simulation downscale" is the
+                 factor `m` the simulation itself runs coarser by (`S = n / m`). At the default
+                 `m = 1x` the two are identical and the app behaves exactly as it always has.
+                 1024 is only offered on the Grid select because `m = 2x`/`4x` can bring the
+                 resulting simulation size back into the 64..=512 range the sim itself supports
+                 (see `WasmSimulationState::apply_grid_dims` in sandart-wasm/src/lib.rs) --
+                 picking 1024 with `m = 1x` is rejected the same way any other invalid
+                 combination is, and the affected `<select>` snaps back to its last valid value. -->
             <div class="group">
                 <div class="group-title">Resolution</div>
                 <div class="row"><label for="resolution-select">Grid</label></div>
@@ -796,6 +805,13 @@
                     <option value="128" selected>128 &times; 128</option>
                     <option value="256">256 &times; 256</option>
                     <option value="512">512 &times; 512</option>
+                    <option value="1024">1024 &times; 1024</option>
+                </select>
+                <div class="row"><label for="sim-downscale-select">Simulation downscale</label></div>
+                <select id="sim-downscale-select">
+                    <option value="1" selected>1x (simulate at full grid)</option>
+                    <option value="2">2x (simulate at half grid)</option>
+                    <option value="4">4x (simulate at quarter grid)</option>
                 </select>
             </div>
 

@@ -89,8 +89,12 @@ export class WasmSimulationState {
         return ret;
     }
     /**
-     * Current simulation grid resolution (64/128/256/512). Lets the web UI display the actual
-     * backing value rather than assuming its `<select>`'s own default matches Rust's.
+     * Current simulation grid resolution `S` (64/128/256/512). Kept under its pre-downscale-
+     * feature name for JS-side compatibility -- every existing caller in `demo.js` (buffer
+     * sizing, neck-slider readouts) already wants the SIM size specifically, not the render size,
+     * so this getter's semantics are unchanged even though what it reads is now derived
+     * (`render_size / sim_downscale`) rather than the only size in the app. Same value as
+     * `get_sim_size` below; both exist so new call sites can name their intent.
      * @returns {number}
      */
     get_grid_size() {
@@ -111,6 +115,37 @@ export class WasmSimulationState {
      */
     get_multistage_chambers() {
         const ret = wasm.wasmsimulationstate_get_multistage_chambers(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Current render/display grid resolution `n` (64/128/256/512/1024) -- what the resolution
+     * `<select>` is showing. Lets the web UI initialise that control from the actual backing
+     * value rather than assuming its own hardcoded default matches Rust's.
+     * @returns {number}
+     */
+    get_render_size() {
+        const ret = wasm.wasmsimulationstate_get_render_size(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Current simulation downscale factor `m` (1/2/4) -- what the "Simulation downscale"
+     * `<select>` is showing. Lets the web UI initialise that control from the actual backing
+     * value, same reasoning as `get_render_size` above.
+     * @returns {number}
+     */
+    get_sim_downscale() {
+        const ret = wasm.wasmsimulationstate_get_sim_downscale(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * Current simulation grid resolution `S` (64/128/256/512) -- identical to `get_grid_size`,
+     * under the name that matches `set_sim_downscale`/`get_render_size` below. New call sites
+     * should prefer this one; `get_grid_size` stays only for JS callers written before the
+     * sim-downscale feature existed.
+     * @returns {number}
+     */
+    get_sim_size() {
+        const ret = wasm.wasmsimulationstate_get_sim_size(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -178,6 +213,13 @@ export class WasmSimulationState {
      * alone is a poor guide to what actually rasterises, especially at small grid sizes,
      * which is exactly what prompted adding this readout in the first place. Display-only;
      * does not affect geometry.
+     *
+     * Deliberately `self.sim_size` (the SIMULATION grid), not `self.render_size`: the mask this
+     * describes is `sim.shape_mask`, rasterised and simulated at `sim_size` regardless of display
+     * resolution (see `HeightmapRenderer::shape_mask_texture`'s doc comment in sandart-render),
+     * so the neck-width slider's range/step must be derived from what the SIMULATION can
+     * represent, not from the render size -- otherwise the UI could offer a neck narrower than
+     * any sim cell, which would rasterise identically to a wider one and silently do nothing.
      * @returns {number}
      */
     neck_half_width_cells() {
@@ -241,22 +283,13 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_gravity(this.__wbg_ptr, x, y);
     }
     /**
-     * Change the simulation/render grid resolution to 64, 128, 256, or 512 (`GRID_SIZE`, the
-     * shipped default, is unchanged by this feature). This is a debugging/perf instrument, not
-     * just a performance knob: the test suite and the shipped app used to run at different,
-     * never-compared resolutions, which is exactly how a lateral-pressure term that scaled with
-     * grid resolution instead of physical depth went unnoticed — see `docs/ARCHITECTURE.md`.
-     * Comparing behaviour across resolutions is the point, so this is meant to be switched at
-     * will while the user is looking at the sim, not just read once on startup.
-     *
-     * This is a full teardown/rebuild of both `sim` and `renderer`, never a partial resize:
-     * every CPU buffer inside `DrawingSimulation` (and every GPU texture inside
-     * `HeightmapRenderer`) is a fixed-size allocation made at construction time, so there is no
-     * in-place "resize" — only "replace with a freshly constructed one of the right size". That
-     * necessarily discards the current sand/water contents (same as any other reset), but current
-     * material, shape, gravity, neck width, chamber curvature and multistage chamber count
-     * survive via `sim.reset()`'s normal contract (it never touches those fields) rather than
-     * reverting to defaults.
+     * Change the render/display resolution `n` to 64, 128, 256, 512, or 1024 (`GRID_SIZE`, the
+     * shipped default, is unchanged by this feature). Rejects the change (and leaves the current
+     * dims untouched) if the RESULTING simulation size `S = n / sim_downscale` would fall outside
+     * 64..=512 -- in particular `n = 1024` is only valid alongside `sim_downscale >= 2`, since
+     * `S` would otherwise be 1024, one power-of-two step past the simulation's own supported
+     * range. See `apply_grid_dims` for the shared validation/rebuild path with
+     * `set_sim_downscale` below.
      * @param {number} size
      */
     set_grid_size(size) {
@@ -481,6 +514,20 @@ export class WasmSimulationState {
      */
     set_shadows_enabled(enabled) {
         wasm.wasmsimulationstate_set_shadows_enabled(this.__wbg_ptr, enabled);
+    }
+    /**
+     * Change the simulation downscale factor `m` to 1, 2, or 4: the simulation runs at
+     * `S = render_size / m` while the display stays at `render_size`. `m = 1` (the shipped
+     * default) is simulation-at-display-resolution, unchanged from before this feature existed.
+     * Rejected the same way `set_grid_size` is if the resulting `S` would fall outside 64..=512
+     * or not divide evenly -- see `apply_grid_dims`.
+     * @param {number} m
+     */
+    set_sim_downscale(m) {
+        const ret = wasm.wasmsimulationstate_set_sim_downscale(this.__wbg_ptr, m);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
     }
     /**
      * @param {number} mode

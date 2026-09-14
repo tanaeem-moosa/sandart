@@ -121,8 +121,11 @@ async function start() {
 
     // Reflect the sim's actual starting resolution (currently always 512, see GRID_SIZE in
     // sandart-sim/src/lib.rs) rather than assuming the <select>'s hardcoded `selected` option
-    // agrees with it.
-    document.getElementById('resolution-select').value = String(state.get_grid_size());
+    // agrees with it. `resolution-select` is the RENDER size `n` (`get_render_size`), not the
+    // simulation size `S` (`get_grid_size`/`get_sim_size`) -- the two are equal at the default
+    // `sim-downscale-select` value of 1x, but only `get_render_size` is correct once that isn't 1.
+    document.getElementById('resolution-select').value = String(state.get_render_size());
+    document.getElementById('sim-downscale-select').value = String(state.get_sim_downscale());
 
     // Same idea for the widest-tier chamber count: reflect the sim's actual default (8) rather
     // than assuming the slider's hard-coded markup value agrees with it.
@@ -427,7 +430,7 @@ function generateColormap(pattern, color1Hex, color2Hex) {
     // this builds is uploaded verbatim via state.update_colormap(), and a size mismatch against
     // whatever resolution the sim is actually running at would silently truncate/garble the
     // pattern (Rust's set_cell_colors copies only overlapping_len bytes, no bounds error) rather
-    // than fail loudly. See WasmSimulationState.set_grid_size in sandart-wasm/src/lib.rs.
+    // than fail loudly. See WasmSimulationState::apply_grid_dims in sandart-wasm/src/lib.rs.
     const size = state ? state.get_grid_size() : 512;
     const data = new Uint8Array(size * size * 4);
     const c1 = hexToRgbBytes(color1Hex);
@@ -1164,37 +1167,55 @@ function setupPanelInput() {
         }
     });
 
-    document.getElementById('resolution-select').addEventListener('change', () => {
+    // Shared handler for the two grid-dimension controls (`resolution-select` sets the render
+    // size `n`, `sim-downscale-select` sets the simulation downscale `m`): both go through
+    // `WasmSimulationState::apply_grid_dims` on the Rust side, which validates the FULL
+    // `(n, m)` pair, not just whichever one changed -- so either control can be rejected
+    // depending on the other's current value (e.g. `n = 1024` is only valid once `m >= 2`).
+    // `applyFn` calls the matching wasm setter; `rollbackFn` reads back the dimension that
+    // `changedSelect` displays, in case the change was rejected and the control needs to snap
+    // back to what's actually running rather than show a value that silently didn't take.
+    function handleGridDimsChange(applyFn, changedSelect, rollbackFn) {
         if (!state) return;
-        const size = parseInt(document.getElementById('resolution-select').value);
         try {
-            // A full sim + renderer teardown/rebuild (see set_grid_size in sandart-wasm/src/lib.rs)
-            // — same "contents are gone" contract as the Reset button, so re-apply the current
-            // material/color theme afterward exactly like btn-reset does below.
-            state.set_grid_size(size);
+            // A full sim + renderer teardown/rebuild (see `apply_grid_dims` in
+            // sandart-wasm/src/lib.rs) — same "contents are gone" contract as the Reset button,
+            // so re-apply the current material/color theme afterward exactly like btn-reset does
+            // below.
+            applyFn();
             syncMaterialTheme(true);
             syncColorTheme();
         } catch (e) {
-            console.error('Failed to change grid resolution:', e);
-            // Roll the control back to what the sim is actually running at, rather than leaving
-            // it showing a value that silently didn't take.
-            document.getElementById('resolution-select').value = String(state.get_grid_size());
+            console.error('Failed to change grid dimensions:', e);
+            changedSelect.value = String(rollbackFn());
         }
-        // The neck-width slider's min/step are resolution-dependent (see
-        // updateNeckSliderRange's doc comment) and have to be recomputed on every resolution
-        // change, not just at startup. If the current value fell below the new minimum (moving
-        // to a coarser grid), the value was already clamped and pushed to the sim inside that
-        // call -- but the mask/sand it seeded came from `set_grid_size`'s own `reset()` using
-        // the OLD, now-invalid value, so an explicit reset here brings the vessel in line with
-        // the corrected neck width too.
+        // The neck-width slider's min/step are SIMULATION-size-dependent (see
+        // updateNeckSliderRange's doc comment) and have to be recomputed on every grid-dimension
+        // change, not just at startup -- both controls can change the simulation size `S`. If the
+        // current value fell below the new minimum (moving to a coarser sim grid), the value was
+        // already clamped and pushed to the sim inside that call -- but the mask/sand it seeded
+        // came from `apply_grid_dims`'s own `reset()` using the OLD, now-invalid value, so an
+        // explicit reset here brings the vessel in line with the corrected neck width too.
         if (updateNeckSliderRange()) {
             state.reset();
             syncMaterialTheme(true);
         }
-        // The neck-width and chamber-count cell-count readouts are grid-size dependent (the
-        // same fraction rasterises to a different cell count at a different resolution), so
+        // The neck-width and chamber-count cell-count readouts are SIMULATION-size dependent (the
+        // same fraction rasterises to a different cell count at a different sim resolution), so
         // they need refreshing here too, not just when their own sliders move.
         updateVesselReadouts();
+    }
+
+    document.getElementById('resolution-select').addEventListener('change', () => {
+        const sel = document.getElementById('resolution-select');
+        const size = parseInt(sel.value);
+        handleGridDimsChange(() => state.set_grid_size(size), sel, () => state.get_render_size());
+    });
+
+    document.getElementById('sim-downscale-select').addEventListener('change', () => {
+        const sel = document.getElementById('sim-downscale-select');
+        const m = parseInt(sel.value);
+        handleGridDimsChange(() => state.set_sim_downscale(m), sel, () => state.get_sim_downscale());
     });
 
     document.getElementById('pattern-select').addEventListener('change', () => {
