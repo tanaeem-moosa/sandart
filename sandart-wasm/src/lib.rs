@@ -19,15 +19,27 @@ pub struct WasmSimulationState {
     device: wgpu::Device,
     queue: wgpu::Queue,
     surface_config: wgpu::SurfaceConfiguration,
-    /// Surface/target color format, kept around so `set_grid_size` can rebuild `renderer` from
+    /// Surface/target color format, kept around so `apply_grid_dims` can rebuild `renderer` from
     /// scratch (GPU textures can't be resized in place — a resolution change is a full
     /// teardown/rebuild of both `sim` and `renderer`, not a mutation of either).
     target_format: wgpu::TextureFormat,
-    /// Current simulation grid resolution (64/128/256/512, default 512). Single source of truth
-    /// for sizing CPU-side upload buffers in `render()` — replaces the old hardcoded module-level
-    /// `GRID_SIZE` constant at every read site that depends on the *current* grid, not the
-    /// compile-time default.
-    grid_size: usize,
+    /// Render/display grid resolution `n` (64/128/256/512/1024, default 512) -- what the
+    /// resolution `<select>` sets. Decoupled from `sim_size` below by the simulation-downscale
+    /// feature: `n` sizes nothing on the sim side and nothing GPU-side except the
+    /// `LightingUniforms.render_size` scalar (the handful of shader quantities that are genuinely
+    /// per-render-pixel, e.g. the grain hash) -- everything else (the sim grid itself, every
+    /// texel-per-cell texture including the shape mask) is sized by `sim_size`.
+    render_size: usize,
+    /// Simulation downscale factor `m` (1/2/4, default 1) -- what the "Simulation downscale"
+    /// `<select>` sets. `sim_size = render_size / sim_downscale`; kept in sync with both by
+    /// `apply_grid_dims`, the only place any of these three fields is allowed to change.
+    sim_downscale: usize,
+    /// Simulation grid resolution `S = render_size / sim_downscale` (64/128/256/512, default
+    /// 512). Single source of truth for sizing CPU-side upload buffers in `render()` — replaces
+    /// the old hardcoded module-level `GRID_SIZE` constant at every read site that depends on the
+    /// *current* sim grid, not the compile-time default. Stored rather than recomputed on every
+    /// read since `render()`'s hot path and several UI-facing getters read it every frame.
+    sim_size: usize,
     full_upload_needed: bool,
 
     // Config state
@@ -220,7 +232,9 @@ impl WasmSimulationState {
             queue,
             surface_config,
             target_format,
-            grid_size: GRID_SIZE,
+            render_size: GRID_SIZE,
+            sim_downscale: 1,
+            sim_size: GRID_SIZE,
             full_upload_needed: true,
             simulator_mode: SimulatorMode::Sandbox,
             marble_count: 1,
@@ -341,13 +355,42 @@ impl WasmSimulationState {
         self.playback.current_indices = [0; 5];
     }
 
-    /// Change the simulation/render grid resolution to 64, 128, 256, or 512 (`GRID_SIZE`, the
-    /// shipped default, is unchanged by this feature). This is a debugging/perf instrument, not
-    /// just a performance knob: the test suite and the shipped app used to run at different,
-    /// never-compared resolutions, which is exactly how a lateral-pressure term that scaled with
-    /// grid resolution instead of physical depth went unnoticed — see `docs/ARCHITECTURE.md`.
-    /// Comparing behaviour across resolutions is the point, so this is meant to be switched at
-    /// will while the user is looking at the sim, not just read once on startup.
+    /// Change the render/display resolution `n` to 64, 128, 256, 512, or 1024 (`GRID_SIZE`, the
+    /// shipped default, is unchanged by this feature). Rejects the change (and leaves the current
+    /// dims untouched) if the RESULTING simulation size `S = n / sim_downscale` would fall outside
+    /// 64..=512 -- in particular `n = 1024` is only valid alongside `sim_downscale >= 2`, since
+    /// `S` would otherwise be 1024, one power-of-two step past the simulation's own supported
+    /// range. See `apply_grid_dims` for the shared validation/rebuild path with
+    /// `set_sim_downscale` below.
+    pub fn set_grid_size(&mut self, size: u32) -> Result<(), JsValue> {
+        self.apply_grid_dims(size as usize, self.sim_downscale)
+    }
+
+    /// Change the simulation downscale factor `m` to 1, 2, or 4: the simulation runs at
+    /// `S = render_size / m` while the display stays at `render_size`. `m = 1` (the shipped
+    /// default) is simulation-at-display-resolution, unchanged from before this feature existed.
+    /// Rejected the same way `set_grid_size` is if the resulting `S` would fall outside 64..=512
+    /// or not divide evenly -- see `apply_grid_dims`.
+    pub fn set_sim_downscale(&mut self, m: u32) -> Result<(), JsValue> {
+        self.apply_grid_dims(self.render_size, m as usize)
+    }
+
+    /// Shared validation and rebuild path for `set_grid_size` and `set_sim_downscale`: both change
+    /// one of the pair `(render_size, sim_downscale)` while holding the other fixed, so both just
+    /// forward their new value and the other's current one here. Validates the FULL resulting
+    /// triple `(render_size, sim_downscale, sim_size)`, not just the one field that changed --
+    /// e.g. `set_grid_size(1024)` alone is only valid if the CURRENT `sim_downscale` already makes
+    /// `sim_size <= 512`, and `set_sim_downscale` is symmetrically checked against the current
+    /// `render_size`. An invalid combination returns `Err` and leaves every field untouched, which
+    /// is what lets the UI `<select>`s snap back on rejection exactly as the old single-resolution
+    /// `set_grid_size` already did.
+    ///
+    /// This is a debugging/perf instrument, not just a performance knob: the test suite and the
+    /// shipped app used to run at different, never-compared resolutions, which is exactly how a
+    /// lateral-pressure term that scaled with grid resolution instead of physical depth went
+    /// unnoticed — see `docs/ARCHITECTURE.md`. Comparing behaviour across resolutions is the
+    /// point, so both dimensions are meant to be switched at will while the user is looking at the
+    /// sim, not just read once on startup.
     ///
     /// This is a full teardown/rebuild of both `sim` and `renderer`, never a partial resize:
     /// every CPU buffer inside `DrawingSimulation` (and every GPU texture inside
@@ -356,18 +399,41 @@ impl WasmSimulationState {
     /// necessarily discards the current sand/water contents (same as any other reset), but current
     /// material, shape, gravity, neck width, chamber curvature and multistage chamber count
     /// survive via `sim.reset()`'s normal contract (it never touches those fields) rather than
-    /// reverting to defaults.
-    pub fn set_grid_size(&mut self, size: u32) -> Result<(), JsValue> {
-        let size = size as usize;
-        if !matches!(size, 64 | 128 | 256 | 512) {
+    /// reverting to defaults. `renderer` is rebuilt from `sim_size` alone -- the render resolution
+    /// `n` is not a GPU resource size anywhere in `sandart-render` (see
+    /// `HeightmapRenderer::sim_size`'s doc comment), so a `set_grid_size` call that leaves
+    /// `sim_size` unchanged (e.g. raising `n` while `sim_downscale` grows by the same factor)
+    /// still rebuilds `renderer` here for simplicity, even though its textures end up identical.
+    fn apply_grid_dims(&mut self, new_render_size: usize, new_sim_downscale: usize) -> Result<(), JsValue> {
+        if !matches!(new_render_size, 64 | 128 | 256 | 512 | 1024) {
             return Err(JsValue::from_str(&format!(
-                "Unsupported grid size: {} (must be 64, 128, 256, or 512)",
-                size
+                "Unsupported render size: {} (must be 64, 128, 256, 512, or 1024)",
+                new_render_size
             )));
         }
-        if size == self.grid_size {
+        if !matches!(new_sim_downscale, 1 | 2 | 4) {
+            return Err(JsValue::from_str(&format!(
+                "Unsupported simulation downscale: {} (must be 1, 2, or 4)",
+                new_sim_downscale
+            )));
+        }
+        if new_render_size % new_sim_downscale != 0 {
+            return Err(JsValue::from_str(&format!(
+                "Render size {} is not evenly divisible by simulation downscale {}",
+                new_render_size, new_sim_downscale
+            )));
+        }
+        let new_sim_size = new_render_size / new_sim_downscale;
+        if !matches!(new_sim_size, 64 | 128 | 256 | 512) {
+            return Err(JsValue::from_str(&format!(
+                "Simulation size {} (render {} / downscale {}) is out of range (must be 64, 128, 256, or 512)",
+                new_sim_size, new_render_size, new_sim_downscale
+            )));
+        }
+        if new_render_size == self.render_size && new_sim_downscale == self.sim_downscale {
             return Ok(());
         }
+        let size = new_sim_size;
 
         let gravity_dir = self.sim.gravity_dir;
         let neck_width = self.sim.neck_width;
@@ -430,7 +496,9 @@ impl WasmSimulationState {
         sim.set_quantile_mode(self.effective_quantile_mode());
         self.sim = sim;
 
-        self.grid_size = size;
+        self.render_size = new_render_size;
+        self.sim_downscale = new_sim_downscale;
+        self.sim_size = size;
         self.renderer = HeightmapRenderer::new(&self.device, self.target_format, size);
         self.full_upload_needed = true;
         self.playback.state = PlaybackState::Stopped;
@@ -438,10 +506,36 @@ impl WasmSimulationState {
         Ok(())
     }
 
-    /// Current simulation grid resolution (64/128/256/512). Lets the web UI display the actual
-    /// backing value rather than assuming its `<select>`'s own default matches Rust's.
+    /// Current simulation grid resolution `S` (64/128/256/512). Kept under its pre-downscale-
+    /// feature name for JS-side compatibility -- every existing caller in `demo.js` (buffer
+    /// sizing, neck-slider readouts) already wants the SIM size specifically, not the render size,
+    /// so this getter's semantics are unchanged even though what it reads is now derived
+    /// (`render_size / sim_downscale`) rather than the only size in the app. Same value as
+    /// `get_sim_size` below; both exist so new call sites can name their intent.
     pub fn get_grid_size(&self) -> u32 {
-        self.grid_size as u32
+        self.sim_size as u32
+    }
+
+    /// Current simulation grid resolution `S` (64/128/256/512) -- identical to `get_grid_size`,
+    /// under the name that matches `set_sim_downscale`/`get_render_size` below. New call sites
+    /// should prefer this one; `get_grid_size` stays only for JS callers written before the
+    /// sim-downscale feature existed.
+    pub fn get_sim_size(&self) -> u32 {
+        self.sim_size as u32
+    }
+
+    /// Current render/display grid resolution `n` (64/128/256/512/1024) -- what the resolution
+    /// `<select>` is showing. Lets the web UI initialise that control from the actual backing
+    /// value rather than assuming its own hardcoded default matches Rust's.
+    pub fn get_render_size(&self) -> u32 {
+        self.render_size as u32
+    }
+
+    /// Current simulation downscale factor `m` (1/2/4) -- what the "Simulation downscale"
+    /// `<select>` is showing. Lets the web UI initialise that control from the actual backing
+    /// value, same reasoning as `get_render_size` above.
+    pub fn get_sim_downscale(&self) -> u32 {
+        self.sim_downscale as u32
     }
 
     pub fn set_simulator_mode(&mut self, mode: u32) {
@@ -536,9 +630,16 @@ impl WasmSimulationState {
     /// alone is a poor guide to what actually rasterises, especially at small grid sizes,
     /// which is exactly what prompted adding this readout in the first place. Display-only;
     /// does not affect geometry.
+    ///
+    /// Deliberately `self.sim_size` (the SIMULATION grid), not `self.render_size`: the mask this
+    /// describes is `sim.shape_mask`, rasterised and simulated at `sim_size` regardless of display
+    /// resolution (see `HeightmapRenderer::shape_mask_texture`'s doc comment in sandart-render),
+    /// so the neck-width slider's range/step must be derived from what the SIMULATION can
+    /// represent, not from the render size -- otherwise the UI could offer a neck narrower than
+    /// any sim cell, which would rasterise identically to a wider one and silently do nothing.
     pub fn neck_half_width_cells(&self) -> f32 {
         sandart_sim::physics::effective_neck_half_width_cells(
-            self.grid_size,
+            self.sim_size,
             self.sandbox_shape,
             self.sim.neck_width,
             self.sim.multistage_chambers,
@@ -1002,10 +1103,10 @@ impl WasmSimulationState {
         }
 
         // Update GPU heightmap and colormap
-        let grid_size = self.grid_size;
+        let sim_size = self.sim_size;
         if self.full_upload_needed {
-            let mut interleaved = vec![0.0f32; grid_size * grid_size * 4];
-            for i in 0..grid_size * grid_size {
+            let mut interleaved = vec![0.0f32; sim_size * sim_size * 4];
+            for i in 0..sim_size * sim_size {
                 let wetness = self.sim.cell_props.wetness[i];
                 let cap = sandart_sim::physics::cell_capacity_for(wetness);
                 interleaved[i * 4 + 0] = self.sim.heightmap.data[i].min(cap);
@@ -1044,7 +1145,7 @@ impl WasmSimulationState {
                 
                 let mut interleaved = vec![0.0f32; sub_width * sub_height * 4];
                 for y in bounds.min_y..=bounds.max_y {
-                    let src_row_offset = y * grid_size;
+                    let src_row_offset = y * sim_size;
                     let dest_row_offset = (y - bounds.min_y) * sub_width;
                     for x in bounds.min_x..=bounds.max_x {
                         let src_idx = src_row_offset + x;
@@ -1065,7 +1166,7 @@ impl WasmSimulationState {
 
                 let mut colormap_sub = vec![0u32; sub_width * sub_height];
                 for y in bounds.min_y..=bounds.max_y {
-                    let src_row_offset = y * grid_size;
+                    let src_row_offset = y * sim_size;
                     let dest_row_offset = (y - bounds.min_y) * sub_width;
                     colormap_sub[dest_row_offset..(dest_row_offset + sub_width)].copy_from_slice(
                         &self.sim.cell_colors[src_row_offset + bounds.min_x..src_row_offset + bounds.max_x + 1]
@@ -1097,8 +1198,8 @@ impl WasmSimulationState {
         for j in 0..5 {
             let (gx, gy) = DrawingSimulation::norm_to_grid(
                 self.sim.marbles[j].pos,
-                grid_size,
-                grid_size,
+                sim_size,
+                sim_size,
             );
             let z = self.sim.heightmap.get(gx, gy);
             current_marbles[j] = MarbleUniform {
@@ -1180,13 +1281,17 @@ impl WasmSimulationState {
             neck_width: self.sim.neck_width,
             hourglass_curve: self.sim.hourglass_curve,
             quantile_count,
-            grid_size: self.grid_size as f32,
+            sim_size: self.sim_size as f32,
             quantile_positions: quantile_positions_uniform,
             marbles: current_marbles,
             heatmap_enabled: if self.heatmap_enabled { 1 } else { 0 },
             pressure_heatmap_enabled: if self.pressure_heatmap_enabled { 1 } else { 0 },
             coarse_eta_enabled: if self.coarse_eta_enabled { 1 } else { 0 },
             coarse_delta_enabled: if self.coarse_delta_enabled { 1 } else { 0 },
+            render_size: self.render_size as f32,
+            _pad_uniform_tail0: 0,
+            _pad_uniform_tail1: 0,
+            _pad_uniform_tail2: 0,
         };
         self.renderer.update_uniforms(&self.queue, &current_uniforms);
 

@@ -1,14 +1,19 @@
 @group(0) @binding(0) var heightmap_tex: texture_2d<f32>;
 @group(0) @binding(1) var heightmap_sampler: sampler;
 @group(0) @binding(4) var colormap_tex: texture_2d<f32>;
+// Sized `uniforms.sim_size` x `uniforms.sim_size`, NOT `uniforms.render_size` -- uploaded straight
+// from `sim.shape_mask`, so `mask_coord` in `fs_main` below indexes it with `sim_size`. See
+// `HeightmapRenderer::shape_mask_texture`'s doc comment (sandart-render/src/lib.rs) for why the
+// vessel outline is never re-rasterized at display resolution: it would risk disagreeing with
+// where the simulation actually lets material go.
 @group(0) @binding(5) var shape_mask_tex: texture_2d<u32>;
 // Block-simulation heat-map debug overlay. Always a fixed 64x64 texels (see `HEAT_GRID_SIZE` in
-// sandart-render/src/lib.rs) regardless of `uniforms.grid_size` -- the LOD scheduler's block
+// sandart-render/src/lib.rs) regardless of `uniforms.sim_size` -- the LOD scheduler's block
 // grid doesn't scale with resolution. Read via `textureLoad` (integer block coords), same as
 // `shape_mask_tex`, so no sampler binding is needed for it.
 @group(0) @binding(6) var block_heat_tex: texture_2d<f32>;
 // Per-cell pressure-field debug overlay. Unlike `block_heat_tex` above, this IS sized
-// `uniforms.grid_size` x `uniforms.grid_size` (one texel per simulation cell), holding the
+// `uniforms.sim_size` x `uniforms.sim_size` (one texel per simulation cell), holding the
 // already log-compressed, normalised [0,1] `column_depth` value produced by
 // `sandart_sim::DrawingSimulation::pressure_field_texels` -- see that function's doc comment for
 // why a log scale against a fixed reference (not per-frame auto-normalisation) was chosen. Read
@@ -16,7 +21,7 @@
 // sampler binding is needed for it either.
 @group(0) @binding(7) var pressure_heat_tex: texture_2d<f32>;
 // Coarse-level `eta` (hydraulic head) debug overlay. Same fixed 64x64 shape as `block_heat_tex`
-// above, NOT `pressure_heat_tex`'s `uniforms.grid_size`-scaled one -- the coarse grid IS the LOD
+// above, NOT `pressure_heat_tex`'s `uniforms.sim_size`-scaled one -- the coarse grid IS the LOD
 // block grid (`t = grid_size / 64` in sandart-sim's `coarse::CoarseGeometry`). Holds
 // `sandart_sim::DrawingSimulation::coarse_eta_texels`'s per-frame min/max-normalised [0,1] value
 // -- see that function's doc comment for why this is a floating per-frame scale rather than a
@@ -53,18 +58,23 @@ struct LightingUniforms {
     neck_width: f32,
     hourglass_curve: f32,
     quantile_count: u32,
-    grid_size: f32,
+    // Simulation grid resolution `S`. Mirrors the Rust-side `LightingUniforms::sim_size` in
+    // sandart-render/src/lib.rs exactly -- see that field's doc comment for why every
+    // texel-per-cell texture (heightmap, pressure heat-map) and the shape mask (NOT re-rasterized
+    // at render resolution, see `shape_mask_tex`'s binding comment above) all read this field, not
+    // `render_size` below.
+    sim_size: f32,
     // Quantile line positions, normalised 0.0 (top row edge) .. 1.0 (bottom row edge), packed
     // 3 lines per vec4 (12 slots total, only the first `quantile_count` used). Must mirror the
     // Rust-side `[[f32; 4]; 3]` exactly: a plain `array<f32, 9>` here would pad each element to
     // 16 bytes in a uniform buffer block and silently desync every field that follows it.
     quantile_positions: array<vec4<f32>, 3>,
     marbles: array<MarbleUniform, 5>,
-    // Block-simulation heat-map debug overlay: 1u = draw it, 0u = off (default). MUST stay the
-    // second-to-last field, mirroring the Rust-side `LightingUniforms` in
-    // sandart-render/src/lib.rs exactly -- see that field's doc comment for why the trailing
-    // `_pad_heatmap*` scalars below exist (an explicit stand-in for what would otherwise be
-    // silent struct-end padding, which `derive(Pod)` on the Rust side refuses to allow).
+    // Block-simulation heat-map debug overlay: 1u = draw it, 0u = off (default). Mirrors the
+    // Rust-side `LightingUniforms` in sandart-render/src/lib.rs exactly -- see that field's doc
+    // comment for why the trailing `_pad_heatmap*` scalars below exist (an explicit stand-in for
+    // what would otherwise be silent struct-end padding, which `derive(Pod)` on the Rust side
+    // refuses to allow).
     //
     // Three separate `u32` scalars, NOT `array<u32, 3>` or `vec3<u32>`: WGSL's uniform-address-
     // space layout rules force BOTH of those to 16-byte alignment/stride (an array's per-element
@@ -82,9 +92,22 @@ struct LightingUniforms {
     // `LightingUniforms::coarse_eta_enabled` exactly; see that field's doc comment.
     coarse_eta_enabled: u32,
     // Coarse-fine disagreement (`Delta`) debug overlay: 1u = draw it, 0u = off (default). The
-    // last of the four trailing flags this struct has room for -- mirrors
+    // last of `_pad_heatmap`'s four original trailing flags -- mirrors
     // `LightingUniforms::coarse_delta_enabled` exactly.
     coarse_delta_enabled: u32,
+    // Render/display grid resolution `n` -- mirrors the Rust-side `LightingUniforms::render_size`
+    // exactly; see that field's doc comment for why this grows the struct (240 -> 256 bytes)
+    // rather than repurposing padding like every field above it. Used only where a shader
+    // quantity is genuinely per-render-pixel, currently just the grain hash near the bottom of
+    // `fs_main`.
+    render_size: f32,
+    // Explicit trailing padding matching the Rust side's `_pad_uniform_tail0/1/2` -- see
+    // `render_size`'s Rust-side doc comment. Three bare `u32` scalars, not an array, for the same
+    // reason `heatmap_enabled`'s doc comment above gives: WGSL arrays stride to 16 bytes in the
+    // uniform address space, which would desync this from Rust's tightly-packed layout.
+    _pad_uniform_tail0: u32,
+    _pad_uniform_tail1: u32,
+    _pad_uniform_tail2: u32,
 };
 
 struct CameraUniforms {
@@ -122,7 +145,7 @@ fn hue_to_rgb(h: f32) -> vec3<f32> {
 // Manual Bilinear Texture Filtering to support linear height interpolation
 // on platforms without float32_filterable extension support
 fn sample_height_bilinear(uv: vec2<f32>) -> f32 {
-    let tex_size = uniforms.grid_size;
+    let tex_size = uniforms.sim_size;
     let texel_coords = uv * tex_size - 0.5;
     let f = fract(texel_coords);
     let index = floor(texel_coords);
@@ -221,9 +244,9 @@ fn fs_main(
     
     // Determine casing and LED channel from the precomputed shape mask texture
     // Mask values: 0 = OUTSIDE (wall/casing), 1 = INSIDE (safe), 2 = BOUNDARY (inside, near wall → LED strip)
-    let grid_size_i = i32(uniforms.grid_size);
-    let mask_coord = vec2<i32>(i32(uv.x * uniforms.grid_size), i32(uv.y * uniforms.grid_size));
-    let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(grid_size_i - 1)), 0).r;
+    let sim_size_i = i32(uniforms.sim_size);
+    let mask_coord = vec2<i32>(i32(uv.x * uniforms.sim_size), i32(uv.y * uniforms.sim_size));
+    let mask_val = textureLoad(shape_mask_tex, clamp(mask_coord, vec2<i32>(0), vec2<i32>(sim_size_i - 1)), 0).r;
 
     var in_casing = mask_val == 0u;
     // LED strip: boundary cells (mask=2) OR outside cells adjacent to inside cells
@@ -385,7 +408,7 @@ fn fs_main(
     
     // 1. Compute finite difference normal from neighbor heightmap pixels
     // Normal tilting scale (high factor creates visual depth)
-    let tex_size = uniforms.grid_size;
+    let tex_size = uniforms.sim_size;
     let texel_size = 1.0 / tex_size;
     let texel_coords = uv * tex_size - 0.5;
     let index = floor(texel_coords);
@@ -758,8 +781,10 @@ fn fs_main(
     }
 
     // Base sand color from presets with grain color variation locked to texel resolution (1024)
-    // Grain noise locked to actual grid resolution to avoid sub-texel aliasing
-    let color_grain = hash(floor(uv * uniforms.grid_size));
+    // Grain noise locked to RENDER resolution (`render_size`, not `sim_size`) -- this is meant to
+    // look like fixed-size sand grains on screen, so it should stay locked to display density even
+    // when the interior is being simulated more coarsely (`m > 1`); at `m == 1` the two are equal.
+    let color_grain = hash(floor(uv * uniforms.render_size));
     let sand_base_color = mat_base_color * (1.0 + (color_grain - 0.5) * 0.025);
 
     // Warm ambient reflection for soft sand look (darker charcoal for Moon Dust)
@@ -812,10 +837,10 @@ fn fs_main(
     // and never on top of a marble. `quantile_count` is 0 whenever the feature is off (the
     // default) or the sim isn't in Sand-fall mode, so this costs nothing in the common case.
     if (uniforms.quantile_count > 0u) {
-        let row_f = uv.y * uniforms.grid_size;
+        let row_f = uv.y * uniforms.sim_size;
         let half_width_px = 1.0; // texel half-width — a soft ~2-texel-wide antialiased line
         for (var i = 0u; i < uniforms.quantile_count; i = i + 1u) {
-            let target_row = uniforms.quantile_positions[i / 4u][i % 4u] * uniforms.grid_size;
+            let target_row = uniforms.quantile_positions[i / 4u][i % 4u] * uniforms.sim_size;
             let d = abs(row_f - target_row);
             if (d < half_width_px) {
                 // Recycled-glass green, and quieter than the cyan it replaces. These lines are a
@@ -834,7 +859,7 @@ fn fs_main(
     // tints actual sand/table, never the casing or a marble, and `heatmap_enabled == 0u` (the
     // default) skips this whole block, costing nothing.
     if (uniforms.heatmap_enabled != 0u) {
-        // The block grid is a fixed 64x64 regardless of `uniforms.grid_size` (see
+        // The block grid is a fixed 64x64 regardless of `uniforms.sim_size` (see
         // `block_heat_tex`'s binding comment -- HEAT_GRID_SIZE in sandart-render/src/lib.rs, was
         // 32 before the LOD block became grid_size/64 instead of grid_size/32), so the block a
         // fragment falls in is just its UV scaled directly by 64, not by the cell-resolution
@@ -875,9 +900,9 @@ fn fs_main(
         // texel per simulation cell, not per 64x64 LOD block -- see `pressure_heat_tex`'s binding
         // comment), so the coordinate is the fragment's cell index, same math as `mask_coord`
         // near the top of this function.
-        let grid_size_i2 = i32(uniforms.grid_size);
-        let pressure_coord = vec2<i32>(i32(uv.x * uniforms.grid_size), i32(uv.y * uniforms.grid_size));
-        let pressure = textureLoad(pressure_heat_tex, clamp(pressure_coord, vec2<i32>(0), vec2<i32>(grid_size_i2 - 1)), 0).r;
+        let sim_size_i2 = i32(uniforms.sim_size);
+        let pressure_coord = vec2<i32>(i32(uv.x * uniforms.sim_size), i32(uv.y * uniforms.sim_size));
+        let pressure = textureLoad(pressure_heat_tex, clamp(pressure_coord, vec2<i32>(0), vec2<i32>(sim_size_i2 - 1)), 0).r;
 
         // Deep violet -> hot magenta -> pale warm yellow. Deliberately a different hue path from
         // the block heat-map's blue/teal/orange-red above (270deg->320deg->50deg here vs.
@@ -912,7 +937,7 @@ fn fs_main(
     // instrument -- so it must show STRUCTURE (a resting pool as one flat hue, a U-tube's two
     // arms as two visibly different hues until they equalise), not a washed-out fixed scale.
     if (uniforms.coarse_eta_enabled != 0u) {
-        // The coarse grid is a fixed 64x64 regardless of `uniforms.grid_size`, same block-coord
+        // The coarse grid is a fixed 64x64 regardless of `uniforms.sim_size`, same block-coord
         // math as `block_heat_tex` above -- the coarse tile IS the LOD block (`t = grid_size /
         // 64`), not a texel-per-cell field like `pressure_heat_tex`.
         let eta_block_coord = vec2<i32>(vec2<f32>(uv.x, uv.y) * 64.0);

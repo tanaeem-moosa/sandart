@@ -1028,7 +1028,7 @@ impl eframe::App for SandArtApp {
                 // The mass-distribution quantile overlay is a sandart-wasm/web feature only;
                 // the native desktop app doesn't have a control for it, so it stays off here.
                 quantile_count: 0,
-                grid_size: sandart_sim::GRID_SIZE as f32,
+                sim_size: sandart_sim::GRID_SIZE as f32,
                 quantile_positions: [[0.0; 4]; 3],
                 marbles: [
                     crate::renderer::MarbleUniform {
@@ -1103,6 +1103,14 @@ impl eframe::App for SandArtApp {
                 // desktop control for either, so both stay off here.
                 coarse_eta_enabled: 0,
                 coarse_delta_enabled: 0,
+                // The native desktop app has no sim-downscale control (that's a sandart-wasm/web
+                // feature only, `set_sim_downscale`) -- it always runs simulation and display at
+                // the same resolution, so `render_size` here is simply `GRID_SIZE`, same as
+                // `sim_size` above.
+                render_size: sandart_sim::GRID_SIZE as f32,
+                _pad_uniform_tail0: 0,
+                _pad_uniform_tail1: 0,
+                _pad_uniform_tail2: 0,
             };
 
             // 3. Draw visuals centered in the allocated space via custom WGPU rendering
