@@ -5,6 +5,11 @@
 // PHYSICS mask -- at `smooth_mask` (`m > 1`) this is consulted as a veto over `fine_mask_tex`
 // below, not as the primary outline source. See `HeightmapRenderer::shape_mask_texture`'s doc
 // comment (sandart-render/src/lib.rs).
+//
+// VERTEX | FRAGMENT (was FRAGMENT-only): `vs_main`'s `sample_height_bilinear` reads this at
+// `m > 1` too, to renormalise its height taps over INSIDE sim texels the same way the fragment
+// stage's own height/colour/normal taps do -- see that function's doc comment for why the
+// vertex stage needs its own copy of this indicator rather than reusing `fs_main`'s.
 @group(0) @binding(5) var shape_mask_tex: texture_2d<u32>;
 // Block-simulation heat-map debug overlay. Always a fixed 64x64 texels (see `HEAT_GRID_SIZE` in
 // sandart-render/src/lib.rs) regardless of `uniforms.sim_size` -- the LOD scheduler's block
@@ -182,31 +187,67 @@ fn hue_to_rgb(h: f32) -> vec3<f32> {
 // Manual Bilinear Texture Filtering to support linear height interpolation
 // on platforms without float32_filterable extension support
 //
-// NOT given the mask-aware treatment `fs_main` gets below (at `m > 1`, dropping OUTSIDE
-// corners from this blend so a wall-adjacent height doesn't sag toward 0): that would need
-// `shape_mask_tex` bound into the VERTEX stage, and its bind group entry
-// (`sandart-render/src/lib.rs`) is FRAGMENT-only -- doing it here would mean a Rust-side
-// binding-visibility change, which this pass is scoped to avoid. The mesh is also a fixed
-// 1024x1024 regardless of `sim_size`, so any resulting sag is at most a fraction of one sim
-// cell's width at the vessel rim, and that rim is where the fragment shader's `in_casing` test
-// (mask-based, not height-based) already paints flat casing/LED colour over the geometry
-// underneath -- so a slight dip in the mesh right there has no visible surface to show through.
+// At `m > 1` (`uniforms.render_size > uniforms.sim_size`) this is now given the SAME mask-aware
+// renormalisation `fs_main`'s height/colour/normal taps get: drop OUTSIDE (mask == 0) corners
+// from the blend and renormalise over the INSIDE ones, so a wall-adjacent vertex no longer
+// drags its sampled height toward the 0 stored in unused exterior texels. `shape_mask_tex`'s
+// bind group entry (`sandart-render/src/lib.rs`, binding 5) is now VERTEX | FRAGMENT for this.
+// At `m == 1` the guard below is false and this is byte-for-byte the original unweighted blend.
+//
+// If NO corner of a vertex's quad is inside (`w_sum == 0`), the weighted sum is also exactly 0,
+// so the `max(w_sum, 1e-4)` guard yields 0 -- the same value the old unweighted blend produced
+// there (all 4 raw texels are ~0 outside the mask), not a new behaviour.
+//
+// This does not make the mesh itself pixel-exact with the fine (render-resolution) outline: the
+// vertex mesh is a fixed 1024x1024 grid, coarser than `render_size` can be finer than at small
+// `m` (e.g. `m == 2` with `render_size == 1024` gives `sim_size == 512`, so one mesh cell spans
+// only half a sim cell). `sim_in_frac` is a continuous, piecewise-bilinear function of uv with
+// slope bounded by `sim_size` (it swings 0..1 over one sim cell), so across one mesh cell
+// (`1/1024` of uv) it can move by up to `sim_size / 1024`. At `m == 2` that bound is 0.5, bigger
+// than the fine outline's `TAU`-guarded inside threshold (`sim_in_frac > 0.1`, see
+// `resolve_smooth_flag`) -- so a fragment the outline draws as inside, sitting right next to a
+// mesh vertex whose own quad happens to be fully outside, is NOT mathematically ruled out. What
+// this fix removes is the ~1-SIM-CELL-wide staircase sag the bug report was about (a mesh
+// vertex used to sag toward 0 across the whole width of the nearest sim cell, tracking the sim
+// mask's blocky boundary under a now-smooth outline); what can still remain, only at small m, is
+// at most a ~1-MESH-CELL-wide (`1/1024` of the domain) sub-pixel-at-shipped-resolutions residual,
+// the ordinary cost of a fixed-density mesh under a per-fragment outline finer than it -- not the
+// wall-tracking staircase this pass fixes.
 fn sample_height_bilinear(uv: vec2<f32>) -> f32 {
     let tex_size = uniforms.sim_size;
     let texel_coords = uv * tex_size - 0.5;
     let f = fract(texel_coords);
     let index = floor(texel_coords);
-    
+
     let u0 = (index.x + 0.5) / tex_size;
     let v0 = (index.y + 0.5) / tex_size;
     let u1 = (index.x + 1.5) / tex_size;
     let v1 = (index.y + 1.5) / tex_size;
-    
+
     let h00 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v0), 0.0).r;
     let h10 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v0), 0.0).r;
     let h01 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u0, v1), 0.0).r;
     let h11 = textureSampleLevel(heightmap_tex, heightmap_sampler, vec2<f32>(u1, v1), 0.0).r;
-    
+
+    if (uniforms.render_size > uniforms.sim_size) {
+        let sim_size_i = i32(tex_size);
+        let mi0 = clamp(vec2<i32>(index), vec2<i32>(0), vec2<i32>(sim_size_i - 1));
+        let mi1 = clamp(vec2<i32>(index) + vec2<i32>(1, 0), vec2<i32>(0), vec2<i32>(sim_size_i - 1));
+        let mi2 = clamp(vec2<i32>(index) + vec2<i32>(0, 1), vec2<i32>(0), vec2<i32>(sim_size_i - 1));
+        let mi3 = clamp(vec2<i32>(index) + vec2<i32>(1, 1), vec2<i32>(0), vec2<i32>(sim_size_i - 1));
+        let inside00 = textureLoad(shape_mask_tex, mi0, 0).r != 0u;
+        let inside10 = textureLoad(shape_mask_tex, mi1, 0).r != 0u;
+        let inside01 = textureLoad(shape_mask_tex, mi2, 0).r != 0u;
+        let inside11 = textureLoad(shape_mask_tex, mi3, 0).r != 0u;
+
+        let w00 = (1.0 - f.x) * (1.0 - f.y) * select(0.0, 1.0, inside00);
+        let w10 = f.x * (1.0 - f.y) * select(0.0, 1.0, inside10);
+        let w01 = (1.0 - f.x) * f.y * select(0.0, 1.0, inside01);
+        let w11 = f.x * f.y * select(0.0, 1.0, inside11);
+        let w_sum = max(w00 + w10 + w01 + w11, 1e-4);
+        return (h00 * w00 + h10 * w10 + h01 * w01 + h11 * w11) / w_sum;
+    }
+
     let h0 = mix(h00, h10, f.x);
     let h1 = mix(h01, h11, f.x);
     return mix(h0, h1, f.y);
@@ -654,6 +695,16 @@ fn fs_main(
         h11m = select(h_center, h11, quad_inside11);
     }
 
+    // AUDIT (vertex-mask-aware-height pass): this wide Sobel reaches one cell further out
+    // (`index +/- {0.5, 2.5}`) than the `quad_insideXX`/`quad_all_inside` gate above checks, so
+    // an OUTSIDE texel two cells from a wall's near side can still leak an unweighted ~0 into
+    // `hL0`/`hR0`/etc. even when `quad_all_inside` is true. Left un-mask-aware: this only feeds
+    // `dh_dx`/`dh_dy`, i.e. the NORMAL used for water-wave shading, never `h_center` (the actual
+    // mesh/opacity height, computed and renormalised separately above) -- so it cannot reproduce
+    // the reported "edge steps down" defect, which was a real vertex-position sag. It is also
+    // unchanged from before `smooth_mask` existed (this branch ran unconditionally pre-e6e064e);
+    // mask-testing all 8 taps here would double this branch's texture reads for a second-order
+    // lighting effect, which e6e064e's original comment already declined to do.
     if (is_water > 0.5 && (!smooth_mask || quad_all_inside)) {
         let u_prev = clamp((index.x - 0.5) / tex_size, 0.0, 1.0);
         let u_next = clamp((index.x + 2.5) / tex_size, 0.0, 1.0);
@@ -863,20 +914,33 @@ fn fs_main(
             directional_sparkle = step(0.8, sparkle_intensity) * (sparkle_noise - m_sparkles_threshold) * 50.0;
         }
 
+        // AUDIT (vertex-mask-aware-height pass): this marches `heightmap_tex` directly via
+        // `textureSampleLevel(..., curr_uv, 0.0)` with `heightmap_sampler`, which is
+        // `FilterMode::Nearest` on every axis (see that sampler's creation comment in
+        // sandart-render/src/lib.rs) -- NOT hardware bilinear. A step landing near a wall snaps
+        // to whichever single texel is nearest and reads its raw (possibly OUTSIDE-mask, ~0)
+        // value outright; it never BLENDS an inside and an outside texel the way the manual
+        // bilinear taps elsewhere in this shader do. So there is no interpolation-introduced sag
+        // here to make mask-aware, only an ordinary one-sample-wide discontinuity in the shadow
+        // ray at the true physical edge of the water/sand -- identical at every `m`, since
+        // `heightmap_tex` is always read at its own native `sim_size` resolution regardless of
+        // downscale. Left untouched: `m` does not change this loop's behaviour, and mask-testing
+        // every step (up to 32 here, up to 8x8 = 64 more in the multi-LED loop below) would be
+        // real added cost for a self-shadow-only effect, not the reported edge-height defect.
         var shadow_factor = 1.0;
         if (uniforms.shadow_enabled == 1u) {
             let step_count = 32;
             let step_size = 0.0022;
             let uv_step = vec2<f32>(light_dir.x, -light_dir.y) * step_size;
             let h_step = (2.0 * light_dir.z * step_size) / Z_SCALE;
-            
+
             var curr_uv = uv;
             var curr_h = h_center + 0.0010;
-            
+
             for (var i = 0; i < step_count; i = i + 1) {
                 curr_uv = curr_uv + uv_step;
                 curr_h = curr_h + h_step;
-                
+
                 if (curr_uv.x < 0.0 || curr_uv.x > 1.0 || curr_uv.y < 0.0 || curr_uv.y > 1.0 || curr_h > 1.0) {
                     break;
                 }
@@ -963,6 +1027,8 @@ fn fs_main(
                 sp = step(0.85, sparkle_intensity) * (sparkle_noise - led_sparkles_threshold) * 40.0;
             }
             
+            // Same audit and conclusion as the directional-light shadow march above: Nearest
+            // sampling, no mask-aware change needed. See that loop's comment.
             var shadow_factor = 1.0;
             if (uniforms.shadow_enabled == 1u) {
                 let uv_step = vec2<f32>(l_dir.x, -l_dir.y) * step_size;

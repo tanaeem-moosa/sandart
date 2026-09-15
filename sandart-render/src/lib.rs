@@ -522,7 +522,11 @@ impl HeightmapRenderer {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // Was FRAGMENT-only. `vs_main`'s `sample_height_bilinear` now reads this too
+                    // (mask-aware height sampling at `m > 1`, matching the fragment stage's own
+                    // sim-mask-renormalised taps) -- same reason binding 2 above went
+                    // VERTEX | FRAGMENT when `sim_size` moved into the vertex stage.
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Uint,
                         view_dimension: wgpu::TextureViewDimension::D2,
