@@ -1045,16 +1045,21 @@
                     <span class="checkmark"></span>
                 </label>
 
-                <!-- 2-tick box average of the uploaded height/wetness (render-only, see
-                     set_temporal_smoothing in sandart-wasm/src/lib.rs). Cancels the fixed-texel
-                     alternation a falling water stream otherwise renders as -- the stream's
-                     actual mass still pulses (see test_neck_pulse_does_not_grow), this just stops
-                     a static camera showing it as beads. Default on. -->
+                <!-- EMA of the uploaded height/wetness (render-only, see set_temporal_smoothing
+                     in sandart-wasm/src/lib.rs). Damps the fixed-texel alternation a falling
+                     water stream otherwise renders as -- the stream's actual mass still pulses
+                     (see test_neck_pulse_does_not_grow), this just stops a static camera showing
+                     it as beads. Default on. -->
                 <label class="checkbox-container">
                     Temporal smoothing
                     <input type="checkbox" id="check-temporal-smoothing" checked>
                     <span class="checkmark"></span>
                 </label>
+                <div class="field row">
+                    <label for="temporal-alpha-slider" title="Exponential moving average blend factor for the temporal smoothing above. Lower = smoother but laggier; 1.0 is equivalent to smoothing off.">Smoothing &alpha;</label>
+                    <span id="temporal-alpha-val" class="val-display">0.25</span>
+                    <input type="range" id="temporal-alpha-slider" min="0.05" max="1.0" step="0.05" value="0.25">
+                </div>
             </div>
 
             <!-- ---- Shared: actions ---- -->
