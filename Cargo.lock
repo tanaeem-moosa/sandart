@@ -2986,6 +2986,7 @@ name = "sandart-sim"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "image",
  "pprof",
  "sandart-pattern",
  "serde",

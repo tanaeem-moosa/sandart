@@ -17,3 +17,8 @@ phase-timing = []
 [dev-dependencies]
 pprof = { version = "0.13.0", features = ["flamegraph"] }
 sandart-pattern = { path = "../sandart-pattern" }
+# Already resolved in the workspace Cargo.lock at this exact version (pulled in transitively via
+# egui/eframe's dependency graph), so this adds no new external dependency -- just makes an
+# already-locked crate available to sandart-sim's own examples. Used only by
+# examples/diag_upscale_reconstruction.rs to write PNG crops; never touches wasm.
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
