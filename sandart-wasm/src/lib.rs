@@ -6,7 +6,7 @@ use js_sys;
 use web_sys;
 use wasm_bindgen::JsCast;
 
-use sandart_sim::{DrawingSimulation, MaterialMode, QuantileMode, SandboxShape, SimulatorMode, MAX_QUANTILE_LINES};
+use sandart_sim::{ActiveBounds, DrawingSimulation, MaterialMode, QuantileMode, SandboxShape, SimulatorMode, MAX_QUANTILE_LINES};
 use sandart_render::{HeightmapRenderer, CameraUniforms, LightingUniforms, MarbleUniform};
 use sandart_pattern::{PlaybackController, PlaybackState, parse_gcode, parse_thr};
 
@@ -41,6 +41,50 @@ pub struct WasmSimulationState {
     /// read since `render()`'s hot path and several UI-facing getters read it every frame.
     sim_size: usize,
     full_upload_needed: bool,
+
+    // --- 2-tick temporal average of the uploaded render state (render-only; `sim` itself is
+    // untouched) --- see `upload_temporal_blend` and the heightmap-upload block in `render()`.
+    //
+    // Falling water in a narrow neck renders as a rigid, screen-space-fixed period-2 pattern:
+    // a column-summed alternation moving exactly 1 cell/tick along the stream, and a profile
+    // that flips entirely tick to tick across it (measured, task #57). An exact 2-tap box
+    // average of consecutive ticks' height/wetness cancels almost all of both, because the two
+    // phases of the alternation average to the same value. This does NOT touch `sim` or hide the
+    // near-neck period-2 MASS pulse `test_neck_pulse_does_not_grow` guards -- that pulse is real
+    // physics and unaffected; this only smooths what a fixed screen texel displays of it.
+    //
+    // UI-facing; default on (see `set_temporal_smoothing`).
+    temporal_smoothing_enabled: bool,
+    /// Raw (uncapped-by-`cell_capacity_for`) per-cell height as of the last PROCESSED sim tick --
+    /// i.e. the "previous" tap of the 2-tick average. `sim_size x sim_size`, reallocated whenever
+    /// `apply_grid_dims` rebuilds `sim` at a new size. Always holds a real previous-tick value,
+    /// never a partially-blended one: `upload_temporal_blend` overwrites the cells it touches with
+    /// that call's CURRENT raw height right after using the old value to build the average, so the
+    /// next call sees this tick's value as its previous tap.
+    prev_raw_height: Vec<f32>,
+    /// Same as `prev_raw_height`, for wetness.
+    prev_raw_wetness: Vec<f32>,
+    /// The active-bounds region from the last tick that was actually PROCESSED by the temporal
+    /// blend (i.e. as of the last render call where `sim.tick_count` had advanced) -- `inactive`
+    /// if that tick had no flow, or before the first tick. Serves two purposes in `render()`:
+    /// unioned with THIS tick's bounds so a region that just stopped changing still gets a final
+    /// upload (its half-blended texels would otherwise never be revisited, since a purely
+    /// bounds-of-this-tick upload wouldn't touch it); and, on the first render call after ticking
+    /// stops (paused), named as the region that needs one settle-upload to replace its
+    /// still-half-blended texture with the true final state (see `temporal_pending_settle`).
+    temporal_last_bounds: ActiveBounds,
+    /// True exactly when the texture currently on the GPU for `temporal_last_bounds` is a genuine
+    /// two-tick blend (not yet the settled single-tick value) -- set after a real new-tick upload,
+    /// cleared once the settle-upload runs. Lets a paused `render()` (called every frame even
+    /// while `step()` is skipped) do the settle correction exactly ONCE rather than every frame:
+    /// second and later paused frames see this already false and upload nothing at all.
+    temporal_pending_settle: bool,
+    /// `sim.tick_count` as of the last `render()` call, or `None` before the first one. Compared
+    /// against the CURRENT `sim.tick_count` to tell whether `step()` actually ran a tick since
+    /// then -- it does not while paused (demo.js keeps calling `render()` every frame regardless;
+    /// see the pause/step comment near the top of demo.js). This is the same tick-count-as-a-
+    /// change-detector idiom `pressure_heat_cache_key` already uses below, for the same reason.
+    last_rendered_tick_count: Option<u32>,
 
     // Config state
     simulator_mode: SimulatorMode,
@@ -236,6 +280,12 @@ impl WasmSimulationState {
             sim_downscale: 1,
             sim_size: GRID_SIZE,
             full_upload_needed: true,
+            temporal_smoothing_enabled: true,
+            prev_raw_height: vec![0.0; GRID_SIZE * GRID_SIZE],
+            prev_raw_wetness: vec![0.0; GRID_SIZE * GRID_SIZE],
+            temporal_last_bounds: ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false },
+            temporal_pending_settle: false,
+            last_rendered_tick_count: None,
             simulator_mode: SimulatorMode::Sandbox,
             marble_count: 1,
             material_mode: MaterialMode::DrySand,
@@ -501,6 +551,15 @@ impl WasmSimulationState {
         self.sim_size = size;
         self.renderer = HeightmapRenderer::new(&self.device, self.target_format, size, new_render_size);
         self.full_upload_needed = true;
+        // Reallocate the temporal-smoothing "previous tick" buffers to the new grid size --
+        // content doesn't matter (the imminent full upload below overwrites every cell from the
+        // fresh `sim`'s current state, see `render()`), only the length, since `sim_size` just
+        // changed and the old-size buffers would be indexed out of bounds otherwise.
+        self.prev_raw_height = vec![0.0; size * size];
+        self.prev_raw_wetness = vec![0.0; size * size];
+        self.temporal_last_bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
+        self.temporal_pending_settle = false;
+        self.last_rendered_tick_count = None;
         self.playback.state = PlaybackState::Stopped;
         self.playback.current_indices = [0; 5];
         Ok(())
@@ -847,6 +906,20 @@ impl WasmSimulationState {
         self.shadows_enabled = enabled;
     }
 
+    /// "Temporal smoothing" UI toggle (task #57): 2-tick box average of the uploaded per-cell
+    /// height/wetness -- see the struct-field comments above `temporal_smoothing_enabled` and
+    /// `upload_temporal_blend` in `render()`. Default on. A no-op write is skipped so flipping it
+    /// to the value it already holds (`syncSettings()` in demo.js re-pushes every control on every
+    /// change, same trap `set_sandbox_shape` documents) doesn't force a needless full re-upload;
+    /// an actual flip forces one with "previous" reset to "current" on both sides of the toggle,
+    /// so the switch itself is never visible as a blend of pre/post-toggle state.
+    pub fn set_temporal_smoothing(&mut self, enabled: bool) {
+        if enabled != self.temporal_smoothing_enabled {
+            self.temporal_smoothing_enabled = enabled;
+            self.full_upload_needed = true;
+        }
+    }
+
     /// "Perfect simulation" debug toggle: forwarded straight to the sim, which force-admits
     /// every non-trivial (in-mask, holding material) block into its unconditional simulate tier
     /// every tick instead of letting the adaptive budget skip any of them. See
@@ -1115,15 +1188,25 @@ impl WasmSimulationState {
 
         // Update GPU heightmap and colormap
         let sim_size = self.sim_size;
+        let current_tick_count = self.sim.tick_count;
         if self.full_upload_needed {
             let mut interleaved = vec![0.0f32; sim_size * sim_size * 4];
             for i in 0..sim_size * sim_size {
+                let height = self.sim.heightmap.data[i];
                 let wetness = self.sim.cell_props.wetness[i];
                 let cap = sandart_sim::physics::cell_capacity_for(wetness);
-                interleaved[i * 4 + 0] = self.sim.heightmap.data[i].min(cap);
+                interleaved[i * 4 + 0] = height.min(cap);
                 interleaved[i * 4 + 1] = wetness;
                 interleaved[i * 4 + 2] = self.sim.cell_props.grain_size[i];
                 interleaved[i * 4 + 3] = 1.0;
+                // A full upload is a discontinuity (reset, grid-dims rebuild, shape/material
+                // change -- every `full_upload_needed = true` site, plus the temporal-smoothing
+                // toggle itself) that the 2-tick average below must never blend across. Reset
+                // "previous" to the state being uploaded right now, whether or not smoothing is
+                // currently on, so turning it on later doesn't blend against pre-discontinuity
+                // values.
+                self.prev_raw_height[i] = height;
+                self.prev_raw_wetness[i] = wetness;
             }
             self.renderer.update_heightmap(&self.queue, &interleaved);
             // `cell_colors` is one packed `u32` (`r | g<<8 | b<<16 | a<<24`) per cell; on the
@@ -1141,7 +1224,15 @@ impl WasmSimulationState {
             // sets `tick_count` back to 0, which could otherwise collide with a cached key from
             // an earlier tick 0 and leave the pre-reset image on screen.
             self.pressure_heat_cache_key = None;
-        } else {
+            // No half-blended region can be outstanding right after a full upload.
+            self.temporal_last_bounds = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
+            self.temporal_pending_settle = false;
+            self.last_rendered_tick_count = Some(current_tick_count);
+        } else if !self.temporal_smoothing_enabled {
+            // Smoothing off: identical to the pre-#57 partial-upload path (raw current state,
+            // unaveraged). `prev_raw_height`/`prev_raw_wetness` are left untouched here -- they're
+            // only consulted while smoothing is on, and turning it back on forces a full upload
+            // (see `set_temporal_smoothing`) that reinitialises them before they'd next be read.
             let bounds = self.sim.active_bounds;
             let render_bounds = sandart_render::ActiveBounds {
                 min_x: bounds.min_x,
@@ -1153,7 +1244,7 @@ impl WasmSimulationState {
             if render_bounds.active {
                 let sub_width = bounds.max_x - bounds.min_x + 1;
                 let sub_height = bounds.max_y - bounds.min_y + 1;
-                
+
                 let mut interleaved = vec![0.0f32; sub_width * sub_height * 4];
                 for y in bounds.min_y..=bounds.max_y {
                     let src_row_offset = y * sim_size;
@@ -1190,6 +1281,51 @@ impl WasmSimulationState {
                     render_bounds,
                 );
             }
+            self.last_rendered_tick_count = Some(current_tick_count);
+        } else {
+            // Smoothing on. `step()` runs at most once between two `render()` calls, and not at
+            // all while paused (demo.js calls `render()` every frame regardless -- see the
+            // pause/step comment near its top) -- so whether `tick_count` moved since our own
+            // last call is exactly "did a new tick actually get processed since we last touched
+            // the temporal buffers", independent of frame rate.
+            let tick_advanced = self.last_rendered_tick_count != Some(current_tick_count);
+            self.last_rendered_tick_count = Some(current_tick_count);
+
+            if tick_advanced {
+                let bounds_now = self.sim.active_bounds;
+                // Union with the region the LAST processed tick touched: that region's most
+                // recent upload is a blend of ticks (N-2, N-1), not yet the settled tick-(N-1)
+                // value, and if it isn't part of `bounds_now` (i.e. it just stopped changing)
+                // nothing else would ever revisit it. Including it here finalizes it in the same
+                // pass -- see `upload_temporal_blend`'s doc comment for why that finalization is
+                // exact rather than approximate.
+                let upload_bounds = union_active_bounds(bounds_now, self.temporal_last_bounds);
+                if upload_bounds.active {
+                    self.upload_temporal_blend(upload_bounds, true);
+                }
+                self.temporal_last_bounds = bounds_now;
+                // Only a genuinely active tick leaves a half-blend outstanding that needs a later
+                // settle pass; a tick with no flow at all (`bounds_now.active == false`) uploaded
+                // nothing new above (or finalized `temporal_last_bounds` for free, as just noted).
+                self.temporal_pending_settle = bounds_now.active;
+            } else if self.temporal_pending_settle {
+                // First `render()` since ticking stopped (paused, or simply no new frame's worth
+                // of stepping happened yet): the texture over `temporal_last_bounds` is still the
+                // last real blend of ticks (N-1, N). `upload_temporal_blend` already copied tick
+                // N's raw state into `prev_raw_*` for exactly this region when it ran, so
+                // re-running it now with today's (unchanged, since no tick ran) current state
+                // averages tick N against itself -- i.e. uploads the true settled value, not an
+                // approximation. Colour is skipped: it was already uploaded fresh (unaveraged)
+                // over this same region by that same call, so it never went stale.
+                let region = self.temporal_last_bounds;
+                if region.active {
+                    self.upload_temporal_blend(region, false);
+                }
+                self.temporal_pending_settle = false;
+            }
+            // Else: already settled and nothing new to show -- skip the upload entirely. This is
+            // the common case for every paused frame after the first, and also for a fully static
+            // scene that still ticks (e.g. a settled pile) once its one settle-upload has run.
         }
 
         // Calculate uniforms
@@ -1389,6 +1525,74 @@ impl WasmSimulationState {
         Ok(())
     }
 
+    /// Upload the 2-tick box average of height/wetness over `bounds` -- `0.5 * (this tick's raw
+    /// value + `prev_raw_height`/`prev_raw_wetness`)`, cap applied to the AVERAGED height using
+    /// the AVERAGED wetness (the same `cell_capacity_for` relationship the unsmoothed path applies
+    /// to a single tick's values, just fed averaged inputs instead of raw ones) -- then advances
+    /// `prev_raw_height`/`prev_raw_wetness` to this tick's raw values over the same region, in the
+    /// same pass, so the next call sees this tick as its "previous" tap. One loop, no second pass:
+    /// the averaging and the previous-buffer update share the same per-cell read of `sim`.
+    ///
+    /// Grain size and colour are uploaded UNAVERAGED (current tick only) -- see `render()`'s
+    /// doc comment on why colour doesn't need it. `upload_colormap` gates only the colour upload;
+    /// height/wetness are always touched by a call to this function.
+    ///
+    /// `bounds` must be `active`; callers check that first (an inactive region has nothing to
+    /// upload and no valid `min_x..=max_x` range).
+    fn upload_temporal_blend(&mut self, bounds: ActiveBounds, upload_colormap: bool) {
+        let sim_size = self.sim_size;
+        let render_bounds = sandart_render::ActiveBounds {
+            min_x: bounds.min_x,
+            max_x: bounds.max_x,
+            min_y: bounds.min_y,
+            max_y: bounds.max_y,
+            active: bounds.active,
+        };
+        let sub_width = bounds.max_x - bounds.min_x + 1;
+        let sub_height = bounds.max_y - bounds.min_y + 1;
+
+        let mut interleaved = vec![0.0f32; sub_width * sub_height * 4];
+        for y in bounds.min_y..=bounds.max_y {
+            let src_row_offset = y * sim_size;
+            let dest_row_offset = (y - bounds.min_y) * sub_width;
+            for x in bounds.min_x..=bounds.max_x {
+                let src_idx = src_row_offset + x;
+                let dest_idx = dest_row_offset + (x - bounds.min_x);
+
+                let cur_height = self.sim.heightmap.data[src_idx];
+                let cur_wetness = self.sim.cell_props.wetness[src_idx];
+                let avg_height = 0.5 * (cur_height + self.prev_raw_height[src_idx]);
+                let avg_wetness = 0.5 * (cur_wetness + self.prev_raw_wetness[src_idx]);
+                let cap = sandart_sim::physics::cell_capacity_for(avg_wetness);
+
+                interleaved[dest_idx * 4 + 0] = avg_height.min(cap);
+                interleaved[dest_idx * 4 + 1] = avg_wetness;
+                interleaved[dest_idx * 4 + 2] = self.sim.cell_props.grain_size[src_idx];
+                interleaved[dest_idx * 4 + 3] = 1.0;
+
+                self.prev_raw_height[src_idx] = cur_height;
+                self.prev_raw_wetness[src_idx] = cur_wetness;
+            }
+        }
+        self.renderer.update_heightmap_partial(&self.queue, &interleaved, render_bounds);
+
+        if upload_colormap {
+            let mut colormap_sub = vec![0u32; sub_width * sub_height];
+            for y in bounds.min_y..=bounds.max_y {
+                let src_row_offset = y * sim_size;
+                let dest_row_offset = (y - bounds.min_y) * sub_width;
+                colormap_sub[dest_row_offset..(dest_row_offset + sub_width)].copy_from_slice(
+                    &self.sim.cell_colors[src_row_offset + bounds.min_x..src_row_offset + bounds.max_x + 1]
+                );
+            }
+            self.renderer.update_colormap_partial(
+                &self.queue,
+                bytemuck::cast_slice::<u32, u8>(&colormap_sub),
+                render_bounds,
+            );
+        }
+    }
+
     pub fn get_heightmap(&self) -> js_sys::Float32Array {
         unsafe { js_sys::Float32Array::view(self.sim.heightmap.as_slice()) }
     }
@@ -1419,3 +1623,24 @@ impl WasmSimulationState {
 }
 
 pub const GRID_SIZE: usize = 512;
+
+/// Smallest `ActiveBounds` rectangle covering both inputs, treating `active: false` as the
+/// identity element (an inactive bound contributes nothing, so the union of an active region with
+/// an inactive one is just the active region, unchanged; the union of two inactive ones is
+/// inactive). Used by `render()`'s temporal-smoothing block to combine this tick's changed region
+/// with the last processed tick's, so a region that just stopped changing still gets a final
+/// upload -- see that block's comments.
+fn union_active_bounds(a: ActiveBounds, b: ActiveBounds) -> ActiveBounds {
+    match (a.active, b.active) {
+        (false, false) => ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false },
+        (true, false) => a,
+        (false, true) => b,
+        (true, true) => ActiveBounds {
+            min_x: a.min_x.min(b.min_x),
+            max_x: a.max_x.max(b.max_x),
+            min_y: a.min_y.min(b.min_y),
+            max_y: a.max_y.max(b.max_y),
+            active: true,
+        },
+    }
+}

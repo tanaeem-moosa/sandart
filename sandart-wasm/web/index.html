@@ -1044,6 +1044,17 @@
                     <input type="checkbox" id="check-shadows" checked>
                     <span class="checkmark"></span>
                 </label>
+
+                <!-- 2-tick box average of the uploaded height/wetness (render-only, see
+                     set_temporal_smoothing in sandart-wasm/src/lib.rs). Cancels the fixed-texel
+                     alternation a falling water stream otherwise renders as -- the stream's
+                     actual mass still pulses (see test_neck_pulse_does_not_grow), this just stops
+                     a static camera showing it as beads. Default on. -->
+                <label class="checkbox-container">
+                    Temporal smoothing
+                    <input type="checkbox" id="check-temporal-smoothing" checked>
+                    <span class="checkmark"></span>
+                </label>
             </div>
 
             <!-- ---- Shared: actions ---- -->

@@ -849,6 +849,7 @@ function syncSettings() {
     const angleVal = document.getElementById('angle-val');
     if (angleVal) angleVal.innerText = `${Math.round(angleRad * 180 / Math.PI)}\u00b0`;
     state.set_shadows_enabled(document.getElementById('check-shadows').checked);
+    state.set_temporal_smoothing(document.getElementById('check-temporal-smoothing').checked);
 
     // LOD scheduler debug instruments (both off by default) -- see the "Debug" group's comment
     // in index.html for what each one does.
@@ -1250,6 +1251,7 @@ function setupPanelInput() {
     });
 
     document.getElementById('check-shadows').addEventListener('change', syncSettings);
+    document.getElementById('check-temporal-smoothing').addEventListener('change', syncSettings);
     document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
     const fallJitterSliderEl = document.getElementById('fall-jitter-slider');
     if (fallJitterSliderEl) {
