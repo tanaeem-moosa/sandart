@@ -548,12 +548,23 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_spiral_spacing(this.__wbg_ptr, spacing);
     }
     /**
-     * "Temporal smoothing" UI toggle (task #57): 2-tick box average of the uploaded per-cell
-     * height/wetness -- see the struct-field comments above `temporal_smoothing_enabled` and
-     * `upload_temporal_blend` in `render()`. Default on. A no-op write is skipped so flipping it
+     * EMA blend factor for temporal smoothing -- see `temporal_alpha`'s field comment. Clamped
+     * to (0, 1] (the UI slider already restricts it to 0.05-1.0; this just protects against a
+     * stray 0.0, which would freeze `y` forever, or a negative/>1 value, which would make the
+     * EMA diverge instead of converge). No full upload is needed: the EMA just continues from
+     * wherever `displayed_height`/`displayed_wetness` currently sit, at the new rate.
+     * @param {number} alpha
+     */
+    set_temporal_alpha(alpha) {
+        wasm.wasmsimulationstate_set_temporal_alpha(this.__wbg_ptr, alpha);
+    }
+    /**
+     * "Temporal smoothing" UI toggle (task #57): EMA of the uploaded per-cell height/wetness --
+     * see the struct-field comments above `temporal_smoothing_enabled` and
+     * `update_and_upload_ema` in `render()`. Default on. A no-op write is skipped so flipping it
      * to the value it already holds (`syncSettings()` in demo.js re-pushes every control on every
      * change, same trap `set_sandbox_shape` documents) doesn't force a needless full re-upload;
-     * an actual flip forces one with "previous" reset to "current" on both sides of the toggle,
+     * an actual flip forces one with "displayed" reset to "current" on both sides of the toggle,
      * so the switch itself is never visible as a blend of pre/post-toggle state.
      * @param {boolean} enabled
      */
