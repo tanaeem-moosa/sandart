@@ -548,6 +548,19 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_spiral_spacing(this.__wbg_ptr, spacing);
     }
     /**
+     * "Temporal smoothing" UI toggle (task #57): 2-tick box average of the uploaded per-cell
+     * height/wetness -- see the struct-field comments above `temporal_smoothing_enabled` and
+     * `upload_temporal_blend` in `render()`. Default on. A no-op write is skipped so flipping it
+     * to the value it already holds (`syncSettings()` in demo.js re-pushes every control on every
+     * change, same trap `set_sandbox_shape` documents) doesn't force a needless full re-upload;
+     * an actual flip forces one with "previous" reset to "current" on both sides of the toggle,
+     * so the switch itself is never visible as a blend of pre/post-toggle state.
+     * @param {boolean} enabled
+     */
+    set_temporal_smoothing(enabled) {
+        wasm.wasmsimulationstate_set_temporal_smoothing(this.__wbg_ptr, enabled);
+    }
+    /**
      * @param {number} dt
      * @param {number} cursor_x
      * @param {number} cursor_y
