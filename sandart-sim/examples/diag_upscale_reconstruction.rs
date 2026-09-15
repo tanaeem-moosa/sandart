@@ -491,8 +491,117 @@ fn eval_model(model: &Option<CellModel>, dx: f32, dy: f32) -> f32 {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// R5: anti-aliased PLIC coverage (an exact clipped-area fraction of each render PIXEL's own
+// footprint, not a point sample of the interface) times a limited-plane height. Round-2 addition
+// -- see UPSCALE-RECONSTRUCTION-2026-09-14.md revision history. Fixes R4's failure mode (a thin
+// covered strip can fall entirely between two point samples and vanish): here every pixel gets a
+// continuous coverage in [0,1] instead of a binary in/out, so a strip narrower than one pixel
+// fades rather than disappearing, and the pixel MEANS used for conservation are exact by
+// construction rather than only exact in the point-sample limit.
+// ---------------------------------------------------------------------------------------------
+
+/// Area fraction of the axis-aligned box `[cx-half,cx+half] x [cy-half,cy+half]` on the covered
+/// side (`n.p >= t`) of the interface line -- the same exact half-plane clip `area_frac_exact`
+/// uses for the whole unit cell, generalised to one render pixel's own smaller footprint. This
+/// closed-form clipped-area computation is exactly what an analytic-AA fragment shader would do
+/// per pixel (see §7 of the writeup) -- no bisection, no sampling.
+fn box_area_frac(nx: f32, ny: f32, t: f32, cx: f32, cy: f32, half: f32) -> f32 {
+    let poly = [(cx - half, cy - half), (cx + half, cy - half), (cx + half, cy + half), (cx - half, cy + half)];
+    let area = polygon_area(&clip_halfplane(&poly, nx, ny, t));
+    let box_area = (2.0 * half) * (2.0 * half);
+    if box_area > 1e-12 { (area / box_area).clamp(0.0, 1.0) } else { 0.0 }
+}
+
+struct R5Model { nx: f32, ny: f32, t: f32, h0: f32, gx: f32, gy: f32, phi: f32, delta: f32 }
+
+/// Per-cell R5 parameters. `delta` is solved in CLOSED FORM (no bisection): the mean over the
+/// cell's own `m*m` pixels of `coverage(dx,dy) * (h0 + phi*gx*dx + phi*gy*dy + delta)` must equal
+/// `h0`. Since `coverage` doesn't depend on `delta`, this is linear in `delta`:
+/// `delta = (h0 - mean(coverage*plane)) / mean(coverage)`. Unlike R2/R3, there is no clip-then-
+/// resolve nonlinearity here -- the "edge" is carried entirely by `coverage`, not by clipping the
+/// height to 0, so the height field itself never needs clamping mid-solve (final output is
+/// clamped defensively at 0, but the conservation identity above is exact before that clamp).
+fn precompute_r5_models(coarse: &CoarseField, m: usize) -> Vec<Option<R5Model>> {
+    let n = coarse.size;
+    let mut out = Vec::with_capacity(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            if coarse.mask[y * n + x] == MASK_OUTSIDE {
+                out.push(None);
+                continue;
+            }
+            let (cx, cy) = (x as i32, y as i32);
+            let h0 = coarse.get(cx, cy);
+            let (_, h_ref) = neighbour_min_max(coarse, cx, cy);
+            let h_ref = h_ref.max(1e-6);
+            let f = (h0 / h_ref).clamp(0.0, 1.0);
+            let (gx, gy) = ls_gradient(coarse, cx, cy);
+            let (mn, mx) = neighbour_min_max(coarse, cx, cy);
+            let phi = bj_phi(h0, gx, gy, mn, mx);
+            let gmag = (gx * gx + gy * gy).sqrt();
+            let (nx, ny) = if gmag > 1e-6 { (gx / gmag, gy / gmag) } else { (0.0, -1.0) };
+            let t = solve_plic_threshold(nx, ny, f);
+            let half = 0.5 / m as f32;
+            let (mut sum_cov, mut sum_cov_h) = (0.0f32, 0.0f32);
+            for j in 0..m {
+                for i in 0..m {
+                    let dx = (i as f32 + 0.5) / m as f32 - 0.5;
+                    let dy = (j as f32 + 0.5) / m as f32 - 0.5;
+                    let cov = box_area_frac(nx, ny, t, dx, dy, half);
+                    let plane_h = h0 + phi * gx * dx + phi * gy * dy;
+                    sum_cov += cov;
+                    sum_cov_h += cov * plane_h;
+                }
+            }
+            let mean_cov = sum_cov / (m * m) as f32;
+            let mean_cov_h = sum_cov_h / (m * m) as f32;
+            let delta = if mean_cov > 1e-6 { (h0 - mean_cov_h) / mean_cov } else { 0.0 };
+            out.push(Some(R5Model { nx, ny, t, h0, gx, gy, phi, delta }));
+        }
+    }
+    out
+}
+
+/// Returns `(height_shown, raw_coverage)` -- the first is what feeds rms/mass/width metrics and
+/// the picture (the coverage-weighted, i.e. "as displayed", height); the second is the RAW
+/// coverage fraction in `[0,1]`, which is what the coverage/IoU metric thresholds at 0.5 (per the
+/// round-2 brief) instead of thresholding a height.
+fn eval_r5(model: &Option<R5Model>, dx: f32, dy: f32, m: usize) -> (f32, f32) {
+    match model {
+        None => (0.0, 0.0),
+        Some(md) => {
+            let half = 0.5 / m as f32;
+            let cov = box_area_frac(md.nx, md.ny, md.t, dx, dy, half);
+            let plane_h = (md.h0 + md.phi * md.gx * dx + md.phi * md.gy * dy + md.delta).max(0.0);
+            (cov * plane_h, cov)
+        }
+    }
+}
+
+fn reconstruct_r5(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
+    let n = coarse.size * m;
+    let models = precompute_r5_models(coarse, m);
+    let mut h_out = vec![0.0f32; n * n];
+    let mut cov_out = vec![0.0f32; n * n];
+    for fy in 0..n {
+        let yc = fine_to_coarse(fy, m);
+        let cy = clamp_idx(yc.round() as i32, coarse.size);
+        let dy = yc - cy as f32;
+        for fx in 0..n {
+            let xc = fine_to_coarse(fx, m);
+            let cx = clamp_idx(xc.round() as i32, coarse.size);
+            let dx = xc - cx as f32;
+            let (hv, cv) = eval_r5(&models[cy * coarse.size + cx], dx, dy, m);
+            h_out[fy * n + fx] = hv;
+            cov_out[fy * n + fx] = cv;
+        }
+    }
+    (h_out, cov_out)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Rule { R0, R1, R2, R3, R4 }
+enum Rule { R0, R1, R2, R3, R4, R5 }
 
 impl Rule {
     fn name(&self) -> &'static str {
@@ -502,6 +611,7 @@ impl Rule {
             Rule::R2 => "R2_limited_plane",
             Rule::R3 => "R3_face_match",
             Rule::R4 => "R4_plic",
+            Rule::R5 => "R5_plic_aa",
         }
     }
 }
@@ -528,8 +638,26 @@ fn reconstruct(coarse: &CoarseField, rule: Rule, m: usize) -> Vec<f32> {
             let models = precompute_plic_models(coarse);
             fill_from_models(&mut out, coarse, &models, m);
         }
+        Rule::R5 => unreachable!("R5 has its own coverage output -- call reconstruct_pair instead"),
     }
     out
+}
+
+/// The single entry point every metric/picture call site should use: returns
+/// `(height_for_rms_mass_width, coverage_comparable_array, coverage_threshold)`. For R0-R4 the
+/// coverage-comparable array IS the height array and the threshold is the shipped `THRESH`
+/// (0.003) -- i.e. "covered" means "height at or above the shader's opacity cutoff", exactly as
+/// today. For R5 the coverage-comparable array is the RAW coverage fraction in [0,1] (not height)
+/// and the threshold is 0.5, per the round-2 brief -- R5's antialiased edge means "covered" is a
+/// question about the interface's area fraction, not about a height value crossing 0.003.
+fn reconstruct_pair(coarse: &CoarseField, rule: Rule, m: usize) -> (Vec<f32>, Vec<f32>, f32) {
+    if rule == Rule::R5 {
+        let (h, cov) = reconstruct_r5(coarse, m);
+        (h, cov, 0.5)
+    } else {
+        let h = reconstruct(coarse, rule, m);
+        (h.clone(), h, THRESH)
+    }
 }
 
 fn fill_from_models(out: &mut [f32], coarse: &CoarseField, models: &[Option<CellModel>], m: usize) {
@@ -681,25 +809,208 @@ fn find_neck_rows(mask: &[u8], size: usize) -> Vec<usize> {
     clusters.iter().map(|c| c[c.len() / 2]).collect()
 }
 
-struct StreamWidth { occupied_px: usize, mass_equiv: f64 }
+// ---------------------------------------------------------------------------------------------
+// Round-2 fix #1: PER-STREAM width. The round-1 metric summed occupied/mass over an entire row,
+// which for a multi-neck vessel measures the SEPARATION between streams as much as any single
+// stream's width. This detects each stream as its own contiguous covered span, matches spans
+// between the original and a candidate by nearest centre, and reports width ratios per matched
+// stream -- averaged over streams and over three rows chosen to be in FREE FALL (round-1 probed
+// only `neck_row+2`, which is still inside the neck's own throat, not free fall).
+// ---------------------------------------------------------------------------------------------
 
-fn stream_width_at_row(h: &[f32], mask: &[u8], size: usize, row: usize) -> StreamWidth {
-    let mut occupied = 0usize;
-    let mut mass = 0.0f64;
-    let mut peak = 0.0f32;
+/// Contiguous covered (`h[idx] >= thresh` and inside-mask) runs along one row -- one entry per
+/// stream (or per lobe of a pool's covered surface, off a stream context).
+fn detect_spans(h: &[f32], mask: &[u8], size: usize, row: usize, thresh: f32) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start: Option<usize> = None;
     for x in 0..size {
-        let i = row * size + x;
-        if mask[i] == MASK_OUTSIDE {
+        let idx = row * size + x;
+        let covered = mask[idx] != MASK_OUTSIDE && h[idx] >= thresh;
+        match (covered, start) {
+            (true, None) => start = Some(x),
+            (false, Some(s)) => { spans.push((s, x)); start = None; }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        spans.push((s, size));
+    }
+    spans
+}
+
+struct SpanMetrics { occupied_px: usize, mass_equiv: f64 }
+
+fn span_metrics(h: &[f32], mask: &[u8], size: usize, row: usize, span: (usize, usize)) -> SpanMetrics {
+    let (a, b) = span;
+    let (mut mass, mut peak) = (0.0f64, 0.0f32);
+    for x in a..b {
+        let idx = row * size + x;
+        if mask[idx] == MASK_OUTSIDE {
             continue;
         }
-        let v = h[i];
-        if v >= THRESH {
-            occupied += 1;
-        }
-        mass += v as f64;
-        peak = peak.max(v);
+        mass += h[idx] as f64;
+        peak = peak.max(h[idx]);
     }
-    StreamWidth { occupied_px: occupied, mass_equiv: if peak > 0.0 { mass / peak as f64 } else { 0.0 } }
+    SpanMetrics { occupied_px: b - a, mass_equiv: if peak > 0.0 { mass / peak as f64 } else { 0.0 } }
+}
+
+/// Greedy nearest-centre matching between the original's spans and a candidate's spans at the
+/// same row. Unmatched originals ("missing" -- the rule dropped or merged a stream) and unmatched
+/// candidate spans ("extra" -- the rule split one stream into two, or hallucinated one) are
+/// reported explicitly rather than silently skipped or silently averaged in.
+fn match_spans(orig: &[(usize, usize)], rule: &[(usize, usize)]) -> (Vec<((usize, usize), (usize, usize))>, usize, usize) {
+    let center = |s: &(usize, usize)| (s.0 + s.1) as f32 / 2.0;
+    let mut used = vec![false; rule.len()];
+    let mut pairs = Vec::new();
+    let mut missing = 0usize;
+    for o in orig {
+        let oc = center(o);
+        let mut best: Option<(usize, f32)> = None;
+        for (i, r) in rule.iter().enumerate() {
+            if used[i] {
+                continue;
+            }
+            let d = (center(r) - oc).abs();
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+        match best {
+            Some((i, _)) => { used[i] = true; pairs.push((*o, rule[i])); }
+            None => missing += 1,
+        }
+    }
+    let extra = used.iter().filter(|u| !**u).count();
+    (pairs, missing, extra)
+}
+
+struct StreamAgg { n_matched: usize, n_missing: usize, n_extra: usize, mean_occ_ratio: f64, mean_mass_ratio: f64 }
+
+/// Averages per-stream width/mass ratios (candidate/original) over every matched stream at every
+/// row in `rows`. `thresh` is the coverage threshold used to detect spans on BOTH fields -- always
+/// `THRESH` on a height array for R0-R4, but the caller passes R5's own coverage-weighted height
+/// array here too (not the raw coverage fraction): per the round-2 brief, R5's width/mass metrics
+/// use coverage*height, so span detection on that product at the normal 0.003 cutoff is exactly
+/// the intended quantity.
+fn per_stream_width(orig_h: &[f32], recon_h: &[f32], mask: &[u8], size: usize, rows: &[usize], thresh: f32) -> StreamAgg {
+    let (mut occ_ratios, mut mass_ratios) = (Vec::new(), Vec::new());
+    let (mut matched, mut missing, mut extra) = (0usize, 0usize, 0usize);
+    for &row in rows {
+        let orig_spans = detect_spans(orig_h, mask, size, row, thresh);
+        let rule_spans = detect_spans(recon_h, mask, size, row, thresh);
+        let (pairs, miss, ext) = match_spans(&orig_spans, &rule_spans);
+        missing += miss;
+        extra += ext;
+        for (o, r) in pairs {
+            let om = span_metrics(orig_h, mask, size, row, o);
+            let rm = span_metrics(recon_h, mask, size, row, r);
+            matched += 1;
+            if om.occupied_px > 0 {
+                occ_ratios.push(rm.occupied_px as f64 / om.occupied_px as f64);
+            }
+            if om.mass_equiv > 1e-9 {
+                mass_ratios.push(rm.mass_equiv / om.mass_equiv);
+            }
+        }
+    }
+    let mean = |v: &[f64]| if v.is_empty() { f64::NAN } else { v.iter().sum::<f64>() / v.len() as f64 };
+    StreamAgg { n_matched: matched, n_missing: missing, n_extra: extra, mean_occ_ratio: mean(&occ_ratios), mean_mass_ratio: mean(&mass_ratios) }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Round-2 fix #2: front fidelity via a symmetric chamfer distance, since a global fp/fn/IoU count
+// is dominated by pool/wall area and is blind to staircasing along a front (the actual complaint
+// -- "curves not smooth"). A 2-pass chamfer-(1, sqrt2) distance transform approximates Euclidean
+// distance to within ~2%, plenty for the px-scale distances measured here.
+// ---------------------------------------------------------------------------------------------
+
+fn boundary_mask(h: &[f32], mask: &[u8], size: usize, thresh: f32) -> Vec<bool> {
+    let mut b = vec![false; size * size];
+    for y in 0..size {
+        for x in 0..size {
+            let idx = y * size + x;
+            if mask[idx] == MASK_OUTSIDE {
+                continue;
+            }
+            let covered = h[idx] >= thresh;
+            let mut edge = false;
+            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                if nx < 0 || ny < 0 || nx as usize >= size || ny as usize >= size {
+                    continue;
+                }
+                let nidx = ny as usize * size + nx as usize;
+                let n_covered = mask[nidx] != MASK_OUTSIDE && h[nidx] >= thresh;
+                if n_covered != covered {
+                    edge = true;
+                }
+            }
+            b[idx] = edge;
+        }
+    }
+    b
+}
+
+const CHAMFER_INF: f32 = 1e9;
+
+fn chamfer_dt(boundary: &[bool], size: usize) -> Vec<f32> {
+    let mut d = vec![CHAMFER_INF; size * size];
+    for (i, &b) in boundary.iter().enumerate() {
+        if b {
+            d[i] = 0.0;
+        }
+    }
+    let s2 = std::f32::consts::SQRT_2;
+    for y in 0..size {
+        for x in 0..size {
+            let idx = y * size + x;
+            let mut best = d[idx];
+            if x > 0 { best = best.min(d[idx - 1] + 1.0); }
+            if y > 0 { best = best.min(d[idx - size] + 1.0); }
+            if x > 0 && y > 0 { best = best.min(d[idx - size - 1] + s2); }
+            if x + 1 < size && y > 0 { best = best.min(d[idx - size + 1] + s2); }
+            d[idx] = best;
+        }
+    }
+    for y in (0..size).rev() {
+        for x in (0..size).rev() {
+            let idx = y * size + x;
+            let mut best = d[idx];
+            if x + 1 < size { best = best.min(d[idx + 1] + 1.0); }
+            if y + 1 < size { best = best.min(d[idx + size] + 1.0); }
+            if x + 1 < size && y + 1 < size { best = best.min(d[idx + size + 1] + s2); }
+            if x > 0 && y + 1 < size { best = best.min(d[idx + size - 1] + s2); }
+            d[idx] = best;
+        }
+    }
+    d
+}
+
+struct ChamferResult { fwd_mean: f64, fwd_max: f32, rev_mean: f64, rev_max: f32, n_fwd: usize, n_rev: usize }
+
+/// Symmetric chamfer over a rectangular region only (a slope front / a pool-wall edge / the sides
+/// of a stream), not the whole grid -- fp/fn/IoU are already global and dominated by bulk pool and
+/// wall area; this is deliberately local to the feature being judged. `fwd` = distance from each
+/// RECONSTRUCTED boundary pixel in the region to the nearest ORIGINAL boundary pixel (using the
+/// original's precomputed distance transform); `rev` = the reverse. Staircasing shows up as
+/// `mean ~= m/4`, `max ~= m/2` in whichever direction has the staircase.
+fn front_fidelity(orig_boundary: &[bool], orig_dt: &[f32], rule_boundary: &[bool], rule_dt: &[f32], size: usize, region: (usize, usize, usize, usize)) -> ChamferResult {
+    let (x0, y0, w, hh) = region;
+    let (mut fwd, mut rev) = (Vec::new(), Vec::new());
+    for y in y0..(y0 + hh).min(size) {
+        for x in x0..(x0 + w).min(size) {
+            let idx = y * size + x;
+            if rule_boundary[idx] {
+                fwd.push(orig_dt[idx] as f64);
+            }
+            if orig_boundary[idx] {
+                rev.push(rule_dt[idx] as f64);
+            }
+        }
+    }
+    let mean = |v: &[f64]| if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 };
+    let maxv = |v: &[f64]| v.iter().cloned().fold(0.0f64, f64::max) as f32;
+    ChamferResult { fwd_mean: mean(&fwd), fwd_max: maxv(&fwd), rev_mean: mean(&rev), rev_max: maxv(&rev), n_fwd: fwd.len(), n_rev: rev.len() }
 }
 
 /// Finds a `box_size` square, fully inside the mask, in the bottom half of the grid, maximising
@@ -789,10 +1100,49 @@ fn find_slope_region(mask: &[u8], h: &[f32], size: usize, box_size: usize) -> (u
 }
 
 // ---------------------------------------------------------------------------------------------
+// Shared region finders -- used by BOTH the numeric front-fidelity probe (`run_snapshot`) and the
+// picture crops (`make_all_pictures`), so the region a number is reported for is exactly the
+// region shown.
+// ---------------------------------------------------------------------------------------------
+
+/// `(x0, y0, w, h)` around the first detected neck and the stream(s) below it.
+fn stream_region(mask: &[u8], size: usize, box_size: usize) -> (usize, usize, usize, usize) {
+    let neck_rows = find_neck_rows(mask, size);
+    let neck_row = *neck_rows.first().unwrap_or(&(size / 3));
+    (size / 2 - box_size / 2, neck_row.saturating_sub(10), box_size, box_size)
+}
+
+/// `(x0, y0, w, h)` around a settled pool/pile interior slid sideways to the nearest vessel wall,
+/// so the crop/probe includes the wall boundary itself, not just the flat interior.
+fn pool_wall_region(mask: &[u8], h: &[f32], size: usize, box_size: usize) -> (usize, usize, usize, usize) {
+    let interior_box = box_size / 2;
+    let (pool_x, pool_y) = find_pool_region(mask, h, size, interior_box);
+    let mut wall_x = pool_x;
+    for x in pool_x.saturating_sub(box_size)..(pool_x + interior_box + box_size).min(size) {
+        if mask[pool_y * size + x] == MASK_OUTSIDE {
+            wall_x = x;
+            break;
+        }
+    }
+    let x0 = wall_x.saturating_sub(box_size / 2).min(size.saturating_sub(box_size));
+    (x0, pool_y.saturating_sub(box_size / 4), box_size, box_size)
+}
+
+/// `(x0, y0, w, h)` fully inside the mask (no wall) in the lower chamber, at the location of
+/// greatest height range -- a granular repose slope or a settling liquid surface.
+fn slope_region(mask: &[u8], h: &[f32], size: usize, box_size: usize) -> (usize, usize, usize, usize) {
+    let (x, y) = find_slope_region(mask, h, size, box_size);
+    (x, y, box_size, box_size)
+}
+
+// ---------------------------------------------------------------------------------------------
 // PNG output
 // ---------------------------------------------------------------------------------------------
 
-fn crop_image(h: &[f32], mask: &[u8], size: usize, x0: usize, y0: usize, w: usize, hh: usize, vmax: f32) -> image::RgbImage {
+/// `h` is the displayed height (grayscale); `cov`/`cov_thresh` is what decides the coverage
+/// outline -- for R0-R4 this is the same array as `h` at `THRESH`, for R5 it's the raw coverage
+/// fraction at 0.5 (round-2: R5's "covered" is a coverage-fraction question, not a height one).
+fn crop_image(h: &[f32], cov: &[f32], cov_thresh: f32, mask: &[u8], size: usize, x0: usize, y0: usize, w: usize, hh: usize, vmax: f32) -> image::RgbImage {
     let mut img = image::RgbImage::new(w as u32, hh as u32);
     for by in 0..hh {
         for bx in 0..w {
@@ -802,10 +1152,8 @@ fn crop_image(h: &[f32], mask: &[u8], size: usize, x0: usize, y0: usize, w: usiz
             let v = (h[idx] / vmax).clamp(0.0, 1.0);
             let g = (v * 235.0) as u8 + if outside { 0 } else { 20 };
             let mut px = if outside { [30u8, 26u8, 22u8] } else { [g, g, g] };
-            // Coverage outline: colour a pixel if it's covered (h>=THRESH) and at least one of its
-            // 4-neighbours is not, i.e. the h>=THRESH boundary.
             if !outside {
-                let covered = h[idx] >= THRESH;
+                let covered = cov[idx] >= cov_thresh;
                 let mut edge = false;
                 for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
                     let (nx, ny) = (x as i32 + dx, y as i32 + dy);
@@ -813,7 +1161,7 @@ fn crop_image(h: &[f32], mask: &[u8], size: usize, x0: usize, y0: usize, w: usiz
                         continue;
                     }
                     let nidx = ny as usize * size + nx as usize;
-                    let n_covered = mask[nidx] != MASK_OUTSIDE && h[nidx] >= THRESH;
+                    let n_covered = mask[nidx] != MASK_OUTSIDE && cov[nidx] >= cov_thresh;
                     if n_covered != covered {
                         edge = true;
                     }
@@ -828,11 +1176,29 @@ fn crop_image(h: &[f32], mask: &[u8], size: usize, x0: usize, y0: usize, w: usiz
     img
 }
 
-fn make_contact_sheet(tiles: &[image::RgbImage]) -> image::RgbImage {
-    let cols = tiles.len().min(6);
+/// Round-2 fix #3: the 128px crops were too small to judge staircasing by eye. Plain nearest-
+/// neighbour pixel replication (no new information, just legibility) up to `factor`x.
+fn magnify_nearest(img: &image::RgbImage, factor: u32) -> image::RgbImage {
+    let (w, h) = img.dimensions();
+    let mut out = image::RgbImage::new(w * factor, h * factor);
+    for y in 0..h {
+        for x in 0..w {
+            let p = *img.get_pixel(x, y);
+            for dy in 0..factor {
+                for dx in 0..factor {
+                    out.put_pixel(x * factor + dx, y * factor + dy, p);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn make_contact_sheet(tiles: &[image::RgbImage], cols: usize) -> image::RgbImage {
+    let cols = cols.min(tiles.len().max(1));
     let rows = (tiles.len() + cols - 1) / cols;
     let (tw, th) = tiles.first().map(|t| (t.width(), t.height())).unwrap_or((1, 1));
-    let pad = 4u32;
+    let pad = 6u32;
     let mut sheet = image::RgbImage::from_pixel(cols as u32 * (tw + pad) + pad, rows as u32 * (th + pad) + pad, image::Rgb([245, 245, 245]));
     for (i, tile) in tiles.iter().enumerate() {
         let (col, row) = (i % cols, i / cols);
@@ -855,9 +1221,42 @@ fn output_dir() -> std::path::PathBuf {
     dir
 }
 
+const ALL_RULES: [Rule; 6] = [Rule::R0, Rule::R1, Rule::R2, Rule::R3, Rule::R4, Rule::R5];
+
 fn run_snapshot(snap: &Snapshot) {
     let size = snap.sim.heightmap.width;
     println!("\n================ snapshot: {} (S=512) ================", snap.name);
+
+    // Regions + original boundary/distance-transform state that do NOT depend on m or rule --
+    // computed once per snapshot, reused across the m loop below.
+    let neck_rows_fine = find_neck_rows(&snap.mask512, size);
+    println!("detected neck rows (fine, S=512): {neck_rows_fine:?}");
+    if std::env::var("DUMP_ROW_COUNTS").is_ok() {
+        let counts: Vec<usize> = (0..size).map(|y| (0..size).filter(|&x| snap.mask512[y * size + x] != MASK_OUTSIDE).count()).collect();
+        for (y, c) in counts.iter().enumerate() {
+            if y % 4 == 0 { println!("row {y}: {c}"); }
+        }
+    }
+    let neck_row = *neck_rows_fine.first().unwrap_or(&(size / 3));
+    // Round-2 fix: probe FREE FALL (16/32/48 cells below the neck), not `neck_row+2` (still
+    // inside the neck's own throat).
+    let free_fall_rows: Vec<usize> = [16usize, 32, 48].iter().filter_map(|&d| if neck_row + d < size { Some(neck_row + d) } else { None }).collect();
+
+    let pool_box = 24usize;
+    let (pool_x, pool_y) = find_pool_region(&snap.mask512, &snap.h, size, pool_box);
+    let orig_smooth = second_diff_rms(&snap.h, size, pool_x, pool_y, pool_box);
+    println!(
+        "original pool-interior 2nd-diff RMS at ({pool_x},{pool_y}) box={pool_box}: {:.9} (near-zero is expected for a settled pool/pile plateau -- this is the TRUE baseline, not noise)",
+        orig_smooth
+    );
+
+    let region_stream = stream_region(&snap.mask512, size, 128);
+    let region_pool = pool_wall_region(&snap.mask512, &snap.h, size, 128);
+    let region_slope = slope_region(&snap.mask512, &snap.h, size, 128);
+    println!("front-fidelity regions: stream={region_stream:?} pool_wall={region_pool:?} slope={region_slope:?}");
+
+    let orig_boundary = boundary_mask(&snap.h, &snap.mask512, size, THRESH);
+    let orig_dt = chamfer_dt(&orig_boundary, size);
 
     for &m in &[2usize, 4usize] {
         let coarse_size = size / m;
@@ -871,36 +1270,16 @@ fn run_snapshot(snap: &Snapshot) {
             dreport.mass_lost, dreport.total_mass, loss_pct
         );
 
-        // Neck rows (scenario a/c only meaningful, but harmless elsewhere) and stream widths.
-        let neck_rows_fine = find_neck_rows(&snap.mask512, size);
-        println!("detected neck rows (fine, S=512): {neck_rows_fine:?}");
-        if std::env::var("DUMP_ROW_COUNTS").is_ok() {
-            let counts: Vec<usize> = (0..size).map(|y| (0..size).filter(|&x| snap.mask512[y * size + x] != MASK_OUTSIDE).count()).collect();
-            for (y, c) in counts.iter().enumerate() {
-                if y % 4 == 0 { println!("row {y}: {c}"); }
-            }
-        }
-        let probe_rows: Vec<usize> = neck_rows_fine.iter().filter_map(|&r| if r + 3 < size { Some(r + 2) } else { None }).collect();
-
-        // Pool region (for smoothness) and slope region (only used for picture crops later).
-        let pool_box = 24usize;
-        let (pool_x, pool_y) = find_pool_region(&snap.mask512, &snap.h, size, pool_box);
-        let orig_smooth = second_diff_rms(&snap.h, size, pool_x, pool_y, pool_box);
-
-        println!(
-            "original pool-interior 2nd-diff RMS at ({pool_x},{pool_y}) box={pool_box}: {:.9} (near-zero is expected for a settled pool/pile plateau -- this is the TRUE baseline, not noise)",
-            orig_smooth
-        );
         println!(
             "{:<18} {:>12} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>12}",
             "rule", "max_mass_err", "rms_all", "rms_int", "rms_front", "fp_px", "fn_px", "iou", "smooth_abs"
         );
 
-        for &rule in &[Rule::R0, Rule::R1, Rule::R2, Rule::R3, Rule::R4] {
-            let recon = reconstruct(&coarse, rule, m);
+        for &rule in &ALL_RULES {
+            let (recon, cov_arr, cov_thresh) = reconstruct_pair(&coarse, rule, m);
             let mass_err = max_mass_error(&coarse, &recon, m);
             let rms = height_rms(&snap.h, &recon, &snap.mask512, size, &coarse_interior, m, coarse_size);
-            let cov = coverage_metrics(&snap.h, &recon, &snap.mask512, size, THRESH);
+            let cov = coverage_metrics(&snap.h, &cov_arr, &snap.mask512, size, cov_thresh);
             let recon_smooth = second_diff_rms(&recon, size, pool_x, pool_y, pool_box);
 
             println!(
@@ -908,16 +1287,24 @@ fn run_snapshot(snap: &Snapshot) {
                 rule.name(), mass_err, rms.all, rms.interior, rms.frontier, cov.fp, cov.fn_, cov.iou, recon_smooth
             );
 
-            if !probe_rows.is_empty() {
-                for &row in &probe_rows {
-                    let orig_w = stream_width_at_row(&snap.h, &snap.mask512, size, row);
-                    let rule_w = stream_width_at_row(&recon, &snap.mask512, size, row);
-                    println!(
-                        "    stream row {row}: {} occupied_px={} (orig {}), mass_equiv_width={:.3} (orig {:.3}, ratio {:.3})",
-                        rule.name(), rule_w.occupied_px, orig_w.occupied_px, rule_w.mass_equiv, orig_w.mass_equiv,
-                        if orig_w.mass_equiv > 1e-9 { rule_w.mass_equiv / orig_w.mass_equiv } else { f64::NAN }
-                    );
-                }
+            // Round-2 fix A: per-stream width, free fall only, matched by span not by row sum.
+            if !free_fall_rows.is_empty() {
+                let agg = per_stream_width(&snap.h, &recon, &snap.mask512, size, &free_fall_rows, THRESH);
+                println!(
+                    "    per-stream width @ y={free_fall_rows:?}: matched={} missing={} extra={} occ_ratio_mean={:.3} mass_ratio_mean={:.3} (target 1.0 for both -- this is a ROUND-TRIP, not a resolution comparison)",
+                    agg.n_matched, agg.n_missing, agg.n_extra, agg.mean_occ_ratio, agg.mean_mass_ratio
+                );
+            }
+
+            // Round-2 fix B: front fidelity (symmetric chamfer), local to each named feature.
+            let rule_boundary = boundary_mask(&cov_arr, &snap.mask512, size, cov_thresh);
+            let rule_dt = chamfer_dt(&rule_boundary, size);
+            for (label, region) in [("stream_sides", region_stream), ("pool_wall_edge", region_pool), ("slope_front", region_slope)] {
+                let cf = front_fidelity(&orig_boundary, &orig_dt, &rule_boundary, &rule_dt, size, region);
+                println!(
+                    "    front_fidelity[{label}] fwd(recon->orig) mean={:.3} max={:.3} n={} | rev(orig->recon) mean={:.3} max={:.3} n={} (px; m/4={:.2}, m/2={:.2})",
+                    cf.fwd_mean, cf.fwd_max, cf.n_fwd, cf.rev_mean, cf.rev_max, cf.n_rev, m as f64 / 4.0, m as f64 / 2.0
+                );
             }
         }
         println!("(rms/mass units are heightmap units 0..1; pixel counts are over the full 512x512 fine-inside domain)");
@@ -938,63 +1325,113 @@ fn run_snapshot(snap: &Snapshot) {
     }
 }
 
+/// Round-2 fix D: 128px base crops were too small to judge staircasing by eye. Every crop is
+/// still sampled at this same 128px base (identical regions to round 1 -- `stream_region`/
+/// `pool_wall_region`/`slope_region` are shared with `run_snapshot`'s numeric probes above, so the
+/// picture and the number are always of the same patch), then magnified 4x nearest-neighbour to
+/// 512px per tile before saving, per the round-2 brief.
+const MAGNIFY: u32 = 4;
+/// Contact sheets show only the rules the round-2 brief asks for: the shipped rule (R1), R3
+/// (the best-measuring limited plane -- R2 is its close twin and stays in the numeric tables only),
+/// R4 (PLIC, to show its dropout failure mode), and R5 (the new anti-aliased PLIC).
+const PICTURE_RULES: [Rule; 4] = [Rule::R1, Rule::R3, Rule::R4, Rule::R5];
+
 fn make_all_pictures(snap_a: &Snapshot, snap_b: &Snapshot, out_dir: &std::path::Path) {
     let size = snap_a.sim.heightmap.width;
 
-    // Crop 1: water stream + neck. Crop 2: pool edge against a wall. Both from scenario (a).
-    let neck_rows = find_neck_rows(&snap_a.mask512, size);
-    let neck_row = *neck_rows.first().unwrap_or(&(size / 3));
-    let stream_crop = (size / 2 - 64, neck_row.saturating_sub(10), 128usize, 128usize);
-
-    let pool_box = 48usize;
-    let (pool_x, pool_y) = find_pool_region(&snap_a.mask512, &snap_a.h, size, pool_box);
-    // Slide the crop toward the nearest wall boundary within a small search window so the pool
-    // edge itself (not just the interior) is inside frame.
-    let mut wall_x = pool_x;
-    for x in pool_x.saturating_sub(80)..(pool_x + pool_box + 80).min(size) {
-        if snap_a.mask512[pool_y * size + x] == MASK_OUTSIDE {
-            wall_x = x;
-            break;
-        }
-    }
-    let pool_crop_x0 = wall_x.saturating_sub(64).min(size.saturating_sub(128));
-    let pool_crop = (pool_crop_x0, pool_y.saturating_sub(32), 128usize, 128usize);
-
-    // Crop 3: sand slope front, from scenario (b).
-    let slope_box = 128usize;
-    let (slope_x, slope_y) = find_slope_region(&snap_b.mask512, &snap_b.h, size, slope_box);
-    let slope_crop = (slope_x, slope_y, slope_box, slope_box);
+    let region_stream = stream_region(&snap_a.mask512, size, 128);
+    let region_pool = pool_wall_region(&snap_a.mask512, &snap_a.h, size, 128);
+    let region_slope = slope_region(&snap_b.mask512, &snap_b.h, size, 128);
 
     let figures: [(&str, &Snapshot, (usize, usize, usize, usize), f32); 3] = [
-        ("stream_neck", snap_a, stream_crop, 0.55),
-        ("pool_wall_edge", snap_a, pool_crop, 0.55),
-        ("sand_slope", snap_b, slope_crop, 0.5),
+        ("stream_neck", snap_a, region_stream, 0.55),
+        ("pool_wall_edge", snap_a, region_pool, 0.55),
+        ("sand_slope", snap_b, region_slope, 0.5),
     ];
 
-    for (fig_name, snap, (x0, y0, w, hh), vmax) in figures {
-        let orig_img = crop_image(&snap.h, &snap.mask512, size, x0, y0, w, hh, vmax);
-        orig_img.save(out_dir.join(format!("{fig_name}_original.png"))).expect("write png");
-        let mut sheet_tiles = vec![orig_img];
+    let mut readme = String::new();
+    readme.push_str("# Picture crops -- artifacts/design/upscale-2026-09-14/\n\n");
+    readme.push_str(&format!(
+        "Every crop is a 128x128 sample of the original 512 grid, magnified {MAGNIFY}x nearest-\
+        neighbour to 512x512 (no new information -- purely so staircasing is legible). Grayscale =\
+        height; orange = the coverage boundary (h>=0.003 for R0-R4, coverage>=0.5 for R5).\n\n"
+    ));
 
+    for (fig_name, snap, (x0, y0, w, hh), vmax) in figures {
+        let orig_img = magnify_nearest(&crop_image(&snap.h, &snap.h, THRESH, &snap.mask512, size, x0, y0, w, hh, vmax), MAGNIFY);
+        orig_img.save(out_dir.join(format!("{fig_name}_original.png"))).expect("write png");
+
+        readme.push_str(&format!("## {fig_name}\ncrop = (x0={x0}, y0={y0}, w={w}, h={hh}), vmax={vmax}\n\n"));
+        readme.push_str(&format!(
+            "`{fig_name}_contact_sheet.png`: 5 columns x 2 rows. Row 1 = m=2, row 2 = m=4. Columns \
+            left to right:\n\n"
+        ));
+        readme.push_str("| col 1 | col 2 | col 3 | col 4 | col 5 |\n|---|---|---|---|---|\n");
+        readme.push_str("| original | R1 bilinear (shipped) | R3 face-match | R4 PLIC | R5 PLIC+AA |\n\n");
+
+        let mut sheet_tiles = vec![orig_img.clone()];
         for &m in &[2usize, 4usize] {
+            if m == 4 {
+                // Original repeats as column 1 of row 2 for direct side-by-side comparison.
+                sheet_tiles.push(orig_img.clone());
+            }
             let coarse_size = size / m;
             let coarse_mask = snap.sim.rasterize_shape_mask(coarse_size);
             let (coarse, _) = downscale(&snap.h, &snap.mask512, size, &coarse_mask, coarse_size, m);
-            for &rule in &[Rule::R0, Rule::R1, Rule::R2, Rule::R3, Rule::R4] {
-                let recon = reconstruct(&coarse, rule, m);
-                let img = crop_image(&recon, &snap.mask512, size, x0, y0, w, hh, vmax);
+            for &rule in &PICTURE_RULES {
+                let (recon, cov_arr, cov_thresh) = reconstruct_pair(&coarse, rule, m);
+                let base = crop_image(&recon, &cov_arr, cov_thresh, &snap.mask512, size, x0, y0, w, hh, vmax);
+                let img = magnify_nearest(&base, MAGNIFY);
                 let fname = format!("{fig_name}_{}_m{m}.png", rule.name());
                 img.save(out_dir.join(&fname)).expect("write png");
                 sheet_tiles.push(img);
             }
         }
-        let sheet = make_contact_sheet(&sheet_tiles);
+        // R0/R2 individual crops too (not in the contact sheet, but on disk for reference).
+        for &m in &[2usize, 4usize] {
+            let coarse_size = size / m;
+            let coarse_mask = snap.sim.rasterize_shape_mask(coarse_size);
+            let (coarse, _) = downscale(&snap.h, &snap.mask512, size, &coarse_mask, coarse_size, m);
+            for &rule in &[Rule::R0, Rule::R2] {
+                let (recon, cov_arr, cov_thresh) = reconstruct_pair(&coarse, rule, m);
+                let base = crop_image(&recon, &cov_arr, cov_thresh, &snap.mask512, size, x0, y0, w, hh, vmax);
+                let img = magnify_nearest(&base, MAGNIFY);
+                img.save(out_dir.join(format!("{fig_name}_{}_m{m}.png", rule.name()))).expect("write png");
+            }
+        }
+
+        let sheet = make_contact_sheet(&sheet_tiles, 5);
         sheet.save(out_dir.join(format!("{fig_name}_contact_sheet.png"))).expect("write contact sheet");
-        println!("wrote {fig_name}: crop=({x0},{y0},{w}x{hh}) vmax={vmax}");
+        println!("wrote {fig_name}: crop=({x0},{y0},{w}x{hh}) vmax={vmax} magnify={MAGNIFY}x");
     }
+
+    std::fs::write(out_dir.join("README.md"), readme).expect("write README");
+}
+
+fn selftest_geometry() {
+    // area_frac_exact(1,0,0) on the whole unit cell should be exactly 0.5 (a vertical line through
+    // the centre, normal pointing +x, covers the right half).
+    println!("selftest area_frac_exact(1,0,0) = {} (want 0.5)", area_frac_exact(1.0, 0.0, 0.0));
+    println!("selftest area_frac_exact(0,1,0) = {} (want 0.5)", area_frac_exact(0.0, 1.0, 0.0));
+    println!("selftest area_frac_exact(1,0,0.5) = {} (want 0.0, line at the right edge)", area_frac_exact(1.0, 0.0, 0.5));
+    println!("selftest area_frac_exact(1,0,-0.5) = {} (want 1.0, line at the left edge)", area_frac_exact(1.0, 0.0, -0.5));
+    // box_area_frac on a tiny box far from the interface should be exactly 0 or 1, never a stray
+    // partial value.
+    println!("selftest box_area_frac(1,0,0.5, cx=-0.4,cy=0,half=0.02) = {} (want 0.0, box entirely left of an interface at x=0.5)", box_area_frac(1.0, 0.0, 0.5, -0.4, 0.0, 0.02));
+    println!("selftest box_area_frac(1,0,-0.5, cx=-0.4,cy=0,half=0.02) = {} (want 1.0, box entirely right of an interface at x=-0.5)", box_area_frac(1.0, 0.0, -0.5, -0.4, 0.0, 0.02));
+    // A cell whose gradient is near-zero (flat) but h0 slightly below the neighbour max should
+    // give f close to but below 1 -- solve_plic_threshold should then place t so nearly the whole
+    // cell is covered, not scattered slivers.
+    let f = 0.98f32;
+    let t = solve_plic_threshold(0.0, -1.0, f);
+    println!("selftest solve_plic_threshold(nx=0,ny=-1,f=0.98) = t={t}, area_frac_exact at that t = {} (want ~0.98)", area_frac_exact(0.0, -1.0, t));
 }
 
 fn main() {
+    if std::env::var("SELFTEST").is_ok() {
+        selftest_geometry();
+        return;
+    }
     let out_dir = output_dir();
     println!("output dir: {}", out_dir.display());
 
