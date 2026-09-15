@@ -281,7 +281,7 @@ impl WasmSimulationState {
             sim_size: GRID_SIZE,
             full_upload_needed: true,
             temporal_smoothing_enabled: true,
-            temporal_alpha: 0.25,
+            temporal_alpha: 0.4,
             displayed_height: vec![0.0; GRID_SIZE * GRID_SIZE],
             displayed_wetness: vec![0.0; GRID_SIZE * GRID_SIZE],
             settling_box: ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false },
