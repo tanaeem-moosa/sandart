@@ -850,6 +850,7 @@ function syncSettings() {
     if (angleVal) angleVal.innerText = `${Math.round(angleRad * 180 / Math.PI)}\u00b0`;
     state.set_shadows_enabled(document.getElementById('check-shadows').checked);
     state.set_temporal_smoothing(document.getElementById('check-temporal-smoothing').checked);
+    state.set_sub_cell_edges(document.getElementById('check-sub-cell-edges').checked);
     const temporalAlphaSlider = document.getElementById('temporal-alpha-slider');
     if (temporalAlphaSlider) {
         const temporalAlpha = parseFloat(temporalAlphaSlider.value);
@@ -1259,6 +1260,7 @@ function setupPanelInput() {
 
     document.getElementById('check-shadows').addEventListener('change', syncSettings);
     document.getElementById('check-temporal-smoothing').addEventListener('change', syncSettings);
+    document.getElementById('check-sub-cell-edges').addEventListener('change', syncSettings);
     const temporalAlphaSliderEl = document.getElementById('temporal-alpha-slider');
     if (temporalAlphaSliderEl) {
         temporalAlphaSliderEl.addEventListener('input', syncSettings);

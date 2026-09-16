@@ -137,10 +137,16 @@ pub struct LightingUniforms {
     /// promises every byte is defined. Three bare `u32` fields, NOT `[u32; 3]`: WGSL's
     /// uniform-address-space layout rules force an array's per-element stride to 16 bytes (see
     /// `quantile_positions`'s doc comment above), which would desync this padding's size from
-    /// this tightly-packed Rust side. Nothing to repurpose the slack for yet, so it stays padding
-    /// -- the next debug overlay flag or shader scalar should spend these before growing the
-    /// struct again.
-    pub _pad_uniform_tail0: u32,
+    /// this tightly-packed Rust side.
+    ///
+    /// "Sub-cell edges" UI toggle (R6 sub-cell coverage reconstruction at the fragment shader's
+    /// `smooth_mask` block, see shader.wgsl's `eval_sub_cell_r6`): 1 = on (default), 0 = off.
+    /// Repurposes what was the first of these three trailing pad slots -- the same move
+    /// `pressure_heatmap_enabled` et al. made against `_pad_heatmap` above -- rather than growing
+    /// the struct, so this costs no layout change. Only has an effect when `render_size >
+    /// sim_size` (`m > 1`); at `m == 1` the shader never reads it. See
+    /// `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md` for what R6 is.
+    pub sub_cell_edges_enabled: u32,
     pub _pad_uniform_tail1: u32,
     pub _pad_uniform_tail2: u32,
 }
@@ -1262,7 +1268,7 @@ mod tests {
                 coarse_eta_enabled: 0,
                 coarse_delta_enabled: 0,
                 render_size: GRID_SIZE as f32,
-                _pad_uniform_tail0: 0,
+                sub_cell_edges_enabled: 0,
                 _pad_uniform_tail1: 0,
                 _pad_uniform_tail2: 0,
             };
@@ -1549,7 +1555,7 @@ mod tests {
                     coarse_eta_enabled: 0,
                     coarse_delta_enabled: 0,
                     render_size: GRID_SIZE as f32,
-                    _pad_uniform_tail0: 0,
+                    sub_cell_edges_enabled: 0,
                     _pad_uniform_tail1: 0,
                     _pad_uniform_tail2: 0,
                 };

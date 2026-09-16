@@ -147,7 +147,13 @@ struct LightingUniforms {
     // `render_size`'s Rust-side doc comment. Three bare `u32` scalars, not an array, for the same
     // reason `heatmap_enabled`'s doc comment above gives: WGSL arrays stride to 16 bytes in the
     // uniform address space, which would desync this from Rust's tightly-packed layout.
-    _pad_uniform_tail0: u32,
+    //
+    // "Sub-cell edges" UI toggle (R6 sub-cell coverage reconstruction, see `eval_sub_cell_r6`
+    // below): 1 = on (default), 0 = off. Repurposes the first of these three trailing pad slots --
+    // mirrors the Rust-side `LightingUniforms::sub_cell_edges_enabled` in
+    // sandart-render/src/lib.rs exactly; see that field's doc comment. Only read when
+    // `render_size > sim_size` (`m > 1`); at `m == 1` this is inert, matching the Rust side.
+    sub_cell_edges_enabled: u32,
     _pad_uniform_tail1: u32,
     _pad_uniform_tail2: u32,
 };
@@ -319,6 +325,189 @@ fn apply_marble_shadow(
         let m_shadow = smoothstep(r_uv * 0.8, r_uv * 1.5, d_to_shadow);
         *shadow_factor = *shadow_factor * (0.35 + 0.65 * m_shadow);
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// "Sub-cell edges" (R6): per-fragment sub-cell coverage/height reconstruction at `m > 1`, behind
+// the `sub_cell_edges_enabled` UI toggle. Mirrors `precompute_r6_models`/`eval_r6` in
+// `sandart-sim/examples/diag_upscale_reconstruction.rs` EXACTLY -- read
+// `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md` §3's R6 entry before changing anything
+// here, this is not an independent derivation. Unlike that offline tool, there is no pre-pass:
+// every fragment recomputes its own coarse cell's model from scratch (up to 9 heightmap +
+// 9 mask `textureLoad`s, shared between the gradient/min-max stencil and the confinement signal,
+// plus a fixed `m*m <= 16` iteration loop for the closed-form conservation solve) -- see the cost
+// discussion in the commit this landed in before adding a pre-pass texture.
+// ---------------------------------------------------------------------------------------------
+
+// 1D exact overlap fraction of a pixel's own footprint `[pixel_center-pixel_half,
+// pixel_center+pixel_half]` against a centred strip `[center-half_width, center+half_width]`.
+// Mirrors the Rust prototype's `overlap_1d` exactly.
+fn overlap_1d(center: f32, half_width: f32, pixel_center: f32, pixel_half: f32) -> f32 {
+    if (pixel_half <= 0.0) {
+        return 0.0;
+    }
+    let lo = max(pixel_center - pixel_half, center - half_width);
+    let hi = min(pixel_center + pixel_half, center + half_width);
+    return clamp(max(hi - lo, 0.0) / (2.0 * pixel_half), 0.0, 1.0);
+}
+
+// One Barth-Jespersen limiter update at corner `(cdx, cdy)` -- mirrors the per-corner body of the
+// Rust prototype's `bj_phi` (called once per corner there via a loop over the 4 corners; unrolled
+// into 4 explicit calls at the call site here since WGSL has no ergonomic array-of-tuples literal
+// for this).
+fn bj_corner(phi_in: f32, h0: f32, gx: f32, gy: f32, mn: f32, mx: f32, cdx: f32, cdy: f32) -> f32 {
+    let d = gx * cdx + gy * cdy;
+    let extrap = h0 + d;
+    var phi = phi_in;
+    if (extrap > mx && abs(d) > 1e-9) {
+        phi = min(phi, max((mx - h0) / d, 0.0));
+    } else if (extrap < mn && abs(d) > 1e-9) {
+        phi = min(phi, max((mn - h0) / d, 0.0));
+    }
+    return phi;
+}
+
+// Returns `(height, coverage)` for the fragment at `uv`, using the R6 rule. Callers must gate on
+// `smooth_mask` (`uniforms.render_size > uniforms.sim_size`) and `uniforms.sub_cell_edges_enabled`
+// themselves -- this function does not check either. `sim_size_i` is `i32(uniforms.sim_size)`,
+// passed in so the caller's copy is reused instead of recomputing it.
+//
+// "Walls are not empty": every neighbour read in the gradient/min-max stencil below excludes
+// OUTSIDE (mask == 0) cells entirely, same as the offline prototype's `CoarseField::inside`. The
+// ONE deliberate exception is the axis confinement/bias signal (`left_h`/`right_h`/`up_h`/
+// `down_h`), which reads an OUTSIDE neighbour as height 0 -- mirroring
+// `axis_confinement_bias`'s doc comment in the Rust prototype: a wall confines a stream visually
+// exactly like empty space does, and a neck squeezed between two walls is exactly the degenerate
+// case this signal targets.
+fn eval_sub_cell_r6(uv: vec2<f32>, sim_size_i: i32) -> vec2<f32> {
+    let sim_size_f = f32(sim_size_i);
+    let tc = uv * sim_size_f - 0.5;
+    let cxy = round(tc);
+    let dxy = tc - cxy;
+    let cx = i32(cxy.x);
+    let cy = i32(cxy.y);
+    if (cx < 0 || cx >= sim_size_i || cy < 0 || cy >= sim_size_i) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    let center_mask = textureLoad(shape_mask_tex, vec2<i32>(cx, cy), 0).r;
+    if (center_mask == 0u) {
+        return vec2<f32>(0.0, 0.0);
+    }
+    let h0 = textureLoad(heightmap_tex, vec2<i32>(cx, cy), 0).r;
+
+    var sxx = 0.0;
+    var syy = 0.0;
+    var sxy = 0.0;
+    var sxr = 0.0;
+    var syr = 0.0;
+    var mn = h0;
+    var mx = h0;
+    var left_h = 0.0;
+    var right_h = 0.0;
+    var up_h = 0.0;
+    var down_h = 0.0;
+    for (var ddy = -1; ddy <= 1; ddy = ddy + 1) {
+        for (var ddx = -1; ddx <= 1; ddx = ddx + 1) {
+            if (ddx == 0 && ddy == 0) {
+                continue;
+            }
+            let nx = cx + ddx;
+            let ny = cy + ddy;
+            let in_bounds = nx >= 0 && nx < sim_size_i && ny >= 0 && ny < sim_size_i;
+            var inside_n = false;
+            var h_n = 0.0;
+            if (in_bounds) {
+                let ni = vec2<i32>(nx, ny);
+                let m_n = textureLoad(shape_mask_tex, ni, 0).r;
+                inside_n = m_n != 0u;
+                if (inside_n) {
+                    h_n = textureLoad(heightmap_tex, ni, 0).r;
+                }
+            }
+            if (inside_n) {
+                let dv = h_n - h0;
+                let fx = f32(ddx);
+                let fy = f32(ddy);
+                sxx = sxx + fx * fx;
+                syy = syy + fy * fy;
+                sxy = sxy + fx * fy;
+                sxr = sxr + fx * dv;
+                syr = syr + fy * dv;
+                mn = min(mn, h_n);
+                mx = max(mx, h_n);
+            }
+            // Deliberate exception to "walls are not empty" -- see the function doc comment.
+            if (ddx == -1 && ddy == 0) { left_h = h_n; }
+            if (ddx == 1 && ddy == 0) { right_h = h_n; }
+            if (ddx == 0 && ddy == -1) { up_h = h_n; }
+            if (ddx == 0 && ddy == 1) { down_h = h_n; }
+        }
+    }
+
+    let det = sxx * syy - sxy * sxy;
+    var gx = 0.0;
+    var gy = 0.0;
+    if (abs(det) < 1e-6) {
+        if (sxx > 1e-6) { gx = sxr / sxx; }
+        if (syy > 1e-6) { gy = syr / syy; }
+    } else {
+        gx = (sxr * syy - syr * sxy) / det;
+        gy = (syr * sxx - sxr * sxy) / det;
+    }
+
+    let h_ref = max(mx, 1e-6);
+    let f_cov = clamp(h0 / h_ref, 0.0, 1.0);
+
+    var phi = 1.0;
+    phi = bj_corner(phi, h0, gx, gy, mn, mx, -0.5, -0.5);
+    phi = bj_corner(phi, h0, gx, gy, mn, mx, 0.5, -0.5);
+    phi = bj_corner(phi, h0, gx, gy, mn, mx, -0.5, 0.5);
+    phi = bj_corner(phi, h0, gx, gy, mn, mx, 0.5, 0.5);
+    phi = clamp(phi, 0.0, 1.0);
+
+    let conf_x = clamp((abs(left_h - h0) + abs(right_h - h0)) / h_ref, 0.0, 1.0);
+    let bias_x = clamp((right_h - left_h) / h_ref, -1.0, 1.0);
+    let conf_y = clamp((abs(up_h - h0) + abs(down_h - h0)) / h_ref, 0.0, 1.0);
+    let bias_y = clamp((down_h - up_h) / h_ref, -1.0, 1.0);
+    let wsum = conf_x + conf_y;
+    let wsum_safe = max(wsum, 1e-6);
+    let w = select(0.5, conf_x / wsum_safe, wsum > 1e-6);
+
+    let strip_half = f_cov * 0.5;
+    let off_x = bias_x * (1.0 - f_cov) * 0.5;
+    let off_y = bias_y * (1.0 - f_cov) * 0.5;
+
+    // Closed-form conservation delta, solved against THIS cell's own m*m sub-pixel grid -- no
+    // pre-pass, so every fragment in the cell repeats this same small loop (m in {1,2,4}, so at
+    // most 16 iterations of pure ALU, no texture reads).
+    let m_f = uniforms.render_size / uniforms.sim_size;
+    let m_i = max(i32(round(m_f)), 1);
+    let half = 0.5 / f32(m_i);
+    var sum_cov = 0.0;
+    var sum_cov_h = 0.0;
+    for (var jj = 0; jj < m_i; jj = jj + 1) {
+        let sdy = (f32(jj) + 0.5) / f32(m_i) - 0.5;
+        for (var ii = 0; ii < m_i; ii = ii + 1) {
+            let sdx = (f32(ii) + 0.5) / f32(m_i) - 0.5;
+            let cov_x = overlap_1d(off_x, strip_half, sdx, half);
+            let cov_y = overlap_1d(off_y, strip_half, sdy, half);
+            let cov = w * cov_x + (1.0 - w) * cov_y;
+            let plane_h = h0 + phi * gx * sdx + phi * gy * sdy;
+            sum_cov = sum_cov + cov;
+            sum_cov_h = sum_cov_h + cov * plane_h;
+        }
+    }
+    let mm = f32(m_i * m_i);
+    let mean_cov = sum_cov / mm;
+    let mean_cov_h = sum_cov_h / mm;
+    let mean_cov_safe = max(mean_cov, 1e-6);
+    let delta = select(0.0, (h0 - mean_cov_h) / mean_cov_safe, mean_cov > 1e-6);
+
+    let cov_x_f = overlap_1d(off_x, strip_half, dxy.x, half);
+    let cov_y_f = overlap_1d(off_y, strip_half, dxy.y, half);
+    let coverage = w * cov_x_f + (1.0 - w) * cov_y_f;
+    let height = max(h0 + phi * gx * dxy.x + phi * gy * dxy.y + delta, 0.0);
+    return vec2<f32>(height, coverage);
 }
 
 @fragment
@@ -738,8 +927,25 @@ fn fs_main(
         1.0
     ));
 
-    // Smooth opacity blend (h_center >= 0.003 is 100% opaque sand color)
-    let empty_blend = clamp(h_center / 0.003, 0.0, 1.0);
+    // "Sub-cell edges" (R6): reconstructs this fragment's own coverage/height from the sim's 3x3
+    // stencil instead of relying on the mask-aware bilinear blend above, so a rendered edge (a
+    // falling stream, a slope front) draws at its true sub-cell position instead of smeared ~1 sim
+    // cell wide. Gated on `m > 1` (nothing to reconstruct between at `m == 1`) AND the UI toggle;
+    // touches ONLY the opacity computation just below -- `h_center`/`normal`/every other quantity
+    // computed above (including the shading normal) are untouched. See `eval_sub_cell_r6`'s doc
+    // comment and `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md`.
+    var opacity_height = h_center;
+    var sub_cell_coverage = 1.0;
+    if (smooth_mask && uniforms.sub_cell_edges_enabled != 0u) {
+        let r6 = eval_sub_cell_r6(uv, sim_size_i);
+        opacity_height = r6.x;
+        sub_cell_coverage = r6.y;
+    }
+
+    // Smooth opacity blend (h_center >= 0.003 is 100% opaque sand color), folded together with
+    // `sub_cell_coverage` above so a sub-cell-thin covered strip fades continuously instead of
+    // snapping to fully opaque the instant its reconstructed height crosses 0.003.
+    let empty_blend = clamp(opacity_height / 0.003, 0.0, 1.0) * sub_cell_coverage;
     let sparkles_fade = clamp(1.0 - wetness / 0.3, 0.0, 1.0) * empty_blend;
     let sparkles_intensity = mix(2.0, 18.0, grain_size) * sparkles_fade;
     let sparkles_threshold = clamp(mix(0.998, 0.990, grain_size) + (1.0 - sparkles_fade) * 0.01, 0.990, 1.0);
