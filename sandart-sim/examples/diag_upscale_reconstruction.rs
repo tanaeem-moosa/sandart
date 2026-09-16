@@ -10,10 +10,10 @@
 //! This is a MEASUREMENT tool, not a shipped change: it never touches the shader, the renderer,
 //! the wasm crate, or physics. It takes a real 512 snapshot, downscales it by block-average to
 //! 256 (m=2) and 128 (m=4) using the *coarse resolution's own rasterized mask* (never a resampling
-//! of the fine mask), then re-upscales with five candidate rules and compares each against the
+//! of the fine mask), then re-upscales with seven candidate rules and compares each against the
 //! original 512 field. Comparing separate 256/512 simulations would conflate reconstruction error
 //! with the fact that different resolutions evolve at different rates -- see CLAUDE.md's method
-//! note. All five rules take ONLY (height field, mask) as input -- no material/wetness branch --
+//! note. Every rule takes ONLY (height field, mask) as input -- no material/wetness branch --
 //! satisfying "the same rule for all materials" by construction, not by convention.
 //!
 //! Run: `cargo run -p sandart-sim --release --example diag_upscale_reconstruction`
@@ -22,7 +22,7 @@
 //! `CARGO_MANIFEST_DIR`, so it works regardless of the caller's cwd) and prints all metric tables
 //! to stdout.
 
-use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape, MASK_OUTSIDE};
+use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape, MASK_INSIDE, MASK_OUTSIDE};
 
 const THRESH: f32 = 0.003;
 
@@ -600,8 +600,157 @@ fn reconstruct_r5(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
     (h_out, cov_out)
 }
 
+// ---------------------------------------------------------------------------------------------
+// R6 (round 3): R5 plus a centred-strip case for features one cell wide. R4/R5's single 2D
+// interface line comes from a GRADIENT direction, which is ill-defined exactly when it should
+// matter most: a stream with empty space on both sides has opposing left/right gradients that
+// cancel, so the "normal" is numerically ~0 and the line lands wherever floating-point noise
+// points it -- the isolated flecks in §4.3 of the writeup. R6 replaces the gradient-direction
+// normal with a per-AXIS confinement signal that doesn't have this cancellation problem: an axis
+// bounded by two near-empty (or wall) neighbours is "confined" regardless of whether they're
+// exactly equal, and the strip is centred there instead of picking an arbitrary side.
+// ---------------------------------------------------------------------------------------------
+
+/// Fraction of the 1D interval `[pixel_center-pixel_half, pixel_center+pixel_half]` covered by
+/// `[center-half_width, center+half_width]` -- the exact 1D analogue of `box_area_frac`'s 2D clip,
+/// used because an R6 strip is, by construction, unbounded (full coverage) along whichever axis
+/// isn't the confined one.
+fn overlap_1d(center: f32, half_width: f32, pixel_center: f32, pixel_half: f32) -> f32 {
+    let lo = (pixel_center - pixel_half).max(center - half_width);
+    let hi = (pixel_center + pixel_half).min(center + half_width);
+    if pixel_half <= 0.0 { return 0.0; }
+    ((hi - lo).max(0.0) / (2.0 * pixel_half)).clamp(0.0, 1.0)
+}
+
+/// Confinement (0 = this axis just continues the flat flow, i.e. both neighbours read like the
+/// cell's own value; 1 = this axis shows a real feature -- a flush-full/empty edge OR both
+/// neighbours empty) and signed bias (-1 = negative-side neighbour fuller, +1 = positive-side
+/// neighbour fuller) along one axis.
+///
+/// Confinement is deliberately measured as DEVIATION FROM `h0` (`|a-h0| + |b-h0|`, normalised by
+/// `h_ref`), not as "how empty the neighbours are relative to `h_ref`" (`1 - avg/h_ref`, tried
+/// first and rejected): the latter compares BOTH axes against the same global `h_ref`, which is
+/// often set by a neighbour on the OTHER axis entirely, and so wrongly flags a flat flow-through
+/// axis (neighbours equal to `h0`, i.e. genuinely open) as "confined" whenever `h_ref` happens to
+/// be much larger than `h0` -- confirmed wrong by the `SELFTEST=1` R5-vs-R6 check, which needs
+/// this deviation form to reduce to R5 in the single-axis-dominant case it's built to test.
+///
+/// Deliberately the ONE place in this whole instrument that reads an OUTSIDE (wall) neighbour as
+/// height 0 -- everywhere else (gradients, `h_ref`, Barth-Jespersen bounds) a wall is excluded
+/// entirely per the "walls are not empty" invariant, but for THIS shape signal a wall confines a
+/// stream exactly the way empty space does (visually, a stream squeezed against a wall on one
+/// side and open on the other is the same "confined axis" as a stream with empty cells on both
+/// sides), and the neck of an hourglass -- squeezed between two walls -- is exactly the
+/// degenerate case this rule exists to fix.
+fn axis_confinement_bias(coarse: &CoarseField, cx: i32, cy: i32, axx: i32, axy: i32, h0: f32, h_ref: f32) -> (f32, f32) {
+    let eff = |x: i32, y: i32| -> f32 { if coarse.inside(x, y) { coarse.get(x, y) } else { 0.0 } };
+    let a = eff(cx - axx, cy - axy);
+    let b = eff(cx + axx, cy + axy);
+    let h_ref = h_ref.max(1e-6);
+    let confinement = (((a - h0).abs() + (b - h0).abs()) / h_ref).clamp(0.0, 1.0);
+    let bias = ((b - a) / h_ref).clamp(-1.0, 1.0);
+    (confinement, bias)
+}
+
+struct R6Model { h0: f32, gx: f32, gy: f32, phi: f32, delta: f32, off_x: f32, off_y: f32, strip_half: f32, w: f32 }
+
+/// `w` blends the x-strip and y-strip coverage fields as `w*cov_x + (1-w)*cov_y` -- a SMOOTH
+/// combination (no if/else branch on which axis "wins"), so the output varies continuously as
+/// axis confinement shifts from one axis to the other. Both `cov_x` and `cov_y` individually
+/// average to `f` over the cell's footprint (each is a single strip of width `f`), so ANY blend
+/// weight preserves that average -- conservation doesn't depend on `w` being "correct", only on
+/// the closed-form `delta` solve below, exactly as R5.
+///
+/// In the pure single-axis-dominant case (one neighbour on an axis at `h_ref`, the opposite one at
+/// 0, and the other axis open/unconfined) this reduces EXACTLY to R5: `off = bias*(1-f)/2` at
+/// `bias=1` places the strip flush against that edge, `[0.5-f, 0.5]`, identical to R5's half-plane
+/// with an axis-aligned normal at the threshold that gives area `f`. It does NOT reduce to R5 for
+/// a genuinely diagonal interface (R6 has no rotated-line case at all) -- see the writeup for why
+/// that trade is accepted.
+fn precompute_r6_models(coarse: &CoarseField, m: usize) -> Vec<Option<R6Model>> {
+    let n = coarse.size;
+    let mut out = Vec::with_capacity(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            if coarse.mask[y * n + x] == MASK_OUTSIDE {
+                out.push(None);
+                continue;
+            }
+            let (cx, cy) = (x as i32, y as i32);
+            let h0 = coarse.get(cx, cy);
+            let (_, h_ref) = neighbour_min_max(coarse, cx, cy);
+            let h_ref = h_ref.max(1e-6);
+            let f = (h0 / h_ref).clamp(0.0, 1.0);
+            let (gx, gy) = ls_gradient(coarse, cx, cy);
+            let (mn, mx) = neighbour_min_max(coarse, cx, cy);
+            let phi = bj_phi(h0, gx, gy, mn, mx);
+            let (conf_x, bias_x) = axis_confinement_bias(coarse, cx, cy, 1, 0, h0, h_ref);
+            let (conf_y, bias_y) = axis_confinement_bias(coarse, cx, cy, 0, 1, h0, h_ref);
+            let wsum = conf_x + conf_y;
+            let w = if wsum > 1e-6 { conf_x / wsum } else { 0.5 };
+            let strip_half = f / 2.0;
+            let off_x = bias_x * (1.0 - f) / 2.0;
+            let off_y = bias_y * (1.0 - f) / 2.0;
+            let half = 0.5 / m as f32;
+            let (mut sum_cov, mut sum_cov_h) = (0.0f32, 0.0f32);
+            for j in 0..m {
+                for i in 0..m {
+                    let dx = (i as f32 + 0.5) / m as f32 - 0.5;
+                    let dy = (j as f32 + 0.5) / m as f32 - 0.5;
+                    let cov_x = overlap_1d(off_x, strip_half, dx, half);
+                    let cov_y = overlap_1d(off_y, strip_half, dy, half);
+                    let cov = w * cov_x + (1.0 - w) * cov_y;
+                    let plane_h = h0 + phi * gx * dx + phi * gy * dy;
+                    sum_cov += cov;
+                    sum_cov_h += cov * plane_h;
+                }
+            }
+            let mean_cov = sum_cov / (m * m) as f32;
+            let mean_cov_h = sum_cov_h / (m * m) as f32;
+            let delta = if mean_cov > 1e-6 { (h0 - mean_cov_h) / mean_cov } else { 0.0 };
+            out.push(Some(R6Model { h0, gx, gy, phi, delta, off_x, off_y, strip_half, w }));
+        }
+    }
+    out
+}
+
+fn eval_r6(model: &Option<R6Model>, dx: f32, dy: f32, m: usize) -> (f32, f32) {
+    match model {
+        None => (0.0, 0.0),
+        Some(md) => {
+            let half = 0.5 / m as f32;
+            let cov_x = overlap_1d(md.off_x, md.strip_half, dx, half);
+            let cov_y = overlap_1d(md.off_y, md.strip_half, dy, half);
+            let cov = md.w * cov_x + (1.0 - md.w) * cov_y;
+            let plane_h = (md.h0 + md.phi * md.gx * dx + md.phi * md.gy * dy + md.delta).max(0.0);
+            (cov * plane_h, cov)
+        }
+    }
+}
+
+fn reconstruct_r6(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
+    let n = coarse.size * m;
+    let models = precompute_r6_models(coarse, m);
+    let mut h_out = vec![0.0f32; n * n];
+    let mut cov_out = vec![0.0f32; n * n];
+    for fy in 0..n {
+        let yc = fine_to_coarse(fy, m);
+        let cy = clamp_idx(yc.round() as i32, coarse.size);
+        let dy = yc - cy as f32;
+        for fx in 0..n {
+            let xc = fine_to_coarse(fx, m);
+            let cx = clamp_idx(xc.round() as i32, coarse.size);
+            let dx = xc - cx as f32;
+            let (hv, cv) = eval_r6(&models[cy * coarse.size + cx], dx, dy, m);
+            h_out[fy * n + fx] = hv;
+            cov_out[fy * n + fx] = cv;
+        }
+    }
+    (h_out, cov_out)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Rule { R0, R1, R2, R3, R4, R5 }
+enum Rule { R0, R1, R2, R3, R4, R5, R6 }
 
 impl Rule {
     fn name(&self) -> &'static str {
@@ -612,6 +761,7 @@ impl Rule {
             Rule::R3 => "R3_face_match",
             Rule::R4 => "R4_plic",
             Rule::R5 => "R5_plic_aa",
+            Rule::R6 => "R6_strip_aa",
         }
     }
 }
@@ -638,7 +788,7 @@ fn reconstruct(coarse: &CoarseField, rule: Rule, m: usize) -> Vec<f32> {
             let models = precompute_plic_models(coarse);
             fill_from_models(&mut out, coarse, &models, m);
         }
-        Rule::R5 => unreachable!("R5 has its own coverage output -- call reconstruct_pair instead"),
+        Rule::R5 | Rule::R6 => unreachable!("R5/R6 have their own coverage output -- call reconstruct_pair instead"),
     }
     out
 }
@@ -647,13 +797,24 @@ fn reconstruct(coarse: &CoarseField, rule: Rule, m: usize) -> Vec<f32> {
 /// `(height_for_rms_mass_width, coverage_comparable_array, coverage_threshold)`. For R0-R4 the
 /// coverage-comparable array IS the height array and the threshold is the shipped `THRESH`
 /// (0.003) -- i.e. "covered" means "height at or above the shader's opacity cutoff", exactly as
-/// today. For R5 the coverage-comparable array is the RAW coverage fraction in [0,1] (not height)
-/// and the threshold is 0.5, per the round-2 brief -- R5's antialiased edge means "covered" is a
-/// question about the interface's area fraction, not about a height value crossing 0.003.
+/// today.
+///
+/// For R5/R6, round 3 fixed a real defect in round 2's convention: thresholding the raw coverage
+/// fraction alone at 0.5 let a nearly-empty film-case cell (all neighbours shallow, so `f=h0/h_ref`
+/// is close to 1 even though `h0` itself is tiny) read as "fully covered" and draw a visible fleck
+/// at near-zero height. The shader's own opacity already depends on HEIGHT
+/// (`empty_blend = clamp(h/0.003, 0, 1)`), so "covered" for these two rules now requires BOTH
+/// `coverage >= 0.5` AND the coverage-weighted height clearing the same 0.003 the other four rules
+/// use: encoded here as one array/threshold pair by writing a sentinel (`-1.0`, which can never
+/// clear any positive threshold) wherever `coverage < 0.5`, and the coverage-weighted height
+/// (`h`, already `coverage*plane_height`) everywhere else -- so `coverage_metrics`/`boundary_mask`
+/// thresholding this array at `THRESH` reproduces the AND exactly, with no change to either
+/// generic function.
 fn reconstruct_pair(coarse: &CoarseField, rule: Rule, m: usize) -> (Vec<f32>, Vec<f32>, f32) {
-    if rule == Rule::R5 {
-        let (h, cov) = reconstruct_r5(coarse, m);
-        (h, cov, 0.5)
+    if rule == Rule::R5 || rule == Rule::R6 {
+        let (h, cov) = if rule == Rule::R5 { reconstruct_r5(coarse, m) } else { reconstruct_r6(coarse, m) };
+        let combined: Vec<f32> = (0..h.len()).map(|i| if cov[i] >= 0.5 { h[i] } else { -1.0 }).collect();
+        (h, combined, THRESH)
     } else {
         let h = reconstruct(coarse, rule, m);
         (h.clone(), h, THRESH)
@@ -1221,7 +1382,7 @@ fn output_dir() -> std::path::PathBuf {
     dir
 }
 
-const ALL_RULES: [Rule; 6] = [Rule::R0, Rule::R1, Rule::R2, Rule::R3, Rule::R4, Rule::R5];
+const ALL_RULES: [Rule; 7] = [Rule::R0, Rule::R1, Rule::R2, Rule::R3, Rule::R4, Rule::R5, Rule::R6];
 
 fn run_snapshot(snap: &Snapshot) {
     let size = snap.sim.heightmap.width;
@@ -1331,30 +1492,47 @@ fn run_snapshot(snap: &Snapshot) {
 /// picture and the number are always of the same patch), then magnified 4x nearest-neighbour to
 /// 512px per tile before saving, per the round-2 brief.
 const MAGNIFY: u32 = 4;
-/// Contact sheets show only the rules the round-2 brief asks for: the shipped rule (R1), R3
-/// (the best-measuring limited plane -- R2 is its close twin and stays in the numeric tables only),
-/// R4 (PLIC, to show its dropout failure mode), and R5 (the new anti-aliased PLIC).
-const PICTURE_RULES: [Rule; 4] = [Rule::R1, Rule::R3, Rule::R4, Rule::R5];
+/// Contact sheets show the shipped rule (R1), R3 (the best-measuring limited plane -- R2 is its
+/// close twin and stays in the numeric tables only), R4 (PLIC), R5 (anti-aliased PLIC), and R6
+/// (round 3's centred-strip extension of R5).
+const PICTURE_RULES: [Rule; 5] = [Rule::R1, Rule::R3, Rule::R4, Rule::R5, Rule::R6];
 
-fn make_all_pictures(snap_a: &Snapshot, snap_b: &Snapshot, out_dir: &std::path::Path) {
+/// Round-3 fix #1: the page displays the EMA field (snapshot c), not the raw per-tick field
+/// (snapshot a) -- pictures must judge what's actually shown. Every figure that was built from (a)
+/// alone in round 2 is now built from BOTH, at the IDENTICAL crop region (computed once from (a)
+/// and reused for (c), so the two are a fair side-by-side rather than each finding its own best
+/// spot), so the effect of temporal smoothing on speckle/jitter can be read directly off the two
+/// contact sheets for the same feature. `sand_slope` has no water/EMA counterpart (dry sand,
+/// scenario b) so it stays single-snapshot, renamed only for the "every figure states its
+/// snapshot" requirement.
+fn make_all_pictures(snap_a: &Snapshot, snap_b: &Snapshot, snap_c: &Snapshot, out_dir: &std::path::Path) {
     let size = snap_a.sim.heightmap.width;
 
     let region_stream = stream_region(&snap_a.mask512, size, 128);
     let region_pool = pool_wall_region(&snap_a.mask512, &snap_a.h, size, 128);
     let region_slope = slope_region(&snap_b.mask512, &snap_b.h, size, 128);
 
-    let figures: [(&str, &Snapshot, (usize, usize, usize, usize), f32); 3] = [
-        ("stream_neck", snap_a, region_stream, 0.55),
-        ("pool_wall_edge", snap_a, region_pool, 0.55),
-        ("sand_slope", snap_b, region_slope, 0.5),
+    let figures: [(&str, &Snapshot, (usize, usize, usize, usize), f32); 5] = [
+        ("stream_neck_a_raw", snap_a, region_stream, 0.55),
+        ("stream_neck_c_ema", snap_c, region_stream, 0.55),
+        ("pool_wall_edge_a_raw", snap_a, region_pool, 0.55),
+        ("pool_wall_edge_c_ema", snap_c, region_pool, 0.55),
+        ("sand_slope_b_dry", snap_b, region_slope, 0.5),
     ];
 
     let mut readme = String::new();
     readme.push_str("# Picture crops -- artifacts/design/upscale-2026-09-14/\n\n");
     readme.push_str(&format!(
-        "Every crop is a 128x128 sample of the original 512 grid, magnified {MAGNIFY}x nearest-\
-        neighbour to 512x512 (no new information -- purely so staircasing is legible). Grayscale =\
-        height; orange = the coverage boundary (h>=0.003 for R0-R4, coverage>=0.5 for R5).\n\n"
+        "Every crop is a 128x128 sample of the 512 grid, magnified {MAGNIFY}x nearest-neighbour to \
+        512x512 (no new information -- purely so staircasing is legible). Grayscale = height; \
+        orange = the coverage boundary (`h>=0.003` for R0-R4; for R5/R6, `coverage>=0.5 AND \
+        coverage*height>=0.003` -- round 3's fix for the film-case fleck defect, see the writeup \
+        §4.3). Figure name suffix states the snapshot: `_a_raw_` = raw per-tick snapshot (a), \
+        `_c_ema_` = the alpha=0.4 EMA over the last 15 ticks (snapshot c, what the deployed page \
+        actually displays), `_b_dry_` = the DrySand snapshot (b, no EMA counterpart). \
+        `stream_neck` and `pool_wall_edge` are shown at BOTH (a) and (c), at the IDENTICAL crop \
+        region, specifically so temporal smoothing's effect on speckle/jitter can be read directly \
+        off the two sheets for the same feature.\n\n"
     ));
 
     for (fig_name, snap, (x0, y0, w, hh), vmax) in figures {
@@ -1363,11 +1541,11 @@ fn make_all_pictures(snap_a: &Snapshot, snap_b: &Snapshot, out_dir: &std::path::
 
         readme.push_str(&format!("## {fig_name}\ncrop = (x0={x0}, y0={y0}, w={w}, h={hh}), vmax={vmax}\n\n"));
         readme.push_str(&format!(
-            "`{fig_name}_contact_sheet.png`: 5 columns x 2 rows. Row 1 = m=2, row 2 = m=4. Columns \
+            "`{fig_name}_contact_sheet.png`: 6 columns x 2 rows. Row 1 = m=2, row 2 = m=4. Columns \
             left to right:\n\n"
         ));
-        readme.push_str("| col 1 | col 2 | col 3 | col 4 | col 5 |\n|---|---|---|---|---|\n");
-        readme.push_str("| original | R1 bilinear (shipped) | R3 face-match | R4 PLIC | R5 PLIC+AA |\n\n");
+        readme.push_str("| col 1 | col 2 | col 3 | col 4 | col 5 | col 6 |\n|---|---|---|---|---|---|\n");
+        readme.push_str("| original | R1 bilinear (shipped) | R3 face-match | R4 PLIC | R5 PLIC+AA | R6 strip+AA |\n\n");
 
         let mut sheet_tiles = vec![orig_img.clone()];
         for &m in &[2usize, 4usize] {
@@ -1400,7 +1578,7 @@ fn make_all_pictures(snap_a: &Snapshot, snap_b: &Snapshot, out_dir: &std::path::
             }
         }
 
-        let sheet = make_contact_sheet(&sheet_tiles, 5);
+        let sheet = make_contact_sheet(&sheet_tiles, 6);
         sheet.save(out_dir.join(format!("{fig_name}_contact_sheet.png"))).expect("write contact sheet");
         println!("wrote {fig_name}: crop=({x0},{y0},{w}x{hh}) vmax={vmax} magnify={MAGNIFY}x");
     }
@@ -1425,6 +1603,62 @@ fn selftest_geometry() {
     let f = 0.98f32;
     let t = solve_plic_threshold(0.0, -1.0, f);
     println!("selftest solve_plic_threshold(nx=0,ny=-1,f=0.98) = t={t}, area_frac_exact at that t = {} (want ~0.98)", area_frac_exact(0.0, -1.0, t));
+
+    // overlap_1d sanity: a strip covering the whole pixel, half, and none of it.
+    println!("selftest overlap_1d(center=0,half=0.5, pixel=0,half=0.1) = {} (want 1.0, strip covers whole cell)", overlap_1d(0.0, 0.5, 0.0, 0.1));
+    println!("selftest overlap_1d(center=0.25,half=0.1, pixel=0.25,half=0.1) = {} (want 1.0, exact overlap)", overlap_1d(0.25, 0.1, 0.25, 0.1));
+    println!("selftest overlap_1d(center=-0.4,half=0.05, pixel=0.4,half=0.05) = {} (want 0.0, far apart)", overlap_1d(-0.4, 0.05, 0.4, 0.05));
+
+    // R5 vs R6 in the single-axis-dominant case (round 3's "must degrade continuously into R5"
+    // requirement): a 3x3 field, flat in y, with the centre's right neighbour full and left
+    // neighbour empty. R6's gradient-free per-axis construction should closely match R5's
+    // gradient-derived interface line here, since there IS a well-defined single direction.
+    {
+        let size = 3usize;
+        let (h_ref, h0) = (1.0f32, 0.3f32);
+        let mut h = vec![h0; size * size];
+        let idx = |x: usize, y: usize| y * size + x;
+        h[idx(0, 1)] = 0.0;
+        h[idx(2, 1)] = h_ref;
+        let mask = vec![MASK_INSIDE; size * size];
+        let coarse = CoarseField { size, h, mask };
+        let m = 4usize;
+        let r5 = precompute_r5_models(&coarse, m);
+        let r6 = precompute_r6_models(&coarse, m);
+        let center = idx(1, 1);
+        let mut max_diff = 0.0f32;
+        for j in 0..m {
+            for i in 0..m {
+                let dx = (i as f32 + 0.5) / m as f32 - 0.5;
+                let dy = (j as f32 + 0.5) / m as f32 - 0.5;
+                let (h5, _) = eval_r5(&r5[center], dx, dy, m);
+                let (h6, _) = eval_r6(&r6[center], dx, dy, m);
+                max_diff = max_diff.max((h5 - h6).abs());
+            }
+        }
+        println!("selftest R5 vs R6 single-axis-dominant max |diff| over m*m samples = {max_diff:.4} (want small, R6 degrades toward R5 here)");
+    }
+
+    // Round-3 fix #2 demonstration: a nearly-empty cell whose neighbours are ALSO nearly empty
+    // (the film case) gets f close to 1 (fully "covered") even though its actual height is tiny.
+    // Round 2's `coverage>=0.5` alone would draw this as a visible fleck; round 3's
+    // `coverage>=0.5 AND coverage*height>=0.003` must not.
+    {
+        let size = 3usize;
+        let h0 = 0.0005f32; // above 0 but far below the 0.003 shader opacity threshold
+        let h = vec![h0; size * size]; // every neighbour equally tiny -> f ~= 1
+        let mask = vec![MASK_INSIDE; size * size];
+        let coarse = CoarseField { size, h, mask };
+        let m = 2usize;
+        let r5 = precompute_r5_models(&coarse, m);
+        let center = 1 * size + 1;
+        let (hv, cv) = eval_r5(&r5[center], 0.0, 0.0, m);
+        let would_be_covered_round2 = cv >= 0.5;
+        let is_covered_round3 = cv >= 0.5 && hv >= THRESH;
+        println!(
+            "selftest film-case fleck: h0={h0}, R5 coverage={cv:.4} height={hv:.6} -- round2 'covered'={would_be_covered_round2}, round3 'covered'={is_covered_round3} (want true, false)"
+        );
+    }
 }
 
 fn main() {
@@ -1447,7 +1681,7 @@ fn main() {
     run_snapshot(&snap_c);
 
     println!("\n================ writing picture crops ================");
-    make_all_pictures(&snap_a, &snap_b, &out_dir);
+    make_all_pictures(&snap_a, &snap_b, &snap_c, &out_dir);
 
     println!("\ndone.");
 }

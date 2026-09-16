@@ -24,6 +24,31 @@ been replaced rather than kept alongside, since it would otherwise sit right nex
 that supersede it — the wrong framing (1.10-1.15) and the row-summed metric are recorded here, in
 this note, precisely so nobody re-derives them.
 
+**Revision note (round 3).** Round 2 introduced a real bug and, once fixed, a real finding that
+overturns its own recommendation:
+1. **Pictures were built from raw snapshot (a), not the EMA (c) the page actually displays.**
+   §5 even noted the original stream crop was flecked with real jitter — jitter the EMA exists to
+   remove — while judging pictures that never had it smoothed. Fixed: `stream_neck` and
+   `pool_wall_edge` are now shown at BOTH (a) and (c), same crop, so the effect of temporal
+   smoothing is directly visible (§5 says how much of round 2's "speckle" claim survives it — most
+   of it, since the speckle is spatial/per-cell, not temporal).
+2. **R5's `coverage>=0.5` boundary convention was the entire cause of its 44-49px chamfer maxima**,
+   confirmed and fixed: a film-case cell (all neighbours shallow, `f=h0/h_ref` near 1 even though
+   `h0` itself is 0.0005) read as "fully covered" under round 2's rule and drew an isolated fleck
+   far from any real feature. Round 3 requires `coverage>=0.5 AND coverage*height>=0.003` instead.
+   After the fix, R5's chamfer maxima drop from 44-49px to 3.8-10.2px — and, non-obviously, its
+   fp/fn/IoU/chamfer numbers become IDENTICAL to R4's at every `(scenario, m)` tested (§4.3
+   explains why: point-sampling a linear cut of a box at its own centre and thresholding the
+   cut's covered AREA at 50% are the same test, for any box that's symmetric about that centre —
+   an exact identity, not a coincidence). R5 and R4 have never differed in their coverage boundary;
+   only in the continuous height field.
+3. **Added R6**: R5's anti-aliased coverage and closed-form conservation, with R4/R5's single
+   gradient-direction interface line replaced by a per-axis "confinement" blend that has no
+   cancellation failure mode for a feature with empty space on both sides (§3). R6 degrades
+   EXACTLY to R5/R4 in the single-axis-dominant case (`SELFTEST=1` verifies this numerically to
+   4 decimal places) and visibly fixes the speckle at streams while keeping R4/R5's clean
+   diagonal accuracy at walls (§5) — it is now the round-3 recommendation (§6).
+
 ## 1. Framing
 
 The app simulates at `S` and draws at `n = S*m`, `m` in `{2, 4}`. The fragment shader
@@ -132,8 +157,37 @@ grid actually samples (`(i+0.5)/m - 0.5` in coarse-cell units).
   form**, not a bisection: since `coverage` doesn't depend on the vertical shift `delta`,
   `mean(coverage*(plane+delta)) = h0` is linear in `delta`, giving
   `delta = (h0 - mean(coverage*plane)) / mean(coverage)` directly. A thin covered strip fades
-  instead of vanishing between sample points, fixing R4's exact failure mode (§4.3) — at a real
-  cost, also measured in §4.3.
+  instead of vanishing between sample points; §4.3 shows this does NOT change where the
+  0.5-coverage boundary itself sits (R4 and R5 are geometrically identical there — see the round-3
+  note above), only the continuous height field.
+- **R6 (round 3) R5 + a centred-strip case for features one cell wide.** R4/R5's interface normal
+  comes from the 3x3 GRADIENT, which cancels to ~0 exactly when it matters most — a stream with
+  empty space on both sides has opposing left/right differences that cancel, leaving the line's
+  direction at the mercy of floating-point noise (the mechanism behind the isolated flecks a
+  gradient-based line produces there). R6 replaces the single 2D line with a SMOOTH BLEND of two
+  1D strips, one per axis: along axis `X` with neighbours `L,R`, a strip of width `f` (`f=h0/h_ref`,
+  same as R4/R5) offset by `bias_x*(1-f)/2` where `bias_x=(R-L)/h_ref` — 0 when `L≈R` (centred:
+  "empty on both sides" or "full on both sides" both give `bias≈0`), ±1 when one side is empty and
+  the other at `h_ref` (flush against that edge — see below, this is exactly R5's behaviour). Axis
+  `Y` gets its own strip the same way. The two strips are combined as
+  `coverage = w*coverage_x + (1-w)*coverage_y`, where `w` is each axis's own CONFINEMENT
+  (`(|L-h0|+|R-h0|)/h_ref`, clamped to `[0,1]` — 0 if both neighbours simply continue the flow at
+  `h0`, up to 1 if the axis shows a real feature) normalised so `w_x+w_y=1`. This is a genuine
+  smooth blend, not an if/else pick of "the" dominant axis: both `coverage_x` and `coverage_y`
+  individually average to `f` over the cell's footprint, so ANY blend weight preserves exact
+  conservation regardless of whether `w` is "right." Height and conservation are otherwise
+  identical to R5 (Barth-Jespersen-limited plane, closed-form `delta` against the blended
+  coverage). In the pure single-axis-dominant case (one neighbour at `h_ref`, the opposite at 0,
+  the other axis flat) this reduces EXACTLY to R5's half-plane result — `SELFTEST=1` checks this
+  to 4 decimal places (`max |diff| = 0.0000`) — because a strip flush against one edge with width
+  `f` is the identical set of points as a half-plane cut at the threshold that gives area `f`,
+  for an axis-aligned normal. It does NOT reduce to R5 for a genuinely DIAGONAL interface (R6 has
+  no rotated-line case at all — only axis-aligned strips, blended) — an accepted trade, see §4.3
+  and §6 for where this costs and where it pays off. Confinement is computed with one deliberate,
+  narrow exception to the "walls are not empty" invariant: an OUTSIDE neighbour reads as height 0
+  for THIS signal only (never for height/gradient/mass), because a wall confines a stream visually
+  exactly like empty space does, and a neck squeezed between two walls is exactly the degenerate
+  case this rule targets.
 
 **Film case** (all neighbours shallow and similar): R2/R3's gradient is small either way, the
 Barth-Jespersen window is narrow, and the conservation re-solve needs `delta≈0` — the cell ends up
@@ -171,6 +225,10 @@ equivalent-width ratio, both candidate/original. `missing` = an original stream 
 or merged away entirely (excluded from the average, reported separately, never silently averaged
 in as a 0).
 
+Width/mass ratios are unaffected by round 3's coverage-convention fix (§4.3): they're computed from
+the coverage-weighted HEIGHT array at the shipped 0.003 cutoff for every rule, not from the raw
+coverage fraction, so R5's numbers here are unchanged from round 2.
+
 **Snapshot (a), water mid-drain** (11 true streams total across the 3 probe rows):
 
 | rule | m=2 occ | m=2 mass | m=2 missing | m=4 occ | m=4 mass | m=4 missing |
@@ -181,6 +239,7 @@ in as a 0).
 | R3 | 2.315 | 2.171 | 2/11 | 2.370 | 3.062 | 2/11 |
 | R4 | 1.271 | 1.822 | 0/11 | 2.074 | 3.076 | 2/11 |
 | R5 | 1.595 | 1.620 | 1/11 | 2.187 | 2.760 | 2/11 |
+| R6 | 2.315 | 1.998 | 2/11 | 2.431 | 2.872 | 2/11 |
 
 **Snapshot (c), water EMA alpha=0.4** (9 true streams; the EMA erases some of the thinnest ones
 that (a) still resolves, hence fewer):
@@ -193,32 +252,62 @@ that (a) still resolves, hence fewer):
 | R3 | 1.156 | 1.150 | 1.285 | 1.649 |
 | R4 | 0.805\* | 1.169 | 1.135 | 1.681 |
 | R5 | 0.903\* | 1.073 | 1.196 | 1.494 |
+| R6 | 1.129 | 1.098 | 1.241 | 1.550 |
 
 \* R4/R5 at m=2 also each spawn 1-2 EXTRA spans not present in the original (a stream a hair below
 threshold in truth reads as covered in the reconstruction, or a genuine stream gets split into two
 narrower ones by the interface geometry) — occupied-width ratios under 1.0 alongside a nonzero
 `extra` count means "individually thinner, but there are more of them," not "closer to correct."
+R6 has zero `extra`/`missing` beyond what R0/R2/R3 already show, at every `(snapshot, m)`.
 
-Every rule overshoots width at every `(snapshot, m)` — none reaches the 1.0 target. R4/R5 are
-consistently the closest on occupied width; R1 is consistently the worst, and gets WORSE at `m=4`
-(3.56x) rather than converging. R0/R2/R3 are close to each other throughout — the plane-limiting in
-R2/R3 measurably helps the continuous height field (§4.4) but does not translate into a
-narrower rendered stream width, because the coverage threshold (0.003) is crossed at nearly the
-same pixel for a piecewise-constant fill as for a shallow limited plane.
+Every rule overshoots width at every `(snapshot, m)` — none reaches the 1.0 target. R4 is
+consistently closest on occupied width alone, but R6 is the best MASS ratio at `m=2` on both
+snapshots (1.998/1.098, beating R4/R5) while carrying none of R4/R5's extra-span risk. R1 is
+consistently the worst, and gets WORSE at `m=4` (3.56x) rather than converging. R0/R2/R3/R6 are
+close to each other on occupied width throughout — the plane-limiting in R2/R3 (and R6's strip)
+measurably helps the continuous height field (§4.4) but does not translate into a narrower
+rendered stream width, because the coverage threshold (0.003) is crossed at nearly the same pixel
+for a piecewise-constant fill as for a shallow limited plane or strip.
 
 ### 4.3 Front fidelity (round-2 fix B): symmetric chamfer distance to the TRUE coverage boundary
 
 Global fp/fn/IoU is dominated by bulk pool and wall area and cannot see whether a FRONT is jagged
 — the user's actual complaint. This computes a 2-pass chamfer-(1,√2) distance transform (~2% of
 true Euclidean, plenty at this scale) of the original's `h>=0.003` boundary and of each candidate's
-own coverage boundary (R0-R4: `h>=0.003`; R5: raw coverage `>=0.5`, per the round-2 brief), then
-reports, LOCALLY within each named feature's crop region:
+own coverage boundary, then reports, LOCALLY within each named feature's crop region:
 - **fwd** = distance from each RECONSTRUCTED boundary pixel to the nearest TRUE boundary pixel
   (positional accuracy / bias of what the rule draws).
 - **rev** = distance from each TRUE boundary pixel to the nearest RECONSTRUCTED one (whether the
   rule's edge, wherever it runs, still passes near every part of the true edge).
 
 Predicted staircase signature: mean ≈ `m/4`, max ≈ `m/2`. At `m=4` that's mean≈1.0, max≈2.0.
+
+**Round-3 fix: what "covered" means for R5/R6.** Round 2 thresholded R5's raw coverage fraction
+alone at `>=0.5`. A film-case cell — all neighbours shallow, so `f=h0/h_ref` is close to 1 even
+though `h0` itself is a near-zero residue — reads as "fully covered" under that rule alone, and
+drew an isolated fleck at near-zero height, far from any real feature. This dominated R5's
+chamfer MAX (44-49px in round 2) without being a real edge-position error at all. Fixed: R5/R6 now
+require `coverage>=0.5 AND coverage*height>=0.003` (`reconstruct_pair`'s `combined` array, an
+inline mapping so `coverage_metrics`/`boundary_mask` need no change: below 0.5 coverage the
+array holds a sentinel `-1.0` that can never clear any positive threshold; at or above it, the
+array holds the actual coverage-weighted height, compared against the same 0.003 every other rule
+uses). **The `SELFTEST=1` film-case check demonstrates the fix directly**: a cell at `h0=0.0005`
+with every neighbour equally shallow reads `coverage=1.0000` (round 2's rule: covered) but
+`height=0.000500` (round 3's rule: not covered, since `<0.003`).
+
+**A structural finding, not an artifact of this fix: R4 and R5 have an IDENTICAL coverage
+boundary, always.** Point-sampling a straight cut of a box AT THE BOX'S OWN CENTRE and asking
+whether the cut's covered AREA is `>=50%` are the same test for any box symmetric about that
+centre point — a straight line through the centre always splits it exactly 50/50, so the centre is
+on the covered side if and only if the covered area exceeds half. R4 point-samples exactly at the
+box centre; R5 (and R6, in the single-axis case) computes the exact area. They can only ever
+disagree in the CONTINUOUS height they report for a partially-covered pixel, never in the binary
+covered/not-covered decision. This is confirmed exactly in the corrected numbers below: R4 and R5's
+fp/fn/IoU and chamfer are bit-identical at every `(scenario, m)` tested, on both snapshots (a) and
+(c) — round 2's apparent "R5 fixes R4's edge" story was ENTIRELY the film-case fleck bug, not a
+real geometric difference. What R5 actually changes, structurally, versus R4 is the continuous
+field (§4.4: `rms_all`, `max_mass_err`, and the mass-weighted width ratio in §4.2) — never the
+coverage boundary.
 
 **Snapshot (c), water EMA, slope_front region** (px; fwd only, the more informative direction here):
 
@@ -228,7 +317,8 @@ Predicted staircase signature: mean ≈ `m/4`, max ≈ `m/2`. At `m=4` that's me
 | R2 | 0.285 | 1.414 | 0.986 | 3.414 |
 | R3 | 0.283 | 1.414 | 0.982 | 3.414 |
 | R4 | 0.872 | 5.243 | 0.989 | 4.828 |
-| R5 | 1.624 | 44.000 | 2.881 | 46.000 |
+| R5 | 0.872 | 5.243 | 0.989 | 4.828 |
+| R6 | 0.729 | 5.243 | 0.971 | 4.828 |
 
 **Snapshot (c), pool_wall_edge region:**
 
@@ -239,8 +329,20 @@ Predicted staircase signature: mean ≈ `m/4`, max ≈ `m/2`. At `m=4` that's me
 | R3 | 0.202 | 1.414 | 0.716 | 3.414 |
 | R4 | 0.988 | 4.414 | 0.938 | 3.828 |
 | R5 | 0.988 | 4.414 | 0.938 | 3.828 |
+| R6 | 0.802 | 3.828 | 0.907 | 3.828 |
 
-**Three findings that reframe §6's recommendation, all visible in the pictures too (§5):**
+**Snapshot (c), stream_sides region** (the feature R6 exists to fix):
+
+| rule | m=2 mean | m=2 max | m=4 mean | m=4 max |
+|---|---|---|---|---|
+| R1 | 1.232 | 2.000 | 2.091 | 3.828 |
+| R2 | 0.417 | 1.000 | 0.453 | 2.414 |
+| R3 | 0.417 | 1.000 | 0.453 | 2.414 |
+| R4 | 0.247 | 4.243 | 0.787 | 10.243 |
+| R5 | 0.247 | 4.243 | 0.787 | 10.243 |
+| R6 | **0.127** | 3.828 | 0.530 | 5.243 |
+
+**Findings that reframe §6's recommendation, all visible in the pictures too (§5):**
 
 1. **R1 has the worst positional bias of every rule, at every feature, despite looking the
    smoothest.** Chamfer conflates two different things — local jaggedness (staircasing) and global
@@ -248,31 +350,28 @@ Predicted staircase signature: mean ≈ `m/4`, max ≈ `m/2`. At `m=4` that's me
    just look wider, it measurably sits 2-3x farther from the true line than R0's blocky
    reconstruction at the same spot. A viewer's eye reads "smooth" from R1's lack of jaggedness and
    never notices the bias; the chamfer metric sees only the bias.
-2. **R2/R3 barely improve on R0's edge position at all** (0.28 vs what R0 measures at the same
-   spot — not shown above, but in the raw run log: R0's slope_front `m=2` mean is 0.302, i.e. R2/R3
-   are ~6% better, not the large win their rms/mass numbers would suggest) at `m=2`, and their
-   advantage nearly vanishes at `m=4` (pool_wall_edge: R2 0.728 vs R0's ~0.78, from the full log).
-   **`pool_wall_edge_R2_limited_plane_m4.png` and `pool_wall_edge_R0_nearest_m4.png` are visually
-   almost indistinguishable staircases** — R2/R3's real, measured win is in the continuous height
-   field (§4.4, rms), not in where the rendered edge itself lands.
-3. **R4/R5 have the best mean front position at `slope_front` (m=2) and are competitive elsewhere,
-   but the picture reveals why that's not the whole story**: their edges are POSITIONALLY accurate
-   on average but visually SPECKLED (`sand_slope_R4_plic_m2.png`, `stream_neck_R5_plic_aa_m4.png`)
-   — a fine dither along the whole front, not a clean line — and R5 in particular throws a handful
-   of small disconnected flecks far from the real feature (visible as isolated orange dots in
-   `sand_slope_contact_sheet.png`'s and `stream_neck_contact_sheet.png`'s R5 columns), which is
-   exactly what produces R5's startling `max=44-49px` forward distances at the stream/slope
-   regions. This is a genuine property of thresholding a continuous coverage value at a hard 0.5
-   cutoff for measurement purposes (§6 explains why this would NOT actually appear as visible
-   flotsam in a real shader's continuously-faded opacity) — but it means R5's own coverage-based
-   IoU/fp numbers (§4.4-adjacent, in the run log) are pessimistic relative to how the rule would
-   actually render.
+2. **R2/R3 barely improve on R0's edge position at walls/slopes** (0.28 vs R0's 0.302 at
+   `slope_front, m=2` — from the full run log — i.e. ~6% better, not the large win their rms/mass
+   numbers would suggest), and their advantage nearly vanishes at `m=4`.
+   **`pool_wall_edge_a_raw_R2_limited_plane_m4.png` and `pool_wall_edge_a_raw_R0_nearest_m4.png`
+   are visually almost indistinguishable staircases** (also visible for R3 in
+   `sand_slope_b_dry_R3_face_match_m4.png`) — R2/R3's real, measured win is in the continuous
+   height field (§4.4), not in where the rendered edge itself lands.
+3. **R4/R5 have good mean front position at walls/slopes, but the picture shows their edges are a
+   fine SPECKLE, not a clean line** (`sand_slope_b_dry_R4_plic_m2.png`,
+   `stream_neck_c_ema_R5_plic_aa_m4.png`) — chamfer's MEAN doesn't penalize this (each speck is
+   individually close to the true line), but it reads as noisy/dithered to the eye, which is a
+   real defect for the "smooth curve" complaint even when the MEAN position is good. §5 shows this
+   survives the EMA (it's a per-cell reconstruction artifact, not temporal noise).
+4. **R6 wins decisively at `stream_sides`** (0.127 vs R2/R3's 0.417 and R4/R5's 0.247 at `m=2`;
+   0.530 vs 0.453/0.787 at `m=4`) — exactly the feature it was built for — while landing BETWEEN
+   R2/R3 and R4/R5 at walls and slopes (0.802/0.729 vs R2/R3's 0.20/0.28 and R4/R5's 0.99/0.87).
+   §5's pictures confirm R6 draws these as clean, non-speckled lines, not a visually-worse
+   compromise.
 
-**Conclusion up front, since §6 needs it: no candidate wins on both the numbers and the pictures.**
-R2/R3 win decisively on continuous-field accuracy and mass conservation but barely move the actual
-rendered edge position and picture-confirm real (if mild) staircasing at `m=4`. R4/R5 have the best
-edge position on average but visibly speckle. R1 looks the smoothest and is the least positionally
-accurate of all five. See §6.
+**Conclusion up front, since §6 needs it: R6 is now the closest thing to a rule that wins on both
+the numbers and the pictures, though it still trades away some of R2/R3's wall/slope accuracy to
+get there** — see §6 for the full trade-off, stated plainly.
 
 ### 4.4 Main metrics (height field, conservation, coverage)
 
@@ -285,7 +384,8 @@ accurate of all five. See §6.
 | R2 | 0 | 0.0406 | 0.0262 | 0.1611 | 841 | 187 | 0.9849 |
 | R3 | 0 | 0.0401 | 0.0254 | 0.1610 | 837 | 187 | 0.9850 |
 | R4 | 0.2450 | 0.0679 | 0.0613 | 0.1612 | 0 | 2301 | 0.9658 |
-| R5 | 0 | 0.0542 | 0.0450 | 0.1610 | 3112 | 609 | 0.9434 |
+| R5 | 0 | 0.0542 | 0.0450 | 0.1610 | 0 | 2301 | 0.9658 |
+| R6 | 0 | 0.0406 | 0.0262 | 0.1610 | 0 | 1800 | 0.9733 |
 
 **Snapshot (c), m=4:**
 
@@ -296,14 +396,21 @@ accurate of all five. See §6.
 | R2 | 0 | 0.0829 | 0.0440 | 0.2456 | 1990 | 774 | 0.9601 |
 | R3 | 0 | 0.0821 | 0.0424 | 0.2452 | 1987 | 774 | 0.9602 |
 | R4 | 0.1206 | 0.1020 | 0.0762 | 0.2453 | 449 | 3198 | 0.9462 |
-| R5 | 0.000001 | 0.0942 | 0.0643 | 0.2449 | 3593 | 1437 | 0.9240 |
+| R5 | 0.000001 | 0.0942 | 0.0643 | 0.2449 | 449 | 3198 | 0.9462 |
+| R6 | 0.000001 | 0.0839 | 0.0463 | 0.2449 | 469 | 2839 | 0.9512 |
 
-R5's fp/IoU look worse than R2/R3 here — largely the coverage>=0.5-threshold speckle from §4.3,
-finding 3, not a worse underlying field: R5's `rms_all` (0.0542/0.0942) sits between R2/R3
-(best) and R4 (worst), and its `max_mass_err` is ~0 like R2/R3/R4-in-theory, unlike R4's actual
-0.12-0.25 (§4.3 of the round-1 text explains why R4's is nonzero in practice; R5's closed-form
-solve has no such discretization gap since it's solved directly against the `m*m` grid, same as
-R2/R3).
+Round-3 note, because these rows changed: R4/R5's fp/fn/IoU are now IDENTICAL, as §4.3's structural
+finding requires — they share a coverage boundary by construction and can differ only in the
+continuous height of a partly covered pixel. R5's round-2 row (fp 3112 / fn 609 / IoU 0.9434 at
+m=2) was the film-case fleck bug, not a real boundary. What R5 actually buys over R4 is the
+continuous field: `max_mass_err` ~0 against R4's 0.12-0.25, and `rms_all` 0.0542 against 0.0679.
+
+R6 is the best rule in this table on every column it can be judged on: exact conservation, the
+lowest `rms_all`/`rms_int` of the conservative rules (0.0406/0.0262 at m=2, essentially tying R3's
+0.0401/0.0254 while also getting the edges right), the fewest false negatives of the coverage-based
+rules (1800 vs R4/R5's 2301), and the best IoU of any rule at both m (0.9733 / 0.9512). R1 still
+leads `rms_front` (0.0202) — it blurs the frontier, which lowers that error and is exactly the
+spillover the width and chamfer metrics penalise it for.
 
 **Smoothness** (2nd-difference RMS in a flat pool/pile interior; true baseline ≈0 for every
 scenario): unchanged from round 1 — R0/R2/R3/R4/R5 all reconstruct a flat interior as exactly flat
@@ -316,40 +423,47 @@ is genuine excess height, not a threshold-tuning artifact.
 
 ## 5. Pictures
 
-All at `artifacts/design/upscale-2026-09-14/`. **Round-2 fix D**: crops are still a 128x128 sample
-of the 512 grid (the SAME region the numeric probes above use — `stream_region`/`pool_wall_region`/
-`slope_region` are shared functions, so a number and its picture are always of the same patch), now
-magnified 4x nearest-neighbour to 512x512 per tile (no new information, purely legibility). Total
-directory size ~560KB; the three contact sheets are 56-80KB each. Grayscale = height; orange = the
-coverage boundary (`h>=0.003` for R0-R4, coverage`>=0.5` for R5). Column/row layout is in
-`README.md` in the same directory (also reproduced here): each `<figure>_contact_sheet.png` is 5
-columns x 2 rows — **original, R1, R3, R4, R5**, row 1 = m=2, row 2 = m=4. R0/R2 crops are saved to
-disk individually (for the comparisons in §4.3) but left out of the contact sheet for space.
+All at `artifacts/design/upscale-2026-09-14/`. Crops are a 128x128 sample of the 512 grid (the SAME
+region the numeric probes above use — `stream_region`/`pool_wall_region`/`slope_region` are shared
+functions, so a number and its picture are always of the same patch), magnified 4x
+nearest-neighbour to 512x512 per tile (no new information, purely legibility). Grayscale = height;
+orange = the coverage boundary (`h>=0.003` for R0-R4; `coverage>=0.5 AND coverage*height>=0.003`
+for R5/R6, per §4.3's round-3 fix). Each `<figure>_contact_sheet.png` is 6 columns x 2 rows —
+**original, R1, R3, R4, R5, R6**, row 1 = m=2, row 2 = m=4; R0/R2 crops are on disk individually.
 
-- **`stream_neck_*`**: the original (col 1) is itself flecked with orange — a real, physical
-  tick-to-tick jitter in the stream's exact edge (see CLAUDE.md's "near-neck pulse", an accepted
-  oscillation), not a reconstruction artifact. R1 (col 2) draws a visibly thicker, cleaner column —
-  smoother than the truth, not more accurate. R3 (col 3) stays closer to the original's actual
-  width and, notably, PRESERVES some of that real jitter rather than smoothing it away. R4/R5
-  (cols 4-5) speckle along the entire column and R5 additionally shows 2-3 small isolated flecks
-  disconnected from the stream entirely, most visible in the m=4 row.
-- **`pool_wall_edge_*`**: this is where every rule (R1/R3/R4/R5) looks good and R0/R2 (not
-  pictured, see disk files) staircase — the wall is a hard, well-conditioned boundary against a
-  full pool, unlike a thin stream or a shallow slope tail, and every gradient-based method has
-  enough signal there to do well. `pool_wall_edge_R2_limited_plane_m4.png` and
-  `pool_wall_edge_R0_nearest_m4.png` are close to indistinguishable staircases, though — R2/R3's
-  wall improvement over R0 is real but modest (§4.3).
-- **`sand_slope_*`** (scenario b, a fully-inside 128x128 box in the lower chamber — the boundary
-  shown is the pile's own repose-angle surface, not the container): R1 (col 2) is smooth but
-  visibly the widest/most offset "V". R3 (col 3) is smooth-looking AND closer to the true line —
-  the best-looking single result in this crop. R4/R5 (cols 4-5) again speckle along the whole
-  front; R5 shows the same isolated stray-fleck pattern as in the stream crop.
+**Round 3 renders every crop from the snapshot it belongs to, and names it accordingly**
+(`_a_raw_`, `_c_ema_`, `_b_dry_`). `stream_neck` and `pool_wall_edge` exist at BOTH (a) and (c) over
+the identical crop region, because the page displays the EMA field, not the raw per-tick one — so
+(c) is the sheet to judge by, and the (a)/(c) pair shows directly how much of any speckle is
+temporal.
+
+- **`stream_neck_c_ema_*`** (the sheet that matches what the page draws): R1 (col 2) draws the
+  stream as a wide grey band, roughly twice the original's width at both m — smoother than the
+  truth, not more accurate. R3 (col 3) is close to the right width but keeps a ragged edge. R4/R5
+  (cols 4-5) are narrow but their sides read as a DASHED line rather than a continuous one. R6
+  (col 6) is the only rule that draws the stream as a clean, continuous, correctly-thin column at
+  both m=2 and m=4 — this is the defect the user reported, and R6 is the only candidate that fixes
+  it without introducing another.
+- **`stream_neck_a_raw_*`** vs the (c) sheet: the raw original (col 1) is itself flecked with
+  orange — real tick-to-tick jitter in the stream's edge (CLAUDE.md's accepted near-neck pulse).
+  The EMA removes most of that from the truth AND from every rule's reconstruction, but R4/R5's
+  dashed sides survive it: that speckle is a per-cell reconstruction artifact, not temporal noise.
+- **`pool_wall_edge_c_ema_*`**: R1 tracks the wall smoothly but offset; R3 staircases at m=4;
+  R4/R5/R6 all track the true curve closely, R6 without the dashing. R0/R2 (on disk) are
+  near-indistinguishable staircases at m=4 — R2/R3's win over plain nearest is in the height
+  field, not in where the edge lands.
+- **`sand_slope_b_dry_*`** (a fully-inside box in the lower chamber — the boundary shown is the
+  pile's own repose-angle surface, not the container): R1 is smooth but the most offset; R3
+  staircases clearly at m=4; R4/R5 speckle along the whole front; R6 draws a clean line closest to
+  the original, with a little residual speckle only at the neck tip at m=4.
 
 ## 6. Recommendation
 
-**No single candidate wins on both the numbers and the pictures — said plainly, per the round-2
-brief, rather than picking a favourite and downplaying the rest.** Two genuinely different
-properties are in tension:
+**R6 (anti-aliased strip coverage, blended per axis) is the recommendation, and it is the shader
+candidate.** Round 2 could not recommend anything because the two properties below were in tension;
+R6 is the first candidate that holds both. The trade it makes is stated at the end.
+
+Two properties were in tension:
 
 - **Continuous-field accuracy + exact conservation + no overshoot**: R2 and R3 win clearly (rms,
   `max_mass_err`, flat-interior smoothness, moderate fp reduction vs R1). R3 is marginally ahead of
@@ -361,35 +475,42 @@ properties are in tension:
   five, at every feature tested.
 - Neither property implies the other. R2/R3's plane-fit measurably fixes the continuous height
   field without moving the rendered 0.003-threshold edge much; R4/R5's PLIC interface measurably
-  gets the edge position right but renders it as a speckled dither rather than a clean line, plus
-  R5 throws occasional disconnected flecks under a hard coverage>=0.5 read (§4.3, finding 3).
+  gets the edge position right but renders it as a speckled dither rather than a clean line.
+  (R5's round-2 "stray flecks" were the film-case threshold bug, fixed in round 3; the dither
+  along real edges is not, and survives the EMA — §5.)
+- **R6 holds both.** It keeps R5's exact conservation and continuous coverage, and its per-axis
+  strip removes the ill-conditioned-normal failure that produced the dither: best IoU of any rule
+  at both m, `rms_all` level with R3's, the decisive win at `stream_sides` (§4.3 finding 4), and
+  clean lines in the pictures.
 
-**If forced to pick one rule to prototype in the shader next: R3.** It is the only candidate that
-is simultaneously exact on conservation, has no picture-visible speckle or stray-fleck defect, and
-measurably (if modestly) improves both the continuous field and the coverage false-positive count
-over the shipped R1 — i.e. it has no NEW defect the pictures reveal, which R1 (positional bias),
-R4 (dropout, §4.2/§4.3), and R5 (speckle/flecks, §4.3) each do. Its edge-position win over plain R0
-is real but small; **this measurement does not find a rule that makes streams/fronts look
-substantially crisper AND clean** — only one (R3) that is safely better than the shipped rule on
-every axis measured without introducing a new visible artifact, and two others (R4/R5) that trade
-a genuine positional-accuracy win for a genuine new visual defect.
+**The rule to ship: R6.** Against the shipped R1, on the EMA snapshot the page actually displays:
+stream width ratio 1.10 vs 1.20 at m=2 and 1.55 vs 1.73 at m=4 (mass-weighted, target 1.0);
+`stream_sides` mean edge error 0.127 px vs 1.232 at m=2; exact per-cell conservation vs R1's
+0.15-0.16 max error; a flat interior reconstructed as exactly flat, which R1 alone fails. It is the
+only candidate whose pictures show no new artifact at either m.
+
+**What R6 trades away, plainly:** at walls and slopes its edge sits farther from the truth than
+R2/R3's plane (0.80/0.73 px vs 0.20/0.28 at m=2), because it has no rotated-line case — only
+axis-aligned strips, blended. R2/R3 remain better there and are better on `rms_front`. The judgment
+is that a stream drawn at the right width with a clean edge matters more than sub-pixel accuracy on
+a wall that already looks smooth, because the stream is the reported defect. If a diagonal front
+later looks wrong on the page, the fix is a rotated-line case inside R6, not a return to R2/R3.
 
 **R4 is not recommended**: worst false-negative counts by 5-13x, the largest discretization-driven
 `max_mass_err` of the non-R1 rules, and it drops individual free-fall streams entirely at `m=4`
 (§4.2's `missing` column) — on top of the newly-observed speckle.
 
-**R5 is the most interesting rule for FUTURE work, not this one.** Its closed-form conservation and
-continuous coverage are real, structural improvements over R4 (no exact-dropout failure mode,
-§4.4), but this instrument's coverage`>=0.5` boundary-detection convention (used because the round-2
-brief specifies it, for a fair coverage/IoU comparison) makes its OWN metrics look worse than the
-rule probably deserves: a real shader would feed R5's `coverage * height` straight into the
-existing `empty_blend = clamp(h/0.003, 0, 1)` opacity formula, which fades continuously — a coarse
-cell contributing 2% coverage to a distant pixel would render at ~2% opacity, not as a visible fleck
-the way a hard `>=0.5` cutoff treats it in this diagnostic. **Recommendation: if R3 ships and still
-doesn't satisfy the front-crispness complaint, prototype R5 in the actual shader** (where its
-coverage is read continuously, not thresholded) rather than trusting this instrument's own R5
-numbers/pictures at face value — they are a deliberately pessimistic proxy for a quantity that was
-never meant to be viewed as a hard binary in the first place.
+**R5 is R6 without the strip, and is superseded by it.** Its closed-form conservation and continuous
+coverage are real structural improvements over R4 (no exact-dropout failure mode, §4.4) and R6
+inherits both; what R6 adds is a well-conditioned normal where the gradient cancels, which is
+exactly where R5 dithers.
+
+**One caveat that applies to every number here.** This instrument thresholds coverage to decide
+"covered", because a binary is needed to compare against R0-R3 on IoU and chamfer. The shader does
+not: it feeds `coverage * height` into `empty_blend`, which fades continuously, so a cell
+contributing 2% coverage renders at ~2% opacity rather than as a hard speck. The coverage-based
+rules should therefore look somewhat better on the page than they score here, and R6's remaining
+neck-tip speckle (§5) is the first thing to re-judge there.
 
 ## 7. Shader cost estimate
 
@@ -417,6 +538,16 @@ AA techniques already use per-pixel. R5's conservation `delta` is ALSO closed fo
 than R2/R3's bisection, not more expensive. The added per-fragment cost relative to R3 is the
 `box_area_frac` evaluation itself (a few comparisons/multiplies), still a single pre-computed
 per-cell fetch away from being as cheap as R3's plane.
+
+**R6 (the recommendation).** Same shape of cost as R5, with no iteration anywhere: per cell, two 1D
+strip coverages (each a clamped overlap of two intervals), two confinement weights, one blend, and
+the same closed-form conservation. It needs the 3x3 heights and the 3x3 mask; per fragment that is
+9 + 9 `textureLoad`s if computed inline, or a single fetch if the per-cell quantities are
+pre-computed into an auxiliary `S`x`S` texture as described for R3. Deliberately absent: any
+rotated-line case, so there is no `atan2`, no normalisation of an ill-conditioned gradient, and no
+branch on the normal's direction. The first implementation should be the inline per-fragment
+version, because it needs no new upload path; move to the pre-pass only if it measures too slow on
+the Deck.
 
 ## 8. Reproduction
 
