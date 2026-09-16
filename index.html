@@ -813,6 +813,16 @@
                     <option value="2">2x (simulate at half grid)</option>
                     <option value="4">4x (simulate at quarter grid)</option>
                 </select>
+                <!-- R6 sub-cell coverage reconstruction (see set_sub_cell_edges in
+                     sandart-wasm/src/lib.rs and eval_sub_cell_r6 in shader.wgsl): draws falling
+                     streams and material edges at their true sub-cell position instead of
+                     smeared across a whole simulated cell. Default on; only visible above at
+                     Simulation downscale 2x/4x. -->
+                <label class="checkbox-container" title="Reconstructs material edges from the simulation's own height gradient instead of blurring across a whole simulated cell, so falling streams and slopes draw narrower and smoother. Only has an effect when Simulation downscale (above) is 2x or 4x.">
+                    Sub-cell edges
+                    <input type="checkbox" id="check-sub-cell-edges" checked>
+                    <span class="checkmark"></span>
+                </label>
             </div>
 
             <!-- ---- Shared: LOD scheduler debug instruments ----
