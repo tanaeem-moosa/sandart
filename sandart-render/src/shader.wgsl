@@ -148,11 +148,14 @@ struct LightingUniforms {
     // reason `heatmap_enabled`'s doc comment above gives: WGSL arrays stride to 16 bytes in the
     // uniform address space, which would desync this from Rust's tightly-packed layout.
     //
-    // "Sub-cell edges" UI toggle (R6 sub-cell coverage reconstruction, see `eval_sub_cell_r6`
-    // below): 1 = on (default), 0 = off. Repurposes the first of these three trailing pad slots --
-    // mirrors the Rust-side `LightingUniforms::sub_cell_edges_enabled` in
-    // sandart-render/src/lib.rs exactly; see that field's doc comment. Only read when
-    // `render_size > sim_size` (`m > 1`); at `m == 1` this is inert, matching the Rust side.
+    // "Sub-cell edges" UI toggle (R7 sub-cell coverage reconstruction, see `eval_sub_cell_r7`
+    // below): 1 = on, 0 = off (shipped default -- see `sandart-wasm`'s `sub_cell_edges_enabled`
+    // default and `index.html`'s checkbox, changed in commit 437cf3a after the R6 "quilting"
+    // report; this shader-side default is not touched by that commit or this one). Repurposes the
+    // first of these three trailing pad slots -- mirrors the Rust-side
+    // `LightingUniforms::sub_cell_edges_enabled` in sandart-render/src/lib.rs exactly; see that
+    // field's doc comment. Only read when `render_size > sim_size` (`m > 1`); at `m == 1` this is
+    // inert, matching the Rust side.
     sub_cell_edges_enabled: u32,
     _pad_uniform_tail1: u32,
     _pad_uniform_tail2: u32,
@@ -328,15 +331,35 @@ fn apply_marble_shadow(
 }
 
 // ---------------------------------------------------------------------------------------------
-// "Sub-cell edges" (R6): per-fragment sub-cell coverage/height reconstruction at `m > 1`, behind
-// the `sub_cell_edges_enabled` UI toggle. Mirrors `precompute_r6_models`/`eval_r6` in
-// `sandart-sim/examples/diag_upscale_reconstruction.rs` EXACTLY -- read
-// `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md` §3's R6 entry before changing anything
-// here, this is not an independent derivation. Unlike that offline tool, there is no pre-pass:
-// every fragment recomputes its own coarse cell's model from scratch (up to 9 heightmap +
-// 9 mask `textureLoad`s, shared between the gradient/min-max stencil and the confinement signal,
-// plus a fixed `m*m <= 16` iteration loop for the closed-form conservation solve) -- see the cost
-// discussion in the commit this landed in before adding a pre-pass texture.
+// "Sub-cell edges" (R7): per-fragment sub-cell coverage/height reconstruction at `m > 1`, behind
+// the `sub_cell_edges_enabled` UI toggle. Mirrors `precompute_r7_models`/`eval_r6` (R7 reuses R6's
+// evaluator, only the coverage width/offset inputs differ) in
+// `sandart-sim/examples/diag_upscale_reconstruction.rs` EXACTLY, at `k=1.0` -- read
+// `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md` §9-§10 before changing anything here,
+// this is not an independent derivation. §10's `k` sweep found `k=1` is the best of {1,2,3,4}
+// measured (every larger `k` monotonically degrades every metric, converging back toward plain
+// R6 -- do not "sharpen" this by raising `k` without re-reading why); §10 also found two SEPARATE
+// candidate mechanisms for a residual grid-pattern artifact (a per-cell independently-fit plane's
+// discontinuity across cell boundaries, and instability in the axis blend weight `w`) that this
+// change does not address and, on the boundary-jump measure, appears to make somewhat worse by
+// removing R6's incidental partial masking of it -- see §10.3/§10.4 before assuming this settles
+// "quilting" for good. Unlike the offline tool, there is no pre-pass: every fragment recomputes
+// its own coarse cell's model from scratch (up to 9 heightmap + 9 mask `textureLoad`s, shared
+// between the gradient/min-max stencil and the confinement signal, plus a fixed `m*m <= 16`
+// iteration loop for the closed-form conservation solve) -- see the cost discussion in the commit
+// this landed in before adding a pre-pass texture.
+//
+// R6 -> R7: `f_cov = h0/h_ref` (the covered fraction) shrinks every non-flat interior cell, not
+// just true material/empty frontiers, because `h_ref` is a max over the 3x3 and an ordinary
+// uphill neighbour on a slope is enough to pull `f_cov` below 1 -- this is what "quilting" mostly
+// was, per §9's continuous coverage-deficit measurement (the binary false-negative metric the R6
+// hypothesis was originally judged against turned out to be dominated by real frontiers, not
+// interior cells -- see §9.1 -- but the continuous, sub-threshold shrinkage was real and is what
+// this fixes). `emptiness` reuses `mn` (already on hand from the Barth-Jespersen stencil just
+// below) as `h_min`: mathematically identical to a separate self-excluded 3x3 minimum for this
+// purpose (see the Rust `r7_emptiness` doc comment for why), so no extra texture reads are needed.
+// `f_eff` then reverts to full coverage away from any real frontier and equals R6's own `f_cov` at
+// one, continuously and without any branch on material/wetness.
 // ---------------------------------------------------------------------------------------------
 
 // 1D exact overlap fraction of a pixel's own footprint `[pixel_center-pixel_half,
@@ -367,10 +390,12 @@ fn bj_corner(phi_in: f32, h0: f32, gx: f32, gy: f32, mn: f32, mx: f32, cdx: f32,
     return phi;
 }
 
-// Returns `(height, coverage)` for the fragment at `uv`, using the R6 rule. Callers must gate on
-// `smooth_mask` (`uniforms.render_size > uniforms.sim_size`) and `uniforms.sub_cell_edges_enabled`
-// themselves -- this function does not check either. `sim_size_i` is `i32(uniforms.sim_size)`,
-// passed in so the caller's copy is reused instead of recomputing it.
+// Returns `(height, coverage)` for the fragment at `uv`, using the R7 rule (R6's strip/blend
+// coverage with the interior-saturating `f_eff` in place of R6's raw `f_cov`; see the section doc
+// comment above). Callers must gate on `smooth_mask` (`uniforms.render_size > uniforms.sim_size`)
+// and `uniforms.sub_cell_edges_enabled` themselves -- this function does not check either.
+// `sim_size_i` is `i32(uniforms.sim_size)`, passed in so the caller's copy is reused instead of
+// recomputing it.
 //
 // "Walls are not empty": every neighbour read in the gradient/min-max stencil below excludes
 // OUTSIDE (mask == 0) cells entirely, same as the offline prototype's `CoarseField::inside`. The
@@ -379,7 +404,7 @@ fn bj_corner(phi_in: f32, h0: f32, gx: f32, gy: f32, mn: f32, mx: f32, cdx: f32,
 // `axis_confinement_bias`'s doc comment in the Rust prototype: a wall confines a stream visually
 // exactly like empty space does, and a neck squeezed between two walls is exactly the degenerate
 // case this signal targets.
-fn eval_sub_cell_r6(uv: vec2<f32>, sim_size_i: i32) -> vec2<f32> {
+fn eval_sub_cell_r7(uv: vec2<f32>, sim_size_i: i32) -> vec2<f32> {
     let sim_size_f = f32(sim_size_i);
     let tc = uv * sim_size_f - 0.5;
     let cxy = round(tc);
@@ -458,6 +483,17 @@ fn eval_sub_cell_r6(uv: vec2<f32>, sim_size_i: i32) -> vec2<f32> {
     let h_ref = max(mx, 1e-6);
     let f_cov = clamp(h0 / h_ref, 0.0, 1.0);
 
+    // R7's fix: `mn` (already the min over the inside 3x3, self included by initialisation --
+    // see the section doc comment for why that's identical to a self-excluded minimum here) is
+    // reused as `h_min`. `emptiness` is 0 (full coverage, `f_eff = 1`) when every neighbour is at
+    // least as tall as `h0` -- a flat interior, a local trough, or an ordinary downhill slope step,
+    // where the drop is small relative to `h0` -- and saturates toward 1 (R6's own `f_cov`) only
+    // when a neighbour is genuinely close to empty relative to `h0`. `k = 1.0` here is the round-5
+    // sweep's result: every larger `k` tested made this worse, not better (see the section doc
+    // comment) -- do not raise it without re-reading why.
+    let emptiness = clamp(1.0 - mn / max(h0, 1e-6), 0.0, 1.0);
+    let f_eff = mix(1.0, f_cov, emptiness);
+
     var phi = 1.0;
     phi = bj_corner(phi, h0, gx, gy, mn, mx, -0.5, -0.5);
     phi = bj_corner(phi, h0, gx, gy, mn, mx, 0.5, -0.5);
@@ -473,9 +509,9 @@ fn eval_sub_cell_r6(uv: vec2<f32>, sim_size_i: i32) -> vec2<f32> {
     let wsum_safe = max(wsum, 1e-6);
     let w = select(0.5, conf_x / wsum_safe, wsum > 1e-6);
 
-    let strip_half = f_cov * 0.5;
-    let off_x = bias_x * (1.0 - f_cov) * 0.5;
-    let off_y = bias_y * (1.0 - f_cov) * 0.5;
+    let strip_half = f_eff * 0.5;
+    let off_x = bias_x * (1.0 - f_eff) * 0.5;
+    let off_y = bias_y * (1.0 - f_eff) * 0.5;
 
     // Closed-form conservation delta, solved against THIS cell's own m*m sub-pixel grid -- no
     // pre-pass, so every fragment in the cell repeats this same small loop (m in {1,2,4}, so at
@@ -927,19 +963,19 @@ fn fs_main(
         1.0
     ));
 
-    // "Sub-cell edges" (R6): reconstructs this fragment's own coverage/height from the sim's 3x3
+    // "Sub-cell edges" (R7): reconstructs this fragment's own coverage/height from the sim's 3x3
     // stencil instead of relying on the mask-aware bilinear blend above, so a rendered edge (a
     // falling stream, a slope front) draws at its true sub-cell position instead of smeared ~1 sim
     // cell wide. Gated on `m > 1` (nothing to reconstruct between at `m == 1`) AND the UI toggle;
     // touches ONLY the opacity computation just below -- `h_center`/`normal`/every other quantity
-    // computed above (including the shading normal) are untouched. See `eval_sub_cell_r6`'s doc
-    // comment and `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md`.
+    // computed above (including the shading normal) are untouched. See `eval_sub_cell_r7`'s doc
+    // comment and `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md` §9-§10.
     var opacity_height = h_center;
     var sub_cell_coverage = 1.0;
     if (smooth_mask && uniforms.sub_cell_edges_enabled != 0u) {
-        let r6 = eval_sub_cell_r6(uv, sim_size_i);
-        opacity_height = r6.x;
-        sub_cell_coverage = r6.y;
+        let r7 = eval_sub_cell_r7(uv, sim_size_i);
+        opacity_height = r7.x;
+        sub_cell_coverage = r7.y;
     }
 
     // Smooth opacity blend (h_center >= 0.003 is 100% opaque sand color), folded together with
