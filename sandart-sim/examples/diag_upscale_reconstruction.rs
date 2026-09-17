@@ -10,11 +10,15 @@
 //! This is a MEASUREMENT tool, not a shipped change: it never touches the shader, the renderer,
 //! the wasm crate, or physics. It takes a real 512 snapshot, downscales it by block-average to
 //! 256 (m=2) and 128 (m=4) using the *coarse resolution's own rasterized mask* (never a resampling
-//! of the fine mask), then re-upscales with seven candidate rules and compares each against the
+//! of the fine mask), then re-upscales with eight candidate rules and compares each against the
 //! original 512 field. Comparing separate 256/512 simulations would conflate reconstruction error
 //! with the fact that different resolutions evolve at different rates -- see CLAUDE.md's method
 //! note. Every rule takes ONLY (height field, mask) as input -- no material/wetness branch --
 //! satisfying "the same rule for all materials" by construction, not by convention.
+//!
+//! **Round 4 (this revision) adds R7** and the interior/frontier false-negative split that
+//! motivated it -- see the R7 section below and
+//! `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md` round-4 note.
 //!
 //! Run: `cargo run -p sandart-sim --release --example diag_upscale_reconstruction`
 //!
@@ -749,8 +753,228 @@ fn reconstruct_r6(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
     (h_out, cov_out)
 }
 
+// ---------------------------------------------------------------------------------------------
+// R7 (round 4): R6 + a continuous coverage cap that saturates toward FULL coverage away from any
+// material/empty frontier. The suspected mechanism behind the user's "quilting" verdict on R6: its
+// `f = h0/h_ref` (`h_ref` = max over the inside 3x3, same as R4/R5) shrinks EVERY cell whose
+// neighbourhood isn't perfectly flat, including a cell deep inside a body of material on a sand
+// slope or a draining pool surface, where the uphill neighbour is simply higher than `h0` -- no
+// empty space is nearby at all. That produces `f < 1` -- a shrunken tile -- at every such cell,
+// which is exactly what a grid of visible seams ("quilting") looks like. `f_eff` reverts to full
+// coverage in that case and keeps R6's own `f` at a real frontier, continuously and without a
+// branch on material/wetness: see `cell_emptiness` for why a smooth slope's small per-cell height
+// step saturates `emptiness` near 0 while a genuine empty neighbour saturates it near 1.
+// ---------------------------------------------------------------------------------------------
+
+/// `emptiness` in `[0,1]`: `1 - h_min/max(h0,eps)`, `h_min` = the minimum height over this cell's
+/// own INSIDE 3x3 neighbours (self excluded, OUTSIDE/wall excluded per the "walls are not empty"
+/// invariant -- a wall is not treated as an empty neighbour for this signal, unlike R6's deliberate
+/// confinement exception). 0 when every neighbour is at least as tall as `h0` (a flat interior, a
+/// local trough, or -- the case that matters here -- a normal downhill slope step, where the
+/// neighbour is only slightly shorter than `h0` so the ratio stays close to 1); saturates toward 1
+/// only when a neighbour is genuinely close to empty (near 0) relative to `h0`, which is a large
+/// relative drop regardless of how small `h0` itself is. A cell with no inside neighbours at all
+/// (isolated single-cell island) reports 0 -- nothing nearby to be "empty" relative to, so this
+/// signal defers entirely to R6's own `f`.
+fn cell_emptiness(coarse: &CoarseField, cx: i32, cy: i32, h0: f32) -> f32 {
+    let mut h_min = f32::MAX;
+    let mut any = false;
+    for ddy in -1..=1i32 {
+        for ddx in -1..=1i32 {
+            if ddx == 0 && ddy == 0 {
+                continue;
+            }
+            let (nx, ny) = (cx + ddx, cy + ddy);
+            if coarse.inside(nx, ny) {
+                h_min = h_min.min(coarse.get(nx, ny));
+                any = true;
+            }
+        }
+    }
+    if !any {
+        return 0.0;
+    }
+    (1.0 - h_min / h0.max(1e-6)).clamp(0.0, 1.0)
+}
+
+/// Identical to `precompute_r6_models` except the strip width/offset are built from `f_eff =
+/// mix(1.0, f, emptiness)` instead of R6's raw `f` -- confinement, bias, `w`, the plane, and the
+/// closed-form conservation solve are all otherwise unchanged, so R7 reuses `R6Model`/`eval_r6`
+/// verbatim. Conservation is unaffected by construction: the `delta` solve targets whatever
+/// coverage field is actually used (built from `f_eff` here), exactly as it targets R6's `f`.
+fn precompute_r7_models(coarse: &CoarseField, m: usize) -> Vec<Option<R6Model>> {
+    let n = coarse.size;
+    let mut out = Vec::with_capacity(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            if coarse.mask[y * n + x] == MASK_OUTSIDE {
+                out.push(None);
+                continue;
+            }
+            let (cx, cy) = (x as i32, y as i32);
+            let h0 = coarse.get(cx, cy);
+            let (_, h_ref) = neighbour_min_max(coarse, cx, cy);
+            let h_ref = h_ref.max(1e-6);
+            let f = (h0 / h_ref).clamp(0.0, 1.0);
+            let emptiness = cell_emptiness(coarse, cx, cy, h0);
+            let f_eff = 1.0 + (f - 1.0) * emptiness; // mix(1.0, f, emptiness)
+            let (gx, gy) = ls_gradient(coarse, cx, cy);
+            let (mn, mx) = neighbour_min_max(coarse, cx, cy);
+            let phi = bj_phi(h0, gx, gy, mn, mx);
+            let (conf_x, bias_x) = axis_confinement_bias(coarse, cx, cy, 1, 0, h0, h_ref);
+            let (conf_y, bias_y) = axis_confinement_bias(coarse, cx, cy, 0, 1, h0, h_ref);
+            let wsum = conf_x + conf_y;
+            let w = if wsum > 1e-6 { conf_x / wsum } else { 0.5 };
+            let strip_half = f_eff / 2.0;
+            let off_x = bias_x * (1.0 - f_eff) / 2.0;
+            let off_y = bias_y * (1.0 - f_eff) / 2.0;
+            let half = 0.5 / m as f32;
+            let (mut sum_cov, mut sum_cov_h) = (0.0f32, 0.0f32);
+            for j in 0..m {
+                for i in 0..m {
+                    let dx = (i as f32 + 0.5) / m as f32 - 0.5;
+                    let dy = (j as f32 + 0.5) / m as f32 - 0.5;
+                    let cov_x = overlap_1d(off_x, strip_half, dx, half);
+                    let cov_y = overlap_1d(off_y, strip_half, dy, half);
+                    let cov = w * cov_x + (1.0 - w) * cov_y;
+                    let plane_h = h0 + phi * gx * dx + phi * gy * dy;
+                    sum_cov += cov;
+                    sum_cov_h += cov * plane_h;
+                }
+            }
+            let mean_cov = sum_cov / (m * m) as f32;
+            let mean_cov_h = sum_cov_h / (m * m) as f32;
+            let delta = if mean_cov > 1e-6 { (h0 - mean_cov_h) / mean_cov } else { 0.0 };
+            out.push(Some(R6Model { h0, gx, gy, phi, delta, off_x, off_y, strip_half, w }));
+        }
+    }
+    out
+}
+
+fn reconstruct_r7(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
+    let n = coarse.size * m;
+    let models = precompute_r7_models(coarse, m);
+    let mut h_out = vec![0.0f32; n * n];
+    let mut cov_out = vec![0.0f32; n * n];
+    for fy in 0..n {
+        let yc = fine_to_coarse(fy, m);
+        let cy = clamp_idx(yc.round() as i32, coarse.size);
+        let dy = yc - cy as f32;
+        for fx in 0..n {
+            let xc = fine_to_coarse(fx, m);
+            let cx = clamp_idx(xc.round() as i32, coarse.size);
+            let dx = xc - cx as f32;
+            let (hv, cv) = eval_r6(&models[cy * coarse.size + cx], dx, dy, m);
+            h_out[fy * n + fx] = hv;
+            cov_out[fy * n + fx] = cv;
+        }
+    }
+    (h_out, cov_out)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Interior/frontier false-negative split (round 4): the direct test of the R7 hypothesis. A coarse
+// cell is "material-interior" if none of its INSIDE 3x3 neighbours is empty (height < THRESH) --
+// i.e. no material/empty frontier passes through this cell's own neighbourhood, even if the
+// neighbourhood isn't flat (a normal slope step still counts as interior here). OUTSIDE (wall)
+// neighbours are excluded per the "walls are not empty" invariant, matching `h_ref`/`ls_gradient`.
+// A FALSE NEGATIVE fine pixel (original >= THRESH, reconstruction not covered) is classified by
+// which of these two buckets its own coarse cell falls into.
+// ---------------------------------------------------------------------------------------------
+
+fn material_interior_mask(coarse: &CoarseField, thresh: f32) -> Vec<bool> {
+    let n = coarse.size;
+    let mut out = vec![false; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            if coarse.mask[y * n + x] == MASK_OUTSIDE {
+                continue;
+            }
+            let (cx, cy) = (x as i32, y as i32);
+            let mut interior = true;
+            for ddy in -1..=1i32 {
+                for ddx in -1..=1i32 {
+                    if ddx == 0 && ddy == 0 {
+                        continue;
+                    }
+                    let (nx, ny) = (cx + ddx, cy + ddy);
+                    if coarse.inside(nx, ny) && coarse.get(nx, ny) < thresh {
+                        interior = false;
+                    }
+                }
+            }
+            out[y * n + x] = interior;
+        }
+    }
+    out
+}
+
+struct FnSplit { interior: usize, frontier: usize }
+
+fn fn_interior_frontier_split(
+    original: &[f32],
+    cov_arr: &[f32],
+    cov_thresh: f32,
+    fine_mask: &[u8],
+    fine_size: usize,
+    material_interior: &[bool],
+    m: usize,
+    coarse_size: usize,
+) -> FnSplit {
+    let (mut interior, mut frontier) = (0usize, 0usize);
+    for fy in 0..fine_size {
+        let cy = (fy / m).min(coarse_size - 1);
+        for fx in 0..fine_size {
+            let idx = fy * fine_size + fx;
+            if fine_mask[idx] == MASK_OUTSIDE {
+                continue;
+            }
+            let cx = (fx / m).min(coarse_size - 1);
+            let o = original[idx] >= THRESH;
+            let r = cov_arr[idx] >= cov_thresh;
+            if o && !r {
+                if material_interior[cy * coarse_size + cx] {
+                    interior += 1;
+                } else {
+                    frontier += 1;
+                }
+            }
+        }
+    }
+    FnSplit { interior, frontier }
+}
+
+/// `(interior_mean_deficit, interior_n, frontier_mean_deficit, frontier_n)` -- mean `1-coverage`
+/// over EVERY inside fine pixel (not just ones that cross a threshold), split by the same
+/// material-interior/frontier classification as `fn_interior_frontier_split`. This is the
+/// continuous companion to that binary split: a cell can shrink (coverage 0.7, say) without ever
+/// crossing THRESH and being counted as a false negative, which is exactly the "shrunken tile"
+/// mechanism the quilting hypothesis describes.
+fn coverage_deficit_stats(cov: &[f32], fine_mask: &[u8], material_interior: &[bool], fine_size: usize, m: usize, coarse_size: usize) -> (f64, usize, f64, usize) {
+    let (mut sum_i, mut n_i, mut sum_f, mut n_f) = (0.0f64, 0usize, 0.0f64, 0usize);
+    for fy in 0..fine_size {
+        let cy = (fy / m).min(coarse_size - 1);
+        for fx in 0..fine_size {
+            let idx = fy * fine_size + fx;
+            if fine_mask[idx] == MASK_OUTSIDE {
+                continue;
+            }
+            let cx = (fx / m).min(coarse_size - 1);
+            let deficit = (1.0 - cov[idx] as f64).max(0.0);
+            if material_interior[cy * coarse_size + cx] {
+                sum_i += deficit;
+                n_i += 1;
+            } else {
+                sum_f += deficit;
+                n_f += 1;
+            }
+        }
+    }
+    (if n_i > 0 { sum_i / n_i as f64 } else { 0.0 }, n_i, if n_f > 0 { sum_f / n_f as f64 } else { 0.0 }, n_f)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Rule { R0, R1, R2, R3, R4, R5, R6 }
+enum Rule { R0, R1, R2, R3, R4, R5, R6, R7 }
 
 impl Rule {
     fn name(&self) -> &'static str {
@@ -762,6 +986,7 @@ impl Rule {
             Rule::R4 => "R4_plic",
             Rule::R5 => "R5_plic_aa",
             Rule::R6 => "R6_strip_aa",
+            Rule::R7 => "R7_strip_sat",
         }
     }
 }
@@ -788,7 +1013,7 @@ fn reconstruct(coarse: &CoarseField, rule: Rule, m: usize) -> Vec<f32> {
             let models = precompute_plic_models(coarse);
             fill_from_models(&mut out, coarse, &models, m);
         }
-        Rule::R5 | Rule::R6 => unreachable!("R5/R6 have their own coverage output -- call reconstruct_pair instead"),
+        Rule::R5 | Rule::R6 | Rule::R7 => unreachable!("R5/R6/R7 have their own coverage output -- call reconstruct_pair instead"),
     }
     out
 }
@@ -799,20 +1024,25 @@ fn reconstruct(coarse: &CoarseField, rule: Rule, m: usize) -> Vec<f32> {
 /// (0.003) -- i.e. "covered" means "height at or above the shader's opacity cutoff", exactly as
 /// today.
 ///
-/// For R5/R6, round 3 fixed a real defect in round 2's convention: thresholding the raw coverage
-/// fraction alone at 0.5 let a nearly-empty film-case cell (all neighbours shallow, so `f=h0/h_ref`
-/// is close to 1 even though `h0` itself is tiny) read as "fully covered" and draw a visible fleck
-/// at near-zero height. The shader's own opacity already depends on HEIGHT
-/// (`empty_blend = clamp(h/0.003, 0, 1)`), so "covered" for these two rules now requires BOTH
-/// `coverage >= 0.5` AND the coverage-weighted height clearing the same 0.003 the other four rules
+/// For R5/R6/R7, round 3 fixed a real defect in round 2's convention: thresholding the raw
+/// coverage fraction alone at 0.5 let a nearly-empty film-case cell (all neighbours shallow, so
+/// `f=h0/h_ref` is close to 1 even though `h0` itself is tiny) read as "fully covered" and draw a
+/// visible fleck at near-zero height. The shader's own opacity already depends on HEIGHT
+/// (`empty_blend = clamp(h/0.003, 0, 1)`), so "covered" for these rules now requires BOTH
+/// `coverage >= 0.5` AND the coverage-weighted height clearing the same 0.003 the other rules
 /// use: encoded here as one array/threshold pair by writing a sentinel (`-1.0`, which can never
 /// clear any positive threshold) wherever `coverage < 0.5`, and the coverage-weighted height
 /// (`h`, already `coverage*plane_height`) everywhere else -- so `coverage_metrics`/`boundary_mask`
 /// thresholding this array at `THRESH` reproduces the AND exactly, with no change to either
 /// generic function.
 fn reconstruct_pair(coarse: &CoarseField, rule: Rule, m: usize) -> (Vec<f32>, Vec<f32>, f32) {
-    if rule == Rule::R5 || rule == Rule::R6 {
-        let (h, cov) = if rule == Rule::R5 { reconstruct_r5(coarse, m) } else { reconstruct_r6(coarse, m) };
+    if rule == Rule::R5 || rule == Rule::R6 || rule == Rule::R7 {
+        let (h, cov) = match rule {
+            Rule::R5 => reconstruct_r5(coarse, m),
+            Rule::R6 => reconstruct_r6(coarse, m),
+            Rule::R7 => reconstruct_r7(coarse, m),
+            _ => unreachable!(),
+        };
         let combined: Vec<f32> = (0..h.len()).map(|i| if cov[i] >= 0.5 { h[i] } else { -1.0 }).collect();
         (h, combined, THRESH)
     } else {
@@ -1382,7 +1612,7 @@ fn output_dir() -> std::path::PathBuf {
     dir
 }
 
-const ALL_RULES: [Rule; 7] = [Rule::R0, Rule::R1, Rule::R2, Rule::R3, Rule::R4, Rule::R5, Rule::R6];
+const ALL_RULES: [Rule; 8] = [Rule::R0, Rule::R1, Rule::R2, Rule::R3, Rule::R4, Rule::R5, Rule::R6, Rule::R7];
 
 fn run_snapshot(snap: &Snapshot) {
     let size = snap.sim.heightmap.width;
@@ -1424,6 +1654,9 @@ fn run_snapshot(snap: &Snapshot) {
         let coarse_mask = snap.sim.rasterize_shape_mask(coarse_size);
         let (coarse, dreport) = downscale(&snap.h, &snap.mask512, size, &coarse_mask, coarse_size, m);
         let coarse_interior = coarse_interior_mask(&coarse);
+        // Round 4: material-interior mask (independent of rule, built from the ORIGINAL coarse
+        // field only) for the interior/frontier false-negative split below.
+        let material_interior = material_interior_mask(&coarse, THRESH);
 
         let loss_pct = if dreport.total_mass > 0.0 { 100.0 * dreport.mass_lost / dreport.total_mass } else { 0.0 };
         println!(
@@ -1448,6 +1681,17 @@ fn run_snapshot(snap: &Snapshot) {
                 rule.name(), mass_err, rms.all, rms.interior, rms.frontier, cov.fp, cov.fn_, cov.iou, recon_smooth
             );
 
+            // Round 4: split false negatives by whether they sit in a coarse cell with a real
+            // material/empty frontier nearby, or one whose neighbourhood is fully material (the
+            // direct test of the "R6 shrinks interior cells too" hypothesis).
+            if cov.fn_ > 0 {
+                let split = fn_interior_frontier_split(&snap.h, &cov_arr, cov_thresh, &snap.mask512, size, &material_interior, m, coarse_size);
+                println!(
+                    "    fn_split: interior={} frontier={} (of fn_px={}; interior = coarse cell with no empty neighbour, i.e. NOT at a material/empty frontier)",
+                    split.interior, split.frontier, cov.fn_
+                );
+            }
+
             // Round-2 fix A: per-stream width, free fall only, matched by span not by row sum.
             if !free_fall_rows.is_empty() {
                 let agg = per_stream_width(&snap.h, &recon, &snap.mask512, size, &free_fall_rows, THRESH);
@@ -1469,6 +1713,22 @@ fn run_snapshot(snap: &Snapshot) {
             }
         }
         println!("(rms/mass units are heightmap units 0..1; pixel counts are over the full 512x512 fine-inside domain)");
+
+        // Round 4, continuous check: the binary fn_split above only counts a cell where coverage
+        // drops the reconstructed height below THRESH -- it is blind to a cell that merely shrinks
+        // (coverage < 1 but still comfortably above THRESH), which is what "quilting" actually
+        // looks like at most interior cells on a gentle slope. This measures mean coverage DEFICIT
+        // (1 - coverage) over every inside fine pixel, split the same way, for the raw coverage
+        // fields of R5/R6/R7 (R4's coverage is binary in/out, not a fraction, so this doesn't apply
+        // to it in the same sense).
+        println!("    -- mean coverage deficit (1-coverage), continuous, not threshold-gated --");
+        for (name, cov) in [("R5_plic_aa", reconstruct_r5(&coarse, m).1), ("R6_strip_aa", reconstruct_r6(&coarse, m).1), ("R7_strip_sat", reconstruct_r7(&coarse, m).1)] {
+            let ds = coverage_deficit_stats(&cov, &snap.mask512, &material_interior, size, m, coarse_size);
+            println!(
+                "    {name:<14} interior: mean_deficit={:.5} n={} | frontier: mean_deficit={:.5} n={}",
+                ds.0, ds.1, ds.2, ds.3
+            );
+        }
     }
 
     // R1 threshold sensitivity, m=2 only (representative).
@@ -1493,9 +1753,10 @@ fn run_snapshot(snap: &Snapshot) {
 /// 512px per tile before saving, per the round-2 brief.
 const MAGNIFY: u32 = 4;
 /// Contact sheets show the shipped rule (R1), R3 (the best-measuring limited plane -- R2 is its
-/// close twin and stays in the numeric tables only), R4 (PLIC), R5 (anti-aliased PLIC), and R6
-/// (round 3's centred-strip extension of R5).
-const PICTURE_RULES: [Rule; 5] = [Rule::R1, Rule::R3, Rule::R4, Rule::R5, Rule::R6];
+/// close twin and stays in the numeric tables only), R4 (PLIC), R5 (anti-aliased PLIC), R6
+/// (round 3's centred-strip extension of R5), and R7 (round 4's interior-saturating extension of
+/// R6, the direct fix for the "quilting" verdict on R6).
+const PICTURE_RULES: [Rule; 6] = [Rule::R1, Rule::R3, Rule::R4, Rule::R5, Rule::R6, Rule::R7];
 
 /// Round-3 fix #1: the page displays the EMA field (snapshot c), not the raw per-tick field
 /// (snapshot a) -- pictures must judge what's actually shown. Every figure that was built from (a)
@@ -1525,7 +1786,7 @@ fn make_all_pictures(snap_a: &Snapshot, snap_b: &Snapshot, snap_c: &Snapshot, ou
     readme.push_str(&format!(
         "Every crop is a 128x128 sample of the 512 grid, magnified {MAGNIFY}x nearest-neighbour to \
         512x512 (no new information -- purely so staircasing is legible). Grayscale = height; \
-        orange = the coverage boundary (`h>=0.003` for R0-R4; for R5/R6, `coverage>=0.5 AND \
+        orange = the coverage boundary (`h>=0.003` for R0-R4; for R5/R6/R7, `coverage>=0.5 AND \
         coverage*height>=0.003` -- round 3's fix for the film-case fleck defect, see the writeup \
         §4.3). Figure name suffix states the snapshot: `_a_raw_` = raw per-tick snapshot (a), \
         `_c_ema_` = the alpha=0.4 EMA over the last 15 ticks (snapshot c, what the deployed page \
@@ -1541,11 +1802,11 @@ fn make_all_pictures(snap_a: &Snapshot, snap_b: &Snapshot, snap_c: &Snapshot, ou
 
         readme.push_str(&format!("## {fig_name}\ncrop = (x0={x0}, y0={y0}, w={w}, h={hh}), vmax={vmax}\n\n"));
         readme.push_str(&format!(
-            "`{fig_name}_contact_sheet.png`: 6 columns x 2 rows. Row 1 = m=2, row 2 = m=4. Columns \
+            "`{fig_name}_contact_sheet.png`: 7 columns x 2 rows. Row 1 = m=2, row 2 = m=4. Columns \
             left to right:\n\n"
         ));
-        readme.push_str("| col 1 | col 2 | col 3 | col 4 | col 5 | col 6 |\n|---|---|---|---|---|---|\n");
-        readme.push_str("| original | R1 bilinear (shipped) | R3 face-match | R4 PLIC | R5 PLIC+AA | R6 strip+AA |\n\n");
+        readme.push_str("| col 1 | col 2 | col 3 | col 4 | col 5 | col 6 | col 7 |\n|---|---|---|---|---|---|---|\n");
+        readme.push_str("| original | R1 bilinear (shipped) | R3 face-match | R4 PLIC | R5 PLIC+AA | R6 strip+AA | R7 strip+sat |\n\n");
 
         let mut sheet_tiles = vec![orig_img.clone()];
         for &m in &[2usize, 4usize] {
@@ -1578,7 +1839,7 @@ fn make_all_pictures(snap_a: &Snapshot, snap_b: &Snapshot, snap_c: &Snapshot, ou
             }
         }
 
-        let sheet = make_contact_sheet(&sheet_tiles, 6);
+        let sheet = make_contact_sheet(&sheet_tiles, 7);
         sheet.save(out_dir.join(format!("{fig_name}_contact_sheet.png"))).expect("write contact sheet");
         println!("wrote {fig_name}: crop=({x0},{y0},{w}x{hh}) vmax={vmax} magnify={MAGNIFY}x");
     }

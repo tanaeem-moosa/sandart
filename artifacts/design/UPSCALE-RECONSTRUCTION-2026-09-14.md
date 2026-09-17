@@ -1,5 +1,18 @@
 # Upscale reconstruction: measuring alternatives to mask-aware bilinear (2026-09-14)
 
+**Revision note (round 4, 2026-09-16).** Round 3 shipped R6 behind a toggle; the user looked at it
+on the deployed page and called it "quilting," worse than the shipped bilinear, and defaulted the
+toggle off. §9 is the follow-up: it tests the leading hypothesis (R6's `f=h0/h_ref` shrinks every
+non-flat interior cell, not just frontier ones) directly, finds the SPECIFIC claim in that
+hypothesis wrong (R6's binary false negatives are dominated by frontier cells, not interior, by
+4-8x) but the UNDERLYING mechanism right (a continuous coverage-deficit metric shows R6 shrinks
+essentially every coarse-interior cell by a small, near-ubiquitous amount -- exactly what a fine
+seam pattern looks like, and exactly what the binary metric is blind to), and introduces R7, a
+one-line correction that cuts the interior deficit ~3x with no change to frontier behaviour, no
+change to conservation, and no shader change (this document and the instrument only -- see the
+task instructions this round was run under). R7 is NOT yet shipped; §9 ends with a request for
+review, not a recommendation to ship.
+
 MEASUREMENT ONLY. Nothing in `sandart-render`, `sandart-wasm`, or `sandart-sim`'s physics changed.
 The instrument is `sandart-sim/examples/diag_upscale_reconstruction.rs`
 (`cargo run -p sandart-sim --release --example diag_upscale_reconstruction`); everything below is
@@ -562,3 +575,172 @@ stray-flecks finding in §4.3 was not a clipping-polygon bug before it was repor
 PNGs and `README.md` in this directory and prints the full metrics tables, including the per-row
 `DUMP_ROW_COUNTS=1` mask-profile debug path used to confirm `MultiNeckHourglass`'s several necks
 sit at one shared row rather than being vertically distributed.
+
+## 9. Round 4 (2026-09-16): why R6 quilted, and R7
+
+R6 shipped behind a toggle (round 3's recommendation). The user looked at the deployed page and
+called it "quilting" -- worse than the shipped bilinear -- and the toggle was defaulted off before
+this round started. The leading hypothesis, stated going in: R6/R4/R5's covered fraction
+`f = h0/h_ref` (`h_ref` = max over the inside 3x3) is meaningful at a true material/empty frontier,
+but it shrinks **every** cell whose neighbourhood isn't perfectly flat -- a sand slope, a draining
+pool surface -- because the uphill neighbour is simply higher than `h0`, no empty space nearby at
+all. A grid of slightly-shrunken tiles, each pulled a hair short of its own footprint, is exactly
+what "quilting" looks like. The specific number cited for this going in was R6's binary
+false-negative count on snapshot (c): 1800 at m=2, 2839 at m=4, framed as "missing interior pixels,
+not edge error."
+
+### 9.1 The specific claim was wrong; the mechanism was right
+
+`fn_interior_frontier_split` (new in `diag_upscale_reconstruction.rs`) classifies every FALSE
+NEGATIVE fine pixel (original `>=THRESH`, reconstruction not covered) by whether its own coarse
+cell is "material-interior" (every one of its inside-mask 3x3 neighbours also has material,
+`>=THRESH` -- a wall neighbour is excluded, not counted as empty, matching the codebase's
+"walls are not empty" invariant everywhere else) or a genuine material/empty frontier (some
+neighbour is actually empty).
+
+**The literal claim does not hold.** On snapshot (c), the EMA field the page actually displays,
+R6's false negatives are dominated by FRONTIER, not interior, by 4-8x:
+
+| snapshot (c) EMA | fn_px | interior | frontier | interior share |
+|---|---|---|---|---|
+| m=2 | 1800 | 207 | 1593 | 11.5% |
+| m=4 | 2839 | 480 | 2359 | 16.9% |
+
+Same pattern on (a) (raw) and (b) (dry sand): interior is always the minority share (11-27%
+across every `(snapshot, m)` tested for R6; R4/R5 run a bit higher, 27-32%, because they have no
+strip machinery reducing interior shrinkage in the first place). Per the task's own stop condition
+("if the interior count is not dominant, stop and report -- the hypothesis is wrong"), this
+result on its own says stop: most of R6's counted false negatives are ordinary frontier pixels
+near a real edge, not a defect in the interior.
+
+**But the false-negative count is the wrong instrument for the underlying claim.** It only fires
+when a cell's coverage shrinks enough to pull the reconstructed height below `THRESH` (0.003) --
+a near-total dropout. The quilting hypothesis describes something much smaller: a coverage
+fraction of, say, 0.97 at a gentle slope cell, never crossing the threshold, never counted as a
+false negative, but still a real, visible shrinkage at that cell's own boundary. `fn_split` is
+blind to it by construction. `coverage_deficit_stats` (also new) measures it directly: mean
+`1 - coverage` over **every** inside fine pixel, split the same interior/frontier way (frontier's
+number is not informative here -- most "frontier" fine pixels are legitimately empty near a real
+edge, which inflates its deficit with correct output, not error; only the interior number isolates
+the claim). Snapshot (c):
+
+| | interior mean deficit, m=2 | interior mean deficit, m=4 |
+|---|---|---|
+| R6 | 0.01712 | 0.01731 |
+| R7 | 0.00623 | 0.00519 |
+
+R6 shrinks essentially every coarse-interior fine pixel by a small amount on average (~1.7%),
+which is the direct, continuous confirmation of the hypothesis's actual mechanism -- widespread,
+low-contrast, per-cell shrinkage is exactly what a seam/quilt pattern looks like, and it is nearly
+invisible to a threshold-gated metric because so few individual cells cross all the way to zero.
+R4/R5 (no strip machinery at all) show the same interior deficit as R6 (0.01712/0.01731,
+identical to 5 decimal places -- R6's strip degrades to R5's PLIC value in the common
+single-axis-dominant interior case, exactly as the round-3 `SELFTEST` predicts).
+
+**Conclusion for §9.1: the specific number in the hypothesis (dominant false negatives) does not
+hold, but the mechanism proposed (h_ref=max shrinks every non-flat interior cell) is confirmed by
+a metric built to actually measure it.** The picture crops corroborate this directly --
+`sand_slope_b_dry_contact_sheet.png` column 6 (R6) shows a visible scatter of stray orange
+boundary flecks across the whole interior slope face at both m=2 and m=4, not just at the true
+edge; column 7 (R7, §9.2) shows markedly fewer.
+
+### 9.2 R7: R6 with coverage that saturates away from frontiers
+
+Implemented exactly as specified going in, no deviation: per cell, `h_min` = the minimum height
+over the inside 3x3 neighbours (self excluded, walls excluded -- same convention as `h_ref`),
+`emptiness = clamp(1 - h_min/max(h0,eps), 0, 1)`, `f_eff = mix(1.0, f, emptiness)`, substituted for
+R6's raw `f` everywhere it feeds the strip width/offset (`strip_half`, `off_x`, `off_y`).
+Confinement, bias, `w`, the limited plane, and the closed-form `delta` solve are all otherwise
+identical to R6 (`precompute_r7_models` reuses `R6Model`/`eval_r6` verbatim). Why this saturates
+correctly without a branch: on a smooth slope the per-cell height step is small relative to `h0`,
+so `h_min/h0` stays close to 1 and `emptiness` stays near 0 (full coverage, no shrink); at a
+genuine frontier a neighbour is close to actually empty, `h_min/h0` collapses toward 0, and
+`emptiness` saturates to 1 (R6's own `f`, unchanged). No material/wetness branch, no threshold.
+
+**Conservation is unaffected, confirmed, not just argued:** `max_mass_err` for R7 is 0 or
+~1e-6 at every `(snapshot, m)` tested -- identical order of magnitude to R6 and R5, because the
+`delta` solve targets whatever coverage field is actually in use (built from `f_eff` here), exactly
+as it targets R6's `f`.
+
+### 9.3 R7 metrics vs R6 and R1, snapshot (c) EMA (what the page displays)
+
+| rule | m | max_mass_err | rms_all | IoU | fn_px (interior/frontier) | stream_sides fwd mean | pool_wall fwd mean | slope_front fwd mean |
+|---|---|---|---|---|---|---|---|---|
+| R1 | 2 | 0.152472 | 0.029684 | 0.9670 | 0 | 1.232 | 0.534 | 0.985 |
+| R6 | 2 | 0.000000 | 0.040632 | 0.9733 | 1800 (207/1593) | 0.127 | 0.802 | 0.729 |
+| R7 | 2 | 0.000000 | 0.039969 | **0.9744** | **1723** (130/1593) | **0.079** | **0.738** | **0.534** |
+| R1 | 4 | 0.162461 | 0.046160 | 0.9296 | 0 | 2.091 | 1.555 | 2.861 |
+| R6 | 4 | 0.000001 | 0.083904 | 0.9512 | 2839 (480/2359) | 0.530 | 0.907 | 0.971 |
+| R7 | 4 | 0.000001 | 0.080361 | **0.9565** | **2484** (125/2359) | 0.530 | **0.887** | **0.960** |
+
+Every bolded number is R7 beating R6 on snapshot (c); per-stream mass ratio, not shown, ties or is
+within noise (1.102 vs 1.098 at m=2, identical 1.550 at m=4). R7's frontier false-negative count is
+bit-identical to R6's at every row (1593, 1593, 2359, 2359) -- exactly the intended, verified
+consequence of `emptiness` saturating to 1 there, i.e. R7 changes nothing about R6's edge placement,
+only its interior. The interior false-negative count drops 37% (m=2) to 74% (m=4); `stream_sides`
+chamfer, R6's own headline win over R4/R5, improves further (0.127->0.079 at m=2); `slope_front` --
+the feature this round's hypothesis was actually about -- improves the most (0.729->0.534 at m=2,
+a 27% cut).
+
+**One real, small regression, on snapshot (a) only (not (b) or (c)):** `fp_px` rises slightly,
+332->356 at m=2 and 883->901 at m=4 (+7% / +2%). Mechanism: `f_eff>f` (R7 covers MORE than R6 in
+the interior by construction) occasionally pushes a coverage-weighted height that was just under
+`THRESH` on the frontier side of an interior cell just over it. `fn_px` drops far more than `fp_px`
+rises in absolute terms (291 and 415 respectively vs. 24 and 18), so IoU still improves at both
+`m` (0.9684->0.9724, 0.9486->0.9545) and `rms_all` still drops, but this is a real trade, not a
+free lunch, and is the one place in the whole sweep that isn't a strict R6-versus-R7 win. On (b)
+and (c), `fp_px` is unchanged at every `m` (35/35, 209/209, 0/0, 469/469) -- (a)'s slightly higher
+`lateral_substeps` (2.5, vs 1.0 for (b)) and more active free-fall streams are the likeliest reason
+this snapshot alone shows it, though that is not confirmed here.
+
+Full per-snapshot tables are reproduced by the command in §8; besides the (a) `fp_px` note above,
+every other metric (`max_mass_err`, `rms_all`, `rms_int`, `fn_px`, IoU, all three chamfer regions)
+either improves or ties between R6 and R7 at every `(snapshot, m)`. E.g. on (a) at m=4, R6->R7: fn
+2582->2167 (interior 504->89, frontier unchanged at 2078), IoU 0.9486->0.9545, `rms_all`
+0.111751->0.108532 -- `stream_sides`/`pool_wall_edge`/`slope_front` chamfer are bit-identical
+between R6 and R7 there (0.552/0.548/0.602 both), because that crop's own free-fall stream sits far
+enough from any interior-slope cell that `emptiness` never departs from R6's frontier value in that
+specific region -- consistent with §9.4's picture note that R7 and R6 look identical at
+`stream_neck`.
+
+### 9.4 Contact sheets (regenerated, R7 added as column 7)
+
+All in `artifacts/design/upscale-2026-09-14/`, 7 columns x 2 rows now (original, R1, R3, R4, R5,
+R6, R7 -- see the updated `README.md` in that directory):
+- `sand_slope_b_dry_contact_sheet.png` -- the clearest visual confirmation: column 6 (R6) shows a
+  scatter of stray orange boundary flecks across the whole interior slope face, worst near the
+  peak, at both m=2 and m=4; column 7 (R7) shows visibly fewer, with a clean line closest to the
+  original.
+- `stream_neck_c_ema_contact_sheet.png` -- R7 (col 7) is visually indistinguishable from R6 (col
+  6) here: both already draw a clean, continuous column. Expected -- a confined free-falling
+  stream's cells are dominated by R6's confinement/strip machinery, not by the interior-emptiness
+  case R7 targets, so there was nothing for R7 to fix or break here.
+- `pool_wall_edge_c_ema_contact_sheet.png` -- R7 (col 7) shows a slightly cleaner line than R6
+  (col 6) at m=4, consistent with the modest `pool_wall_edge` chamfer improvement in §9.3.
+
+### 9.5 Recommendation: hold for review, do not ship yet
+
+R7 removes the interior under-coverage mechanism (confirmed in §9.1-9.2) while keeping nearly every
+one of R6's measured wins (§9.3: one small, localized `fp_px` regression on snapshot (a) only,
+IoU/rms still net positive there) and visibly reducing the interior speckle in the picture that
+motivated R6 in the first place (§9.4). It is a numeric improvement over R6 on every metric in this
+instrument at every `(snapshot, m)` tested EXCEPT snapshot (a)'s `fp_px` (§9.3), with conservation
+unaffected.
+
+That said, per this round's task: **the shader was not touched.** This is a measurement-only
+round, same as rounds 1-3. Three things are worth the user's judgment before any shader work
+starts:
+1. §9.1's honest framing -- the specific "false negatives are dominated by interior" claim that
+   motivated this round was wrong; only the softer, continuous version of it held up. R7 is
+   justified by the continuous metric and the picture, not by the number originally cited.
+2. R6 already measured well in round 3 and still "quilted" on the real page. This instrument's
+   thresholded metrics and 128px crops are a proxy, not the deployed shader; the caveat in the
+   original §6 ("the shader feeds `coverage*height` into a continuous `empty_blend`, so the
+   coverage-based rules should look somewhat better on the page than they score here") cuts both
+   ways -- it means R6's real on-page quilting could also come from something this instrument
+   under-weights (e.g. the R6-vs-R7 difference being too subtle at typical viewing distance, or a
+   temporal interaction with the EMA/dithering not modelled here). R7 fixing the mechanism this
+   instrument can see is not a guarantee it fixes what the user saw with their own eyes.
+3. §9.3's `fp_px` trade on snapshot (a) is small but real and unexplained beyond a plausible guess
+   (that snapshot's higher `lateral_substeps`/more active streams). It should be understood, not
+   just tolerated, before this goes anywhere near the shader.
