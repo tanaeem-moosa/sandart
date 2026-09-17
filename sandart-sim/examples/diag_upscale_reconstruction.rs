@@ -30,6 +30,12 @@ use sandart_sim::{DrawingSimulation, MaterialMode, SandboxShape, MASK_INSIDE, MA
 
 const THRESH: f32 = 0.003;
 
+/// Round 5's chosen sharpening factor for R7's `emptiness = clamp(k*(1-h_min/h0), 0, 1)`, used by
+/// every ALL_RULES/PICTURE_RULES table and picture from here on (i.e. "R7" in this file's output
+/// means "R7 at this k" unless a table explicitly sweeps k). See `run_r7_k_sweep` and
+/// UPSCALE-RECONSTRUCTION-2026-09-14.md §10 for how this value was chosen.
+const R7_K: f32 = 1.0; // placeholder pending the sweep in this run; updated below once measured.
+
 // ---------------------------------------------------------------------------------------------
 // Scene construction -- ports of examples/profile_sandfall_water.rs's `build()`.
 // ---------------------------------------------------------------------------------------------
@@ -733,24 +739,8 @@ fn eval_r6(model: &Option<R6Model>, dx: f32, dy: f32, m: usize) -> (f32, f32) {
 }
 
 fn reconstruct_r6(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
-    let n = coarse.size * m;
     let models = precompute_r6_models(coarse, m);
-    let mut h_out = vec![0.0f32; n * n];
-    let mut cov_out = vec![0.0f32; n * n];
-    for fy in 0..n {
-        let yc = fine_to_coarse(fy, m);
-        let cy = clamp_idx(yc.round() as i32, coarse.size);
-        let dy = yc - cy as f32;
-        for fx in 0..n {
-            let xc = fine_to_coarse(fx, m);
-            let cx = clamp_idx(xc.round() as i32, coarse.size);
-            let dx = xc - cx as f32;
-            let (hv, cv) = eval_r6(&models[cy * coarse.size + cx], dx, dy, m);
-            h_out[fy * n + fx] = hv;
-            cov_out[fy * n + fx] = cv;
-        }
-    }
-    (h_out, cov_out)
+    reconstruct_from_r6_models(coarse, &models, m)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -766,35 +756,23 @@ fn reconstruct_r6(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
 // step saturates `emptiness` near 0 while a genuine empty neighbour saturates it near 1.
 // ---------------------------------------------------------------------------------------------
 
-/// `emptiness` in `[0,1]`: `1 - h_min/max(h0,eps)`, `h_min` = the minimum height over this cell's
-/// own INSIDE 3x3 neighbours (self excluded, OUTSIDE/wall excluded per the "walls are not empty"
-/// invariant -- a wall is not treated as an empty neighbour for this signal, unlike R6's deliberate
-/// confinement exception). 0 when every neighbour is at least as tall as `h0` (a flat interior, a
-/// local trough, or -- the case that matters here -- a normal downhill slope step, where the
-/// neighbour is only slightly shorter than `h0` so the ratio stays close to 1); saturates toward 1
-/// only when a neighbour is genuinely close to empty (near 0) relative to `h0`, which is a large
-/// relative drop regardless of how small `h0` itself is. A cell with no inside neighbours at all
-/// (isolated single-cell island) reports 0 -- nothing nearby to be "empty" relative to, so this
-/// signal defers entirely to R6's own `f`.
-fn cell_emptiness(coarse: &CoarseField, cx: i32, cy: i32, h0: f32) -> f32 {
-    let mut h_min = f32::MAX;
-    let mut any = false;
-    for ddy in -1..=1i32 {
-        for ddx in -1..=1i32 {
-            if ddx == 0 && ddy == 0 {
-                continue;
-            }
-            let (nx, ny) = (cx + ddx, cy + ddy);
-            if coarse.inside(nx, ny) {
-                h_min = h_min.min(coarse.get(nx, ny));
-                any = true;
-            }
-        }
-    }
-    if !any {
-        return 0.0;
-    }
-    (1.0 - h_min / h0.max(1e-6)).clamp(0.0, 1.0)
+/// Round 5: `emptiness = clamp(k * (1 - h_min/max(h0,eps)), 0, 1)` for a sharpening factor `k`
+/// (round 4 shipped `k=1`; see `run_r7_k_sweep` for why a larger `k` was measured and the doc's
+/// §10 for the result). `h_min` is "the minimum height over this cell's own INSIDE 3x3
+/// neighbours, self excluded" per the original round-4 spec -- but note `neighbour_min_max`'s
+/// `mn` (self-INCLUDED-by-initialisation) is mathematically identical for this purpose: whenever
+/// the true neighbour minimum is >= h0 (flat/uphill/local-min), `mn` collapses to `h0` giving raw
+/// `0`, while the self-excluded form gives some value `<= 0` that the caller's `clamp(_, 0, 1)`
+/// also flattens to `0` -- same result either way, for every `k`. So this reuses the `mn` already
+/// computed by `neighbour_min_max` (no second stencil pass), which is also exactly what the
+/// shader's `eval_sub_cell_r7` does (it already has `mn` on hand from the Barth-Jespersen stencil).
+/// 0 when every neighbour is at least as tall as `h0` (a flat interior, a local trough, or a normal
+/// downhill slope step, where the neighbour is only slightly shorter than `h0` so the ratio stays
+/// close to 1); saturates toward 1 (faster, for larger `k`) only when a neighbour is genuinely
+/// close to empty (near 0) relative to `h0`.
+fn r7_emptiness(mn: f32, h0: f32, k: f32) -> f32 {
+    let raw = 1.0 - mn / h0.max(1e-6);
+    (k * raw).clamp(0.0, 1.0)
 }
 
 /// Identical to `precompute_r6_models` except the strip width/offset are built from `f_eff =
@@ -802,7 +780,7 @@ fn cell_emptiness(coarse: &CoarseField, cx: i32, cy: i32, h0: f32) -> f32 {
 /// closed-form conservation solve are all otherwise unchanged, so R7 reuses `R6Model`/`eval_r6`
 /// verbatim. Conservation is unaffected by construction: the `delta` solve targets whatever
 /// coverage field is actually used (built from `f_eff` here), exactly as it targets R6's `f`.
-fn precompute_r7_models(coarse: &CoarseField, m: usize) -> Vec<Option<R6Model>> {
+fn precompute_r7_models(coarse: &CoarseField, m: usize, k: f32) -> Vec<Option<R6Model>> {
     let n = coarse.size;
     let mut out = Vec::with_capacity(n * n);
     for y in 0..n {
@@ -813,13 +791,12 @@ fn precompute_r7_models(coarse: &CoarseField, m: usize) -> Vec<Option<R6Model>> 
             }
             let (cx, cy) = (x as i32, y as i32);
             let h0 = coarse.get(cx, cy);
-            let (_, h_ref) = neighbour_min_max(coarse, cx, cy);
-            let h_ref = h_ref.max(1e-6);
+            let (mn, mx) = neighbour_min_max(coarse, cx, cy);
+            let h_ref = mx.max(1e-6);
             let f = (h0 / h_ref).clamp(0.0, 1.0);
-            let emptiness = cell_emptiness(coarse, cx, cy, h0);
+            let emptiness = r7_emptiness(mn, h0, k);
             let f_eff = 1.0 + (f - 1.0) * emptiness; // mix(1.0, f, emptiness)
             let (gx, gy) = ls_gradient(coarse, cx, cy);
-            let (mn, mx) = neighbour_min_max(coarse, cx, cy);
             let phi = bj_phi(h0, gx, gy, mn, mx);
             let (conf_x, bias_x) = axis_confinement_bias(coarse, cx, cy, 1, 0, h0, h_ref);
             let (conf_y, bias_y) = axis_confinement_bias(coarse, cx, cy, 0, 1, h0, h_ref);
@@ -851,9 +828,11 @@ fn precompute_r7_models(coarse: &CoarseField, m: usize) -> Vec<Option<R6Model>> 
     out
 }
 
-fn reconstruct_r7(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
+/// Shared by `reconstruct_r6`/`reconstruct_r7`/the round-5 `k` sweep: evaluates a precomputed
+/// `R6Model` field (from any of `precompute_r6_models`/`precompute_r7_models`) over the full fine
+/// grid. Pulled out once both R6 and R7 needed it, plus the sweep needing it at arbitrary `k`.
+fn reconstruct_from_r6_models(coarse: &CoarseField, models: &[Option<R6Model>], m: usize) -> (Vec<f32>, Vec<f32>) {
     let n = coarse.size * m;
-    let models = precompute_r7_models(coarse, m);
     let mut h_out = vec![0.0f32; n * n];
     let mut cov_out = vec![0.0f32; n * n];
     for fy in 0..n {
@@ -870,6 +849,11 @@ fn reconstruct_r7(coarse: &CoarseField, m: usize) -> (Vec<f32>, Vec<f32>) {
         }
     }
     (h_out, cov_out)
+}
+
+fn reconstruct_r7(coarse: &CoarseField, m: usize, k: f32) -> (Vec<f32>, Vec<f32>) {
+    let models = precompute_r7_models(coarse, m, k);
+    reconstruct_from_r6_models(coarse, &models, m)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -973,6 +957,146 @@ fn coverage_deficit_stats(cov: &[f32], fine_mask: &[u8], material_interior: &[bo
     (if n_i > 0 { sum_i / n_i as f64 } else { 0.0 }, n_i, if n_f > 0 { sum_f / n_f as f64 } else { 0.0 }, n_f)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Round 5, "also, briefly": two candidate SECOND mechanisms for a regular grid-pattern artifact at
+// `m > 1`, independent of R7's `f_eff`/`k` entirely -- neither reads `f` or `emptiness` at all, so
+// if either shows real structure, no choice of `k` in §step-1 can fix it.
+// ---------------------------------------------------------------------------------------------
+
+struct WInstability { mean_abs_dw: f64, n_pairs: usize, frac_extreme: f64, n_interior: usize }
+
+/// Does R6/R7's per-axis blend weight `w = conf_x/(conf_x+conf_y)` flip abruptly between
+/// neighbouring material-interior coarse cells even when neither axis shows a real feature (both
+/// confinements near 0, so in principle `w` is deciding between two strips that both cover nearly
+/// the whole cell and shouldn't matter -- but `w` itself is still computed as a ratio of two
+/// noise-floor quantities there, and a ratio of near-zero numbers is exactly where a ratio is least
+/// stable). `mean_abs_dw` is the mean `|w(neighbour)-w(cell)|` over every adjacent (4-connected)
+/// pair of material-interior cells; `frac_extreme` is the fraction of material-interior cells
+/// where `w` has already saturated near 0 or 1 (a near-binary axis pick) despite no axis showing a
+/// real feature by construction (that's what "material-interior" means here). `w` does not depend
+/// on `h0`'s relation to `h_ref` or on any `k` -- only on the 3x3 neighbour heights via
+/// `axis_confinement_bias` -- so this is unaffected by anything in step 1.
+fn w_instability_stats(coarse: &CoarseField, material_interior: &[bool]) -> WInstability {
+    let n = coarse.size;
+    let mut w_field = vec![f32::NAN; n * n];
+    let (mut n_interior, mut n_extreme) = (0usize, 0usize);
+    for y in 0..n {
+        for x in 0..n {
+            if coarse.mask[y * n + x] == MASK_OUTSIDE || !material_interior[y * n + x] {
+                continue;
+            }
+            let (cx, cy) = (x as i32, y as i32);
+            let h0 = coarse.get(cx, cy);
+            let (_, h_ref) = neighbour_min_max(coarse, cx, cy);
+            let h_ref = h_ref.max(1e-6);
+            let (conf_x, _) = axis_confinement_bias(coarse, cx, cy, 1, 0, h0, h_ref);
+            let (conf_y, _) = axis_confinement_bias(coarse, cx, cy, 0, 1, h0, h_ref);
+            let wsum = conf_x + conf_y;
+            let w = if wsum > 1e-6 { conf_x / wsum } else { 0.5 };
+            w_field[y * n + x] = w;
+            n_interior += 1;
+            if w < 0.1 || w > 0.9 {
+                n_extreme += 1;
+            }
+        }
+    }
+    let (mut sum_dw, mut n_pairs) = (0.0f64, 0usize);
+    for y in 0..n {
+        for x in 0..n {
+            let w0 = w_field[y * n + x];
+            if w0.is_nan() {
+                continue;
+            }
+            if x + 1 < n {
+                let w1 = w_field[y * n + x + 1];
+                if !w1.is_nan() {
+                    sum_dw += (w1 - w0).abs() as f64;
+                    n_pairs += 1;
+                }
+            }
+            if y + 1 < n {
+                let w1 = w_field[(y + 1) * n + x];
+                if !w1.is_nan() {
+                    sum_dw += (w1 - w0).abs() as f64;
+                    n_pairs += 1;
+                }
+            }
+        }
+    }
+    WInstability {
+        mean_abs_dw: if n_pairs > 0 { sum_dw / n_pairs as f64 } else { 0.0 },
+        n_pairs,
+        frac_extreme: if n_interior > 0 { n_extreme as f64 / n_interior as f64 } else { 0.0 },
+        n_interior,
+    }
+}
+
+struct BoundaryJump { boundary_mean: f64, n_boundary: usize, within_mean: f64, n_within: usize }
+
+/// Does the per-cell INDEPENDENTLY-FIT plane introduce a periodic discontinuity exactly at
+/// coarse-cell boundaries -- which would look like a regular `m x m` grid of seams -- that isn't
+/// present in the original field? Compares the mean absolute height jump between adjacent fine
+/// pixels that CROSS a coarse-cell boundary against the same for pixel pairs that stay WITHIN one
+/// coarse cell, both restricted to pairs where both participating coarse cells are
+/// material-interior (i.e. no real edge should be present at all, in EITHER cell). If a rule's
+/// boundary/within ratio sits far above the ORIGINAL field's own ratio (which has no reason to
+/// know the coarse grid exists), that is a real, distinct artifact from coverage shrinkage -- a
+/// property of the independently-fit plane, not of `f`/`emptiness`, so no choice of R7's `k` can
+/// move it.
+fn boundary_jump_stats(recon: &[f32], fine_mask: &[u8], material_interior: &[bool], fine_size: usize, m: usize, coarse_size: usize) -> BoundaryJump {
+    let (mut sum_b, mut n_b, mut sum_w, mut n_w) = (0.0f64, 0usize, 0.0f64, 0usize);
+    for fy in 0..fine_size {
+        let cy = (fy / m).min(coarse_size - 1);
+        for fx in 1..fine_size {
+            let (idx, idx0) = (fy * fine_size + fx, fy * fine_size + fx - 1);
+            if fine_mask[idx] == MASK_OUTSIDE || fine_mask[idx0] == MASK_OUTSIDE {
+                continue;
+            }
+            let cx = (fx / m).min(coarse_size - 1);
+            let cx0 = ((fx - 1) / m).min(coarse_size - 1);
+            if !material_interior[cy * coarse_size + cx] || !material_interior[cy * coarse_size + cx0] {
+                continue;
+            }
+            let jump = (recon[idx] - recon[idx0]).abs() as f64;
+            if fx % m == 0 {
+                sum_b += jump;
+                n_b += 1;
+            } else {
+                sum_w += jump;
+                n_w += 1;
+            }
+        }
+    }
+    for fy in 1..fine_size {
+        for fx in 0..fine_size {
+            let (idx, idx0) = (fy * fine_size + fx, (fy - 1) * fine_size + fx);
+            if fine_mask[idx] == MASK_OUTSIDE || fine_mask[idx0] == MASK_OUTSIDE {
+                continue;
+            }
+            let cy = (fy / m).min(coarse_size - 1);
+            let cy0 = ((fy - 1) / m).min(coarse_size - 1);
+            let cx = (fx / m).min(coarse_size - 1);
+            if !material_interior[cy * coarse_size + cx] || !material_interior[cy0 * coarse_size + cx] {
+                continue;
+            }
+            let jump = (recon[idx] - recon[idx0]).abs() as f64;
+            if fy % m == 0 {
+                sum_b += jump;
+                n_b += 1;
+            } else {
+                sum_w += jump;
+                n_w += 1;
+            }
+        }
+    }
+    BoundaryJump {
+        boundary_mean: if n_b > 0 { sum_b / n_b as f64 } else { 0.0 },
+        n_boundary: n_b,
+        within_mean: if n_w > 0 { sum_w / n_w as f64 } else { 0.0 },
+        n_within: n_w,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Rule { R0, R1, R2, R3, R4, R5, R6, R7 }
 
@@ -1040,7 +1164,7 @@ fn reconstruct_pair(coarse: &CoarseField, rule: Rule, m: usize) -> (Vec<f32>, Ve
         let (h, cov) = match rule {
             Rule::R5 => reconstruct_r5(coarse, m),
             Rule::R6 => reconstruct_r6(coarse, m),
-            Rule::R7 => reconstruct_r7(coarse, m),
+            Rule::R7 => reconstruct_r7(coarse, m, R7_K),
             _ => unreachable!(),
         };
         let combined: Vec<f32> = (0..h.len()).map(|i| if cov[i] >= 0.5 { h[i] } else { -1.0 }).collect();
@@ -1722,11 +1846,69 @@ fn run_snapshot(snap: &Snapshot) {
         // fields of R5/R6/R7 (R4's coverage is binary in/out, not a fraction, so this doesn't apply
         // to it in the same sense).
         println!("    -- mean coverage deficit (1-coverage), continuous, not threshold-gated --");
-        for (name, cov) in [("R5_plic_aa", reconstruct_r5(&coarse, m).1), ("R6_strip_aa", reconstruct_r6(&coarse, m).1), ("R7_strip_sat", reconstruct_r7(&coarse, m).1)] {
+        for (name, cov) in [("R5_plic_aa", reconstruct_r5(&coarse, m).1), ("R6_strip_aa", reconstruct_r6(&coarse, m).1), ("R7_strip_sat", reconstruct_r7(&coarse, m, R7_K).1)] {
             let ds = coverage_deficit_stats(&cov, &snap.mask512, &material_interior, size, m, coarse_size);
             println!(
                 "    {name:<14} interior: mean_deficit={:.5} n={} | frontier: mean_deficit={:.5} n={}",
                 ds.0, ds.1, ds.2, ds.3
+            );
+        }
+
+        // Round 5, step 1: R7 sharpening sweep. `k` only ever multiplies the raw emptiness signal
+        // before its own clamp (see `r7_emptiness`), so frontier behaviour (where raw is already
+        // ~1 well before any clamp) is expected to stay put across k -- printed per-k so that
+        // expectation is checked, not assumed.
+        println!("    -- round 5: R7 sharpening sweep (emptiness = clamp(k*(1-h_min/h0),0,1)) --");
+        for &k in &[1.0f32, 2.0, 3.0, 4.0] {
+            let models = precompute_r7_models(&coarse, m, k);
+            let (h, cov) = reconstruct_from_r6_models(&coarse, &models, m);
+            let combined: Vec<f32> = (0..h.len()).map(|i| if cov[i] >= 0.5 { h[i] } else { -1.0 }).collect();
+            let mass_err = max_mass_error(&coarse, &h, m);
+            let cm = coverage_metrics(&snap.h, &combined, &snap.mask512, size, THRESH);
+            let fn_split = fn_interior_frontier_split(&snap.h, &combined, THRESH, &snap.mask512, size, &material_interior, m, coarse_size);
+            let deficit = coverage_deficit_stats(&cov, &snap.mask512, &material_interior, size, m, coarse_size);
+            println!(
+                "    k={k:<4} max_mass_err={:>10.6} iou={:.4} fp_px={:>5} fn_px={:>5} (interior={} frontier={}) interior_deficit={:.5} frontier_deficit={:.5}",
+                mass_err, cm.iou, cm.fp, cm.fn_, fn_split.interior, fn_split.frontier, deficit.0, deficit.2
+            );
+            if !free_fall_rows.is_empty() {
+                let agg = per_stream_width(&snap.h, &h, &snap.mask512, size, &free_fall_rows, THRESH);
+                println!(
+                    "        per-stream width occ_ratio_mean={:.3} mass_ratio_mean={:.3} missing={} extra={}",
+                    agg.mean_occ_ratio, agg.mean_mass_ratio, agg.n_missing, agg.n_extra
+                );
+            }
+            let rule_boundary = boundary_mask(&combined, &snap.mask512, size, THRESH);
+            let rule_dt = chamfer_dt(&rule_boundary, size);
+            for (label, region) in [("stream_sides", region_stream), ("pool_wall_edge", region_pool), ("slope_front", region_slope)] {
+                let cf = front_fidelity(&orig_boundary, &orig_dt, &rule_boundary, &rule_dt, size, region);
+                println!("        front_fidelity[{label}] fwd mean={:.3} max={:.3}", cf.fwd_mean, cf.fwd_max);
+            }
+        }
+
+        // Round 5, "also, briefly": two candidate SECOND mechanisms for a regular grid-pattern
+        // artifact, independent of R7/k entirely (neither check below depends on k at all).
+        println!("    -- round 5: second-mechanism checks (independent of R7's k) --");
+        let wstats = w_instability_stats(&coarse, &material_interior);
+        println!(
+            "    w-instability: mean|dw| between adjacent material-interior cells={:.4} (n_pairs={}) frac_extreme(w<0.1 or w>0.9)={:.3} (n_interior_cells={})",
+            wstats.mean_abs_dw, wstats.n_pairs, wstats.frac_extreme, wstats.n_interior
+        );
+        let orig_bj = boundary_jump_stats(&snap.h, &snap.mask512, &material_interior, size, m, coarse_size);
+        let ratio = |bj: &BoundaryJump| if bj.within_mean > 1e-12 { bj.boundary_mean / bj.within_mean } else { f64::NAN };
+        println!(
+            "    boundary-jump ORIGINAL  : boundary_mean={:.6} (n={}) within_mean={:.6} (n={}) ratio={:.3}",
+            orig_bj.boundary_mean, orig_bj.n_boundary, orig_bj.within_mean, orig_bj.n_within, ratio(&orig_bj)
+        );
+        for (name, recon) in [
+            ("R1".to_string(), reconstruct(&coarse, Rule::R1, m)),
+            ("R6".to_string(), reconstruct_r6(&coarse, m).0),
+            ("R7(k=1)".to_string(), reconstruct_r7(&coarse, m, 1.0).0),
+        ] {
+            let bj = boundary_jump_stats(&recon, &snap.mask512, &material_interior, size, m, coarse_size);
+            println!(
+                "    boundary-jump {name:<8}: boundary_mean={:.6} (n={}) within_mean={:.6} (n={}) ratio={:.3}",
+                bj.boundary_mean, bj.n_boundary, bj.within_mean, bj.n_within, ratio(&bj)
             );
         }
     }

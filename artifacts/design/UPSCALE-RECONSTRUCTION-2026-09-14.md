@@ -13,6 +13,18 @@ change to conservation, and no shader change (this document and the instrument o
 task instructions this round was run under). R7 is NOT yet shipped; §9 ends with a request for
 review, not a recommendation to ship.
 
+**Revision note (round 5, 2026-09-16, same day).** §10: a requested sharpening factor `k` on R7's
+emptiness term was swept over `{1,2,3,4}` and found to go the WRONG way -- `k=1` (already-measured
+R7) wins on every metric at every `(snapshot, m)`, and every larger `k` degrades monotonically,
+converging back toward plain R6 -- so per the brief's own fallback, no `k` is reported as a
+"winner," and `k=1` ships as the best-of-set, not as a value that met the requested target. Also in
+§10: two SEPARATE candidate mechanisms for a regular grid-pattern artifact, neither touched by R7 --
+an unstable axis blend weight `w` (§10.2), and a per-cell independently-fit plane's discontinuity
+across cell boundaries, which R7 measurably makes WORSE, not better, by removing R6's own
+incidental partial masking of it (§10.3). `eval_sub_cell_r6` in `sandart-render/src/shader.wgsl` is
+renamed `eval_sub_cell_r7` and now implements R7 at `k=1`, still behind the `sub_cell_edges_enabled`
+toggle, still default OFF (unchanged by this round).
+
 MEASUREMENT ONLY. Nothing in `sandart-render`, `sandart-wasm`, or `sandart-sim`'s physics changed.
 The instrument is `sandart-sim/examples/diag_upscale_reconstruction.rs`
 (`cargo run -p sandart-sim --release --example diag_upscale_reconstruction`); everything below is
@@ -718,7 +730,8 @@ R6, R7 -- see the updated `README.md` in that directory):
 - `pool_wall_edge_c_ema_contact_sheet.png` -- R7 (col 7) shows a slightly cleaner line than R6
   (col 6) at m=4, consistent with the modest `pool_wall_edge` chamfer improvement in §9.3.
 
-### 9.5 Recommendation: hold for review, do not ship yet
+### 9.5 Recommendation: hold for review, do not ship yet (superseded by §10 -- the shader WAS
+subsequently touched, see §10.4)
 
 R7 removes the interior under-coverage mechanism (confirmed in §9.1-9.2) while keeping nearly every
 one of R6's measured wins (§9.3: one small, localized `fp_px` regression on snapshot (a) only,
@@ -744,3 +757,132 @@ starts:
 3. §9.3's `fp_px` trade on snapshot (a) is small but real and unexplained beyond a plausible guess
    (that snapshot's higher `lateral_substeps`/more active streams). It should be understood, not
    just tolerated, before this goes anywhere near the shader.
+
+## 10. Round 5 (2026-09-16): a `k` sweep that goes the wrong way, and two more mechanisms
+
+The coordinator asked for a sharpening factor `k` on R7's emptiness term --
+`emptiness = clamp(k*(1-h_min/max(h0,eps)), 0, 1)`, `k` in `{1,2,3,4}` -- to try to push the ~0.6%
+residual interior coverage deficit (§9.3) under ~0.2%, and, separately, asked whether a SECOND
+mechanism (independent of coverage collapse entirely) could also be producing a regular grid
+pattern at `m>1`.
+
+### 10.1 The `k` sweep: no candidate clears the bar, and larger `k` is strictly worse
+
+Measured on all three snapshots at both `m`, full output reproducible via the command in §8.
+Snapshot (c) EMA, m=2 (representative -- every snapshot and `m` shows the identical monotonic
+direction, see the raw run log for the other five tables):
+
+| k | max_mass_err | iou | fp_px | fn_px (interior/frontier) | interior_deficit | stream_sides fwd | pool_wall fwd | slope_front fwd |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 0.000000 | **0.9744** | 0 | **1723** (130/1593) | **0.00623** | **0.079** | **0.738** | **0.534** |
+| 2 | 0.000000 | 0.9736 | 0 | 1776 (183/1593) | 0.00872 | 0.127 | 0.802 | 0.705 |
+| 3 | 0.000000 | 0.9735 | 0 | 1788 (195/1593) | 0.00979 | 0.127 | 0.802 | 0.729 |
+| 4 | 0.000000 | 0.9734 | 0 | 1789 (196/1593) | 0.01053 | 0.127 | 0.802 | 0.729 |
+
+`k=1` (already-shipped-in-this-doc R7) wins EVERY column, and `k=4`'s numbers (fn 1789, IoU
+0.9734, chamfer 0.127/0.802/0.729) are converging back toward plain R6's own row from §9.3 (fn
+1800, IoU 0.9733, chamfer 0.127/0.802/0.729) -- at `k=4`, R7 is most of the way back to being R6.
+The frontier false-negative count is the one thing that stays exactly put across every `k` (1593
+at every row here, matching the other five snapshot/m tables too) -- confirming a genuine frontier
+cell's raw ratio is already saturating the clamp well before `k=1`, so multiplying it further can't
+move it.
+
+**Why, mathematically:** `k` multiplies the RAW ratio uniformly, before the clamp -- it does not
+discriminate between "a hair off flat" (small raw, the case R7 exists to rescue) and "genuinely
+near-empty" (raw close to 1 already). Any `k>1` amplifies BOTH cases, so it pushes the small-raw
+interior case toward MORE emptiness (less coverage, undoing R7's own fix) while doing nothing
+further to the already-saturated frontier case. A transform that actually sharpened the
+interior/frontier distinction in the intended direction would need to suppress small raw values
+relatively more than large ones (e.g. an exponent `raw^k` for `k>1`, not a multiplier) -- not
+measured here, since the brief asked for this exact formula measured first, and it was.
+
+**Per the brief's own fallback: no `k` in `{1,2,3,4}` clears 0.2% interior deficit at either `m`,
+and every `k>1` also degrades IoU, `fn_px`, and all three chamfer regions relative to `k=1`, on
+every snapshot.** Reported plainly, not picking a favourite among `{2,3,4}` -- there isn't one;
+`k=1` is simply the best of the four, not a value that meets the target. §10.4 says what shipped
+because of this.
+
+### 10.2 Second mechanism #1: the axis blend weight `w` is measurably unstable
+
+`w = conf_x/(conf_x+conf_y)` picks how much of R6/R7's coverage comes from the x-strip vs the
+y-strip. It reads only `h0` and the 3x3 neighbour heights -- nothing about `f`, `emptiness`, or `k`
+-- so if it shows real instability, no `k` from §10.1 touches it.
+
+Measured `mean|Δw|` between every adjacent (4-connected) pair of MATERIAL-INTERIOR coarse cells
+(cells with no empty neighbour at all, by §9.1's definition -- i.e. cells where, by construction,
+NEITHER axis has a real feature, so `w` is deciding between two options that are both supposed to
+be "no feature here"), and the fraction of material-interior cells where `w` has already saturated
+near 0 or 1 despite that:
+
+| snapshot | m | mean\|Δw\| (adjacent interior cells) | frac(w<0.1 or w>0.9) | n interior cells |
+|---|---|---|---|---|
+| a | 2 | 0.098 | 19.0% | 16172 |
+| a | 4 | 0.123 | 23.0% | 3833 |
+| b | 2 | 0.085 | 10.1% | 6493 |
+| b | 4 | 0.128 | 17.0% | 1474 |
+| c | 2 | 0.092 | 18.8% | 16213 |
+| c | 4 | 0.120 | 22.6% | 3846 |
+
+`w` moves by ~0.09-0.13 on average between adjacent cells that, by definition, have no real
+feature to disagree about, and 10-23% of these "no feature" cells have already snapped to a
+near-exclusive pick of one axis. This is a real, measurable instability: `w` is a ratio of two
+near-zero confinement values in exactly this regime, and a ratio of near-zero numbers is the least
+numerically stable shape a signal can take. This is a plausible SECOND, independent source of
+regular-grid structure at `m>1` -- unrelated to coverage collapse, unaffected by `f_eff`/`k`, and
+NOT fixed by anything in this round.
+
+### 10.3 Second mechanism #2: per-cell plane discontinuity, and R7 makes it WORSE on this measure
+
+Each coarse cell's plane (`h0 + phi*gx*dx + phi*gy*dy + delta`) is fit independently of its
+neighbours' planes; Barth-Jespersen keeps a cell's own corners inside its neighbourhood's min/max,
+but nothing enforces that two adjacent cells' planes agree at the shared face. `boundary_jump_stats`
+compares the mean `|height jump|` between fine-pixel pairs that CROSS a coarse-cell boundary
+against pairs that stay WITHIN one cell, restricted to pairs where BOTH participating cells are
+material-interior (no real edge should be present in either). The ORIGINAL field's own ratio is
+the null hypothesis: it has no reason to know the coarse grid exists, so its boundary/within ratio
+should be close to 1 (and it is, 0.81-0.97 across every row measured -- if anything slightly
+BELOW 1, the opposite of a grid artifact).
+
+| snapshot | m | ORIGINAL ratio | R1 ratio | R6 ratio | R7(k=1) ratio |
+|---|---|---|---|---|---|
+| a | 2 | 0.914 | 0.913 | 1.050 | **1.663** |
+| a | 4 | 0.957 | 0.662 | 1.130 | **2.244** |
+| b | 2 | 0.876 | 0.565 | 1.611 | **1.976** |
+| b | 4 | 0.815 | 0.352 | 1.058 | **1.659** |
+| c | 2 | 0.905 | 0.734 | 0.722 | **1.034** |
+| c | 4 | 0.966 | 0.624 | 0.989 | **1.783** |
+
+R1 (bilinear) always sits BELOW the original's own ratio -- expected, it blurs across boundaries,
+which can only shrink a boundary-vs-within gap. R6 sits close to or modestly above 1 in most rows.
+**R7(k=1) is the highest ratio in every single row, always above both R6 and the original, by a
+wide margin at `m=4`.** This is a real, distinct, and unwelcome finding: `emptiness` making an
+interior cell's coverage saturate to 1 removes R6's own strip tapering right at the cell edge,
+which had been incidentally PARTIALLY MASKING this plane mismatch (a strip narrower than the full
+cell fades to near-zero coverage before it reaches the boundary, so the raw plane's boundary value
+rarely gets rendered at full weight); R7 forcing full coverage renders that raw, unmatched plane
+value at the boundary directly, more often. **Fixing mechanism #1 (coverage collapse) made
+mechanism #2 (plane discontinuity) more visible, not because R7 broke anything new, but because it
+removed an incidental band-aid mechanism #1's own shrinkage was providing for mechanism #2.**
+
+### 10.4 What shipped, and what didn't
+
+Given §10.1's result, `k=1` -- the ALREADY-MEASURED round-4 R7, unchanged -- is what's implemented
+in the shader (`sandart-render/src/shader.wgsl`'s `eval_sub_cell_r6`, renamed `eval_sub_cell_r7` to
+match; still behind the `sub_cell_edges_enabled` toggle, still default OFF, not touched here). This
+is the best-measured candidate available, not a candidate that met the requested target -- §10.1's
+own numbers are why no larger `k` was used.
+
+**This is not represented as settling "quilting."** Two things are now measured and NOT fixed by
+this change:
+- §10.2's `w` instability, unrelated to `f`/`emptiness` entirely.
+- §10.3's plane-boundary discontinuity, which this specific change (§9's R7 fix) makes WORSE on the
+  boundary-jump measure, not better, by removing R6's incidental partial masking of it.
+
+Both are plausible contributors to a REGULAR grid-pattern artifact distinct from the
+non-flat-interior shrinkage §9 diagnosed and fixed. Neither is addressed in this round. A future
+attempt at either should start here rather than re-deriving that they exist: mechanism #1 (`w`)
+would need `w`'s ratio-of-near-zero instability addressed directly (a deadband, or blending by
+something less noise-sensitive than a raw ratio, near `conf_x+conf_y ~= 0`); mechanism #2 (plane
+discontinuity) would need either continuity enforced between neighbouring planes at their shared
+face, or the coverage strip's own tapering restored in some form that doesn't reopen mechanism #1's
+coverage collapse.
