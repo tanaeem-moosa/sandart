@@ -1099,10 +1099,11 @@ impl eframe::App for SandArtApp {
                 // Same as `heatmap_enabled` just above: a sandart-wasm/web debug feature only,
                 // no native desktop control for it, so it stays off here.
                 pressure_heatmap_enabled: 0,
-                // Same as the two flags above: sandart-wasm/web debug features only, no native
-                // desktop control for either, so both stay off here.
-                coarse_eta_enabled: 0,
-                coarse_delta_enabled: 0,
+                // Explicit padding, following `LightingUniforms::_pad_heatmap_tail0/1`'s doc
+                // comment in sandart-render -- these two slots used to be the coarse-level debug
+                // overlay flags, removed 2026-09-17.
+                _pad_heatmap_tail0: 0,
+                _pad_heatmap_tail1: 0,
                 // The native desktop app has no sim-downscale control (that's a sandart-wasm/web
                 // feature only, `set_sim_downscale`) -- it always runs simulation and display at
                 // the same resolution, so `render_size` here is simply `GRID_SIZE`, same as

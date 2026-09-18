@@ -133,17 +133,6 @@ pub struct WasmSimulationState {
     // underlying `sim.column_depth` it displays is always maintained regardless of whether this
     // is on; this field only gates whether `render()` bothers uploading/tinting with it).
     pressure_heatmap_enabled: bool,
-    // Coarse-level `eta` (hydraulic head) debug overlay (see `set_coarse_eta_overlay`). Same
-    // shape as `heatmap_enabled`/`pressure_heatmap_enabled` above -- a pure render-side toggle;
-    // the underlying `sim.coarse_state.eta` runs unconditionally whenever `sim.coarse.available`
-    // (OVERCLOCKING.md: no longer gated on `coarse_pressure_coupling`, which now only gates the
-    // driving-potential coupling into the fine solver), this only gates whether `render()`
-    // bothers uploading/tinting with it. Off by default, like every other Debug-group overlay.
-    coarse_eta_enabled: bool,
-    // Coarse-fine disagreement (`Delta`) debug overlay (see `set_coarse_delta_overlay`). Same
-    // shape as `coarse_eta_enabled` just above -- independent toggle, independent texture, so
-    // both can be viewed at once the same way the block and pressure heat-maps already can.
-    coarse_delta_enabled: bool,
     // Cache key for the per-cell pressure overlay upload below: the `(tick_count, source)` the
     // currently-uploaded texture was built from, or `None` if nothing has been uploaded yet.
     //
@@ -315,8 +304,6 @@ impl WasmSimulationState {
             quantile_mode: QuantileMode::Off,
             heatmap_enabled: false,
             pressure_heatmap_enabled: false,
-            coarse_eta_enabled: false,
-            coarse_delta_enabled: false,
             pressure_heat_cache_key: None,
             last_dt: 1.0 / 60.0,
             quantile_eased: [0.0; MAX_QUANTILE_LINES],
@@ -1415,8 +1402,8 @@ impl WasmSimulationState {
             marbles: current_marbles,
             heatmap_enabled: if self.heatmap_enabled { 1 } else { 0 },
             pressure_heatmap_enabled: if self.pressure_heatmap_enabled { 1 } else { 0 },
-            coarse_eta_enabled: if self.coarse_eta_enabled { 1 } else { 0 },
-            coarse_delta_enabled: if self.coarse_delta_enabled { 1 } else { 0 },
+            _pad_heatmap_tail0: 0,
+            _pad_heatmap_tail1: 0,
             render_size: self.render_size as f32,
             _pad_uniform_tail0: 0,
             _pad_uniform_tail1: 0,
