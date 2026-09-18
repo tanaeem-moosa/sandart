@@ -7,17 +7,6 @@ use wgpu;
 /// different size (tests, the desktop app), passed for both.
 pub const GRID_SIZE: usize = 512;
 
-/// The LOD scheduler's block grid edge length -- always 64x64 blocks regardless of simulation
-/// resolution (see `sandart-sim`'s `DrawingSimulation::new_with_size` doc comment on
-/// `block_size`; the resolution-invariance is load-bearing there specifically because this
-/// texture's upload, `update_block_heat` below, assumes an exact `HEAT_GRID_SIZE * HEAT_GRID_SIZE`
-/// source length with no bounds check). The block-simulation heat-map overlay's texture is sized
-/// to this, not to `GRID_SIZE`/the current resolution. Was 32 (32x32 = 1024 blocks);
-/// `sandart-sim`'s `block_size` moved from `sim_size/32` to `sim_size/64` to match what was then
-/// `coarse::CoarseGeometry`'s pressure tile (HIERARCHICAL-PRESSURE.md §2); the coarse level was
-/// deleted 2026-08-30, so `HEAT_GRID_SIZE` now just tracks the LOD block grid on its own.
-pub const HEAT_GRID_SIZE: usize = 64;
-
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
@@ -85,48 +74,46 @@ pub struct LightingUniforms {
     // block (144 bytes wasted for 9 floats), whereas array<vec4<f32>, 3> has zero padding.
     pub quantile_positions: [[f32; 4]; 3],
     pub marbles: [MarbleUniform; 5], // array of up to 5 marbles
-    /// Block-simulation heat-map debug overlay: 1 = draw it, 0 = off (default). Appended as the
-    /// LAST field rather than interleaved among the scalars above (`shadow_enabled` et al.), so
-    /// only the tail of the struct needs to change.
+    /// Explicit padding. These four `u32` slots held, in order: the block-simulation heat-map
+    /// overlay flag (`heatmap_enabled`), the per-cell pressure-field heat-map overlay flag
+    /// (`pressure_heatmap_enabled`), and the coarse-level eta/disagreement debug overlay flags
+    /// (`coarse_eta_enabled`/`coarse_delta_enabled`, removed 2026-09-17 when `coarse.rs` was
+    /// found to have no surviving producer). All four were removed together 2026-09-17: none of
+    /// the four textures/bindings they gated (`block_heat_tex`, `pressure_heat_tex`, and the two
+    /// already-removed coarse textures) had any producer or upload caller left in the tree --
+    /// `update_block_heat`/`update_pressure_heat` had zero callers anywhere, no wasm setter for
+    /// either flag was ever implemented, and no UI checkbox or `demo.js` wiring referenced them,
+    /// so both flags could only ever be 0. `_pad_heatmap_tail2`/`_pad_heatmap_tail3` are the
+    /// (already-explicit) former `coarse_eta_enabled`/`coarse_delta_enabled` slots; this comment
+    /// on `_pad_heatmap_tail0` is the one to read for the layout history of all four.
     ///
     /// The struct's overall alignment is 16 (forced by `quantile_positions`/`marbles`), so its
-    /// size must land on a 16-byte multiple; before this field the struct was exactly 224 bytes
-    /// (`224 / 16 == 14`, no trailing pad). A single `u32` here would land at 228, and Rust
-    /// would silently insert 12 bytes of TRAILING padding to round back up to 240 -- which
-    /// `derive(Pod)` correctly refuses to allow, since padding bytes are uninitialized and Pod
-    /// promises every byte is defined. `_pad_heatmap` makes that padding explicit data instead,
-    /// the same fix `sim_size` above already used once for a mid-struct gap (see its doc
-    /// comment) -- here there's nothing useful to repurpose the slack for, so it stays padding.
-    pub heatmap_enabled: u32,
-    /// Per-cell pressure-field debug overlay (see `HeightmapRenderer::pressure_heat_texture`'s
-    /// doc comment and `sandart_sim::DrawingSimulation::pressure_field_texels`): 1 = draw it,
-    /// 0 = off (default). Repurposes one of `heatmap_enabled`'s three trailing pad slots below
-    /// (the same move `sim_size` above made once already for a mid-struct gap -- see its doc
-    /// comment) rather than growing the struct, so this costs no layout change and the
-    /// `size_of::<LightingUniforms>() == 256` assert further down stays untouched at the size it
-    /// was then (240; `render_size` below grew it to 256 later). The remaining two slots were
-    /// `coarse_eta_enabled`/`coarse_delta_enabled` (the coarse-level debug overlays), removed
-    /// 2026-09-17 along with the rest of the coarse-overlay plumbing -- `coarse.rs` itself was
-    /// deleted 2026-08-30, so those two flags were never anything but 0 (no producer, no setter,
-    /// no UI toggle). `_pad_heatmap_tail0`/`_pad_heatmap_tail1` below keep the two slots as
-    /// explicit padding at the same offsets, so this struct's size and layout are unchanged.
-    pub pressure_heatmap_enabled: u32,
+    /// size must land on a 16-byte multiple; before `heatmap_enabled` was added the struct was
+    /// exactly 224 bytes (`224 / 16 == 14`, no trailing pad). A single `u32` there would have
+    /// landed at 228, and Rust would silently insert 12 bytes of TRAILING padding to round back
+    /// up to 240 -- which `derive(Pod)` correctly refuses to allow, since padding bytes are
+    /// uninitialized and Pod promises every byte is defined. Explicit padding fields make that
+    /// padding explicit data instead, the same fix `sim_size` above already used once for a
+    /// mid-struct gap (see its doc comment).
     pub _pad_heatmap_tail0: u32,
     pub _pad_heatmap_tail1: u32,
+    pub _pad_heatmap_tail2: u32,
+    pub _pad_heatmap_tail3: u32,
     /// Render/display grid resolution `n` (the resolution `<select>`'s value; can be 1024, unlike
     /// `sim_size`) -- the sim-downscale feature's second size, added when simulation resolution
     /// `S` split from `n` (`S = n / m`, `sandart-wasm`'s `set_sim_downscale`). Unlike `sim_size`
     /// this is NOT a repurposed padding slot: at the time this field was added every one of
-    /// `_pad_heatmap`'s original four slots was already spent (see `pressure_heatmap_enabled`'s
-    /// doc comment above), so this grows the struct from 240 to 256 bytes -- the next 16-byte
-    /// multiple, since the struct's overall alignment is 16 (forced by `quantile_positions` /
-    /// `marbles`). Used only where a shader quantity is genuinely per-render-pixel rather than
-    /// per-simulation-cell -- currently just the grain hash (`hash(floor(uv * render_size))`),
-    /// which is meant to look like fixed-size sand grains on screen regardless of how coarsely
-    /// the interior is being simulated. At `m == 1` this equals `sim_size` exactly.
+    /// `_pad_heatmap_tail0..3`'s slots was already spent by the four now-removed debug overlay
+    /// flags (see `_pad_heatmap_tail0`'s doc comment above), so this grows the struct from 240 to
+    /// 256 bytes -- the next 16-byte multiple, since the struct's overall alignment is 16 (forced
+    /// by `quantile_positions`/`marbles`). Used only where a shader quantity is genuinely
+    /// per-render-pixel rather than per-simulation-cell -- currently just the grain hash
+    /// (`hash(floor(uv * render_size))`), which is meant to look like fixed-size sand grains on
+    /// screen regardless of how coarsely the interior is being simulated. At `m == 1` this equals
+    /// `sim_size` exactly.
     pub render_size: f32,
     /// Explicit trailing padding, added alongside `render_size` above for the same reason
-    /// `_pad_heatmap` originally existed (see `heatmap_enabled`'s doc comment): `render_size`
+    /// `_pad_heatmap_tail0..3` originally existed (see that field's doc comment): `render_size`
     /// lands the struct at 244 bytes, and Rust would otherwise silently insert 12 bytes of
     /// TRAILING padding to round back up to the next 16-byte multiple (256) -- which
     /// `derive(Pod)` correctly refuses to allow, since padding bytes are uninitialized and Pod
@@ -179,21 +166,6 @@ pub struct HeightmapRenderer {
     /// wherever the two disagree enough to matter. Only uploaded (`update_fine_mask`) when `m > 1`
     /// -- see that method's doc comment.
     pub fine_mask_texture: wgpu::Texture,
-    /// Block-simulation heat-map debug overlay texture. Fixed 64x64 (`HEAT_GRID_SIZE`) rather
-    /// than `sim_size` x `sim_size` like the textures above -- the LOD scheduler's block grid
-    /// is always exactly 64x64 regardless of simulation resolution (see the `block_size`
-    /// derivation note in sandart-sim's `DrawingSimulation::new_with_size`), so this is the one
-    /// GPU resource in this struct that does NOT need rebuilding when resolution changes.
-    pub block_heat_texture: wgpu::Texture,
-    /// Per-cell pressure-field debug overlay texture. Unlike `block_heat_texture` above, this IS
-    /// sized `sim_size` x `sim_size` (one texel per simulation cell, not per 64x64 LOD block --
-    /// see `set_grid_size`'s doc comment in sandart-wasm for why sim_size can be 64/128/256/512),
-    /// so it must be rebuilt on a resolution change along with `heightmap_texture` et al., not
-    /// left alone the way `block_heat_texture` is. R8Unorm holding the log-compressed,
-    /// already-normalised [0,1] `column_depth` value produced by
-    /// `sandart_sim::DrawingSimulation::pressure_field_texels` -- see that function's doc comment
-    /// for the scaling rationale.
-    pub pressure_heat_texture: wgpu::Texture,
     pub bind_group: wgpu::BindGroup,
     pub uniform_buffer: wgpu::Buffer,
     pub camera_buffer: wgpu::Buffer,
@@ -201,7 +173,7 @@ pub struct HeightmapRenderer {
     pub index_buffer: wgpu::Buffer,
     pub num_indices: u32,
     /// Simulation grid resolution every per-sim-cell GPU texture in this struct (heightmap,
-    /// colormap, `shape_mask_texture`, the heat-map overlays) was allocated at -- `S` in the
+    /// colormap, `shape_mask_texture`) was allocated at -- `S` in the
     /// sim-downscale scheme (`sandart-wasm`'s `set_sim_downscale`/`set_grid_size`):
     /// `S = render_size / m`. Renamed from `grid_size` when the render resolution `n` and the sim
     /// resolution `S` decoupled.
@@ -347,49 +319,6 @@ impl HeightmapRenderer {
         let fine_mask_texture_view =
             fine_mask_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create block-simulation heat-map texture (HEAT_GRID_SIZE x HEAT_GRID_SIZE R8Unorm).
-        // R8Unorm (not R8Uint like shape_mask_texture) because the shader reads it as a
-        // normalised [0,1] intensity to feed straight into a colour ramp, not as a small set of
-        // discrete tags to branch on. Sized to the fixed 64x64 block grid, not `texture_size`
-        // (which scales with `sim_size`) -- see `HEAT_GRID_SIZE`'s doc comment.
-        let heat_texture_size = wgpu::Extent3d {
-            width: HEAT_GRID_SIZE as u32,
-            height: HEAT_GRID_SIZE as u32,
-            depth_or_array_layers: 1,
-        };
-        let block_heat_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("block_heat_texture"),
-            size: heat_texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let block_heat_texture_view =
-            block_heat_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Create per-cell pressure-field heat-map texture (sim_size x sim_size R8Unorm).
-        // Sized to `texture_size` (tracks `sim_size`), unlike `block_heat_texture` above which
-        // stays fixed at 64x64 -- this overlay tints individual simulation cells, not LOD blocks.
-        // R8Unorm for the same reason as `block_heat_texture`: the shader reads it as a
-        // normalised [0,1] intensity to feed a colour ramp, not as discrete tags.
-        let pressure_heat_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("pressure_heat_texture"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let pressure_heat_texture_view =
-            pressure_heat_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
         // 2. Create heightmap sampler (using Nearest filtering for portable R32Float manual bilinear interpolation in shader)
         let heightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("heightmap_sampler"),
@@ -487,31 +416,6 @@ impl HeightmapRenderer {
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        // Read via `textureLoad` in the shader (integer block coords, no
-                        // sampler), same as `shape_mask_tex` above -- `filterable: false` costs
-                        // nothing since nothing ever samples this with a filtering sampler.
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 7,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        // Read via `textureLoad` in the shader, same as `block_heat_tex` -- no
-                        // sampler needed, so `filterable: false` costs nothing.
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
                     binding: 10,
                     // FRAGMENT-only, like `shape_mask_tex` -- nothing in `vs_main` needs the
                     // render-resolution outline (vertex displacement stays sim-mask/heightmap
@@ -557,14 +461,6 @@ impl HeightmapRenderer {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(&shape_mask_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&block_heat_texture_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::TextureView(&pressure_heat_texture_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 10,
@@ -627,8 +523,6 @@ impl HeightmapRenderer {
             colormap_texture,
             shape_mask_texture,
             fine_mask_texture,
-            block_heat_texture,
-            pressure_heat_texture,
             bind_group,
             uniform_buffer,
             camera_buffer,
@@ -695,8 +589,7 @@ impl HeightmapRenderer {
     /// Callers must only call this at `m > 1` (`render_size > sim_size`): at `m == 1`
     /// `fine_mask_texture` is a 1x1 placeholder (see `new`'s doc comment on that field) that this
     /// write would overrun, and the shader never reads this binding at `m == 1` anyway
-    /// (`smooth_mask` in `fs_main` gates it) -- exactly the same "gate the upload, not just the
-    /// shader read" contract `update_block_heat` below already follows for its own overlay.
+    /// (`smooth_mask` in `fs_main` gates it).
     pub fn update_fine_mask(&mut self, queue: &wgpu::Queue, data: &[u8]) {
         let render_size = self.render_size as u32;
         queue.write_texture(
@@ -718,122 +611,6 @@ impl HeightmapRenderer {
                 depth_or_array_layers: 1,
             },
         );
-    }
-
-    /// Upload the block-simulation heat-map (R8Unorm) to GPU. `data` must be
-    /// `HEAT_GRID_SIZE * HEAT_GRID_SIZE` bytes, row-major -- see
-    /// `DrawingSimulation::block_heat_texels` in sandart-sim, which produces exactly that.
-    /// Callers are expected to only call this while the overlay is switched on (see
-    /// `sandart-wasm`'s `render()`), since the whole point of gating the upload behind the
-    /// toggle -- not just the shader read -- is to cost nothing when it's off.
-    pub fn update_block_heat(&mut self, queue: &wgpu::Queue, data: &[u8]) {
-        let size = HEAT_GRID_SIZE as u32;
-        let aligned_bytes_per_row = (size + 255) & !255;
-        if aligned_bytes_per_row == size {
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &self.block_heat_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                data,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(size),
-                    rows_per_image: Some(size),
-                },
-                wgpu::Extent3d {
-                    width: size,
-                    height: size,
-                    depth_or_array_layers: 1,
-                },
-            );
-        } else {
-            let mut padded = vec![0u8; (aligned_bytes_per_row * size) as usize];
-            for y in 0..size as usize {
-                let src_start = y * size as usize;
-                let dst_start = y * aligned_bytes_per_row as usize;
-                padded[dst_start..dst_start + size as usize].copy_from_slice(&data[src_start..src_start + size as usize]);
-            }
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &self.block_heat_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &padded,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(aligned_bytes_per_row),
-                    rows_per_image: Some(size),
-                },
-                wgpu::Extent3d {
-                    width: size,
-                    height: size,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-    }
-
-    /// Upload the per-cell pressure-field heat-map (R8Unorm) to GPU. `data` must be
-    /// `sim_size * sim_size` bytes, row-major -- see
-    /// `DrawingSimulation::pressure_field_texels` in sandart-sim, which produces exactly that.
-    /// Same "only call while the overlay is on" contract as `update_block_heat`: gating the
-    /// upload behind the toggle (not just the shader read) is the "costs nothing when off" half
-    /// that the shader-side `pressure_heatmap_enabled == 0u` early-out doesn't cover on its own.
-    pub fn update_pressure_heat(&mut self, queue: &wgpu::Queue, data: &[u8]) {
-        let sim_size = self.sim_size as u32;
-        let aligned_bytes_per_row = (sim_size + 255) & !255;
-        if aligned_bytes_per_row == sim_size {
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &self.pressure_heat_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                data,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(sim_size), // 1 byte per pixel for R8Unorm
-                    rows_per_image: Some(sim_size),
-                },
-                wgpu::Extent3d {
-                    width: sim_size,
-                    height: sim_size,
-                    depth_or_array_layers: 1,
-                },
-            );
-        } else {
-            let mut padded = vec![0u8; (aligned_bytes_per_row * sim_size) as usize];
-            for y in 0..sim_size as usize {
-                let src_start = y * sim_size as usize;
-                let dst_start = y * aligned_bytes_per_row as usize;
-                padded[dst_start..dst_start + sim_size as usize].copy_from_slice(&data[src_start..src_start + sim_size as usize]);
-            }
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &self.pressure_heat_texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &padded,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(aligned_bytes_per_row),
-                    rows_per_image: Some(sim_size),
-                },
-                wgpu::Extent3d {
-                    width: sim_size,
-                    height: sim_size,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
     }
 
     /// Upload a sub-rectangle of CPU float heightmap data directly to the WGPU texture.
@@ -1060,10 +837,10 @@ mod tests {
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                     MarbleUniform { pos: [0.0, 0.0], radius: 0.025, z_pos: 0.0 },
                 ],
-                heatmap_enabled: 0,
-                pressure_heatmap_enabled: 0,
                 _pad_heatmap_tail0: 0,
                 _pad_heatmap_tail1: 0,
+                _pad_heatmap_tail2: 0,
+                _pad_heatmap_tail3: 0,
                 render_size: GRID_SIZE as f32,
                 _pad_uniform_tail0: 0,
                 _pad_uniform_tail1: 0,
@@ -1347,10 +1124,10 @@ mod tests {
                         MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
                         MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
                     ],
-                    heatmap_enabled: 0,
-                    pressure_heatmap_enabled: 0,
                     _pad_heatmap_tail0: 0,
                     _pad_heatmap_tail1: 0,
+                    _pad_heatmap_tail2: 0,
+                    _pad_heatmap_tail3: 0,
                     render_size: GRID_SIZE as f32,
                     _pad_uniform_tail0: 0,
                     _pad_uniform_tail1: 0,

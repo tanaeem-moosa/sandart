@@ -122,32 +122,6 @@ pub struct WasmSimulationState {
     // Quantile mass-distribution overlay (UI-facing setting; only actually applied to `sim`
     // while `simulator_mode == SandFall` — see `set_quantile_mode`/`set_simulator_mode`).
     quantile_mode: QuantileMode,
-    // Block-simulation heat-map debug overlay (see `set_heatmap_overlay`). Off by default, like
-    // `shadows_enabled` and `quantile_mode` — a pure render-side toggle, doesn't affect `sim` at
-    // all (the underlying per-block counter it displays, `sim.block_heat_buckets`, is always
-    // maintained regardless of whether this is on; this field only gates whether `render()`
-    // bothers uploading/tinting with it).
-    heatmap_enabled: bool,
-    // Per-cell pressure-field debug overlay (see `set_pressure_heatmap_overlay`). Same shape as
-    // `heatmap_enabled` just above: a pure render-side toggle, doesn't affect `sim` at all (the
-    // underlying `sim.column_depth` it displays is always maintained regardless of whether this
-    // is on; this field only gates whether `render()` bothers uploading/tinting with it).
-    pressure_heatmap_enabled: bool,
-    // Cache key for the per-cell pressure overlay upload below: the `(tick_count, source)` the
-    // currently-uploaded texture was built from, or `None` if nothing has been uploaded yet.
-    //
-    // Exists for the PAUSED case, which is the one this overlay is actually for (see the pause /
-    // step controls in demo.js -- they were added so a pressure distribution could be read while
-    // nothing moves). Pause stops `step()` but deliberately keeps `render()` running every frame,
-    // so without this the new head-field source would recompute a bit-identical field ~60 times a
-    // second at ~11.4ms a call (w=512, release) and make the paused inspection sluggish for no
-    // reason at all. `tick_count` does not advance while paused, so the whole recompute-and-upload
-    // is skipped after the first frame.
-    //
-    // Keyed on the SOURCE as well as the tick so flipping `pressure_heatmap_head_field` while
-    // paused -- exactly the A/B this overlay was built for -- redraws immediately instead of
-    // showing a stale field from the other source.
-    pressure_heat_cache_key: Option<(u32, bool)>,
     // Last dt seen by `step()`, used to make the per-frame easing below frame-rate independent.
     last_dt: f32,
     // Displayed (eased) quantile line positions, plus whether they hold a meaningful previous
@@ -302,9 +276,6 @@ impl WasmSimulationState {
             clock_minute: 99,
             color_mode: 0,
             quantile_mode: QuantileMode::Off,
-            heatmap_enabled: false,
-            pressure_heatmap_enabled: false,
-            pressure_heat_cache_key: None,
             last_dt: 1.0 / 60.0,
             quantile_eased: [0.0; MAX_QUANTILE_LINES],
             quantile_eased_valid: false,
@@ -932,11 +903,16 @@ impl WasmSimulationState {
         self.sim.fresh_pressure_field = enabled;
     }
 
-    /// Selects which quantity feeds the pressure heat-map overlay (see
-    /// `set_pressure_heatmap_overlay` for the overlay's own on/off switch): forwarded straight to
-    /// the sim, a plain field write (same shape as `set_fresh_pressure_field` just above — no
-    /// reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
-    /// `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
+    /// Selects which quantity the sim's persistent `head_field` buffer would feed the per-cell
+    /// pressure heat-map overlay, IF that overlay still existed -- it was removed render/wasm-side
+    /// 2026-09-17 (dead: no producer, no setter, no UI toggle) along with `heatmap_enabled`/
+    /// `pressure_heatmap_enabled`. This setter is intentionally left alone: flipping it does not
+    /// only feed a render overlay, it also changes whether `settle_tick` advances `head_field` at
+    /// all this tick (see `head_field_needs_advance`), which is used elsewhere. Verified
+    /// byte-identical simulation output either way by `pressure_heatmap_head_field_toggle.rs`.
+    /// Forwarded straight to the sim, a plain field write (same shape as `set_fresh_pressure_field`
+    /// just above — no reset, no reinitialisation, safe to call every frame from `syncSettings()`).
+    /// See `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
     /// for what it switches between: `false` (default) is today's shipped `column_depth`; `true`
     /// is task #55 step 2's static hydraulic head field, converted to a pressure-like quantity so
     /// it renders on the same colour scale.
@@ -1206,15 +1182,6 @@ impl WasmSimulationState {
             // not a copy/interleave step.
             self.renderer.update_colormap(&self.queue, bytemuck::cast_slice::<u32, u8>(&self.sim.cell_colors));
             self.full_upload_needed = false;
-            // Anything that forces a full heightmap re-upload -- reset, resolution change, shape
-            // change, material change -- has also invalidated whatever the pressure overlay last
-            // drew. Hanging the invalidation off this flag rather than off each of those call
-            // sites individually is deliberate: `full_upload_needed` is already set at every one
-            // of them, so a future one gets this for free instead of silently keeping a stale
-            // field. It also covers the case the tick-count key alone cannot -- `sim.reset()`
-            // sets `tick_count` back to 0, which could otherwise collide with a cached key from
-            // an earlier tick 0 and leave the pre-reset image on screen.
-            self.pressure_heat_cache_key = None;
             // Nothing is mid-blend right after a full upload -- every cell was just snapped.
             self.settling_box = ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false };
         } else if !self.temporal_smoothing_enabled {
@@ -1400,10 +1367,10 @@ impl WasmSimulationState {
             sim_size: self.sim_size as f32,
             quantile_positions: quantile_positions_uniform,
             marbles: current_marbles,
-            heatmap_enabled: if self.heatmap_enabled { 1 } else { 0 },
-            pressure_heatmap_enabled: if self.pressure_heatmap_enabled { 1 } else { 0 },
             _pad_heatmap_tail0: 0,
             _pad_heatmap_tail1: 0,
+            _pad_heatmap_tail2: 0,
+            _pad_heatmap_tail3: 0,
             render_size: self.render_size as f32,
             _pad_uniform_tail0: 0,
             _pad_uniform_tail1: 0,

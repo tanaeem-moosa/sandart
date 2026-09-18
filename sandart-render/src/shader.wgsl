@@ -11,19 +11,6 @@
 // stage's own height/colour/normal taps do -- see that function's doc comment for why the
 // vertex stage needs its own copy of this indicator rather than reusing `fs_main`'s.
 @group(0) @binding(5) var shape_mask_tex: texture_2d<u32>;
-// Block-simulation heat-map debug overlay. Always a fixed 64x64 texels (see `HEAT_GRID_SIZE` in
-// sandart-render/src/lib.rs) regardless of `uniforms.sim_size` -- the LOD scheduler's block
-// grid doesn't scale with resolution. Read via `textureLoad` (integer block coords), same as
-// `shape_mask_tex`, so no sampler binding is needed for it.
-@group(0) @binding(6) var block_heat_tex: texture_2d<f32>;
-// Per-cell pressure-field debug overlay. Unlike `block_heat_tex` above, this IS sized
-// `uniforms.sim_size` x `uniforms.sim_size` (one texel per simulation cell), holding the
-// already log-compressed, normalised [0,1] `column_depth` value produced by
-// `sandart_sim::DrawingSimulation::pressure_field_texels` -- see that function's doc comment for
-// why a log scale against a fixed reference (not per-frame auto-normalisation) was chosen. Read
-// via `textureLoad` (integer cell coords), same as `shape_mask_tex`/`block_heat_tex`, so no
-// sampler binding is needed for it either.
-@group(0) @binding(7) var pressure_heat_tex: texture_2d<f32>;
 // The vessel outline re-rasterized at RENDER resolution (`uniforms.render_size` x
 // `uniforms.render_size`), via the SAME `sandart_sim::DrawingSimulation::rasterize_shape_mask`
 // function `shape_mask_tex` above comes from -- just sampled at a finer lattice, not a second copy
@@ -99,29 +86,23 @@ struct LightingUniforms {
     // 16 bytes in a uniform buffer block and silently desync every field that follows it.
     quantile_positions: array<vec4<f32>, 3>,
     marbles: array<MarbleUniform, 5>,
-    // Block-simulation heat-map debug overlay: 1u = draw it, 0u = off (default). Mirrors the
-    // Rust-side `LightingUniforms` in sandart-render/src/lib.rs exactly -- see that field's doc
-    // comment for why the trailing `_pad_heatmap*` scalars below exist (an explicit stand-in for
-    // what would otherwise be silent struct-end padding, which `derive(Pod)` on the Rust side
-    // refuses to allow).
+    // Explicit padding matching the Rust side's `_pad_heatmap_tail0..3`. These four slots used to
+    // be the block-simulation heat-map, per-cell pressure-field, and (already-removed 2026-09-17)
+    // coarse-level eta/disagreement debug overlay flags (`heatmap_enabled`, then
+    // `pressure_heatmap_enabled`, `coarse_eta_enabled`, `coarse_delta_enabled`); the block and
+    // pressure heat-map overlays were removed 2026-09-17 as well -- their textures/bindings had
+    // no producer and their shader branches were dead code. See `_pad_heatmap_tail0`'s Rust-side
+    // doc comment in sandart-render/src/lib.rs for the layout history.
     //
-    // Three separate `u32` scalars, NOT `array<u32, 3>` or `vec3<u32>`: WGSL's uniform-address-
+    // Four separate `u32` scalars, NOT `array<u32, 4>` or `vec4<u32>`: WGSL's uniform-address-
     // space layout rules force BOTH of those to 16-byte alignment/stride (an array's per-element
-    // stride and a vec3's own alignment each round up to 16 in this address space), which would
+    // stride and a vec4's own alignment each round up to 16 in this address space), which would
     // shove this padding off to a different offset than the Rust side's plain, tightly-packed
-    // `[u32; 3]` and desync every byte after it. Bare scalars stay 4-byte aligned, matching Rust.
-    heatmap_enabled: u32,
-    // Per-cell pressure-field debug overlay: 1u = draw it, 0u = off (default). Repurposes one of
-    // the trailing pad scalars above rather than growing the struct -- mirrors the Rust-side
-    // `LightingUniforms::pressure_heatmap_enabled` in sandart-render/src/lib.rs exactly; see that
-    // field's doc comment for why this must stay a bare `u32` at this exact offset.
-    pressure_heatmap_enabled: u32,
-    // Explicit padding matching the Rust side's `_pad_heatmap_tail0`/`_pad_heatmap_tail1`. These
-    // two slots used to be the coarse-level `eta`/disagreement debug overlay flags
-    // (`coarse_eta_enabled`/`coarse_delta_enabled`); removed 2026-09-17 along with the rest of the
-    // coarse-overlay plumbing -- see `pressure_heatmap_enabled`'s Rust-side doc comment.
+    // `[u32; 4]` and desync every byte after it. Bare scalars stay 4-byte aligned, matching Rust.
     _pad_heatmap_tail0: u32,
     _pad_heatmap_tail1: u32,
+    _pad_heatmap_tail2: u32,
+    _pad_heatmap_tail3: u32,
     // Render/display grid resolution `n` -- mirrors the Rust-side `LightingUniforms::render_size`
     // exactly; see that field's doc comment for why this grows the struct (240 -> 256 bytes)
     // rather than repurposing padding like every field above it. Used only where a shader
@@ -130,7 +111,7 @@ struct LightingUniforms {
     render_size: f32,
     // Explicit trailing padding matching the Rust side's `_pad_uniform_tail0/1/2` -- see
     // `render_size`'s Rust-side doc comment. Three bare `u32` scalars, not an array, for the same
-    // reason `heatmap_enabled`'s doc comment above gives: WGSL arrays stride to 16 bytes in the
+    // reason `_pad_heatmap_tail0`'s doc comment above gives: WGSL arrays stride to 16 bytes in the
     // uniform address space, which would desync this from Rust's tightly-packed layout.
     _pad_uniform_tail0: u32,
     _pad_uniform_tail1: u32,
@@ -1147,82 +1128,6 @@ fn fs_main(
                 final_color = mix(final_color, line_color, line_alpha);
             }
         }
-    }
-
-    // Block-simulation heat-map debug overlay. Same placement contract as the quantile lines
-    // just above: past the `in_casing` early-return and the marble-hit return, so it only ever
-    // tints actual sand/table, never the casing or a marble, and `heatmap_enabled == 0u` (the
-    // default) skips this whole block, costing nothing.
-    if (uniforms.heatmap_enabled != 0u) {
-        // The block grid is a fixed 64x64 regardless of `uniforms.sim_size` (see
-        // `block_heat_tex`'s binding comment -- HEAT_GRID_SIZE in sandart-render/src/lib.rs, was
-        // 32 before the LOD block became grid_size/64 instead of grid_size/32), so the block a
-        // fragment falls in is just its UV scaled directly by 64, not by the cell-resolution
-        // `grid_size`.
-        let heat_block_coord = vec2<i32>(vec2<f32>(uv.x, uv.y) * 64.0);
-        let heat = textureLoad(block_heat_tex, clamp(heat_block_coord, vec2<i32>(0), vec2<i32>(63)), 0).r;
-
-        // Cold -> hot ramp: dark blue, through teal-green, to a bright orange-red at 1.0. Picked
-        // over a single-hue (e.g. all-red) ramp because this overlay sits on top of BOTH the
-        // pale tan/cream sand AND the dark casing background in the same frame: a ramp that
-        // stayed dark at its cold end would disappear into the casing, and one that stayed
-        // bright at its hot end would wash out over pale sand. Blue-to-red moves in both
-        // lightness and hue at once, so the cold end reads against light sand (dark blue on
-        // cream) and the hot end reads against the dark casing (bright red-orange on near-black)
-        // instead of either extreme depending on luck to have contrast.
-        let cold = vec3<f32>(0.06, 0.10, 0.45);
-        let mid = vec3<f32>(0.10, 0.65, 0.55);
-        let hot = vec3<f32>(1.0, 0.30, 0.05);
-        var heat_color: vec3<f32>;
-        if (heat < 0.5) {
-            heat_color = mix(cold, mid, heat * 2.0);
-        } else {
-            heat_color = mix(mid, hot, (heat - 0.5) * 2.0);
-        }
-        // A flat, fairly strong blend rather than an intensity-scaled one: this is a debug
-        // instrument meant to be read at a glance, including over a completely cold (heat = 0.0)
-        // block, which needs to visibly differ from "no overlay at all" or the coldest blocks
-        // would be indistinguishable from the overlay being off.
-        final_color = mix(final_color, heat_color, 0.55);
-    }
-
-    // Per-cell pressure-field debug overlay. Same placement contract as the two overlays above:
-    // past the `in_casing` early-return and the marble-hit return, so it only ever tints actual
-    // sand/table, and `pressure_heatmap_enabled == 0u` (the default) skips this whole block,
-    // costing nothing.
-    if (uniforms.pressure_heatmap_enabled != 0u) {
-        // Unlike `heat_block_coord` above, this texture IS sized `grid_size` x `grid_size` (one
-        // texel per simulation cell, not per 64x64 LOD block -- see `pressure_heat_tex`'s binding
-        // comment), so the coordinate is the fragment's cell index, same math as `mask_coord`
-        // near the top of this function.
-        let sim_size_i2 = i32(uniforms.sim_size);
-        let pressure_coord = vec2<i32>(i32(uv.x * uniforms.sim_size), i32(uv.y * uniforms.sim_size));
-        let pressure = textureLoad(pressure_heat_tex, clamp(pressure_coord, vec2<i32>(0), vec2<i32>(sim_size_i2 - 1)), 0).r;
-
-        // Deep violet -> hot magenta -> pale warm yellow. Deliberately a different hue path from
-        // the block heat-map's blue/teal/orange-red above (270deg->320deg->50deg here vs.
-        // 230deg->160deg->20deg there) so the two overlays are never confusable mid-comparison
-        // when flipping between them -- exactly the use case this instrument exists for (A/B'ing
-        // the "Fresh pressure field" toggle). Like that ramp it moves in both lightness and hue at
-        // once (dark, saturated violet up to a pale, warm yellow), so the cold end still reads
-        // against pale sand and the hot end still reads against the near-black casing/table,
-        // rather than either extreme depending on luck for contrast. `pressure` already IS the
-        // log-compressed, normalised [0,1] value (see `pressure_field_texels`'s doc comment for
-        // the scaling rationale) -- this ramp only maps that scalar to colour, it does no further
-        // compression itself.
-        let p_cold = vec3<f32>(0.20, 0.05, 0.35);
-        let p_mid = vec3<f32>(0.85, 0.10, 0.55);
-        let p_hot = vec3<f32>(1.0, 0.92, 0.55);
-        var pressure_color: vec3<f32>;
-        if (pressure < 0.5) {
-            pressure_color = mix(p_cold, p_mid, pressure * 2.0);
-        } else {
-            pressure_color = mix(p_mid, p_hot, (pressure - 0.5) * 2.0);
-        }
-        // Same flat, strong blend as the block heat-map overlay, for the same reason: a debug
-        // instrument meant to be read at a glance, including over a genuinely-zero-pressure void
-        // (pressure = 0.0), which needs to visibly differ from "no overlay at all".
-        final_color = mix(final_color, pressure_color, 0.55);
     }
 
     return vec4<f32>(final_color, 1.0);
