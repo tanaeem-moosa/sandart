@@ -1,5 +1,32 @@
 # Upscale reconstruction: measuring alternatives to mask-aware bilinear (2026-09-14)
 
+**OUTCOME (2026-09-17): this line of work was stopped and the shader path reverted.** R6 shipped
+behind a "Sub-cell edges" toggle (`0810235`), the user judged it "quilting" — worse than the
+shipped bilinear — and R7's interior-saturating coverage (`10b4dd1`) neither fixed that nor helped
+the falling streams the whole effort was for. The user's call: "maybe this is not worth pursuing."
+The shader, the uniform flag and the UI toggle were reverted; this document, the instrument and the
+pictures are kept as the record.
+
+Two mechanisms were diagnosed before stopping, both still unfixed:
+1. **Per-cell planes disagree at shared cell faces**, so the displayed field jumps at every cell
+   boundary — a regular grid of tiles, which is what "quilting" describes. R7 made this WORSE
+   (boundary/within jump ratio 2.24, against the true field's own 0.82-0.97), because saturating
+   interior coverage removed the strip-tapering that had partially masked the mismatch.
+2. **The axis blend weight flips between adjacent featureless cells** (mean |Δw| ≈ 0.09-0.13, with
+   10-23% of such cells already snapped to a near-binary axis pick).
+
+**Why the offline study pointed the wrong way, and what a future attempt must carry.** Every metric
+here scores a static snapshot: edge position, width, conservation, interior smoothness. None scores
+GRID REGULARITY, and the eye locks onto a regular pattern that no per-pixel error measure finds
+large. This is the second time the project has been caught by exactly this — `LATERAL-COARSE-
+CORRECTION.md` Design 1 measured +41% spread and died on visible seams. Do not reopen sub-cell
+coverage without (a) a formulation whose displayed field is continuous ACROSS cell boundaries by
+construction, and (b) a metric that scores regularity at the cell pitch. The change that actually
+improved the streams was the temporal EMA (`alpha = 0.4`), not any spatial rule.
+
+**Render cost is not the constraint** (user, 2026-09-17): at 4x with a 1024 render the page is
+under 20 ms.
+
 **Revision note (round 4, 2026-09-16).** Round 3 shipped R6 behind a toggle; the user looked at it
 on the deployed page and called it "quilting," worse than the shipped bilinear, and defaulted the
 toggle off. §9 is the follow-up: it tests the leading hypothesis (R6's `f=h0/h_ref` shrinks every

@@ -1108,10 +1108,7 @@ impl eframe::App for SandArtApp {
                 // the same resolution, so `render_size` here is simply `GRID_SIZE`, same as
                 // `sim_size` above.
                 render_size: sandart_sim::GRID_SIZE as f32,
-                // The native desktop app always renders at `m == 1` (see `render_size` above), so
-                // "Sub-cell edges" (a sandart-wasm/web-only toggle) is inert here regardless of
-                // its value; stays off for the same reason the debug flags above do.
-                sub_cell_edges_enabled: 0,
+                _pad_uniform_tail0: 0,
                 _pad_uniform_tail1: 0,
                 _pad_uniform_tail2: 0,
             };

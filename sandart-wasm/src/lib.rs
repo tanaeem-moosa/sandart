@@ -64,14 +64,6 @@ pub struct WasmSimulationState {
     /// `y` is replaced by `current` every update, i.e. equivalent to smoothing being off. Default
     /// 0.25. See `set_temporal_alpha`.
     temporal_alpha: f32,
-    /// "Sub-cell edges" UI toggle: reconstructs each render pixel's coverage/height from the sim's
-    /// own 3x3 gradient stencil (R6, see `artifacts/design/UPSCALE-RECONSTRUCTION-2026-09-14.md`)
-    /// instead of the mask-aware bilinear blend, so a falling stream or slope front at `m > 1`
-    /// draws at its true sub-cell width instead of smeared ~1 sim cell wide. Render-only, like
-    /// `temporal_smoothing_enabled` -- never touches `sim`. Only has an effect when
-    /// `sim_downscale > 1`; a plain field write is enough (no reset needed) since the shader reads
-    /// it fresh every frame. Default on. See `set_sub_cell_edges`.
-    sub_cell_edges_enabled: bool,
     /// Displayed per-cell height (`y` above), raw/uncapped by `cell_capacity_for` -- the EMA of
     /// `sim.heightmap.data`, updated once per `render()` call over the settling box (see
     /// `settling_box`). `sim_size x sim_size`, reallocated whenever `apply_grid_dims` rebuilds
@@ -290,7 +282,6 @@ impl WasmSimulationState {
             full_upload_needed: true,
             temporal_smoothing_enabled: true,
             temporal_alpha: 0.4,
-            sub_cell_edges_enabled: false,
             displayed_height: vec![0.0; GRID_SIZE * GRID_SIZE],
             displayed_wetness: vec![0.0; GRID_SIZE * GRID_SIZE],
             settling_box: ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false },
@@ -935,14 +926,6 @@ impl WasmSimulationState {
         self.temporal_alpha = alpha.clamp(0.01, 1.0);
     }
 
-    /// "Sub-cell edges" UI toggle -- see `sub_cell_edges_enabled`'s field doc comment. Plain field
-    /// write, safe every frame from `syncSettings()`: the shader reads the uniform fresh each
-    /// draw, so there is nothing to reset or re-upload on a flip (unlike
-    /// `set_temporal_smoothing`'s EMA state). Default on.
-    pub fn set_sub_cell_edges(&mut self, enabled: bool) {
-        self.sub_cell_edges_enabled = enabled;
-    }
-
     /// "Perfect simulation" debug toggle: forwarded straight to the sim, which force-admits
     /// every non-trivial (in-mask, holding material) block into its unconditional simulate tier
     /// every tick instead of letting the adaptive budget skip any of them. See
@@ -1435,7 +1418,7 @@ impl WasmSimulationState {
             coarse_eta_enabled: if self.coarse_eta_enabled { 1 } else { 0 },
             coarse_delta_enabled: if self.coarse_delta_enabled { 1 } else { 0 },
             render_size: self.render_size as f32,
-            sub_cell_edges_enabled: if self.sub_cell_edges_enabled { 1 } else { 0 },
+            _pad_uniform_tail0: 0,
             _pad_uniform_tail1: 0,
             _pad_uniform_tail2: 0,
         };
