@@ -548,16 +548,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_spiral_spacing(this.__wbg_ptr, spacing);
     }
     /**
-     * "Sub-cell edges" UI toggle -- see `sub_cell_edges_enabled`'s field doc comment. Plain field
-     * write, safe every frame from `syncSettings()`: the shader reads the uniform fresh each
-     * draw, so there is nothing to reset or re-upload on a flip (unlike
-     * `set_temporal_smoothing`'s EMA state). Default on.
-     * @param {boolean} enabled
-     */
-    set_sub_cell_edges(enabled) {
-        wasm.wasmsimulationstate_set_sub_cell_edges(this.__wbg_ptr, enabled);
-    }
-    /**
      * EMA blend factor for temporal smoothing -- see `temporal_alpha`'s field comment. Clamped
      * to (0, 1] (the UI slider already restricts it to 0.05-1.0; this just protects against a
      * stray 0.0, which would freeze `y` forever, or a negative/>1 value, which would make the
