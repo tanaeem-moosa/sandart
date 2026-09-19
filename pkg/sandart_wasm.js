@@ -265,17 +265,6 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_color_mode(this.__wbg_ptr, mode);
     }
     /**
-     * "Fresh pressure field" debug toggle: forwarded straight to the sim, a plain field write
-     * (same shape as `set_perfect_simulation` just above — no reset, no reinitialisation). See
-     * `DrawingSimulation::fresh_pressure_field`'s doc comment in sandart-sim/src/lib.rs for what
-     * it switches between. Experimental — it exists to A/B the standalone `column_depth` pass
-     * against the shipped default live, not because it is known to be an improvement.
-     * @param {boolean} enabled
-     */
-    set_fresh_pressure_field(enabled) {
-        wasm.wasmsimulationstate_set_fresh_pressure_field(this.__wbg_ptr, enabled);
-    }
-    /**
      * @param {number} x
      * @param {number} y
      */
@@ -299,20 +288,6 @@ export class WasmSimulationState {
         }
     }
     /**
-     * "Drive transport from the head field" debug toggle (task #55 step 3): forwarded straight
-     * to the sim, a plain field write (same shape as `set_fresh_pressure_field` above — no
-     * reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
-     * `DrawingSimulation::head_field_transport`'s doc comment in sandart-sim/src/lib.rs for what
-     * it switches on: `false` (default) is today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`
-     * driving head, bit-identical; `true` makes LIQUID-ONLY lateral and vertical edges use the
-     * unified hydraulic head field instead. Granular material and mixed liquid/granular edges
-     * are unaffected.
-     * @param {boolean} enabled
-     */
-    set_head_field_transport(enabled) {
-        wasm.wasmsimulationstate_set_head_field_transport(this.__wbg_ptr, enabled);
-    }
-    /**
      * @param {number} order
      */
     set_hilbert_order(order) {
@@ -330,19 +305,6 @@ export class WasmSimulationState {
      */
     set_hypotrochoid_params(r, d) {
         wasm.wasmsimulationstate_set_hypotrochoid_params(this.__wbg_ptr, r, d);
-    }
-    /**
-     * "Lateral substeps" slider: how many times the cross-gravity edge pass runs per tick, as a
-     * continuous dial, 1.0..=4.0. Plain field write, safe every frame. `1.0` (the default) is
-     * bit-identical to before this parameter existed, and so is any integer value; a fractional
-     * value is realised stochastically, once per tick and globally across the whole grid, so the
-     * expected pass count matches the dial exactly without ever running a wasted partial pass.
-     * See `DrawingSimulation::lateral_substeps`'s doc comment for the mechanism and
-     * `physics::settle_tick`'s own parameter of the same name for the full reasoning.
-     * @param {number} substeps
-     */
-    set_lateral_substeps(substeps) {
-        wasm.wasmsimulationstate_set_lateral_substeps(this.__wbg_ptr, substeps);
     }
     /**
      * @param {number} r
@@ -363,15 +325,6 @@ export class WasmSimulationState {
      */
     set_light_angle(angle) {
         wasm.wasmsimulationstate_set_light_angle(this.__wbg_ptr, angle);
-    }
-    /**
-     * "Falling liquid jitter" slider (STICKINESS.md): per-cell downward-flow jitter for
-     * UNDERFULL liquid, 0..=0.6. Plain field write, safe every frame. `0` is the pre-feature
-     * behaviour exactly. See `DrawingSimulation::liquid_fall_jitter`.
-     * @param {number} jitter
-     */
-    set_liquid_fall_jitter(jitter) {
-        wasm.wasmsimulationstate_set_liquid_fall_jitter(this.__wbg_ptr, jitter);
     }
     /**
      * @param {number} a
@@ -433,50 +386,6 @@ export class WasmSimulationState {
         const ptr0 = passStringToWasm0(mode, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         wasm.wasmsimulationstate_set_pattern_mode(this.__wbg_ptr, ptr0, len0);
-    }
-    /**
-     * "Perfect simulation" debug toggle: forwarded straight to the sim, which force-admits
-     * every non-trivial (in-mask, holding material) block into its unconditional simulate tier
-     * every tick instead of letting the adaptive budget skip any of them. See
-     * `DrawingSimulation::perfect_simulation`'s doc comment in sandart-sim/src/lib.rs. Slow by
-     * design — it exists to A/B the scheduler's approximation against the ground truth, not to
-     * be left on.
-     * @param {boolean} enabled
-     */
-    set_perfect_simulation(enabled) {
-        wasm.wasmsimulationstate_set_perfect_simulation(this.__wbg_ptr, enabled);
-    }
-    /**
-     * Selects which quantity the sim's persistent `head_field` buffer would feed the per-cell
-     * pressure heat-map overlay, IF that overlay still existed -- it was removed render/wasm-side
-     * 2026-09-17 (dead: no producer, no setter, no UI toggle) along with `heatmap_enabled`/
-     * `pressure_heatmap_enabled`. This setter is intentionally left alone: flipping it does not
-     * only feed a render overlay, it also changes whether `settle_tick` advances `head_field` at
-     * all this tick (see `head_field_needs_advance`), which is used elsewhere. Verified
-     * byte-identical simulation output either way by `pressure_heatmap_head_field_toggle.rs`.
-     * Forwarded straight to the sim, a plain field write (same shape as `set_fresh_pressure_field`
-     * just above — no reset, no reinitialisation, safe to call every frame from `syncSettings()`).
-     * See `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
-     * for what it switches between: `false` (default) is today's shipped `column_depth`; `true`
-     * is task #55 step 2's static hydraulic head field, converted to a pressure-like quantity so
-     * it renders on the same colour scale.
-     * @param {boolean} enabled
-     */
-    set_pressure_heatmap_head_field(enabled) {
-        wasm.wasmsimulationstate_set_pressure_heatmap_head_field(this.__wbg_ptr, enabled);
-    }
-    /**
-     * "Pressure-sensitive flow rate" debug toggle (task #63): forwarded straight to the sim, a
-     * plain field write (same shape as `set_head_field_transport` just above — no reset, no
-     * reinitialisation, safe to call every frame from `syncSettings()`). See
-     * `DrawingSimulation::pressure_sensitive_flow`'s doc comment in sandart-sim/src/lib.rs for
-     * what it switches on: `false` (default) is today's head-independent conveyance rate,
-     * bit-identical; `true` slows LIQUID-ONLY edges whose donor carries less than one cell of
-     * hydrostatic head. Free-falling material and granular material are unaffected.
-     * @param {boolean} enabled
-     */
-    set_pressure_sensitive_flow(enabled) {
-        wasm.wasmsimulationstate_set_pressure_sensitive_flow(this.__wbg_ptr, enabled);
     }
     /**
      * UI setter for the quantile-line overlay: 0 = off, 1 = quartiles, 2 = deciles. Stores the

@@ -858,28 +858,6 @@ function syncSettings() {
         state.set_temporal_alpha(temporalAlpha);
     }
 
-    // LOD scheduler debug instruments (both off by default) -- see the "Debug" group's comment
-    // in index.html for what each one does.
-    state.set_perfect_simulation(document.getElementById('check-perfect-sim').checked);
-    state.set_fresh_pressure_field(false);
-    state.set_pressure_heatmap_head_field(false);
-    state.set_head_field_transport(false);
-    state.set_pressure_sensitive_flow(false);
-    const fallJitterSlider = document.getElementById('fall-jitter-slider');
-    if (fallJitterSlider) {
-        const fallJitter = parseFloat(fallJitterSlider.value);
-        const fallJitterVal = document.getElementById('fall-jitter-val');
-        if (fallJitterVal) fallJitterVal.innerText = fallJitter.toFixed(2);
-        state.set_liquid_fall_jitter(fallJitter);
-    }
-    const lateralSubstepsSlider = document.getElementById('lateral-substeps-slider');
-    if (lateralSubstepsSlider) {
-        const lateralSubsteps = parseFloat(lateralSubstepsSlider.value);
-        const lateralSubstepsVal = document.getElementById('lateral-substeps-val');
-        if (lateralSubstepsVal) lateralSubstepsVal.innerText = lateralSubsteps.toFixed(1);
-        state.set_lateral_substeps(lateralSubsteps);
-    }
-
     // Update dynamic parameter panels visibility & slider constraints (does not reset/reload pattern)
     const patternType = document.getElementById('pattern-select').value;
     updateParamPanels(patternType);
@@ -1264,18 +1242,6 @@ function setupPanelInput() {
         temporalAlphaSliderEl.addEventListener('input', syncSettings);
         temporalAlphaSliderEl.addEventListener('change', syncSettings);
     }
-    document.getElementById('check-perfect-sim').addEventListener('change', syncSettings);
-    const fallJitterSliderEl = document.getElementById('fall-jitter-slider');
-    if (fallJitterSliderEl) {
-        fallJitterSliderEl.addEventListener('input', syncSettings);
-        fallJitterSliderEl.addEventListener('change', syncSettings);
-    }
-    const lateralSubstepsSliderEl = document.getElementById('lateral-substeps-slider');
-    if (lateralSubstepsSliderEl) {
-        lateralSubstepsSliderEl.addEventListener('input', syncSettings);
-        lateralSubstepsSliderEl.addEventListener('change', syncSettings);
-    }
-
     // Pause / step (see setPaused() and the module-scope isPaused/pendingSteps state above
     // tick() for why this never touches syncSettings or wasm).
     document.getElementById('btn-pause').addEventListener('click', () => {

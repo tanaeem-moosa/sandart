@@ -815,57 +815,16 @@
                 </select>
             </div>
 
-            <!-- ---- Shared: LOD scheduler debug instruments ----
-                 Off by default. "Perfect simulation" bypasses the adaptive block budget
-                 entirely (every block holding material simulates every tick, not just the ones
-                 that win the budget competition) -- it exists to A/B the scheduler's own
-                 approximation against ground truth, and it is deliberately slow. The heat-map
-                 tints each LOD block by how often it was actually simulated over roughly the last
-                 300 frames, cold = rarely, hot = every tick -- it shows exactly which blocks the
-                 budget is skipping, with or without the toggle above switched on. With
-                 overclocking on it switches to a per-FRAME view of executed sub-steps instead;
-                 see the overclocking checkbox below.
-                 "Pressure field heat-map" tints each individual grid CELL (not each 64x64 block,
-                 like the heat-map above) by a pressure-like value on a fixed log scale
-                 (violet = low/void, magenta = mid, pale yellow = high). -->
+            <!-- Pause / step: pause freezes physics while the render loop keeps running,
+                 so the canvas stays live; Step advances exactly one tick while paused. Pure
+                 JS loop state in demo.js -- never touches wasm, never routed through
+                 syncSettings(). Space toggles pause, "." steps, from anywhere except a
+                 text input. -->
             <div class="group">
-                <div class="group-title">Debug</div>
-                <label class="checkbox-container">
-                    Perfect simulation (slow)
-                    <input type="checkbox" id="check-perfect-sim">
-                    <span class="checkmark"></span>
-                </label>
-                <!-- Pause / step: pause freezes physics while the render loop keeps running,
-                     so the canvas stays live; Step advances exactly one tick while paused. Pure
-                     JS loop state in demo.js -- never touches wasm, never routed through
-                     syncSettings(). Space toggles pause, "." steps, from anywhere except a
-                     text input. -->
-                <div class="row gap-above">
+                <div class="group-title">Playback</div>
+                <div class="row">
                     <button id="btn-pause" title="Space">Pause</button>
                     <button id="btn-step" title="." disabled>Step</button>
-                </div>
-                <!-- STICKINESS.md: unrelated to the removed #70 machinery -- this randomises how
-                     fast each partly-filled liquid cell drains downward so a falling sheet stops
-                     descending as one flat front. -->
-                <div class="field row" id="fall-jitter-row">
-                    <label for="fall-jitter-slider" title="Randomises how fast each partly-filled liquid cell drains downward, so a falling sheet stops descending as one flat front. Does not affect full cells or granular material.">Falling liquid jitter</label>
-                    <span id="fall-jitter-val" class="val-display">0.00</span>
-                    <input type="range" id="fall-jitter-slider" min="0" max="0.6" step="0.02" value="0">
-                </div>
-                <!-- Fix for a settled liquid surface holding a straight ~45-degree facet instead
-                     of flattening: reruns the lateral (cross-gravity) edge pass extra times per
-                     tick, weighted by how wet (liquidity) the donor cell is. 1.0 is bit-identical to
-                     the old single pass; the page defaults to 2.5, chosen by eye on 2026-09-11
-                     (the library default stays 1.0). Dry material is always exactly 1.0.
-                     A fractional value's fractional part is realised as a single random draw per
-                     tick, global to the whole grid (not per block/cell, which showed as seams),
-                     so the expected extra-pass rate matches the slider exactly without ever
-                     running a wasted partial pass -- see `DrawingSimulation::lateral_substeps`'s
-                     doc comment. -->
-                <div class="field row" id="lateral-substeps-row">
-                    <label for="lateral-substeps-slider" title="How many times the sideways (lateral) flow pass runs per tick, scaled by how wet each donor cell is. 1.0 is today's single pass. Higher values flatten a settled liquid surface instead of leaving a straight diagonal facet. A fractional value is realised as a per-tick coin flip (e.g. 2.5 runs 3 passes half the time, 2 the other half), so the average matches the number shown. Dry material is unaffected at every value.">Lateral substeps</label>
-                    <span id="lateral-substeps-val" class="val-display">2.5</span>
-                    <input type="range" id="lateral-substeps-slider" min="1.0" max="4.0" step="0.1" value="2.5">
                 </div>
             </div>
 
