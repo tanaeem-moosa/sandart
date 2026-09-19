@@ -627,6 +627,48 @@ pub fn cell_capacity_for(wetness: f32) -> f32 {
     1.5 * (1.0 - l) + 1.0 * l
 }
 
+/// Capacity-aware acceptor room for cell `(x, y)`, accounting for every orthogonal neighbour
+/// this solver's g=0 conservative wave branch could mix its wetness in from this phase (flux on
+/// either of its edges can run in either direction -- see the branch's own comment on why a
+/// cell's incoming edge is not fixed to "left/top only").
+///
+/// Same fix as `run_lateral_edge_pass`'s Stage 1b and `settle_tick`'s phase-0 vertical edge (see
+/// either for the full derivation): `advect_properties`/the mixed-props step mass-weight-averages
+/// an acceptor's wetness with its donor's, so the acceptor's true post-transfer capacity is
+/// `cell_capacity_for` of a value between its own wetness and its donor's -- never more than the
+/// max of the two. `cell_capacity_for` is monotonically non-increasing in wetness, so capping this
+/// cell's room to `cell_capacity_for(max over self and every possible donor)` is a safe (if
+/// occasionally conservative) bound on the true post-mix capacity, whichever neighbour(s) end up
+/// donating.
+///
+/// A pure function of `(x, y)` and the frozen pre-phase `cell_props`/`shape_mask` -- never of
+/// which edge or which endpoint is being visited -- so every call site that writes this cell's
+/// `cell_freecap` slot (as the edge's `center`, or as another edge's `nb`) computes the identical
+/// value, preserving `cell_freecap`'s "pure function of the cell" invariant.
+#[inline]
+fn room_cap_4n(x: usize, y: usize, w: usize, h: usize, shape_mask: &[u8], cell_props: &CellProps) -> f32 {
+    let idx = y * w + x;
+    let mut worst_wetness = cell_props.wetness[idx];
+    let mut consider = |nidx: usize| {
+        if shape_mask[nidx] != crate::MASK_OUTSIDE {
+            worst_wetness = worst_wetness.max(cell_props.wetness[nidx]);
+        }
+    };
+    if x > 0 {
+        consider(idx - 1);
+    }
+    if x + 1 < w {
+        consider(idx + 1);
+    }
+    if y > 0 {
+        consider(idx - w);
+    }
+    if y + 1 < h {
+        consider(idx + w);
+    }
+    cell_capacity_for(worst_wetness)
+}
+
 // TOMBSTONE: DO NOT PUT A FILTER ON THE EDGE VELOCITY. Three were tried on 2026-08-16 and all
 // three are reverted. Bisected 2026-08-30; see `artifacts/design/SESSION-HANDOVER-2026-08-29.md`.
 //
@@ -4154,6 +4196,45 @@ fn run_lateral_edge_pass(
             }
         }
 
+        // ---- Stage 1b: capacity-aware acceptor headroom (incompressibility fix) ----
+        //
+        // SESSION-HANDOVER-2026-09-13.md #4: "max(h - cap) = 2.68e-2 on the gradient snapshot ...
+        // capacity drops 1.5 -> 1.0 while its height stays." `freecap[i]` above was computed from
+        // cell `i`'s OWN (pre-transfer) wetness alone, but Stage 4+5 below mass-weight-averages
+        // the acceptor's wetness with EVERY live donor's wetness once this pass's flux lands
+        // (`mixed_props[0]`) -- so a cell already near its own capacity can be pushed over the
+        // (now lower) capacity that same mixing just gave it, if a wetter neighbour donates.
+        //
+        // The mixed wetness is a convex combination of the cell's own wetness and its donor(s)',
+        // so it can never exceed the max of the values being combined. `cell_capacity_for` is
+        // monotonically non-increasing in wetness (wetter material packs less densely -- see its
+        // doc comment), so `cell_capacity_for(max(...))` is always <= the true post-mix capacity:
+        // a safe, if occasionally conservative, room bound. A cell in this pass has at most two
+        // possible donors -- its left and right row neighbours (Stage 4+5's `add_source(i - 1,
+        // ...)` / `add_source(i + 1, ...)`) -- so folding those two into the max covers every
+        // source it can actually mix from.
+        //
+        // This is a PURE function of `i` and its fixed row neighbours, never of which edge visits
+        // first (unlike a per-edge `min(cap_a, cap_b)`, which would make a cell's effective room
+        // depend on WHICH of its two edges wrote it last -- exactly the sweep-order hazard
+        // `cell_freecap`'s invariant in `settle_tick` warns against). Recomputing the whole array
+        // here, after Stage 1 finished populating `wetness` for the whole span, is what makes the
+        // right-neighbour read (`scratch.wetness[i + 1]`) well-defined regardless of scan order.
+        for i in 0..n_data {
+            if !scratch.inside[i] {
+                continue;
+            }
+            let mut worst_wetness = scratch.wetness[i];
+            if i > 0 && scratch.inside[i - 1] {
+                worst_wetness = worst_wetness.max(scratch.wetness[i - 1]);
+            }
+            if i + 1 < n_data && scratch.inside[i + 1] {
+                worst_wetness = worst_wetness.max(scratch.wetness[i + 1]);
+            }
+            let safe_cap = cell_capacity_for(worst_wetness);
+            scratch.freecap[i] = (safe_cap - scratch.h[i]).max(0.0);
+        }
+
         // ---- Stage 2: candidate flux per edge ----
         for e in 0..n_edges {
             scratch.live[e] = false;
@@ -5297,7 +5378,38 @@ pub fn settle_tick(
                         let h_b = heightmap.data[nb_idx];
                         let cap_a = cell_capacity_for(wetness);
                         let cap_b = cell_capacity_for(cell_props.wetness[nb_idx]);
-                        let (cap_a_eff, cap_b_eff) = (cap_a, cap_b);
+                        // Incompressibility fix (SESSION-HANDOVER-2026-09-13.md #4: "max(h - cap)
+                        // = 2.68e-2 on the gradient snapshot ... capacity drops 1.5 -> 1.0 while
+                        // its height stays"). `flux_edge_apply` -> `advect_properties`
+                        // mass-weight-averages the ACCEPTOR's wetness with its donor's once this
+                        // edge's flux lands, so the acceptor's post-transfer capacity is not
+                        // `cap_a`/`cap_b` above -- those are computed from the PRE-transfer
+                        // wetness, before the very mixing this edge is about to cause. The
+                        // mixed wetness is a weighted average of the two, so it can never exceed
+                        // their max; `cell_capacity_for` is monotonically non-increasing in
+                        // wetness (wetter packs less densely), so `cell_capacity_for(max(...))`
+                        // is always <= the true post-mix capacity -- a safe (if occasionally
+                        // conservative) room bound. `center_idx`/`nb_idx` each have exactly one
+                        // other vertical neighbour this phase can mix in from (the cell directly
+                        // above and the one directly below), so folding those two additional
+                        // reads in is enough to cover every source `advect_properties` can pull
+                        // from here. Each side's bound is a function of its own FIXED up/down
+                        // neighbours only, never of which end of the edge is visited first, so
+                        // `cell_freecap`'s "pure function of the cell" invariant a few lines below
+                        // still holds (both the write from this cell's own down-edge and the write
+                        // from the cell above's down-edge land on the identical value).
+                        let up_a_wetness = if y > 0 && is_inside(x, y - 1) {
+                            cell_props.wetness[center_idx - w]
+                        } else {
+                            wetness // neighbour doesn't exist: no-op under max()
+                        };
+                        let down_b_wetness = if y + 2 < h && is_inside(x, y + 2) {
+                            cell_props.wetness[nb_idx + w]
+                        } else {
+                            cell_props.wetness[nb_idx] // neighbour doesn't exist: no-op under max()
+                        };
+                        let cap_a_eff = cell_capacity_for(wetness.max(cell_props.wetness[nb_idx]).max(up_a_wetness));
+                        let cap_b_eff = cell_capacity_for(cell_props.wetness[nb_idx].max(wetness).max(down_b_wetness));
                         // Driving head on this edge, fill term normalised to fraction-of-capacity
                         // (dimensionless, 0..1) rather than raw mass. Without this, "one saturated
                         // cell of fill" is 1.5 for granular material (`cell_capacity_for` at
@@ -5432,8 +5544,11 @@ pub fn settle_tick(
                         } else {
                             1.0
                         };
-                        let (cap_a_eff, cap_b_eff) = (cap_a, cap_b);
-                        let (max_accept_fwd, max_accept_bwd) = ((cap_b - h_b).max(0.0), (cap_a - h_a).max(0.0));
+                        // `cap_a_eff`/`cap_b_eff` (computed above, before the sleep check) are the
+                        // capacity-aware bound explained there -- reused here rather than
+                        // re-derived from the raw `cap_a`/`cap_b` so the actual acceptance clamp
+                        // (not just the sleep heuristic) is what stays capacity-safe.
+                        let (max_accept_fwd, max_accept_bwd) = ((cap_b_eff - h_b).max(0.0), (cap_a_eff - h_a).max(0.0));
                         let prev_v = if center_idx + w < w * h && edge_vel_v[center_idx + w] < 0.0 && h_b >= 0.5 * cap_b {
                             edge_vel_v[center_idx].min(edge_vel_v[center_idx + w])
                         } else {
@@ -5556,7 +5671,6 @@ pub fn settle_tick(
                     // bearing for CFL. Gauss-Seidel is only wrong for the conservative,
                     // energy-carrying case, which is exactly this g = 0 branch.
                     let (c_sq, damping) = wave_params(wetness);
-                    let cap_c = cell_capacity_for(wetness);
                     // Largest head difference across the edges this cell owns — the *driving*
                     // term, the same quantity `edge_sleeps`' branch 2 tests against `tau`. It is
                     // the wake magnitude; see the block-activation note at the end of this branch
@@ -5588,8 +5702,11 @@ pub fn settle_tick(
                         let nb_idx = center_idx + 1;
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
-                        let cap_b = cell_capacity_for(cell_props.wetness[nb_idx]);
-                        let (cap_c_eff, cap_b_eff) = (cap_c, cap_b);
+                        // Incompressibility fix (see `room_cap_4n`'s doc comment): the acceptor
+                        // clamp below must reflect the capacity this edge's mixing will leave
+                        // behind, not the pre-mix capacities of `center_idx`/`nb_idx`.
+                        let (cap_c_eff, cap_b_eff) =
+                            (room_cap_4n(x, y, w, h, shape_mask, cell_props), room_cap_4n(x + 1, y, w, h, shape_mask, cell_props));
                         let (head_c_drive, head_b_drive) = (head_c, heightmap.data[nb_idx]);
                         max_head_diff = max_head_diff.max((head_c_drive - head_b_drive).abs());
                         if edge_sleeps(
@@ -5645,8 +5762,10 @@ pub fn settle_tick(
                         let nb_idx = center_idx + w;
                         let h_a = temp_heights[center_idx];
                         let h_b = temp_heights[nb_idx];
-                        let cap_b = cell_capacity_for(cell_props.wetness[nb_idx]);
-                        let (cap_c_eff, cap_b_eff) = (cap_c, cap_b);
+                        // Incompressibility fix -- see the x-edge site above and `room_cap_4n`'s
+                        // doc comment.
+                        let (cap_c_eff, cap_b_eff) =
+                            (room_cap_4n(x, y, w, h, shape_mask, cell_props), room_cap_4n(x, y + 1, w, h, shape_mask, cell_props));
                         let (head_c_drive, head_b_drive) = (head_c, heightmap.data[nb_idx]);
                         max_head_diff = max_head_diff.max((head_c_drive - head_b_drive).abs());
                         if edge_sleeps(
@@ -5723,11 +5842,11 @@ pub fn settle_tick(
 
                     // Continuous liquid weight for this cell (see `liquidity` doc comment).
                     // Computed once per center cell and reused by both the avalanche safety
-                    // valve below and the main neighbor flow loop further down, so the acceptor
-                    // capacity (C1, incompressibility) is enforced consistently everywhere a
-                    // neighbor can receive mass in a single tick.
+                    // valve below and the main neighbor flow loop further down. The acceptor
+                    // capacity itself (C1, incompressibility) is no longer a single per-center
+                    // value derived from this alone -- see the incompressibility-fix comments on
+                    // each `max_dst_room` below, which fold in the ACCEPTOR's own wetness too.
                     let cell_liquidity = liquidity(wetness);
-                    let cell_capacity = 1.5 * (1.0 - cell_liquidity) + 1.0 * cell_liquidity;
                     // Complement of the liquid share handled by the edge-flux solver below.
                     // Exactly 1.0 for any granular material (liquidity == 0), so the CA path is
                     // bit-identical to before for sand.
@@ -5983,7 +6102,25 @@ pub fn settle_tick(
                                 // avalanche safety valve bypasses the normal threshold/alpha flow
                                 // computation entirely, so without this clamp it could push a
                                 // liquid neighbor above the incompressibility cap on its own.
-                                let max_dst_room = (cell_capacity - current_temp_neighbor).max(0.0);
+                                //
+                                // Incompressibility fix (SESSION-HANDOVER-2026-09-13.md #4): this
+                                // used to be `cell_capacity` alone -- the DONOR's own capacity,
+                                // reused as a stand-in for the acceptor's room regardless of the
+                                // acceptor's actual wetness. Two problems, same fix: (1) if the
+                                // acceptor's own capacity is lower than the donor's, that alone
+                                // already admits more than the acceptor's true room, with no
+                                // mixing required; (2) `try_move` -> `advect_properties` then
+                                // mass-weight-averages the acceptor's wetness with the donor's, so
+                                // even a correctly-sized transfer can still lower the acceptor's
+                                // capacity out from under the height it was just given. Both are
+                                // covered by capping to `cell_capacity_for(max(donor, acceptor))`:
+                                // the post-mix wetness is a convex combination of the two, so it
+                                // never exceeds their max, and `cell_capacity_for` is monotonically
+                                // non-increasing in wetness, so this is a safe (if occasionally
+                                // conservative) bound on the acceptor's true post-mix capacity.
+                                let max_dst_room = (cell_capacity_for(wetness.max(cell_props.wetness[neighbor_idx]))
+                                    - current_temp_neighbor)
+                                    .max(0.0);
                                 let clamped_flow = flow.min(temp_diff * 0.4).min(max_dst_room).max(0.0)
                                     * granular_share;
                                 if clamped_flow > FLOW_INACTIVE_THRESHOLD {
@@ -6024,9 +6161,10 @@ pub fn settle_tick(
                         gravity_active,
                     );
 
-                    // `cell_liquidity` / `cell_capacity` computed above (right after the CA
-                    // branch was entered); reused below to blend the gravity_push multiplier,
-                    // the transfer coefficient, and the acceptor cell capacity.
+                    // `cell_liquidity` computed above (right after the CA branch was entered);
+                    // reused below to blend the gravity_push multiplier and the transfer
+                    // coefficient (the acceptor cell capacity is now computed per-edge -- see the
+                    // incompressibility-fix comments on `max_dst_room` below).
                     for &(neighbor_idx, ndx, ndy) in &neighbors_info {
                         let h_neighbor = if gravity_active { temp_heights[neighbor_idx].max(heightmap.data[neighbor_idx]) } else { heightmap.data[neighbor_idx] };
                         let geom_slope = h_center - h_neighbor;
@@ -6129,18 +6267,29 @@ pub fn settle_tick(
                                 } else {
                                     0.20 // Sand uses lower coeff on bed to prevent wave oscillations
                                 };
-                                // Acceptor cell capacity (incompressibility, C1). `cell_capacity`
-                                // (computed once above, per center cell) is 1.5 for granular
+                                // Acceptor cell capacity (incompressibility, C1): 1.5 for granular
                                 // materials (unchanged, load-bearing for sand-pile height tests)
-                                // and interpolates down to 1.0 for liquids via `cell_liquidity`, so
-                                // there is no hard cut. Applied to BOTH branches below (not just the
-                                // "push into an equal/higher neighbor" case) because within a single
-                                // tick a cell can receive inflow from more than one neighbor; without
-                                // a capacity check on the downhill (geom_slope > 0) branch too,
-                                // several simultaneous donors could each independently push a liquid
-                                // neighbor a little past 1.0 even though none of them individually
-                                // looked like overpacking.
-                                let max_dst_room = (cell_capacity - temp_heights[neighbor_idx]).max(0.0);
+                                // and interpolating down to 1.0 for liquids, so there is no hard
+                                // cut. Applied to BOTH branches below (not just the "push into an
+                                // equal/higher neighbor" case) because within a single tick a cell
+                                // can receive inflow from more than one neighbor; without a
+                                // capacity check on the downhill (geom_slope > 0) branch too,
+                                // several simultaneous donors could each independently push a
+                                // liquid neighbor a little past 1.0 even though none of them
+                                // individually looked like overpacking.
+                                //
+                                // Incompressibility fix (SESSION-HANDOVER-2026-09-13.md #4): same
+                                // reasoning as the avalanche valve's `max_dst_room` above --
+                                // `cell_capacity` alone is the DONOR's own capacity, which both
+                                // ignores the acceptor's actual (possibly lower) capacity and
+                                // ignores that `try_move` -> `advect_properties` mixes the
+                                // acceptor's wetness toward the donor's, which can only lower it
+                                // (`cell_capacity_for` is monotonically non-increasing in wetness).
+                                // `cell_capacity_for(max(donor, acceptor))` bounds the post-mix
+                                // capacity safely regardless of which of the two is wetter.
+                                let max_dst_room = (cell_capacity_for(wetness.max(cell_props.wetness[neighbor_idx]))
+                                    - temp_heights[neighbor_idx])
+                                    .max(0.0);
 
                                 let src_h = temp_heights[center_idx];
                                 let mut clamped_flow = if geom_slope > 0.0 {
@@ -11895,6 +12044,285 @@ mod tests {
         run("gradient", gradient_props(grid, grid, dry_sand, water));
         run("all_dry_sand", get_test_props(MaterialMode::DrySand, grid * grid));
         run("all_water", get_test_props(MaterialMode::Water, grid * grid));
+    }
+
+    /// DIAGNOSTIC (SESSION-HANDOVER-2026-09-13.md §4). Measures `max(h - cell_capacity_for(wetness))`
+    /// over two mixed-material scenes, to localise the small incompressibility leak reported there
+    /// ("max(h - cap) = 2.68e-2 on the gradient snapshot ... capacity drops 1.5 -> 1.0 while its
+    /// height stays"). A single-material scene is run as a control for each: this quantity must be
+    /// (near) zero whenever wetness never mixes two different values into one cell, because then no
+    /// cell's own capacity ever moves out from under its own height.
+    ///
+    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_capacity_leak
+    #[test]
+    #[ignore]
+    fn diag_capacity_leak() {
+        let over_capacity = |sim: &TestSim| -> f32 {
+            let mut worst = 0.0f32;
+            for i in 0..sim.mask.len() {
+                if sim.mask[i] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let cap = cell_capacity_for(sim.cell_props.wetness[i]);
+                worst = worst.max(sim.hm.data[i] - cap);
+            }
+            worst
+        };
+
+        // Scene A: the same DrySand -> Water linear gradient in a MultiNeckHourglass that
+        // `diag_gradient_cliffs` uses, with its own all-dry / all-water controls.
+        {
+            let grid = 256usize;
+            let bs = crate::DEFAULT_BLOCK_SIZE;
+            let mask = make_test_mask(grid, grid, SandboxShape::MultiNeckHourglass, 0.04, 1.0);
+            let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32);
+            let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32);
+            let budget = (grid / bs) * (grid / bs);
+
+            let run = |label: &str, props: CellProps| {
+                let mut sim = TestSim::new(grid, grid, props, mask.clone(), bs);
+                sim.lateral_substeps = 2.5;
+                for y in 0..grid / 2 {
+                    for x in 0..grid {
+                        let i = y * grid + x;
+                        if sim.mask[i] != crate::MASK_OUTSIDE {
+                            sim.hm.data[i] = 0.5;
+                        }
+                    }
+                }
+                let mut worst = 0.0f32;
+                for t in 1..=3000u32 {
+                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+                    let cur = over_capacity(&sim);
+                    if cur > worst {
+                        worst = cur;
+                    }
+                    if t == 500 || t == 1500 || t == 3000 {
+                        println!("DIAGCAP {} t={} over_this_tick={:.5} worst_so_far={:.5}", label, t, cur, worst);
+                    }
+                }
+                println!("DIAGCAP {} FINAL worst_max_h_minus_cap={:.5}", label, worst);
+            };
+
+            run("gradient", gradient_props(grid, grid, dry_sand, water));
+            run("all_dry_sand", get_test_props(MaterialMode::DrySand, grid * grid));
+            run("all_water", get_test_props(MaterialMode::Water, grid * grid));
+        }
+
+        // Scene B: a second mixed-material pair (Water falling onto a DrySand pool packed near
+        // its own capacity, a Square vessel) -- different shape, different material pair,
+        // different dominant flux path (vertical/gravity-aligned edges, not the lateral drain of
+        // Scene A) -- so the finding isn't an artifact of one geometry or one flux direction.
+        {
+            let grid = 128usize;
+            let bs = crate::DEFAULT_BLOCK_SIZE;
+            let mask = make_test_mask(grid, grid, SandboxShape::Square, 0.04, 1.0);
+            let budget = (grid / bs) * (grid / bs);
+
+            let run = |label: &str, top_props: (f32, f32, f32, f32), bottom_props: (f32, f32, f32, f32)| {
+                let mut props = CellProps::new(grid * grid);
+                for y in 0..grid {
+                    for x in 0..grid {
+                        let i = y * grid + x;
+                        let (wetness, threshold, flow_rate, grain_size) =
+                            if y < grid / 3 { top_props } else { bottom_props };
+                        props.wetness[i] = wetness;
+                        props.threshold[i] = threshold;
+                        props.flow_rate[i] = flow_rate;
+                        props.grain_size[i] = grain_size;
+                    }
+                }
+                let mut sim = TestSim::new(grid, grid, props, mask.clone(), bs);
+                // Fill the bottom two thirds close to the POOL MATERIAL's own capacity -- the
+                // leak needs an acceptor that is already near its OWN (pre-mix) capacity before
+                // the wetter inflow arrives (SESSION-HANDOVER-2026-09-13.md's "capacity drops
+                // 1.5 -> 1.0 while its height stays"); a half-full pool has headroom to spare and
+                // cannot show it. `- 0.05` keeps the fill a valid (non-leaking) initial condition
+                // for a single-material pool, so the controls below start at zero, not at
+                // whatever gap this fill height happens to leave against a DIFFERENT material's
+                // capacity. The top third stays clear air so the falling body has room to fall.
+                let bottom_fill = cell_capacity_for(bottom_props.0) - 0.05;
+                for y in grid / 3..grid {
+                    for x in 0..grid {
+                        let i = y * grid + x;
+                        if sim.mask[i] != crate::MASK_OUTSIDE {
+                            sim.hm.data[i] = bottom_fill;
+                        }
+                    }
+                }
+                // Drop a slab of the top material into the top third (still air) so it falls
+                // under gravity into the pool below -- exercises the vertical/gravity-aligned
+                // mixing path specifically (Scene A is dominated by lateral drain through necks).
+                for y in 0..grid / 3 {
+                    for x in grid / 4..3 * grid / 4 {
+                        let i = y * grid + x;
+                        if sim.mask[i] != crate::MASK_OUTSIDE {
+                            sim.hm.data[i] = 0.5;
+                            sim.cell_props.wetness[i] = top_props.0;
+                            sim.cell_props.threshold[i] = top_props.1;
+                            sim.cell_props.flow_rate[i] = top_props.2;
+                            sim.cell_props.grain_size[i] = top_props.3;
+                        }
+                    }
+                }
+                let mut worst = 0.0f32;
+                for t in 1..=1500u32 {
+                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+                    let cur = over_capacity(&sim);
+                    if cur > worst {
+                        worst = cur;
+                    }
+                    if t == 200 || t == 750 || t == 1500 {
+                        println!("DIAGCAP {} t={} over_this_tick={:.5} worst_so_far={:.5}", label, t, cur, worst);
+                    }
+                }
+                println!("DIAGCAP {} FINAL worst_max_h_minus_cap={:.5}", label, worst);
+            };
+
+            // WetSand (wetness 0.45) is below the liquidity ramp's onset (0.65, see
+            // `liquidity`'s doc comment), so its capacity is identical to DrySand's (both 1.5) --
+            // that pairing cannot show this leak no matter how much they mix. Water (wetness
+            // 1.00, capacity 1.0) is the material whose capacity actually differs from DrySand's,
+            // so it is Water falling onto a DrySand pool that stresses the vertical/gravity-
+            // aligned mixing path the way Scene A stresses the lateral one.
+            let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32); // MaterialMode::Water
+            let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32); // MaterialMode::DrySand
+            run("water_on_dry", water, dry_sand);
+            run("water_on_water_control", water, water);
+            run("dry_on_dry_control", dry_sand, dry_sand);
+        }
+
+        // Scene C: a THIRD mixed-material pair specifically targeting the old per-cell granular
+        // Cellular Automata path (the `else` of `settle_tick`'s `if wetness >= 0.75 &&
+        // !gravity_active`), which Scenes A and B never reach: that branch has a `if
+        // gravity_active { continue; }` bail-out (Stage C), so it is unconditionally skipped
+        // whenever gravity is on -- confirmed by reading, not just by A/B measuring zero. It only
+        // runs at `gravity_dir == 0` (a Sandbox wave/settling scene), and only for its OWN
+        // lateral neighbour-flow loop (`try_move`, which -- like `advect_properties` everywhere
+        // else -- mass-weight-averages the acceptor's wetness). To reach it with a REAL capacity
+        // difference, the donor must have wetness >= 0.65 (inside the liquidity ramp) while still
+        // being < 0.75 (the CA/g0-liquid branch cut) -- MaterialMode::ButterCream (wetness 0.70)
+        // is exactly that: it takes the CA branch (unlike Water, wetness 1.00, which would take
+        // the g0-liquid branch instead and never touch this code path at all).
+        {
+            let grid = 96usize;
+            let bs = crate::DEFAULT_BLOCK_SIZE;
+            let mask = make_test_mask(grid, grid, SandboxShape::Square, 0.04, 1.0);
+            let budget = (grid / bs) * (grid / bs);
+
+            let run = |label: &str,
+                       left_props: (f32, f32, f32, f32),
+                       left_fill: f32,
+                       right_props: (f32, f32, f32, f32),
+                       right_fill: f32| {
+                let mut props = CellProps::new(grid * grid);
+                for y in 0..grid {
+                    for x in 0..grid {
+                        let i = y * grid + x;
+                        let (wetness, threshold, flow_rate, grain_size) =
+                            if x < grid / 2 { left_props } else { right_props };
+                        props.wetness[i] = wetness;
+                        props.threshold[i] = threshold;
+                        props.flow_rate[i] = flow_rate;
+                        props.grain_size[i] = grain_size;
+                    }
+                }
+                let mut sim = TestSim::new(grid, grid, props, mask.clone(), bs);
+                for y in 0..grid {
+                    for x in 0..grid {
+                        let i = y * grid + x;
+                        if sim.mask[i] == crate::MASK_OUTSIDE {
+                            continue;
+                        }
+                        sim.hm.data[i] = if x < grid / 2 { left_fill } else { right_fill };
+                    }
+                }
+                let mut worst = 0.0f32;
+                for t in 1..=1000u32 {
+                    // gravity_dir == 0 is what routes wetness < 0.75 cells through the CA branch
+                    // instead of the always-gravity-active flux passes Scenes A/B exercise.
+                    sim.tick(glam::Vec2::ZERO, budget);
+                    let cur = over_capacity(&sim);
+                    if cur > worst {
+                        worst = cur;
+                    }
+                    if t == 200 || t == 500 || t == 1000 {
+                        println!("DIAGCAP {} t={} over_this_tick={:.5} worst_so_far={:.5}", label, t, cur, worst);
+                    }
+                }
+                println!("DIAGCAP {} FINAL worst_max_h_minus_cap={:.5}", label, worst);
+            };
+
+            let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32); // MaterialMode::DrySand, cap 1.5
+            let butter_cream = (0.70f32, 0.04f32, 0.15f32, 0.08f32); // MaterialMode::ButterCream, cap ~1.42, CA branch (< 0.75)
+            // DrySand packed to 1.35 (0.15 headroom of its own 1.5 cap); ButterCream at 1.42
+            // (near its OWN ~1.42 cap) so it is the higher/donor side and pushes into the packed
+            // DrySand region, raising the DrySand cells' wetness (and so lowering their capacity)
+            // as it mixes in.
+            run("buttercream_into_packed_drysand", dry_sand, 1.35, butter_cream, 1.42);
+            run("buttercream_control", butter_cream, 1.35, butter_cream, 1.42);
+            run("drysand_control", dry_sand, 1.35, dry_sand, 1.42f32.min(1.5));
+        }
+    }
+
+    /// REGRESSION TEST for SESSION-HANDOVER-2026-09-13.md #4's incompressibility leak ("max(h -
+    /// cap) = 2.68e-2 on the gradient snapshot ... capacity drops 1.5 -> 1.0 while its height
+    /// stays"). FAILS on `main` (measured worst = 1.19e-1 on this exact scenario at this grid/tick
+    /// count -- see `diag_capacity_leak` for the full before/after across three independent
+    /// mixing paths and two grid sizes); PASSES after the fix, which makes every acceptor's flux
+    /// clamp aware of the capacity its own post-transfer mixed wetness will leave it with (see
+    /// `room_cap_4n`'s doc comment and the `run_lateral_edge_pass` Stage 1b comment for the
+    /// derivation). Uses a smaller/faster grid than the diagnostic to stay within the main lib
+    /// suite's runtime budget, but the identical DrySand -> Water linear-gradient distribution in
+    /// a MultiNeckHourglass, at the shipped `lateral_substeps = 2.5` default, that the diagnostic
+    /// and `diag_gradient_cliffs` both use.
+    #[test]
+    fn test_mixed_material_transfer_respects_capacity() {
+        let grid = 128usize;
+        let bs = crate::DEFAULT_BLOCK_SIZE;
+        let mask = make_test_mask(grid, grid, SandboxShape::MultiNeckHourglass, 0.04, 1.0);
+        let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32);
+        let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32);
+        let props = gradient_props(grid, grid, dry_sand, water);
+        let mut sim = TestSim::new(grid, grid, props, mask, bs);
+        sim.lateral_substeps = 2.5;
+        for y in 0..grid / 2 {
+            for x in 0..grid {
+                let i = y * grid + x;
+                if sim.mask[i] != crate::MASK_OUTSIDE {
+                    sim.hm.data[i] = 0.5;
+                }
+            }
+        }
+        let initial_mass = sim.mass();
+        let budget = (grid / bs) * (grid / bs);
+        let mut worst_over = 0.0f32;
+        for _ in 0..1500u32 {
+            sim.tick(glam::Vec2::new(0.0, 0.04), budget);
+            for i in 0..sim.mask.len() {
+                if sim.mask[i] == crate::MASK_OUTSIDE {
+                    continue;
+                }
+                let cap = cell_capacity_for(sim.cell_props.wetness[i]);
+                worst_over = worst_over.max(sim.hm.data[i] - cap);
+            }
+        }
+        let final_mass = sim.mass();
+        let rel_err = (final_mass - initial_mass) / initial_mass;
+        println!(
+            "test_mixed_material_transfer_respects_capacity: worst_over={:.3e} init_mass={:.6} final_mass={:.6} rel_err={:.3e}",
+            worst_over, initial_mass, final_mass, rel_err
+        );
+        assert!(
+            worst_over <= 1e-5,
+            "a cell exceeded its own post-mix capacity by {:.3e} -- SESSION-HANDOVER-2026-09-13.md #4's incompressibility leak",
+            worst_over
+        );
+        assert!(
+            rel_err.abs() < 1e-4,
+            "mass not conserved: rel_err={:.6}",
+            rel_err
+        );
     }
 
     /// MEASUREMENT-ONLY DIAGNOSTIC (LOD-FLUX-BUDGET-SURVEY). Answers: how much of the block-LOD
