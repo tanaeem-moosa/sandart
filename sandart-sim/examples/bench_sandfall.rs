@@ -20,7 +20,7 @@
 //!                      1024 = full (32x32 blocks at block_size 16); 256 = the app's start
 //!                      value; 32 = BUDGET_MIN, i.e. fully throttled.
 //!   --materials a,b    water,drysand,calmwater,... (default water,drysand)
-//!   --shape s          hourglass | multistage (default hourglass)
+//!   --shape s          hourglass (default hourglass)
 //!   --phases           also report a per-third breakdown (fill / stream / pool)
 //!   --descent          report centre-of-mass descent (for the iterations experiment)
 
@@ -194,10 +194,10 @@ fn main() {
         .split(',')
         .map(|v| parse_material(v.trim()))
         .collect();
-    let shape = match get("--shape").unwrap_or_else(|| "hourglass".to_string()).as_str() {
-        "multistage" | "multistagehourglass" => SandboxShape::MultiStageHourglass,
-        _ => SandboxShape::Hourglass,
-    };
+    // `--shape` only ever selected between hourglass and the now-removed MultiStageHourglass
+    // cascade; hourglass is the only option left, so the flag is accepted but ignored.
+    let _ = get("--shape");
+    let shape = SandboxShape::Hourglass;
     // Grid resolution the scenario runs at. Defaults to GRID_SIZE (the shipped 512 default);
     // pass e.g. `--grid-size 64` to measure the user-selectable resolutions from the web UI's
     // resolution selector (see sandart-wasm's set_grid_size) against this same scenario.

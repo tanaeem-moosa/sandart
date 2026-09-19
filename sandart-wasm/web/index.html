@@ -677,18 +677,6 @@
                         <span id="curvature-val" class="val-display">0.6</span>
                         <input type="range" id="curvature-slider" min="0.1" max="3.0" step="0.1" value="0.6">
                     </div>
-                    <!-- Cascade-only: the widest (top) tier's chamber count for the
-                         "Merging cascade" shape. Every tier below it is derived, not
-                         separately configured -- see multistage_tier_chambers in
-                         sandart-sim/src/physics.rs. Shown/hidden alongside shape selection
-                         the same way the shape-specific pattern param panels are (see
-                         updateParamPanels in demo.js), since it means nothing for any other
-                         shape. -->
-                    <div class="field row" id="chambers-row" style="display: none;">
-                        <label for="chambers-slider">Widest tier</label>
-                        <span id="chambers-val" class="val-display">8</span>
-                        <input type="range" id="chambers-slider" min="5" max="16" step="1" value="8">
-                    </div>
                 </div>
 
                 <div class="group">
@@ -773,7 +761,6 @@
                     </optgroup>
                     <optgroup label="Sand-fall funnels" id="shape-group-sandfall">
                         <option value="3">Classic hourglass</option>
-                        <option value="4">Merging cascade</option>
                         <option value="5">Galton board</option>
                         <option value="6">Staircase cascade</option>
                         <option value="7">Procedural cave</option>

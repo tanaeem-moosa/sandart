@@ -328,23 +328,30 @@ impl Default for SimulatorMode {
     }
 }
 
+// Explicit discriminants: the web UI and `sandart-wasm::set_sandbox_shape` map an independent,
+// stable integer id to each variant (see that function's `match`), but `self.sandbox_shape as
+// u32` (used for the render() shape uniform) casts the ENUM's own discriminant, which without
+// explicit values is just declaration order. `MultiStageHourglass` (id 4) was removed from
+// between `Hourglass` and `GaltonBoard` on 2026-09-19; pinning every remaining variant's
+// discriminant to its pre-removal value keeps `as u32` in permanent agreement with the UI's ids
+// -- including for GaltonBoard/StaircaseCascade/ProceduralFunnel/MultiNeckHourglass/
+// UTubeFlowThrough, which would otherwise have silently shifted down by one. Id 4 is now unused.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SandboxShape {
-    Circle,
-    Square,
-    Oval,
-    Hourglass,
-    MultiStageHourglass,
-    GaltonBoard,
-    StaircaseCascade,
-    ProceduralFunnel,
-    MultiNeckHourglass,
+    Circle = 0,
+    Square = 1,
+    Oval = 2,
+    Hourglass = 3,
+    GaltonBoard = 5,
+    StaircaseCascade = 6,
+    ProceduralFunnel = 7,
+    MultiNeckHourglass = 8,
     /// Task #61: a U-shaped flow-through vessel -- a test apparatus for pressure work, not a
     /// sand cascade. Water fills the tall left reservoir arm, flows down through a partly
     /// ROOFED bottom basin (deliberately: this is the Pascal-pressure test case), climbs the
     /// shorter right arm, spills over its rim (the overflow lip) through a horizontal spout,
     /// and falls into a catch well. See `physics::U_TUBE_RECTS` for the geometry.
-    UTubeFlowThrough,
+    UTubeFlowThrough = 9,
 }
 
 impl Default for SandboxShape {
@@ -596,14 +603,6 @@ pub struct DrawingSimulation {
     pub gravity_dir: Vec2,
     pub neck_width: f32,
     pub hourglass_curve: f32,
-    /// The widest (top) tier's chamber count for `SandboxShape::MultiStageHourglass`'s
-    /// merging cascade -- user-selectable 5..=16, default 8 (today's shipped, hard-coded
-    /// value before this field existed). Every tier below is derived from this one number
-    /// by `physics::multistage_tier_chambers`; see that function's doc comment for the
-    /// merge rule. Setting this follows the same contract as `neck_width`/
-    /// `hourglass_curve`: the setter (`sandart-wasm`'s `set_multistage_chambers`) just
-    /// assigns the field and calls `generate_shape_mask()`, it does not reset the sim.
-    pub multistage_chambers: u32,
 
     /// Precomputed shape mask grid (GRID_SIZE * GRID_SIZE).
     /// Values: MASK_OUTSIDE (0) = wall, MASK_INSIDE (1) = playable interior,
@@ -613,8 +612,8 @@ pub struct DrawingSimulation {
     pub shape_mask_dirty: bool,
     /// Whether the apparatus is currently upside down. Consumed by `generate_shape_mask` (it
     /// negates `dy` in the shape evaluator), so the *structure* inverts along with its contents
-    /// — asymmetric shapes like StaircaseCascade and the MultiStageHourglass cascade's tiers used to keep their
-    /// original orientation while the sand mirrored into them. Stored rather than applied to the
+    /// — asymmetric shapes like StaircaseCascade used to keep their original orientation while
+    /// the sand mirrored into them. Stored rather than applied to the
     /// mask in place because the mask is rebuilt from scratch whenever neck width, curvature or
     /// the shape itself changes, which would silently discard an in-place mirror.
     pub flipped: bool,
@@ -997,7 +996,6 @@ impl DrawingSimulation {
             gravity_dir: Vec2::ZERO,
             neck_width: 0.005,
             hourglass_curve: 0.6,
-            multistage_chambers: 8,
             shape_mask: vec![MASK_OUTSIDE; grid_size * grid_size],
             shape_mask_dirty: true,
             flipped: false,
@@ -1035,9 +1033,8 @@ impl DrawingSimulation {
         sim
     }
 
-    /// Regenerate the shape mask from the current sandbox_shape, neck_width, hourglass_curve,
-    /// and (for MultiStageHourglass) multistage_chambers. Call this whenever these parameters
-    /// change. Sets shape_mask_dirty for GPU re-upload.
+    /// Regenerate the shape mask from the current sandbox_shape, neck_width, hourglass_curve.
+    /// Call this whenever these parameters change. Sets shape_mask_dirty for GPU re-upload.
     ///
     /// The `out_size == sim size` case of `rasterize_shape_mask` below -- kept as its own method
     /// (rather than a one-line call site) since `self.shape_mask`/`shape_mask_dirty` are the sim's
@@ -1050,7 +1047,7 @@ impl DrawingSimulation {
     }
 
     /// Rasterize the CURRENT vessel shape (sandbox_shape, neck_width, hourglass_curve,
-    /// multistage_chambers, flipped) at an arbitrary square output resolution `out_size`,
+    /// flipped) at an arbitrary square output resolution `out_size`,
     /// returning a fresh `MASK_OUTSIDE`/`MASK_INSIDE`/`MASK_BOUNDARY` buffer -- the same values
     /// `shape_mask` holds, just not written into it.
     ///
@@ -1094,7 +1091,6 @@ impl DrawingSimulation {
                     self.sandbox_shape,
                     self.neck_width,
                     self.hourglass_curve,
-                    self.multistage_chambers,
                     self.flipped,
                 );
                 mask[offset + i] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
@@ -1142,7 +1138,6 @@ impl DrawingSimulation {
         if matches!(
             self.sandbox_shape,
             SandboxShape::Hourglass
-                | SandboxShape::MultiStageHourglass
                 | SandboxShape::GaltonBoard
                 | SandboxShape::StaircaseCascade
                 | SandboxShape::ProceduralFunnel
@@ -1204,21 +1199,6 @@ impl DrawingSimulation {
         let center_x = w as f32 / 2.0;
         let center_y = h as f32 / 2.0;
 
-        // Fills exactly tier 0 (the widest tier) of the MultiStageHourglass merging cascade:
-        // `total_half = 0.42h` split evenly across however many tiers
-        // `physics::multistage_tier_chambers(self.multistage_chambers)` produces, and this is
-        // the bottom boundary of tier 0 (`-total_half + tier_h`). Must match the tier math in
-        // `eval_sandbox_shape`'s `MultiStageHourglass` branch -- computed once here (not per
-        // cell) since it only depends on `h` and the chamber count, not on `(x, y)`. At the
-        // shipped default (multistage_chambers = 8, 4 tiers of `0.21h` each) this is exactly
-        // `-0.21 * h`, today's original hard-coded value.
-        let multistage_fill_threshold = {
-            let total_half = 0.42 * h as f32;
-            let n_tiers = physics::multistage_tier_chambers(self.multistage_chambers).len();
-            let tier_h = (2.0 * total_half) / n_tiers as f32;
-            -total_half + tier_h
-        };
-
         for y in 0..h {
             let row_offset = y * w;
             let dy = y as f32 - center_y;
@@ -1243,9 +1223,7 @@ impl DrawingSimulation {
                     continue;
                 }
 
-                let fill_threshold = if self.sandbox_shape == SandboxShape::MultiStageHourglass {
-                    multistage_fill_threshold
-                } else if self.sandbox_shape == SandboxShape::StaircaseCascade {
+                let fill_threshold = if self.sandbox_shape == SandboxShape::StaircaseCascade {
                     -0.26 * h as f32
                 } else {
                     0.0
@@ -1301,9 +1279,8 @@ impl DrawingSimulation {
         self.head_field.fill(0.0);
 
         // Turn the *structure* over too, not just what is in it. Symmetric shapes are unaffected
-        // by construction; the asymmetric ones (StaircaseCascade's alternating shelves, the
-        // MultiStageHourglass cascade's tiered chambers, ProceduralFunnel's noise) used to stay upright while
-        // their contents mirrored into them.
+        // by construction; the asymmetric ones (StaircaseCascade's alternating shelves,
+        // ProceduralFunnel's noise) used to stay upright while their contents mirrored into them.
         //
         // This must run BEFORE the out-of-bounds cleanup below, or that loop culls the mirrored
         // sand against the *old* geometry and deletes mass that the new geometry has room for.
@@ -1474,7 +1451,6 @@ impl DrawingSimulation {
                 }
             }
             SandboxShape::Hourglass
-            | SandboxShape::MultiStageHourglass
             | SandboxShape::GaltonBoard
             | SandboxShape::StaircaseCascade
             | SandboxShape::ProceduralFunnel
@@ -1857,9 +1833,8 @@ mod tests {
     /// Every shape offered under the "Sand-fall Funnels" group in the UI. Kept in one place so a
     /// new funnel is covered by the geometry and mass-conservation tests by default rather than
     /// by remembering to add it to each.
-    const SANDFALL_FUNNEL_SHAPES: [SandboxShape; 7] = [
+    const SANDFALL_FUNNEL_SHAPES: [SandboxShape; 6] = [
         SandboxShape::Hourglass,
-        SandboxShape::MultiStageHourglass,
         SandboxShape::GaltonBoard,
         SandboxShape::StaircaseCascade,
         SandboxShape::ProceduralFunnel,
@@ -2183,17 +2158,16 @@ mod tests {
     }
 
     #[test]
-    // `test_cascade_no_sand_leaking` pinned exactly one shape. Every funnel geometry has the
-    // same failure mode — a shelf, peg or neck that does not quite close lets sand cross into
-    // MASK_OUTSIDE, where `settle_tick`'s mask guards freeze it permanently — so all of them are
-    // worth the same check, and the ones whose geometry just changed most of all: the Galton peg
-    // lattice, the three-neck hourglass and the finer staircase.
+    // Every funnel geometry has the same failure mode — a shelf, peg or neck that does not quite
+    // close lets sand cross into MASK_OUTSIDE, where `settle_tick`'s mask guards freeze it
+    // permanently — so all of them are worth the same check, and the ones whose geometry just
+    // changed most of all: the Galton peg lattice, the three-neck hourglass and the finer
+    // staircase.
     //
     // Run at the default neck width only — sweeping the slider here costs 20s of suite time, and
     // what the slider actually threatens is *geometric* (necks merging, shelves fusing into a
     // slab). That is covered per-shape instead, for free, by mask inspection:
-    // `test_staircase_steps_stay_separated` and
-    // `test_cascade_no_dam_or_neck_merge_across_full_slider_range`.
+    // `test_staircase_steps_stay_separated`.
     fn test_all_sandfall_funnels_conserve_sand_mass() {
         for shape in SANDFALL_FUNNEL_SHAPES {
             let mut sim = super::DrawingSimulation::new();
@@ -2222,8 +2196,7 @@ mod tests {
     #[test]
     // The geometric companion to the mass test above: pure mask inspection, so it costs nothing
     // to run. This one covers StaircaseCascade only, at the default neck width — the staircase's
-    // geometry does not depend on the neck slider. The cascade's slider sweep lives in
-    // `test_cascade_no_dam_or_neck_merge_across_full_slider_range`.
+    // geometry does not depend on the neck slider.
     //
     // The failure it exists for is the staircase. Consecutive shelves alternate slope sign and
     // which wall they attach to, so they converge at the shared inner edge; reduce the step
@@ -2301,7 +2274,6 @@ mod tests {
     fn test_flip_inverts_the_structure_not_just_the_sand() {
         for shape in [
             SandboxShape::StaircaseCascade,
-            SandboxShape::MultiStageHourglass,
             SandboxShape::ProceduralFunnel,
         ] {
             let mut sim = super::DrawingSimulation::new();
@@ -2347,49 +2319,6 @@ mod tests {
             );
         }
     }
-
-    #[test]
-    fn test_cascade_no_sand_leaking() {
-        let mut sim = super::DrawingSimulation::new();
-        sim.sandbox_shape = SandboxShape::MultiStageHourglass;
-        sim.gravity_dir = Vec2::new(0.0, 0.04);
-        sim.initialize_hourglass();
-
-        let initial_mass: f32 = sim.heightmap.data.iter().sum();
-        assert!(initial_mass > 0.0, "MultiStageHourglass should be initialized with sand in tier 0");
-
-        let targets = [None; 5];
-        // Run gravity simulation for 500 ticks across all 4 tiers
-        for _ in 0..500 {
-            sim.update(
-                0.016,
-                &targets,
-                0.08,
-                MaterialMode::DrySand,
-                SandboxShape::MultiStageHourglass,
-                16.0,
-                16.0,
-            );
-        }
-
-        let final_mass: f32 = sim.heightmap.data.iter().sum();
-        let mass_err = (final_mass - initial_mass).abs() / initial_mass;
-
-        // Verify 100.0000% sand mass conservation with ZERO leaks out of bounds
-        assert!(
-            mass_err < 0.0001,
-            "Cascade sandbox leaked sand mass under gravity! Init={:.4}, Final={:.4}, Error={:.6}",
-            initial_mass,
-            final_mass,
-            mass_err
-        );
-    }
-
-    // The "does sand actually reach the bottom chamber" check lives in physics.rs as
-    // `test_cascade_drains_to_bottom_chamber`, alongside `test_hourglass_full_drainage` which it
-    // mirrors -- both drive `settle_tick` directly on a small custom grid instead of the full
-    // `DrawingSimulation` pipeline, which is the difference between this suite taking seconds and
-    // taking minutes.
 
     #[test]
     fn test_quantile_mode_off_by_default_and_costs_nothing() {
@@ -2949,7 +2878,6 @@ mod tests {
             for (name, shape) in [
                 ("Hourglass", SandboxShape::Hourglass),
                 ("MultiNeckHourglass", SandboxShape::MultiNeckHourglass),
-                ("MultiStageHourglass", SandboxShape::MultiStageHourglass),
             ] {
                 let mut sim = DrawingSimulation::new_with_size(grid);
                 sim.sandbox_shape = shape;
@@ -2994,7 +2922,6 @@ mod tests {
                 SandboxShape::Square,
                 SandboxShape::Oval,
                 SandboxShape::Hourglass,
-                SandboxShape::MultiStageHourglass,
                 SandboxShape::GaltonBoard,
                 SandboxShape::StaircaseCascade,
                 SandboxShape::ProceduralFunnel,
@@ -3005,7 +2932,6 @@ mod tests {
                 sim.sandbox_shape = shape;
                 sim.neck_width = 0.06;
                 sim.hourglass_curve = 0.8;
-                sim.multistage_chambers = 8;
                 sim.generate_shape_mask();
 
                 // Independent discrete reimplementation of the old two-pass algorithm, using the
@@ -3016,7 +2942,7 @@ mod tests {
                     for x in 0..w {
                         let (inside, _safe) = physics::eval_sandbox_shape(
                             x, y, w, h, shape, sim.neck_width, sim.hourglass_curve,
-                            sim.multistage_chambers, sim.flipped,
+                            sim.flipped,
                         );
                         expected[y * w + x] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
                     }

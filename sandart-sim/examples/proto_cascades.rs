@@ -1,24 +1,30 @@
 //! PROTOTYPE ONLY. Round 2. Renders pictures of candidate redesigns for the "Merging cascade"
-//! vessel (`SandboxShape::MultiStageHourglass`) for the user to pick between. Does not touch
-//! `sandart-sim/src`, the renderer, wasm or the UI.
+//! vessel (formerly `SandboxShape::MultiStageHourglass`, removed 2026-09-19 -- the user decided
+//! to delete it outright rather than keep it alongside its replacement) for the user to pick
+//! between. Does not touch `sandart-sim/src`, the renderer, wasm or the UI.
 //!
 //! ROUND 1 (kept as `*_r1_*` files) shipped A (split/merge) and C (step pools) but the actual
 //! pictures did not show what round 1's report claimed:
 //!   - A rendered as a regular lattice of parallel teeth; nothing visibly divided or rejoined.
 //!   - C's material bypassed the pools entirely (fell straight down the sides); no pool visibly
 //!     filled or spilled.
-//!   - Both started BELOW today's shape's capacity fraction (22%/11% vs today's 26%), which does
+//!   - Both started BELOW the old shape's capacity fraction (22%/11% vs its 26%), which does
 //!     not fix the user's actual complaint ("not enough material").
 //!
-//! ROUND 2 fixes: B0 (control -- today's shape, unchanged geometry, bigger reservoir), A2 (real
-//! enclosed brick chambers with two corner holes each, landing in two DIFFERENT chambers below),
-//! C2 (real weir pools -- the only outlet is a lip near the top of the downstream wall, never a
-//! floor drain or side gap, so a pool must nearly fill before anything reaches the next one). A
-//! colour tracer (reservoir left half vs right half in two colours, which advect with the
-//! material) makes dividing/rejoining and fill order verifiable from the picture, not asserted.
+//! ROUND 2 fixes: A2 (real enclosed brick chambers with two corner holes each, landing in two
+//! DIFFERENT chambers below), C2 (real weir pools -- the only outlet is a lip near the top of the
+//! downstream wall, never a floor drain or side gap, so a pool must nearly fill before anything
+//! reaches the next one). A colour tracer (reservoir left half vs right half in two colours,
+//! which advect with the material) makes dividing/rejoining and fill order verifiable from the
+//! picture, not asserted.
 //!
-//! Background: artifacts/tickets/24-*.md, 32-*.md, 41-*.md; `MultiStageHourglass` in
-//! sandart-sim/src/physics.rs (~2940); `initialize_hourglass` in sandart-sim/src/lib.rs.
+//! Round 2 also had a B0 control design (today's then-shipped `MultiStageHourglass` geometry,
+//! unchanged, with a bigger reservoir) to compare A2/C2 against a like-for-like baseline. It is
+//! removed along with the shape it controlled for; the pictures already written to
+//! `artifacts/design/cascade-2026-09-17/` (including B0's) stay as the record.
+//!
+//! Background: artifacts/tickets/24-*.md, 32-*.md, 41-*.md; `initialize_hourglass` in
+//! sandart-sim/src/lib.rs.
 //!
 //!   distrobox enter sandart-dev -- bash -lc \
 //!     'cd /home/deck/projects/sandart && cargo run -p sandart-sim --release --example proto_cascades'
@@ -26,7 +32,7 @@
 //! Writes PNGs and a README to artifacts/design/cascade-2026-09-17/.
 
 use sandart_sim::{
-    color_channel, pack_rgba, DrawingSimulation, MaterialMode, SandboxShape, MASK_BOUNDARY,
+    color_channel, pack_rgba, DrawingSimulation, MaterialMode, MASK_BOUNDARY,
     MASK_INSIDE, MASK_OUTSIDE,
 };
 use std::fs;
@@ -138,22 +144,6 @@ fn connectivity(
     }
     let reached = visited.iter().filter(|&&v| v).count();
     (reached, total_inside, reached_collector)
-}
-
-/// Finds the smallest `dy` threshold such that the number of inside cells with `dy < threshold`
-/// is >= `target_area`, by scanning whole rows top-to-bottom. Row-granular (not sub-cell), which
-/// is fine at grid 256.
-fn threshold_for_area(mask: &[u8], w: usize, h: usize, target_area: usize) -> f32 {
-    let center_y = h as f32 / 2.0;
-    let mut acc = 0usize;
-    for y in 0..h {
-        let row_count = (0..w).filter(|&x| mask[y * w + x] != MASK_OUTSIDE).count();
-        acc += row_count;
-        if acc >= target_area {
-            return (y as f32 + 1.0) - center_y;
-        }
-    }
-    h as f32 - center_y
 }
 
 // -------------------------------------------------------------------------------------------
@@ -384,20 +374,6 @@ fn trace_mass(
         }
         sim.update(0.016, &targets, 0.08, material, sim.sandbox_shape, 16.0, 16.0);
     }
-}
-
-// -------------------------------------------------------------------------------------------
-// B0 -- control: today's MultiStageHourglass, unchanged geometry, reservoir enlarged to the
-// material target (>= 50% of the capacity of the network below the reservoir, i.e. reservoir
-// area >= capacity/3 of the whole shape, since here the reservoir is carved OUT OF a fixed total
-// rather than added on top).
-// -------------------------------------------------------------------------------------------
-
-fn b0_base_mask() -> Vec<u8> {
-    let mut sim = DrawingSimulation::new_with_size(GRID);
-    sim.sandbox_shape = SandboxShape::MultiStageHourglass;
-    sim.generate_shape_mask();
-    sim.shape_mask
 }
 
 // -------------------------------------------------------------------------------------------
@@ -723,65 +699,6 @@ fn main() {
     let do_trace = std::env::var("TRACE_MASS").is_ok();
 
     // ===================================================================================
-    // B0 -- control
-    // ===================================================================================
-    let base_mask = b0_base_mask();
-    let base_total_capacity = capacity(&base_mask);
-    // reservoir_area >= 0.5 * (total - reservoir_area)  =>  reservoir_area >= total / 3.
-    // Aim comfortably above the floor (0.40 of total) so rounding to whole rows doesn't leave it
-    // just under 50% of the remaining network.
-    let b0_target_area = (base_total_capacity as f32 * 0.40).ceil() as usize;
-    let b0_threshold = threshold_for_area(&base_mask, GRID, GRID, b0_target_area);
-    let b0_is_reservoir = move |_dx: f32, dy: f32| dy < b0_threshold;
-    let b0_is_collector = move |_dx: f32, dy: f32| dy > 0.30 * h_f; // today's bottom chamber
-    let b0_network_capacity = base_total_capacity
-        - base_mask
-            .iter()
-            .enumerate()
-            .filter(|&(i, &m)| {
-                m != MASK_OUTSIDE && {
-                    let y = i / GRID;
-                    (y as f32 - h_f / 2.0) < b0_threshold
-                }
-            })
-            .count();
-    let base_mask_for_fill = base_mask.clone();
-    let b0_fill = move |dx: f32, dy: f32| {
-        if !b0_is_reservoir(dx, dy) {
-            return 0.0;
-        }
-        // Must also check the actual mask -- `dy < threshold` alone says nothing about whether
-        // this (dx, dy) cell is INSIDE the vessel at all (e.g. above/beside the funnel's own
-        // walls). Missing this check was a real bug in an earlier version of this file: it
-        // filled OUTSIDE cells to 1.0 too, inflating the reported reservoir mass past the
-        // vessel's own total capacity.
-        let x = (dx + (GRID as f32 - 1.0) / 2.0).round();
-        let y = (dy + GRID as f32 / 2.0).round();
-        if x < 0.0 || y < 0.0 || x as usize >= GRID || y as usize >= GRID {
-            return 0.0;
-        }
-        if base_mask_for_fill[y as usize * GRID + x as usize] != MASK_OUTSIDE { 1.0 } else { 0.0 }
-    };
-
-    if do_trace {
-        let mut sim = build_sim(base_mask.clone(), &b0_fill, GRID);
-        trace_mass("B0", &mut sim, MaterialMode::Water, 3000, 100, b0_is_reservoir, b0_is_collector);
-    }
-    let water_ticks_b0 = [0u32, 300, 700, 1100];
-    let sand_ticks_b0 = [0u32, 400, 1000, 2200];
-    let b0_result = run_design(
-        "B0_control",
-        out_dir,
-        base_mask,
-        b0_fill,
-        b0_is_reservoir,
-        b0_is_collector,
-        b0_network_capacity,
-        &water_ticks_b0,
-        &sand_ticks_b0,
-    );
-
-    // ===================================================================================
     // A2 -- real split and merge
     // ===================================================================================
     // The reservoir sits ABOVE the network within one FIXED total vertical span (0.46h either
@@ -892,7 +809,7 @@ fn main() {
     );
 
     println!("\n=== summary ===");
-    for r in [&b0_result, &a2_result, &c2_result] {
+    for r in [&a2_result, &c2_result] {
         println!(
             "{}: mass={:.1} network_capacity={} fraction_of_network={:.3} water_err={:.6} sand_err={:.6}",
             r.name, r.initial_mass, r.network_capacity, r.fraction_of_network, r.water_mass_err, r.sand_mass_err
