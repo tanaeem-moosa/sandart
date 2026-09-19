@@ -59,8 +59,10 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **101 passed / 4 failed on `main`**, and that is the current expected state
-(101 since 2026-09-14, when `test_rasterize_shape_mask_matches_discrete_eval_at_sim_size` was added):
+The library suite is **102 passed / 4 failed on `main`**, and that is the current expected state
+(101 since 2026-09-14, when `test_rasterize_shape_mask_matches_discrete_eval_at_sim_size` was added;
+102 since 2026-09-18, when `test_mixed_material_transfer_respects_capacity` was added with the
+mixed-material incompressibility fix):
 
 - `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
   keep failing. See HANDOVER.md §1.
