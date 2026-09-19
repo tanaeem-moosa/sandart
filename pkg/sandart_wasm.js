@@ -447,11 +447,16 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_perfect_simulation(this.__wbg_ptr, enabled);
     }
     /**
-     * Selects which quantity feeds the pressure heat-map overlay (see
-     * `set_pressure_heatmap_overlay` for the overlay's own on/off switch): forwarded straight to
-     * the sim, a plain field write (same shape as `set_fresh_pressure_field` just above — no
-     * reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
-     * `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
+     * Selects which quantity the sim's persistent `head_field` buffer would feed the per-cell
+     * pressure heat-map overlay, IF that overlay still existed -- it was removed render/wasm-side
+     * 2026-09-17 (dead: no producer, no setter, no UI toggle) along with `heatmap_enabled`/
+     * `pressure_heatmap_enabled`. This setter is intentionally left alone: flipping it does not
+     * only feed a render overlay, it also changes whether `settle_tick` advances `head_field` at
+     * all this tick (see `head_field_needs_advance`), which is used elsewhere. Verified
+     * byte-identical simulation output either way by `pressure_heatmap_head_field_toggle.rs`.
+     * Forwarded straight to the sim, a plain field write (same shape as `set_fresh_pressure_field`
+     * just above — no reset, no reinitialisation, safe to call every frame from `syncSettings()`).
+     * See `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
      * for what it switches between: `false` (default) is today's shipped `column_depth`; `true`
      * is task #55 step 2's static hydraulic head field, converted to a pressure-like quantity so
      * it renders on the same colour scale.
