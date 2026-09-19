@@ -127,10 +127,6 @@ async function start() {
     document.getElementById('resolution-select').value = String(state.get_render_size());
     document.getElementById('sim-downscale-select').value = String(state.get_sim_downscale());
 
-    // Same idea for the widest-tier chamber count: reflect the sim's actual default (8) rather
-    // than assuming the slider's hard-coded markup value agrees with it.
-    document.getElementById('chambers-slider').value = String(state.get_multistage_chambers());
-
     // Populate material <select> options from the wasm module's canonical material list before
     // anything reads them (syncMaterialTheme below, or the user changing the selection).
     populateMaterialSelects();
@@ -939,8 +935,6 @@ function loadActivePattern() {
     state.load_preset_pattern(type);
 }
 
-const MULTISTAGE_HOURGLASS_SHAPE = 4;
-
 // The pressure heat-map's colour ramp, mirrored from sandart-render/src/shader.wgsl: deep violet
 // -> hot magenta -> pale warm yellow, piecewise-linear with the knee at 0.5. Kept in sync BY HAND
 // -- if that ramp changes, this legend silently starts lying, which is worse than having no
@@ -954,30 +948,15 @@ function pressureRampColor(t) {
     return [0, 1, 2].map((c) => Math.round((a[c] + (b[c] - a[c]) * k) * 255));
 }
 
-function updateChambersRowVisibility() {
-    const el = document.getElementById('chambers-row');
-    if (!el) return;
-    const shapeSelect = document.getElementById('shape-select');
-    const shapeVal = shapeSelect ? parseInt(shapeSelect.value) : 0;
-    el.style.display = (shapeVal === MULTISTAGE_HOURGLASS_SHAPE) ? '' : 'none';
-}
-
 function updateVesselReadouts() {
     if (!state) return;
     const neckSlider = document.getElementById('neck-slider');
-    const chambersSlider = document.getElementById('chambers-slider');
-    if (!neckSlider || !chambersSlider) return;
+    if (!neckSlider) return;
 
     const neckVal = parseFloat(neckSlider.value);
     const neckCells = 2 * state.neck_half_width_cells();
     const neckValEl = document.getElementById('neck-val');
     if (neckValEl) neckValEl.innerText = `${neckVal.toFixed(4)} · ${neckCells.toFixed(1)} cells`;
-
-    const chambersVal = parseInt(chambersSlider.value);
-    const gridSize = state.get_grid_size();
-    const chamberCells = gridSize / chambersVal;
-    const chambersValEl = document.getElementById('chambers-val');
-    if (chambersValEl) chambersValEl.innerText = `${chambersVal} · ${chamberCells.toFixed(1)} cells`;
 }
 
 function updateNeckSliderRange() {
@@ -1011,7 +990,6 @@ function syncSandFallSettings() {
 
     const neckSlider = document.getElementById('neck-slider');
     const curvatureSlider = document.getElementById('curvature-slider');
-    const chambersSlider = document.getElementById('chambers-slider');
 
     if (neckSlider) {
         const neckVal = parseFloat(neckSlider.value);
@@ -1023,11 +1001,6 @@ function syncSandFallSettings() {
         const curveEl = document.getElementById('curvature-val');
         if (curveEl) curveEl.innerText = curveVal.toFixed(1);
         state.set_hourglass_curve(curveVal);
-    }
-
-    if (chambersSlider) {
-        const chambersVal = parseInt(chambersSlider.value);
-        state.set_multistage_chambers(chambersVal);
     }
 
     updateVesselReadouts();
@@ -1057,7 +1030,6 @@ function switchMode(mode) {
             shapeSelect.value = '0';
             state.set_sandbox_shape(0);
         }
-        updateChambersRowVisibility();
 
         state.set_simulator_mode(0);
         state.set_gravity(0.0, 0.0);
@@ -1074,7 +1046,6 @@ function switchMode(mode) {
         if (sandfallControls) sandfallControls.style.display = 'block';
 
         if (shapeGroupSandfall) shapeGroupSandfall.hidden = false;
-        updateChambersRowVisibility();
 
         state.set_simulator_mode(1);
         syncSandFallSettings();
@@ -1138,7 +1109,6 @@ function setupPanelInput() {
         if (!state) return;
         const shapeVal = parseInt(document.getElementById('shape-select').value);
         state.set_sandbox_shape(shapeVal);
-        updateChambersRowVisibility();
         if (isSandFall) {
             // `reset_simulation` was never a real wasm-bound method (checked
             // sandart-wasm/src/lib.rs — only `reset` exists), so this always threw and never
@@ -1283,7 +1253,6 @@ function setupPanelInput() {
 
     const neckSlider = document.getElementById('neck-slider');
     const curvatureSlider = document.getElementById('curvature-slider');
-    const chambersSlider = document.getElementById('chambers-slider');
     const quantileSelect = document.getElementById('quantile-select');
 
     if (quantileSelect) {
@@ -1302,16 +1271,6 @@ function setupPanelInput() {
     curvatureSlider.addEventListener('input', () => {
         syncSandFallSettings();
         // Since changing curvature changes the boundary, reset the simulation to re-initialize the hourglass bed
-        state.reset();
-        syncMaterialTheme(true);
-    });
-
-    // Widest-tier Chamber Count Slider (MultiStageHourglass / "Merging cascade" only)
-    chambersSlider.addEventListener('input', () => {
-        syncSandFallSettings();
-        // Changing the chamber count changes the boundary at least as much as neck width or
-        // curvature does (it can even change the number of TIERS, not just their width), so
-        // the same reset-to-reinitialize contract applies.
         state.reset();
         syncMaterialTheme(true);
     });
@@ -1337,10 +1296,9 @@ function setupPanelInput() {
         requestAnimationFrame(animateResize);
     });
 
-    // Paint the shape-specific visibility, the neck slider's resolution-dependent range, and
-    // the cell-count readouts once up front, so they reflect the sim's actual starting state
-    // immediately rather than only after the first slider move or shape/resolution change.
-    updateChambersRowVisibility();
+    // Paint the neck slider's resolution-dependent range and the cell-count readouts once up
+    // front, so they reflect the sim's actual starting state immediately rather than only after
+    // the first slider move or shape/resolution change.
     updateNeckSliderRange();
     updateVesselReadouts();
 }

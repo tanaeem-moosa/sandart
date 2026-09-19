@@ -109,15 +109,6 @@ export class WasmSimulationState {
         return ret;
     }
     /**
-     * Current `multistage_chambers` value, so the web UI can initialise its slider/readout
-     * from the actual backing value rather than assuming its own hard-coded default matches.
-     * @returns {number}
-     */
-    get_multistage_chambers() {
-        const ret = wasm.wasmsimulationstate_get_multistage_chambers(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
      * Current render/display grid resolution `n` (64/128/256/512/1024) -- what the resolution
      * `<select>` is showing. Lets the web UI initialise that control from the actual backing
      * value rather than assuming its own hardcoded default matches Rust's.
@@ -206,13 +197,12 @@ export class WasmSimulationState {
     }
     /**
      * The rasterised neck HALF-width, in cells, that `eval_sandbox_shape` actually uses for
-     * the current shape/neck_width/multistage_chambers/grid-size combination -- i.e. after
-     * the per-tier cap and floor (and, for MultiStageHourglass, the anti-merge ceiling) have
-     * been applied, not just the raw slider fraction. Exists purely for the UI cell-count
-     * readout next to the neck-width slider: the floor/cap logic means the slider's fraction
-     * alone is a poor guide to what actually rasterises, especially at small grid sizes,
-     * which is exactly what prompted adding this readout in the first place. Display-only;
-     * does not affect geometry.
+     * the current shape/neck_width/grid-size combination -- i.e. after whatever per-shape cap
+     * and floor logic applies, not just the raw slider fraction. Exists purely for the UI
+     * cell-count readout next to the neck-width slider: the floor/cap logic means the slider's
+     * fraction alone is a poor guide to what actually rasterises, especially at small grid
+     * sizes, which is exactly what prompted adding this readout in the first place.
+     * Display-only; does not affect geometry.
      *
      * Deliberately `self.sim_size` (the SIMULATION grid), not `self.render_size`: the mask this
      * describes is `sim.shape_mask`, rasterised and simulated at `sim_size` regardless of display
@@ -359,19 +349,6 @@ export class WasmSimulationState {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
-    }
-    /**
-     * The widest (top) tier's chamber count for `SandboxShape::MultiStageHourglass`'s
-     * merging cascade -- user-selectable 5..=16, default 8. Clamped defensively even though
-     * the UI slider (`chambers-slider` in `index.html`) already enforces the range, matching
-     * `set_marble_count`'s pattern below. Follows the exact same contract as
-     * `set_neck_width`/`set_hourglass_curve`: only regenerates the mask, does not reset the
-     * sim (the caller in `demo.js` resets explicitly afterward, same as it does for those
-     * two, since changing the chamber count changes the boundary as much as they do).
-     * @param {number} chambers
-     */
-    set_multistage_chambers(chambers) {
-        wasm.wasmsimulationstate_set_multistage_chambers(this.__wbg_ptr, chambers);
     }
     /**
      * @param {number} width
@@ -2190,17 +2167,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2110, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2109, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_19e72e13a434ff99___convert__closures_____invoke___wasm_bindgen_19e72e13a434ff99___JsValue__core_ed718c3d60ebd546___result__Result_____wasm_bindgen_19e72e13a434ff99___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 59, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_19e72e13a434ff99___convert__closures_____invoke___wasm_bindgen_19e72e13a434ff99___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 60, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 59, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_19e72e13a434ff99___convert__closures_____invoke___wasm_bindgen_19e72e13a434ff99___JsValue______true__2);
             return ret;
         },
