@@ -227,7 +227,8 @@ impl WasmSimulationState {
         surface.configure(&device, &surface_config);
 
         let renderer = HeightmapRenderer::new(&device, target_format, GRID_SIZE, GRID_SIZE);
-        let sim = DrawingSimulation::new();
+        let mut sim = DrawingSimulation::new();
+        sim.lateral_substeps = LATERAL_SUBSTEPS;
         let playback = PlaybackController::new();
 
         Ok(Self {
@@ -446,13 +447,6 @@ impl WasmSimulationState {
         let neck_width = self.sim.neck_width;
         let hourglass_curve = self.sim.hourglass_curve;
         let multistage_chambers = self.sim.multistage_chambers;
-        let perfect_simulation = self.sim.perfect_simulation;
-        let fresh_pressure_field = self.sim.fresh_pressure_field;
-        let pressure_heatmap_head_field = self.sim.pressure_heatmap_head_field;
-        let head_field_transport = self.sim.head_field_transport;
-        let pressure_sensitive_flow = self.sim.pressure_sensitive_flow;
-        let liquid_fall_jitter = self.sim.liquid_fall_jitter;
-        let lateral_substeps = self.sim.lateral_substeps;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -461,46 +455,12 @@ impl WasmSimulationState {
         sim.neck_width = neck_width;
         sim.hourglass_curve = hourglass_curve;
         sim.multistage_chambers = multistage_chambers;
-        // Carried over like the geometry params above, not left to reset to the fresh sim's
-        // default -- a resolution change is a full sim teardown/rebuild (see this function's
-        // doc comment), but the "perfect simulation" debug toggle is a UI setting, same
-        // category as `quantile_mode` below, and shouldn't silently flip off just because the
-        // grid resized underneath it.
-        sim.perfect_simulation = perfect_simulation;
-        // Same reasoning as `perfect_simulation` just above: a UI debug toggle, not simulation
-        // state, so it should survive a resolution rebuild rather than silently reset to default.
-        sim.fresh_pressure_field = fresh_pressure_field;
-        // Same reasoning again: a UI debug toggle (which pressure heat-map source is selected),
-        // not simulation state -- must survive a resolution rebuild like its siblings above.
-        sim.pressure_heatmap_head_field = pressure_heatmap_head_field;
-        // Same reasoning again -- and if this were dropped the decile legend would silently stop
-        // refreshing after any resolution change, leaving a stale scale on screen.
-        // Same reasoning again: a UI debug toggle, not simulation state.
-        sim.head_field_transport = head_field_transport;
-        // Same reasoning again: a UI debug toggle, not simulation state.
-        sim.pressure_sensitive_flow = pressure_sensitive_flow;
-        // Same reasoning again: a UI debug toggle, not simulation state.
-        // Same reasoning again: a UI debug toggle, not simulation state -- must survive a
-        // resolution rebuild like its siblings above rather than reverting to the fresh sim's
-        // (also `true`) default and silently discarding an explicit user choice to turn it off.
-        // Same reasoning again: a UI debug toggle, not simulation state.
-        // Same reasoning again: a UI slider position, not simulation state.
-        // Same reasoning again: a UI toggle, not simulation state.
-        // Same reasoning again: a UI slider position, not simulation state.
-        sim.liquid_fall_jitter = liquid_fall_jitter;
-        // Same reasoning again: a UI slider position, not simulation state -- must survive a
-        // resolution rebuild like its siblings above rather than reverting to the fresh sim's
-        // `1.0` default and silently discarding an explicit user choice.
-        sim.lateral_substeps = lateral_substeps;
-        // Same reasoning again: a UI toggle, not simulation state.
-        // Same reasoning again: a UI toggle, not simulation state.
-        // Same reasoning again: a UI toggle, not simulation state.
-        // Same reasoning again: UI debug settings, not simulation state -- the correction toggle,
-        // its damping slider and its axis selector must all survive a resolution rebuild.
-        // Same reasoning again: UI debug settings, not simulation state. CREDIT-DEBT-TRANSPORT.md
-        // §2.3's toggle and its rate slider must survive a resolution rebuild like their siblings.
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
+        // Fixed page value, not carried from `self.sim` -- see `LATERAL_SUBSTEPS`'s doc comment.
+        // A rebuild replaces `sim` wholesale, so this must be re-applied every time, same as at
+        // construction in `new` above.
+        sim.lateral_substeps = LATERAL_SUBSTEPS;
         self.sim = sim;
 
         self.render_size = new_render_size;
@@ -882,83 +842,6 @@ impl WasmSimulationState {
     /// wherever `displayed_height`/`displayed_wetness` currently sit, at the new rate.
     pub fn set_temporal_alpha(&mut self, alpha: f32) {
         self.temporal_alpha = alpha.clamp(0.01, 1.0);
-    }
-
-    /// "Perfect simulation" debug toggle: forwarded straight to the sim, which force-admits
-    /// every non-trivial (in-mask, holding material) block into its unconditional simulate tier
-    /// every tick instead of letting the adaptive budget skip any of them. See
-    /// `DrawingSimulation::perfect_simulation`'s doc comment in sandart-sim/src/lib.rs. Slow by
-    /// design — it exists to A/B the scheduler's approximation against the ground truth, not to
-    /// be left on.
-    pub fn set_perfect_simulation(&mut self, enabled: bool) {
-        self.sim.perfect_simulation = enabled;
-    }
-
-    /// "Fresh pressure field" debug toggle: forwarded straight to the sim, a plain field write
-    /// (same shape as `set_perfect_simulation` just above — no reset, no reinitialisation). See
-    /// `DrawingSimulation::fresh_pressure_field`'s doc comment in sandart-sim/src/lib.rs for what
-    /// it switches between. Experimental — it exists to A/B the standalone `column_depth` pass
-    /// against the shipped default live, not because it is known to be an improvement.
-    pub fn set_fresh_pressure_field(&mut self, enabled: bool) {
-        self.sim.fresh_pressure_field = enabled;
-    }
-
-    /// Selects which quantity the sim's persistent `head_field` buffer would feed the per-cell
-    /// pressure heat-map overlay, IF that overlay still existed -- it was removed render/wasm-side
-    /// 2026-09-17 (dead: no producer, no setter, no UI toggle) along with `heatmap_enabled`/
-    /// `pressure_heatmap_enabled`. This setter is intentionally left alone: flipping it does not
-    /// only feed a render overlay, it also changes whether `settle_tick` advances `head_field` at
-    /// all this tick (see `head_field_needs_advance`), which is used elsewhere. Verified
-    /// byte-identical simulation output either way by `pressure_heatmap_head_field_toggle.rs`.
-    /// Forwarded straight to the sim, a plain field write (same shape as `set_fresh_pressure_field`
-    /// just above — no reset, no reinitialisation, safe to call every frame from `syncSettings()`).
-    /// See `DrawingSimulation::pressure_heatmap_head_field`'s doc comment in sandart-sim/src/lib.rs
-    /// for what it switches between: `false` (default) is today's shipped `column_depth`; `true`
-    /// is task #55 step 2's static hydraulic head field, converted to a pressure-like quantity so
-    /// it renders on the same colour scale.
-    pub fn set_pressure_heatmap_head_field(&mut self, enabled: bool) {
-        self.sim.pressure_heatmap_head_field = enabled;
-    }
-
-    /// "Drive transport from the head field" debug toggle (task #55 step 3): forwarded straight
-    /// to the sim, a plain field write (same shape as `set_fresh_pressure_field` above — no
-    /// reset, no reinitialisation, safe to call every frame from `syncSettings()`). See
-    /// `DrawingSimulation::head_field_transport`'s doc comment in sandart-sim/src/lib.rs for what
-    /// it switches on: `false` (default) is today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`
-    /// driving head, bit-identical; `true` makes LIQUID-ONLY lateral and vertical edges use the
-    /// unified hydraulic head field instead. Granular material and mixed liquid/granular edges
-    /// are unaffected.
-    pub fn set_head_field_transport(&mut self, enabled: bool) {
-        self.sim.head_field_transport = enabled;
-    }
-
-    /// "Pressure-sensitive flow rate" debug toggle (task #63): forwarded straight to the sim, a
-    /// plain field write (same shape as `set_head_field_transport` just above — no reset, no
-    /// reinitialisation, safe to call every frame from `syncSettings()`). See
-    /// `DrawingSimulation::pressure_sensitive_flow`'s doc comment in sandart-sim/src/lib.rs for
-    /// what it switches on: `false` (default) is today's head-independent conveyance rate,
-    /// bit-identical; `true` slows LIQUID-ONLY edges whose donor carries less than one cell of
-    /// hydrostatic head. Free-falling material and granular material are unaffected.
-    pub fn set_pressure_sensitive_flow(&mut self, enabled: bool) {
-        self.sim.pressure_sensitive_flow = enabled;
-    }
-
-    /// "Falling liquid jitter" slider (STICKINESS.md): per-cell downward-flow jitter for
-    /// UNDERFULL liquid, 0..=0.6. Plain field write, safe every frame. `0` is the pre-feature
-    /// behaviour exactly. See `DrawingSimulation::liquid_fall_jitter`.
-    pub fn set_liquid_fall_jitter(&mut self, jitter: f32) {
-        self.sim.liquid_fall_jitter = jitter;
-    }
-
-    /// "Lateral substeps" slider: how many times the cross-gravity edge pass runs per tick, as a
-    /// continuous dial, 1.0..=4.0. Plain field write, safe every frame. `1.0` (the default) is
-    /// bit-identical to before this parameter existed, and so is any integer value; a fractional
-    /// value is realised stochastically, once per tick and globally across the whole grid, so the
-    /// expected pass count matches the dial exactly without ever running a wasted partial pass.
-    /// See `DrawingSimulation::lateral_substeps`'s doc comment for the mechanism and
-    /// `physics::settle_tick`'s own parameter of the same name for the full reasoning.
-    pub fn set_lateral_substeps(&mut self, substeps: f32) {
-        self.sim.lateral_substeps = substeps;
     }
 
     pub fn load_pattern_gcode(&mut self, content: &str) -> bool {
@@ -1610,6 +1493,14 @@ impl WasmSimulationState {
 }
 
 pub const GRID_SIZE: usize = 512;
+
+/// Fixed page value for `DrawingSimulation::lateral_substeps` (library default is `1.0`; see
+/// `sandart_sim::DrawingSimulation::new_with_size`). Reruns the lateral (cross-gravity) edge pass
+/// extra times per tick, weighted by donor liquidity, to fix a settled liquid surface holding a
+/// straight ~45-degree facet instead of flattening. `2.5` was chosen by eye on 2026-09-11; this was
+/// a UI slider until the debug controls were removed, so the page now always runs at this value.
+/// See `artifacts/design/ASYMMETRY-2026-09-08.md` §10-11.
+const LATERAL_SUBSTEPS: f32 = 2.5;
 
 /// Convergence threshold for the temporal-smoothing EMA (`update_and_upload_ema` /
 /// `render()`'s settling-box block): once the largest per-cell `|y - current|` in a region drops
