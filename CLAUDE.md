@@ -59,10 +59,14 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **102 passed / 4 failed on `main`**, and that is the current expected state
-(101 since 2026-09-14, when `test_rasterize_shape_mask_matches_discrete_eval_at_sim_size` was added;
-102 since 2026-09-18, when `test_mixed_material_transfer_respects_capacity` was added with the
-mixed-material incompressibility fix):
+The library suite is **96 passed / 3 failed on `main`**, and that is the current expected state.
+On 2026-09-19 the "Merging cascade" vessel (`MultiStageHourglass`) was deleted at the user's request
+(a chamber-network design is replacing it; see `artifacts/design/cascade-2026-09-17/` and
+`artifacts/design/network-2026-09-19/`). Seven tests went with it: six passing ones that exercised
+only that shape, and the former known failure
+`test_cascade_no_dam_or_neck_merge_across_chamber_count_range`. `SandboxShape` now has explicit
+discriminants; id 4 is retired, never reuse it, since the UI sends shapes as integers. The three
+remaining failures:
 
 - `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
   keep failing. See HANDOVER.md §1.
@@ -78,14 +82,6 @@ mixed-material incompressibility fix):
   cuts mid-drain mirror asymmetry 27-36%. **Do not silently re-baseline these thresholds** — they
   are the only thing recording what the symmetry win cost. See `artifacts/design/ASYMMETRY-2026-09-08.md`
   §8 for the measured trade curve and the operator-rebalance hypothesis for fixing both at once.
-- `test_cascade_no_dam_or_neck_merge_across_chamber_count_range` — **known outstanding work on the
-  MultiStage/cascade geometry only.** The 2026-09-08 mirror-axis correction moved every chamber
-  centre by half a cell, and this shape family's neck floor and `anti_merge_ceiling` were both
-  tuned against the old integer axis. The floor was fixed (0.5 -> 1.0, see
-  `multistage_neck_half_width`); `anti_merge_ceiling`'s `-0.5` has the same axis sensitivity and
-  has NOT been re-derived, so at `w=64, chambers=11, neck_width=0.06` the wall between adjacent
-  necks opens and chambers merge. Hourglass and MultiNeckHourglass are unaffected. Do not "fix"
-  this by reverting the axis.
 
 **The near-neck pulse is a known, ACCEPTED oscillation, guarded rather than failing (2026-09-13).**
 In `build_drain_scenario` the column next to the neck swings in mass from tick to tick.
