@@ -1,40 +1,48 @@
 //! PROTOTYPE ONLY. Renders pictures of candidate "network of chambers joined by channels"
-//! vessels, replacing the old "Merging cascade" (`SandboxShape::MultiStageHourglass`). Does not
-//! touch `sandart-sim/src`, the renderer, wasm, the UI, or `proto_cascades.rs` (another agent is
-//! changing that file).
+//! vessels, replacing the old "Merging cascade" (`SandboxShape::MultiStageHourglass`, deleted
+//! from the codebase). Does not touch `sandart-sim/src`, the renderer, wasm, the UI, or
+//! `proto_cascades.rs` (another agent owns that file).
 //!
-//! Background: `artifacts/design/cascade-2026-09-17/README.md`. Round 2's A2 ("split and merge")
-//! was a brick grid of enclosed chambers that the user liked structurally ("opens up many avenues
-//! of complex network ... does not even have to be perpendicular ... can be at an angle") but it
-//! did NOT mix: every stream fell straight down its own hole and red never touched green.
+//! ROUND 1 of this file prototyped N1/N2/N3 (crossing junctions / split-recombine / layering) --
+//! their PNGs and README section stay in `artifacts/design/network-2026-09-19/` as the record,
+//! but the user rejected all three ("None of these are good") and this file no longer builds
+//! them. See git history for that code if it's ever needed again.
 //!
-//! Decisions already made by the user (do not re-litigate):
-//!   - Mirror symmetry is NOT required for these networks.
-//!   - Channels may run at any angle, not just vertical/horizontal.
-//!   - Whether "mixing" should look like BLENDING or INTERLEAVING is undecided -- show both.
+//! ROUND 2 (this file, now): a concrete spec from the user. **12 rectangular chambers, a fixed
+//! 3-row x 4-column grid (top/middle/bottom, 4 per row), joined by pipes.** The interesting
+//! variable is the PIPE CONFIGURATION (and, per a follow-up clarification, the chamber FLOOR
+//! shape) over that same fixed grid. Geometry is still data for one small rasterizer -- see
+//! `Shape`, `shape_inside`, `network_inside` -- now with a third shape (`Shape::Poly`, an
+//! arbitrary simple polygon) added specifically so a chamber's floor can be sloped, not just
+//! flat.
 //!
-//! Geometry is built as DATA for one small rasterizer (chambers = rounded boxes, channels =
-//! capsules/line segments with a width), because that is how it would ship. See `Shape`,
-//! `shape_inside`, `network_inside` below.
+//! Two follow-up clarifications from the user, both load-bearing:
+//!   1. Chambers need not be strictly rectangular -- sloped floors are a deliberate design
+//!      variable, not a workaround to hide. G6/G7 below are the SAME pipe configuration with a
+//!      flat vs. sloped floor, specifically so the cost/benefit is visible side by side.
+//!   2. **Pipes merging is fine and wanted** -- "that creates interesting effects." Two pipes (or
+//!      two colours) meeting in one pipe or junction chamber is a deliberate design element here,
+//!      not a planar-mask accident to route around. G3 is built specifically to merge a red
+//!      column with a green column early and show what the tracer does there.
 //!
-//! Three designs:
-//!   N1 -- crossing junctions: streams arrive at small shared junction chambers on angled
-//!         channels that visually cross (X) before and after each chamber, so material from both
-//!         approach directions is forced into the same small pool several times down the vessel.
-//!   N2 -- split and recombine: a literal binary "swap the touching inner halves of each adjacent
-//!         pair of bands" network, applied 3 times (2 -> 4 -> 8 -> 16 bands). This is the closest
-//!         buildable 2D approximation of the classic split/recombine microfluidic mixer -- a real
-//!         doubling-by-lamination mixer needs a third (out-of-plane) dimension to make one branch
-//!         carry a full copy of the incoming pattern, which a flat height-field mask cannot do
-//!         without the two branches physically merging. Report what the picture actually shows.
-//!   N3 -- layering: a short direct path for the left (red) half and a long winding path for the
-//!         right (green) half, both converging on ONE shared collector, so red should settle at
-//!         the bottom before green arrives on top -- checked from the mass trace, not assumed.
+//! Variants (all on the same 12-chamber grid; only the pipe list -- and, for G6/G7, the chamber
+//! floor shape -- changes):
+//!   G1 -- straight: each chamber feeds the one directly below. Flat floor, centred pipe mouth.
+//!   G2 -- diagonal shift: each feeds the chamber one column across; the wrap (last column back
+//!         to the first) is a genuine long diagonal that crosses the others -- left as a real
+//!         crossing/merge, per clarification 2.
+//!   G3 -- merge: a red top column and a green top column are deliberately routed into the SAME
+//!         shared chamber, twice, so the tracer shows the merge directly.
+//!   G4 -- split: every chamber's floor has two pipes, feeding two different chambers below.
+//!   G5 -- crossing fan: top row reverses column order into the middle row (a full 4-way crossing
+//!         "own idea" variant), then runs straight into the bottom row for contrast.
+//!   G6 -- straight, flat floor, CORNER pipe mouth (vs. G1's centred mouth) -- sand-drainage A/B.
+//!   G7 -- straight, SLOPED floor, same corner pipe mouth as G6 -- sand-drainage A/B, continued.
 //!
 //!   distrobox enter sandart-dev -- bash -lc \
 //!     'cd /home/deck/projects/sandart && CARGO_BUILD_JOBS=2 cargo run -p sandart-sim --release --example proto_networks'
 //!
-//! Writes PNGs and a README to artifacts/design/network-2026-09-19/.
+//! Writes PNGs and a README to artifacts/design/network-2026-09-19/ (N1/N2/N3's files untouched).
 
 use sandart_sim::{
     color_channel, pack_rgba, DrawingSimulation, MaterialMode, MASK_BOUNDARY, MASK_INSIDE,
@@ -53,12 +61,16 @@ const GRID: usize = 256;
 // math like the old MultiStageHourglass).
 // -------------------------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Shape {
     /// Rounded box: centre (cx, cy), half-extents (hx, hy), corner radius r (r <= min(hx, hy)).
     Chamber { cx: f32, cy: f32, hx: f32, hy: f32, r: f32 },
     /// Capsule: line segment (x0,y0)-(x1,y1), half-width hw (rounded ends).
     Channel { x0: f32, y0: f32, x1: f32, y1: f32, hw: f32 },
+    /// Arbitrary simple polygon (closed, points in order). Used for sloped-floor chambers --
+    /// everything else about a chamber (rounded corners, uniform depth) assumes a flat floor, so
+    /// a slope needs its own shape rather than a parameter on `Chamber`.
+    Poly(Vec<(f32, f32)>),
 }
 
 fn rounded_box_inside(x: f32, y: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> bool {
@@ -79,10 +91,28 @@ fn capsule_inside(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, hw: f32) -
     (ex * ex + ey * ey).sqrt() <= hw
 }
 
+/// Standard ray-casting point-in-polygon test. `pts` need not be convex, just a simple closed
+/// loop (implicitly closed -- the last point connects back to the first).
+fn poly_inside(x: f32, y: f32, pts: &[(f32, f32)]) -> bool {
+    let n = pts.len();
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = pts[i];
+        let (xj, yj) = pts[j];
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 fn shape_inside(s: &Shape, x: f32, y: f32) -> bool {
-    match *s {
-        Shape::Chamber { cx, cy, hx, hy, r } => rounded_box_inside(x, y, cx, cy, hx, hy, r),
-        Shape::Channel { x0, y0, x1, y1, hw } => capsule_inside(x, y, x0, y0, x1, y1, hw),
+    match s {
+        &Shape::Chamber { cx, cy, hx, hy, r } => rounded_box_inside(x, y, cx, cy, hx, hy, r),
+        &Shape::Channel { x0, y0, x1, y1, hw } => capsule_inside(x, y, x0, y0, x1, y1, hw),
+        Shape::Poly(pts) => poly_inside(x, y, pts),
     }
 }
 
@@ -427,285 +457,6 @@ fn trace_mass(
 }
 
 // -------------------------------------------------------------------------------------------
-// Shared vertical envelope for all three designs.
-// -------------------------------------------------------------------------------------------
-
-const HW_FRAC: f32 = 0.42; // * w_f, half-width of the network envelope
-const TOTAL_HALF_FRAC: f32 = 0.46; // * h_f, half-height of the whole vessel
-
-// dry-sand angle of repose in this sim is ~0.089 height-per-cell (per CLAUDE.md / physics.rs
-// comments on the CA's repose threshold) -- effectively a very shallow ~5 degree critical slope.
-// Every diagonal channel below is built with a drop-to-run ratio of at least 1.3 (>= 52 degrees
-// from horizontal), an order of magnitude steeper than that floor, specifically so dry sand does
-// not stall in a corridor. Checked against the measured dry-sand mass trace below, not asserted.
-const MIN_DROP_RUN_RATIO: f32 = 1.3;
-
-// -------------------------------------------------------------------------------------------
-// N1 -- crossing junctions: reservoir -> N_STAGES small junction chambers, each pair of
-// consecutive nodes (reservoir/chamber/collector) connected by an X of two crossing channels, so
-// material from the "left" approach and the "right" approach are forced into the SAME chamber
-// several times down the vessel.
-// -------------------------------------------------------------------------------------------
-
-const N1_STAGES: usize = 4;
-const N1_LANE_FRAC: f32 = 0.20; // * w_f, x-offset of the crossing lanes either side of centre
-const N1_CH_HW_FRAC: f32 = 0.11; // * w_f, chamber half-width
-const N1_CHANNEL_HW: f32 = 6.0; // channel half-width in cells (width 12, well over the 2-cell min)
-const N1_COLLECTOR_FRAC: f32 = 0.16; // * (net height), collector height
-
-/// One X-crossing between a "from" node (at y=y_from) and a "to" node (at y=y_to): an incoming
-/// point pair (from_l, from_r) at y_from and an outgoing point pair (to_l, to_r) at y_to, wired so
-/// from_l connects to to_r and from_r connects to to_l (the crossing).
-fn cross_pair(from_l: f32, from_r: f32, y_from: f32, to_l: f32, to_r: f32, y_to: f32, hw: f32) -> [Shape; 2] {
-    [
-        Shape::Channel { x0: from_l, y0: y_from, x1: to_r, y1: y_to, hw },
-        Shape::Channel { x0: from_r, y0: y_from, x1: to_l, y1: y_to, hw },
-    ]
-}
-
-fn build_n1(w_f: f32, h_f: f32) -> (Vec<Shape>, f32, f32, Vec<f32>) {
-    let total_half = TOTAL_HALF_FRAC * h_f;
-    let res_hw = HW_FRAC * w_f;
-    let lane = N1_LANE_FRAC * w_f;
-    let ch_hw = N1_CH_HW_FRAC * w_f;
-
-    // Fixed-point sizing: reservoir height depends on network capacity, network capacity barely
-    // depends on reservoir height (chambers are sized in absolute cells / fractions of stage
-    // height, not of the leftover span), so this converges in a couple of iterations.
-    let mut res_h = 20.0f32;
-    let mut net_cap = 0usize;
-    let mut chamber_cy: Vec<f32> = Vec::new();
-    let mut shapes: Vec<Shape> = Vec::new();
-    let mut collector_y0 = 0.0f32;
-    for _ in 0..5 {
-        let res_y0 = -total_half;
-        let res_y1 = res_y0 + res_h;
-        let net_y0 = res_y1;
-        let net_y1 = total_half;
-        let net_h = net_y1 - net_y0;
-        let collector_h = N1_COLLECTOR_FRAC * net_h;
-        let stages_h = net_h - collector_h;
-        let stage_h = stages_h / N1_STAGES as f32;
-
-        chamber_cy.clear();
-        for i in 0..N1_STAGES {
-            let y0 = net_y0 + i as f32 * stage_h;
-            chamber_cy.push(y0 + stage_h * 0.55);
-        }
-        collector_y0 = net_y0 + stages_h;
-
-        shapes = Vec::new();
-        shapes.push(Shape::Chamber { cx: 0.0, cy: (res_y0 + res_y1) / 2.0, hx: res_hw, hy: (res_y1 - res_y0) / 2.0, r: 6.0 });
-        for &cy in &chamber_cy {
-            shapes.push(Shape::Chamber { cx: 0.0, cy, hx: ch_hw, hy: stage_h * 0.30, r: 6.0 });
-        }
-        shapes.push(Shape::Chamber { cx: 0.0, cy: (collector_y0 + total_half) / 2.0, hx: res_hw, hy: (total_half - collector_y0) / 2.0, r: 6.0 });
-
-        // reservoir -> chamber 0
-        let inset = 4.0;
-        shapes.extend(cross_pair(-lane, lane, res_y1 - inset, -ch_hw * 0.5, ch_hw * 0.5, chamber_cy[0] - stage_h * 0.30 + inset, N1_CHANNEL_HW));
-        // chamber i -> chamber i+1
-        for i in 0..N1_STAGES - 1 {
-            let y_from = chamber_cy[i] + stage_h * 0.30 - inset;
-            let y_to = chamber_cy[i + 1] - stage_h * 0.30 + inset;
-            shapes.extend(cross_pair(-ch_hw * 0.5, ch_hw * 0.5, y_from, -ch_hw * 0.5, ch_hw * 0.5, y_to, N1_CHANNEL_HW));
-        }
-        // last chamber -> collector
-        let last = N1_STAGES - 1;
-        let y_from = chamber_cy[last] + stage_h * 0.30 - inset;
-        shapes.extend(cross_pair(-ch_hw * 0.5, ch_hw * 0.5, y_from, -lane, lane, collector_y0 + inset, N1_CHANNEL_HW));
-
-        let net_mask = rasterize(GRID, GRID, |dx, dy| dy >= net_y0 && network_inside(&shapes, dx, dy));
-        net_cap = capacity(&net_mask);
-        let target_area = (0.55 * net_cap as f32).ceil();
-        res_h = (target_area / (2.0 * res_hw)).ceil().max(20.0);
-    }
-
-    (shapes, res_h, collector_y0, chamber_cy)
-}
-
-// -------------------------------------------------------------------------------------------
-// N2 -- split and recombine: repeated "swap the touching inner halves of each adjacent pair of
-// bands" doubling, applied 3 times (2 -> 4 -> 8 -> 16 bands). See the module doc comment for why
-// this -- not a literal lamination duplicate -- is the buildable 2D version of the classic mixer.
-// -------------------------------------------------------------------------------------------
-
-const N2_STAGES: usize = 3; // 2 -> 4 -> 8 -> 16 bands
-const N2_WALL_FRAC: f32 = 0.18; // fraction of a band's width kept as wall margin each side
-
-/// One doubling stage: `n` input bands (equal-width slices of [-hw, hw]) at y=y0 become `2n`
-/// output bands at y=y1. For each input pair (2k, 2k+1): input(2k)_left-half stays in place,
-/// input(2k+1)_right-half stays in place, and the two TOUCHING inner halves --
-/// input(2k)_right-half and input(2k+1)_left-half -- swap (a crossing X). This is the only
-/// operation of the four that changes anything; the outer two are straight channels.
-fn n2_doubling_stage(n: usize, hw: f32, y0: f32, y1: f32) -> Vec<Shape> {
-    let w = 2.0 * hw;
-    let n2 = 2 * n;
-    let slot_out = w / n2 as f32;
-    let margin = slot_out * N2_WALL_FRAC;
-    let half_chan = slot_out / 2.0 - margin;
-    let mut shapes = Vec::new();
-
-    let out_slot_center = |j: usize| -hw + (j as f32 + 0.5) * slot_out;
-    let in_slot_lo_hi = |k: usize| {
-        let slot_in = w / n as f32;
-        (-hw + k as f32 * slot_in, -hw + (k as f32 + 1.0) * slot_in)
-    };
-
-    for k in 0..n / 2 {
-        // input pair (2k, 2k+1) -> output slots (4k, 4k+1, 4k+2, 4k+3)
-        let (lo0, hi0) = in_slot_lo_hi(2 * k);
-        let (lo1, hi1) = in_slot_lo_hi(2 * k + 1);
-        let in0_l = (lo0 + hi0) / 2.0 - (hi0 - lo0) / 4.0;
-        let in0_r = (lo0 + hi0) / 2.0 + (hi0 - lo0) / 4.0;
-        let in1_l = (lo1 + hi1) / 2.0 - (hi1 - lo1) / 4.0;
-        let in1_r = (lo1 + hi1) / 2.0 + (hi1 - lo1) / 4.0;
-
-        let out4k = out_slot_center(4 * k);
-        let out4k1 = out_slot_center(4 * k + 1);
-        let out4k2 = out_slot_center(4 * k + 2);
-        let out4k3 = out_slot_center(4 * k + 3);
-
-        // straight (no crossing): in0_l -> out(4k), in1_r -> out(4k+3)
-        shapes.push(Shape::Channel { x0: in0_l, y0, x1: out4k, y1, hw: half_chan });
-        shapes.push(Shape::Channel { x0: in1_r, y0, x1: out4k3, y1, hw: half_chan });
-        // crossing: in1_l -> out(4k+1), in0_r -> out(4k+2)
-        shapes.push(Shape::Channel { x0: in1_l, y0, x1: out4k1, y1, hw: half_chan });
-        shapes.push(Shape::Channel { x0: in0_r, y0, x1: out4k2, y1, hw: half_chan });
-    }
-    shapes
-}
-
-fn build_n2(w_f: f32, h_f: f32) -> (Vec<Shape>, f32, f32) {
-    let total_half = TOTAL_HALF_FRAC * h_f;
-    let hw = HW_FRAC * w_f;
-
-    let mut res_h = 20.0f32;
-    let mut net_cap = 0usize;
-    let mut shapes: Vec<Shape> = Vec::new();
-    let mut collector_y0 = 0.0f32;
-    for _ in 0..5 {
-        let res_y0 = -total_half;
-        let res_y1 = res_y0 + res_h;
-        let net_y0 = res_y1;
-        let net_y1 = total_half;
-        let net_h = net_y1 - net_y0;
-        let collector_h = 0.20 * net_h;
-        let stages_h = net_h - collector_h;
-        let stage_h = stages_h / N2_STAGES as f32;
-        // stage_h/slot_width for the final (finest) stage must satisfy MIN_DROP_RUN_RATIO -- the
-        // finest stage moves material by half a slot width (see n2_doubling_stage), and the
-        // narrowest slots are the LAST stage's outputs (16 bands).
-        let finest_slot = (2.0 * hw) / 16.0;
-        let min_stage_h = MIN_DROP_RUN_RATIO * finest_slot * 0.5;
-        let stage_h = stage_h.max(min_stage_h);
-
-        collector_y0 = net_y0 + stage_h * N2_STAGES as f32;
-
-        shapes = Vec::new();
-        shapes.push(Shape::Chamber { cx: 0.0, cy: (res_y0 + res_y1) / 2.0, hx: hw, hy: (res_y1 - res_y0) / 2.0, r: 6.0 });
-        let mut n = 2usize;
-        for s in 0..N2_STAGES {
-            let y0 = net_y0 + s as f32 * stage_h;
-            let y1 = y0 + stage_h;
-            shapes.extend(n2_doubling_stage(n, hw, y0, y1));
-            n *= 2;
-        }
-        shapes.push(Shape::Chamber { cx: 0.0, cy: (collector_y0 + total_half) / 2.0, hx: hw, hy: (total_half - collector_y0) / 2.0, r: 6.0 });
-
-        let net_mask = rasterize(GRID, GRID, |dx, dy| dy >= net_y0 && network_inside(&shapes, dx, dy));
-        net_cap = capacity(&net_mask);
-        let target_area = (0.55 * net_cap as f32).ceil();
-        res_h = (target_area / (2.0 * hw)).ceil().max(20.0);
-    }
-
-    (shapes, res_h, collector_y0)
-}
-
-// -------------------------------------------------------------------------------------------
-// N3 -- layering: a short direct path (from the reservoir's LEFT / red half) and a long winding
-// path (from the RIGHT / green half) both converge on one shared collector, so red should arrive
-// and settle first, with green layering on top once it finally gets there.
-// -------------------------------------------------------------------------------------------
-
-const N3_FAST_HW: f32 = 14.0; // half-width of the fast (red) channel
-const N3_SLOW_HW: f32 = 11.0; // half-width of the slow (green) channel -- narrower, so it also
-                               // carries less flux per unit time, reinforcing the delay
-const N3_SLOW_LEGS: usize = 10; // number of switchback traversals for the slow path -- confined
-                                 // to the right half (see build_n3), so more legs is what buys
-                                 // extra path length, not a shallower angle.
-
-fn build_n3(w_f: f32, h_f: f32) -> (Vec<Shape>, f32, f32) {
-    let total_half = TOTAL_HALF_FRAC * h_f;
-    let hw = HW_FRAC * w_f;
-
-    let mut res_h = 20.0f32;
-    let mut net_cap = 0usize;
-    let mut shapes: Vec<Shape> = Vec::new();
-    let mut collector_y0 = 0.0f32;
-    for _ in 0..5 {
-        let res_y0 = -total_half;
-        let res_y1 = res_y0 + res_h;
-        let net_y0 = res_y1;
-        let net_y1 = total_half;
-        let net_h = net_y1 - net_y0;
-        let collector_h = 0.22 * net_h;
-        let paths_h = net_h - collector_h;
-        collector_y0 = net_y0 + paths_h;
-
-        shapes = Vec::new();
-        shapes.push(Shape::Chamber { cx: 0.0, cy: (res_y0 + res_y1) / 2.0, hx: hw, hy: (res_y1 - res_y0) / 2.0, r: 6.0 });
-        shapes.push(Shape::Chamber { cx: 0.0, cy: (collector_y0 + total_half) / 2.0, hx: hw, hy: (total_half - collector_y0) / 2.0, r: 6.0 });
-
-        // FAST path: confined to the LEFT half of the envelope (under the reservoir's red half),
-        // a short, nearly straight drop with one gentle bend for character. Kept entirely at
-        // x < -8 so it never spatially overlaps the slow path below -- two channels that cross
-        // in this flat 2D mask necessarily MERGE where they touch (there is no bridge/via), which
-        // would blur exactly the "two distinguishable paths" this design depends on.
-        let fast_lo = -hw + N3_FAST_HW + 2.0;
-        let fast_x0 = fast_lo + (hw * 0.30);
-        let fast_y0 = res_y1 - 4.0;
-        let fast_x1 = fast_lo + (hw * 0.12);
-        let fast_y1 = collector_y0 + 4.0;
-        shapes.push(Shape::Channel { x0: fast_x0, y0: fast_y0, x1: fast_x1, y1: fast_y1, hw: N3_FAST_HW });
-
-        // SLOW path: confined to the RIGHT half of the envelope (under the reservoir's green
-        // half, x > 8), switchbacking within that half N3_SLOW_LEGS times before reaching the
-        // collector -- several times the path LENGTH of the fast path for the same vertical
-        // drop, hence much later arrival, WITHOUT ever crossing into the fast path's territory.
-        // Confining the swing to one half (rather than the full envelope) means the ratio floor
-        // is no longer the binding constraint on sweep -- it is the region width -- so more legs
-        // (not a shallower angle) is what buys extra path length here; each leg's actual
-        // drop/run ratio is checked afterwards and stays far above the repose floor.
-        let slow_lo = 8.0;
-        let slow_hi = hw - N3_SLOW_HW - 2.0;
-        let amp_center = (slow_lo + slow_hi) / 2.0;
-        let half_amp = (slow_hi - slow_lo) / 2.0;
-        let leg_h = (paths_h - 8.0) / N3_SLOW_LEGS as f32;
-        let mut x = amp_center + half_amp; // start at the right edge of the confined region
-        let mut y = res_y1 - 4.0;
-        let mut going_right = false;
-        for _ in 0..N3_SLOW_LEGS {
-            let nx = if going_right { amp_center + half_amp } else { amp_center - half_amp };
-            let ny = y + leg_h;
-            shapes.push(Shape::Channel { x0: x, y0: y, x1: nx, y1: ny, hw: N3_SLOW_HW });
-            x = nx;
-            y = ny;
-            going_right = !going_right;
-        }
-        // final short drop into the collector, drifting back toward the right-half centre.
-        shapes.push(Shape::Channel { x0: x, y0: y, x1: amp_center, y1: collector_y0 + 4.0, hw: N3_SLOW_HW });
-
-        let net_mask = rasterize(GRID, GRID, |dx, dy| dy >= net_y0 && network_inside(&shapes, dx, dy));
-        net_cap = capacity(&net_mask);
-        let target_area = (0.55 * net_cap as f32).ceil();
-        res_h = (target_area / (2.0 * hw)).ceil().max(20.0);
-    }
-
-    (shapes, res_h, collector_y0)
-}
-
-// -------------------------------------------------------------------------------------------
 // Driving the simulation
 // -------------------------------------------------------------------------------------------
 
@@ -825,160 +576,331 @@ fn run_design(
     }
 }
 
+// -------------------------------------------------------------------------------------------
+// The 12-chamber grid: 3 rows (top/middle/bottom) x 4 columns, fixed across every variant. Only
+// the pipe list -- and, for G6/G7, the chamber floor shape -- changes per variant.
+// -------------------------------------------------------------------------------------------
+
+const G_ROWS: usize = 3;
+const G_COLS: usize = 4;
+const G_HW_X_FRAC: f32 = 0.44; // * w_f, half-width of the whole grid envelope
+const G_TOTAL_HALF_Y_FRAC: f32 = 0.46; // * h_f, half-height of the whole grid envelope
+// The top row gets a bigger share of the vertical budget than middle/bottom. With three EQUAL
+// rows, the reservoir (4 top chambers) is capped at ~4/(8 chambers + pipes) of the network, i.e.
+// well under 50% before a single pipe is even added -- measured at 0.491 for the sparsest variant
+// (G1, 8 pipes) and as low as 0.474 once a variant's pipe list gets bigger (G4, 16 pipes). Giving
+// row 0 a larger slice fixes this at the geometry level instead of inflating the fill some other
+// way.
+const G_ROW_FRACS: [f32; 3] = [0.42, 0.29, 0.29];
+const G_CHAMBER_FILL_X: f32 = 0.82; // fraction of a column's own width slot the chamber fills
+const G_CHAMBER_FILL_Y: f32 = 0.68; // fraction of a row's own height slot the chamber fills
+const G_CHAMBER_R: f32 = 3.0; // corner radius -- small, so chambers still read as rectangular
+const G_PIPE_HW: f32 = 5.0; // pipe half-width (10 cells -- well over the 3-cell/6-cell minimum)
+const G_INSET: f32 = 4.0; // how far a pipe's mouth is inset from the chamber's own wall
+
+struct Grid {
+    hw_x: f32,
+    total_half_y: f32,
+    col_width: f32,
+    row_y0: [f32; G_ROWS],
+    row_y1: [f32; G_ROWS],
+    chamber_hx: f32,
+    chamber_hy: [f32; G_ROWS],
+}
+
+impl Grid {
+    fn new(w_f: f32, h_f: f32) -> Self {
+        let hw_x = G_HW_X_FRAC * w_f;
+        let total_half_y = G_TOTAL_HALF_Y_FRAC * h_f;
+        let col_width = 2.0 * hw_x / G_COLS as f32;
+        let total_h = 2.0 * total_half_y;
+        let mut row_y0 = [0.0f32; G_ROWS];
+        let mut row_y1 = [0.0f32; G_ROWS];
+        let mut y = -total_half_y;
+        for r in 0..G_ROWS {
+            row_y0[r] = y;
+            y += G_ROW_FRACS[r] * total_h;
+            row_y1[r] = y;
+        }
+        let mut chamber_hy = [0.0f32; G_ROWS];
+        for r in 0..G_ROWS {
+            chamber_hy[r] = (row_y1[r] - row_y0[r]) * 0.5 * G_CHAMBER_FILL_Y;
+        }
+        Grid { hw_x, total_half_y, col_width, row_y0, row_y1, chamber_hx: col_width * 0.5 * G_CHAMBER_FILL_X, chamber_hy }
+    }
+    fn col_c(&self, col: usize) -> f32 {
+        -self.hw_x + self.col_width * (col as f32 + 0.5)
+    }
+    fn row_c(&self, row: usize) -> f32 {
+        (self.row_y0[row] + self.row_y1[row]) * 0.5
+    }
+    /// The boundary between row 0 (top/reservoir) and row 1 -- everything above is "reservoir".
+    fn reservoir_boundary(&self) -> f32 {
+        self.row_y1[0]
+    }
+    /// The boundary between row 1 and row 2 (bottom/collector) -- everything below is "collector".
+    fn collector_boundary(&self) -> f32 {
+        self.row_y1[1]
+    }
+    fn chamber(&self, row: usize, col: usize) -> Shape {
+        Shape::Chamber { cx: self.col_c(col), cy: self.row_c(row), hx: self.chamber_hx, hy: self.chamber_hy[row], r: G_CHAMBER_R }
+    }
+    /// A sloped-floor chamber: flat top and sides, but the floor is a single straight ramp from
+    /// a shallow corner (0.35 of the way down) to a full-depth corner at the outlet side. No
+    /// corner rounding -- see the module doc comment (clarification 1: slope is a real, visible
+    /// design variable here, not a parameter tucked away on the normal chamber).
+    fn sloped_chamber(&self, row: usize, col: usize, outlet_side: f32) -> Shape {
+        let cx = self.col_c(col);
+        let cy = self.row_c(row);
+        let (hx, hy) = (self.chamber_hx, self.chamber_hy[row]);
+        let shallow_y = cy + hy * 0.35;
+        let deep_y = cy + hy;
+        let (bl_y, br_y) = if outlet_side < 0.0 { (deep_y, shallow_y) } else { (shallow_y, deep_y) };
+        Shape::Poly(vec![(cx - hx, cy - hy), (cx + hx, cy - hy), (cx + hx, br_y), (cx - hx, bl_y)])
+    }
+    fn all_chambers_flat(&self) -> Vec<Shape> {
+        (0..G_ROWS).flat_map(|r| (0..G_COLS).map(move |c| (r, c))).map(|(r, c)| self.chamber(r, c)).collect()
+    }
+    fn all_chambers_sloped(&self, outlet_side: f32) -> Vec<Shape> {
+        (0..G_ROWS).flat_map(|r| (0..G_COLS).map(move |c| (r, c))).map(|(r, c)| self.sloped_chamber(r, c, outlet_side)).collect()
+    }
+    /// A point on chamber (row, col)'s own floor, `xfrac` in [-1, 1] across its own width.
+    fn floor_pt(&self, row: usize, col: usize, xfrac: f32) -> (f32, f32) {
+        (self.col_c(col) + xfrac * self.chamber_hx * 0.9, self.row_c(row) + self.chamber_hy[row] - G_INSET)
+    }
+    /// A point on chamber (row, col)'s own ceiling (top edge), `xfrac` in [-1, 1].
+    fn top_pt(&self, row: usize, col: usize, xfrac: f32) -> (f32, f32) {
+        (self.col_c(col) + xfrac * self.chamber_hx * 0.9, self.row_c(row) - self.chamber_hy[row] + G_INSET)
+    }
+    /// A point on chamber (row, col)'s own side wall. `side` -1.0 = left wall, +1.0 = right wall.
+    fn side_pt(&self, row: usize, col: usize, side: f32, yfrac: f32) -> (f32, f32) {
+        (self.col_c(col) + side * (self.chamber_hx - G_INSET), self.row_c(row) + yfrac * self.chamber_hy[row] * 0.6)
+    }
+    fn pipe_floor_to_top(&self, from: (usize, usize, f32), to: (usize, usize, f32)) -> Shape {
+        let (x0, y0) = self.floor_pt(from.0, from.1, from.2);
+        let (x1, y1) = self.top_pt(to.0, to.1, to.2);
+        Shape::Channel { x0, y0, x1, y1, hw: G_PIPE_HW }
+    }
+    fn pipe_side_to_side(&self, from: (usize, usize, f32, f32), to: (usize, usize, f32, f32)) -> Shape {
+        let (x0, y0) = self.side_pt(from.0, from.1, from.2, from.3);
+        let (x1, y1) = self.side_pt(to.0, to.1, to.2, to.3);
+        Shape::Channel { x0, y0, x1, y1, hw: G_PIPE_HW }
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Variant pipe lists. Chambers are identical across all of these (`Grid::all_chambers_flat`,
+// except G7 which uses `all_chambers_sloped`) -- each function below returns PIPES ONLY.
+// -------------------------------------------------------------------------------------------
+
+/// G1 -- straight: every chamber feeds the one directly below it. Flat floor, centred mouth.
+fn pipes_g1_straight(g: &Grid) -> Vec<Shape> {
+    let mut v = Vec::new();
+    for c in 0..G_COLS {
+        v.push(g.pipe_floor_to_top((0, c, 0.0), (1, c, 0.0)));
+        v.push(g.pipe_floor_to_top((1, c, 0.0), (2, c, 0.0)));
+    }
+    v
+}
+
+/// G2 -- diagonal shift: column c feeds column c+1 one row down, wrapping column 3 back to
+/// column 0. The wrap is a genuine long diagonal that crosses the three short ones -- left as a
+/// real crossing/merge (clarification 2: merging pipes is a wanted effect, not something to
+/// route around). This also means every column has exactly one incoming pipe at every row, so
+/// full connectivity falls out for free with no extra connector pipes needed.
+fn pipes_g2_diagonal_shift(g: &Grid) -> Vec<Shape> {
+    let mut v = Vec::new();
+    for c in 0..G_COLS {
+        let to = (c + 1) % G_COLS;
+        // sign: which way the mouth/entry lean -- rightward for the three short shifts (to > c),
+        // leftward for the one wrap (to < c, column 3 back to column 0).
+        let sign = if to > c { 1.0 } else { -1.0 };
+        v.push(g.pipe_floor_to_top((0, c, 0.3 * sign), (1, to, -0.3 * sign)));
+        v.push(g.pipe_floor_to_top((1, c, 0.3 * sign), (2, to, -0.3 * sign)));
+    }
+    v
+}
+
+/// G3 -- merge: deliberately routes a RED top column and a GREEN top column into the SAME
+/// shared chamber, twice (clarification 2's dedicated "colours actually meet" variant). Columns
+/// 0-1 start red, 2-3 start green (see `set_tracer_colors` below), so pairing (0,2) -> mid col 1
+/// and (1,3) -> mid col 2 guarantees both merge points combine one red source and one green
+/// source. Mid columns 0 and 3 get no direct feed from this pairing, so a lateral connector pipe
+/// (side wall to side wall, not floor-to-top) keeps them reachable -- an ordinary "connected
+/// vessels" link, not a crossing workaround. The same pattern repeats mid -> bottom.
+fn pipes_g3_merge(g: &Grid) -> Vec<Shape> {
+    let mut v = Vec::new();
+    // top -> mid: (0,2) -> mid col 1, (1,3) -> mid col 2.
+    v.push(g.pipe_floor_to_top((0, 0, 0.5), (1, 1, -0.4)));
+    v.push(g.pipe_floor_to_top((0, 2, -0.5), (1, 1, 0.4)));
+    v.push(g.pipe_floor_to_top((0, 1, 0.5), (1, 2, -0.4)));
+    v.push(g.pipe_floor_to_top((0, 3, -0.5), (1, 2, 0.4)));
+    v.push(g.pipe_side_to_side((1, 0, 1.0, 0.0), (1, 1, -1.0, 0.0)));
+    v.push(g.pipe_side_to_side((1, 2, 1.0, 0.0), (1, 3, -1.0, 0.0)));
+    // mid -> bottom: same merge pattern one row down.
+    v.push(g.pipe_floor_to_top((1, 0, 0.5), (2, 1, -0.4)));
+    v.push(g.pipe_floor_to_top((1, 2, -0.5), (2, 1, 0.4)));
+    v.push(g.pipe_floor_to_top((1, 1, 0.5), (2, 2, -0.4)));
+    v.push(g.pipe_floor_to_top((1, 3, -0.5), (2, 2, 0.4)));
+    v.push(g.pipe_side_to_side((2, 0, 1.0, 0.0), (2, 1, -1.0, 0.0)));
+    v.push(g.pipe_side_to_side((2, 2, 1.0, 0.0), (2, 3, -1.0, 0.0)));
+    v
+}
+
+/// G4 -- split: every chamber's floor has TWO pipes, feeding two different chambers below (the
+/// last column feeds itself and its inward neighbour instead of wrapping, to keep every run
+/// short and local).
+fn pipes_g4_split(g: &Grid) -> Vec<Shape> {
+    let fan = |from_row: usize, to_row: usize, v: &mut Vec<Shape>| {
+        for c in 0..G_COLS - 1 {
+            v.push(g.pipe_floor_to_top((from_row, c, -0.3), (to_row, c, 0.3)));
+            v.push(g.pipe_floor_to_top((from_row, c, 0.3), (to_row, c + 1, -0.3)));
+        }
+        let last = G_COLS - 1;
+        v.push(g.pipe_floor_to_top((from_row, last, 0.3), (to_row, last, -0.3)));
+        v.push(g.pipe_floor_to_top((from_row, last, -0.3), (to_row, last - 1, 0.3)));
+    };
+    let mut v = Vec::new();
+    fan(0, 1, &mut v);
+    fan(1, 2, &mut v);
+    v
+}
+
+/// G5 -- crossing fan ("own idea"): top row reverses column order into the middle row (col c ->
+/// mid col 3-c), a deliberate 4-way crossing/merge in the middle of the vessel; middle -> bottom
+/// then runs straight (no crossing) so the picture contrasts a crossing stage against a clean one.
+fn pipes_g5_crossing_fan(g: &Grid) -> Vec<Shape> {
+    let mut v = Vec::new();
+    for c in 0..G_COLS {
+        v.push(g.pipe_floor_to_top((0, c, 0.0), (1, G_COLS - 1 - c, 0.0)));
+    }
+    for c in 0..G_COLS {
+        v.push(g.pipe_floor_to_top((1, c, 0.0), (2, c, 0.0)));
+    }
+    v
+}
+
+/// G6/G7 share this pipe list (same configuration, per the sand-drainage A/B request) -- only
+/// the chamber floor shape differs between the two (flat for G6, sloped for G7). The pipe mouth
+/// sits at a corner (xfrac 0.7) rather than centred, which for G7 is also where the sloped floor
+/// is deepest.
+fn pipes_corner_outlet(g: &Grid) -> Vec<Shape> {
+    let mut v = Vec::new();
+    let xf = 0.7;
+    for c in 0..G_COLS {
+        v.push(g.pipe_floor_to_top((0, c, xf), (1, c, xf)));
+        v.push(g.pipe_floor_to_top((1, c, xf), (2, c, xf)));
+    }
+    v
+}
+
 fn main() {
     let out_dir = Path::new("artifacts/design/network-2026-09-19");
     fs::create_dir_all(out_dir).expect("create output dir");
 
     let w_f = GRID as f32;
     let h_f = GRID as f32;
+    let g = Grid::new(w_f, h_f);
     let do_trace = std::env::var("TRACE_MASS").is_ok();
 
-    // ===================================================================================
-    // N1 -- crossing junctions
-    // ===================================================================================
-    let (n1_shapes, n1_res_h, n1_collector_y0, _n1_chamber_cy) = build_n1(w_f, h_f);
-    let n1_shapes = std::rc::Rc::new(n1_shapes);
-    let n1_total_half = TOTAL_HALF_FRAC * h_f;
-    let n1_res_y0 = -n1_total_half;
-    let n1_res_y1 = n1_res_y0 + n1_res_h;
-    let n1_inside = {
-        let shapes = n1_shapes.clone();
-        move |dx: f32, dy: f32| network_inside(&shapes, dx, dy)
+    let is_reservoir = {
+        let b = g.reservoir_boundary();
+        move |_dx: f32, dy: f32| dy < b
     };
-    let n1_mask = rasterize(GRID, GRID, n1_inside.clone());
-    let n1_is_reservoir = move |_dx: f32, dy: f32| dy < n1_res_y1;
-    let n1_is_collector = move |_dx: f32, dy: f32| dy >= n1_collector_y0;
-    let n1_net_cap = capacity(&n1_mask) - {
-        let center_y = h_f / 2.0;
-        n1_mask
-            .iter()
-            .enumerate()
-            .filter(|&(i, &m)| m != MASK_OUTSIDE && (i / GRID) as f32 - center_y < n1_res_y1)
-            .count()
-    };
-    let n1_fill = {
-        let inside = n1_inside.clone();
-        move |dx: f32, dy: f32| if n1_is_reservoir(dx, dy) && inside(dx, dy) { 1.0 } else { 0.0 }
+    let is_collector = {
+        let b = g.collector_boundary();
+        move |_dx: f32, dy: f32| dy >= b
     };
 
-    if do_trace {
-        let mut sim = build_sim(n1_mask.clone(), n1_fill.clone(), GRID);
-        trace_mass("N1", &mut sim, MaterialMode::Water, 2500, 50, n1_is_reservoir, n1_is_collector);
-        let mut sim = build_sim(n1_mask.clone(), n1_fill.clone(), GRID);
-        trace_mass("N1", &mut sim, MaterialMode::DrySand, 3000, 100, n1_is_reservoir, n1_is_collector);
-    }
-    let water_ticks_n1 = [0u32, 300, 800, 2400];
-    let sand_ticks_n1 = [0u32, 300, 900, 3000];
-    let n1_result = run_design(
-        "N1_crossing_junctions",
-        out_dir,
-        n1_mask,
-        n1_fill,
-        n1_is_reservoir,
-        n1_is_collector,
-        n1_net_cap,
-        &water_ticks_n1,
-        &sand_ticks_n1,
+    // Report the geometric drop/run ratio for a representative diagonal pipe (G2/G4/G5's short
+    // shift) and the long G2 wrap, against the ~0.089 (~5 degree) dry-sand repose floor, rather
+    // than asserting steepness -- see the printed numbers below and the dry-sand traces/pictures
+    // for whether each actually keeps flowing.
+    // A floor-to-top pipe's endpoints are each inset INTO their own chamber, so measure the
+    // actual drop directly from a representative pipe's own endpoints (row 1 -> row 2, the
+    // smaller of the two gaps now that row 0 is enlarged) rather than re-deriving it from row
+    // geometry by hand.
+    let (fx0, fy0) = g.floor_pt(1, 0, 0.0);
+    let (tx0, ty0) = g.top_pt(2, 0, 0.0);
+    let short_drop = ty0 - fy0;
+    let short_run = g.col_width;
+    let _ = (fx0, tx0);
+    let wrap_run = (G_COLS - 1) as f32 * g.col_width;
+    println!(
+        "geometry: short diagonal drop/run = {:.3}/{:.1} = {:.3} ({:.1} deg); long wrap drop/run = {:.3}/{:.1} = {:.3} ({:.1} deg); repose floor = 0.089 (~5.1 deg)",
+        short_drop, short_run, short_drop / short_run, (short_drop / short_run).atan().to_degrees(),
+        short_drop, wrap_run, short_drop / wrap_run, (short_drop / wrap_run).atan().to_degrees()
     );
 
-    // ===================================================================================
-    // N2 -- split and recombine
-    // ===================================================================================
-    let (n2_shapes, n2_res_h, n2_collector_y0) = build_n2(w_f, h_f);
-    let n2_shapes = std::rc::Rc::new(n2_shapes);
-    let n2_total_half = TOTAL_HALF_FRAC * h_f;
-    let n2_res_y0 = -n2_total_half;
-    let n2_res_y1 = n2_res_y0 + n2_res_h;
-    let n2_inside = {
-        let shapes = n2_shapes.clone();
-        move |dx: f32, dy: f32| network_inside(&shapes, dx, dy)
-    };
-    let n2_mask = rasterize(GRID, GRID, n2_inside.clone());
-    let n2_is_reservoir = move |_dx: f32, dy: f32| dy < n2_res_y1;
-    let n2_is_collector = move |_dx: f32, dy: f32| dy >= n2_collector_y0;
-    let n2_net_cap = capacity(&n2_mask) - {
-        let center_y = h_f / 2.0;
-        n2_mask
-            .iter()
-            .enumerate()
-            .filter(|&(i, &m)| m != MASK_OUTSIDE && (i / GRID) as f32 - center_y < n2_res_y1)
-            .count()
-    };
-    let n2_fill = {
-        let inside = n2_inside.clone();
-        move |dx: f32, dy: f32| if n2_is_reservoir(dx, dy) && inside(dx, dy) { 1.0 } else { 0.0 }
-    };
-
-    if do_trace {
-        let mut sim = build_sim(n2_mask.clone(), n2_fill.clone(), GRID);
-        trace_mass("N2", &mut sim, MaterialMode::Water, 2500, 50, n2_is_reservoir, n2_is_collector);
-        let mut sim = build_sim(n2_mask.clone(), n2_fill.clone(), GRID);
-        trace_mass("N2", &mut sim, MaterialMode::DrySand, 3000, 100, n2_is_reservoir, n2_is_collector);
+    struct Variant {
+        name: &'static str,
+        chambers: Vec<Shape>,
+        pipes: Vec<Shape>,
+        water_ticks: [u32; 4],
+        sand_ticks: [u32; 4],
     }
-    let water_ticks_n2 = [0u32, 150, 350, 700];
-    let sand_ticks_n2 = [0u32, 150, 400, 900];
-    let n2_result = run_design(
-        "N2_split_recombine",
-        out_dir,
-        n2_mask,
-        n2_fill,
-        n2_is_reservoir,
-        n2_is_collector,
-        n2_net_cap,
-        &water_ticks_n2,
-        &sand_ticks_n2,
-    );
 
-    // ===================================================================================
-    // N3 -- layering
-    // ===================================================================================
-    let (n3_shapes, n3_res_h, n3_collector_y0) = build_n3(w_f, h_f);
-    let n3_shapes = std::rc::Rc::new(n3_shapes);
-    let n3_total_half = TOTAL_HALF_FRAC * h_f;
-    let n3_res_y0 = -n3_total_half;
-    let n3_res_y1 = n3_res_y0 + n3_res_h;
-    let n3_inside = {
-        let shapes = n3_shapes.clone();
-        move |dx: f32, dy: f32| network_inside(&shapes, dx, dy)
-    };
-    let n3_mask = rasterize(GRID, GRID, n3_inside.clone());
-    let n3_is_reservoir = move |_dx: f32, dy: f32| dy < n3_res_y1;
-    let n3_is_collector = move |_dx: f32, dy: f32| dy >= n3_collector_y0;
-    let n3_net_cap = capacity(&n3_mask) - {
-        let center_y = h_f / 2.0;
-        n3_mask
-            .iter()
-            .enumerate()
-            .filter(|&(i, &m)| m != MASK_OUTSIDE && (i / GRID) as f32 - center_y < n3_res_y1)
-            .count()
-    };
-    let n3_fill = {
-        let inside = n3_inside.clone();
-        move |dx: f32, dy: f32| if n3_is_reservoir(dx, dy) && inside(dx, dy) { 1.0 } else { 0.0 }
-    };
+    let variants = vec![
+        Variant { name: "G1_straight_flat_center", chambers: g.all_chambers_flat(), pipes: pipes_g1_straight(&g), water_ticks: [0, 150, 600, 2200], sand_ticks: [0, 400, 1500, 4500] },
+        Variant { name: "G2_diagonal_shift", chambers: g.all_chambers_flat(), pipes: pipes_g2_diagonal_shift(&g), water_ticks: [0, 300, 900, 2200], sand_ticks: [0, 300, 900, 3500] },
+        Variant { name: "G3_merge", chambers: g.all_chambers_flat(), pipes: pipes_g3_merge(&g), water_ticks: [0, 300, 900, 2200], sand_ticks: [0, 300, 900, 3500] },
+        Variant { name: "G4_split", chambers: g.all_chambers_flat(), pipes: pipes_g4_split(&g), water_ticks: [0, 200, 700, 1500], sand_ticks: [0, 400, 1200, 2800] },
+        Variant { name: "G5_crossing_fan", chambers: g.all_chambers_flat(), pipes: pipes_g5_crossing_fan(&g), water_ticks: [0, 300, 900, 2500], sand_ticks: [0, 300, 900, 3500] },
+        Variant { name: "G6_straight_flat_corner", chambers: g.all_chambers_flat(), pipes: pipes_corner_outlet(&g), water_ticks: [0, 150, 600, 2200], sand_ticks: [0, 400, 1500, 4500] },
+        Variant { name: "G7_straight_sloped_corner", chambers: g.all_chambers_sloped(1.0), pipes: pipes_corner_outlet(&g), water_ticks: [0, 150, 600, 2200], sand_ticks: [0, 400, 1500, 4500] },
+    ];
 
-    if do_trace {
-        let mut sim = build_sim(n3_mask.clone(), n3_fill.clone(), GRID);
-        trace_mass("N3", &mut sim, MaterialMode::Water, 6000, 200, n3_is_reservoir, n3_is_collector);
-        let mut sim = build_sim(n3_mask.clone(), n3_fill.clone(), GRID);
-        trace_mass("N3", &mut sim, MaterialMode::DrySand, 8000, 200, n3_is_reservoir, n3_is_collector);
+    let mut results = Vec::new();
+    let mut all_masks = Vec::new();
+    for variant in variants {
+        let mut shapes = variant.chambers;
+        shapes.extend(variant.pipes);
+        let shapes = std::rc::Rc::new(shapes);
+        let inside = {
+            let shapes = shapes.clone();
+            move |dx: f32, dy: f32| network_inside(&shapes, dx, dy)
+        };
+        let mask = rasterize(GRID, GRID, inside.clone());
+        let total_cap = capacity(&mask);
+        let reservoir_cap = {
+            let center_y = h_f / 2.0;
+            mask.iter().enumerate().filter(|&(i, &m)| m != MASK_OUTSIDE && (i / GRID) as f32 - center_y < g.reservoir_boundary()).count()
+        };
+        let network_cap = total_cap - reservoir_cap;
+        let fill = {
+            let inside = inside.clone();
+            let is_reservoir = is_reservoir.clone();
+            move |dx: f32, dy: f32| if is_reservoir(dx, dy) && inside(dx, dy) { 1.0 } else { 0.0 }
+        };
+
+        if do_trace {
+            let mut sim = build_sim(mask.clone(), fill.clone(), GRID);
+            trace_mass(variant.name, &mut sim, MaterialMode::Water, 2500, 50, is_reservoir.clone(), is_collector.clone());
+            let mut sim = build_sim(mask.clone(), fill.clone(), GRID);
+            trace_mass(variant.name, &mut sim, MaterialMode::DrySand, 3500, 100, is_reservoir.clone(), is_collector.clone());
+        }
+
+        all_masks.push(mask_image(&mask, GRID, GRID));
+        let result = run_design(
+            variant.name,
+            out_dir,
+            mask,
+            fill,
+            is_reservoir.clone(),
+            is_collector.clone(),
+            network_cap,
+            &variant.water_ticks,
+            &variant.sand_ticks,
+        );
+        results.push(result);
     }
-    let water_ticks_n3 = [0u32, 300, 800, 3800];
-    let sand_ticks_n3 = [0u32, 600, 2000, 8000];
-    let n3_result = run_design(
-        "N3_layering",
-        out_dir,
-        n3_mask,
-        n3_fill,
-        n3_is_reservoir,
-        n3_is_collector,
-        n3_net_cap,
-        &water_ticks_n3,
-        &sand_ticks_n3,
-    );
+
+    contact_sheet(&all_masks, 4)
+        .save(out_dir.join("G_all_masks_comparison.png"))
+        .expect("write comparison sheet");
 
     println!("\n=== summary ===");
-    for r in [&n1_result, &n2_result, &n3_result] {
+    for r in &results {
         println!(
             "{}: mass={:.1} network_capacity={} fraction_of_network={:.3} water_err={:.6} sand_err={:.6} mirror_mismatches={}",
             r.name, r.initial_mass, r.network_capacity, r.fraction_of_network, r.water_mass_err, r.sand_mass_err, r.mirror_mismatches

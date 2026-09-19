@@ -165,3 +165,239 @@ further, or repeating more of them, is the most directly testable next step. If 
 layering specifically, N3's two paths would need to be routed onto the SAME collector footprint
 (not just the same collector) for arrival-order to show as horizontal bands rather than a
 left/right split.
+
+---
+
+# Round 2 -- 12-chamber grid (G1-G7)
+
+N1/N2/N3 above were rejected outright ("None of these are good") in favour of a concrete spec:
+**a fixed 3-row x 4-column grid of clear rectangular chambers (12 total: 4 top, 4 middle, 4
+bottom), joined by pipes, where the interesting variable is the pipe configuration** -- and, per
+two follow-up clarifications, the chamber floor shape too. Same rasterizer approach (chambers and
+channels as data, union = inside), now with a third shape, `Shape::Poly`, added specifically so a
+chamber's floor can be a slope, not just a flat rounded box. Grid 256, gravity `(0, 0.04)`,
+`lateral_substeps = 2.5`. All 12 chambers are the SAME size and position across every variant
+(`Grid::all_chambers_flat`, except G7 which uses `all_chambers_sloped`); only the pipe list --
+and, for G6 vs G7, the floor shape -- changes.
+
+Two clarifications from the user, both load-bearing for what follows:
+
+1. **Chambers need not be strictly rectangular; sloped floors are a deliberate design variable,
+   not a workaround to hide.** G6 and G7 are the SAME pipe configuration (straight, corner mouth)
+   with a flat vs. a sloped floor, specifically so the cost/benefit is visible side by side.
+2. **Pipes merging is fine and wanted** -- "that creates interesting effects." Two pipes (or two
+   colours) meeting in one pipe or junction chamber is now a deliberate design element, not a
+   planar-mask accident to route around. G3 is built specifically to merge a red top column with
+   a green top column, twice, so the tracer shows the merge directly; G2's wrap pipe and G5's
+   4-way reversal are both left as genuine crossings rather than routed around.
+
+Top row starts full (fill = 1.0); left two top chambers (columns 0-1) start red, right two
+(columns 2-3) start green, same tracer convention as N1-N3. The row heights are NOT equal --
+row 0 (top/reservoir) gets 42% of the vertical budget, rows 1-2 get 29% each (`G_ROW_FRACS`) --
+because with three equal rows the reservoir (4 chambers) is capped at under half of "8 chambers +
+pipes" before a single pipe is even added (measured 0.47-0.49 in an earlier pass of this file);
+enlarging row 0 fixes the >=50% target at the geometry level for every variant, including the
+ones with the most pipe capacity (G4, G5).
+
+Geometry check (from the actual pipe endpoints, not asserted): a short one-column diagonal shift
+has drop/run = 29.86/56.3 = **0.530 (27.9 degrees)**; the long wrap-around diagonal (G2, column 3
+back to column 0) has drop/run = 29.86/169.0 = **0.177 (10.0 degrees)**. Both are comfortably
+above the ~0.089 (~5.1 degree) dry-sand repose floor, and every dry-sand trace below keeps
+draining (never plateaus at a nonzero mid-network value except where a variant's OWN geometry
+dams it, called out explicitly per variant).
+
+All seven variants: exact mass conservation (water and dry sand both `0.000000`/`0.000001` err),
+full connectivity (every inside cell reached from the reservoir, collector reached, verified by
+flood fill, printed per run), and initial-fill fraction of network capacity comfortably over the
+50% target (0.68-0.73 across all seven). Mirror mismatches are reported but not a target either
+way -- 0 where a variant happens to be symmetric (G1, G3, G5), nonzero where the pipe list is
+deliberately asymmetric (G2's wrap, G4's last-column fan, G6/G7's one-sided corner mouth).
+
+`G_all_masks_comparison.png` puts all seven bare masks side by side, 4 per row, for a quick visual
+comparison of the pipe configurations before reading the per-variant detail below.
+
+## G1 -- straight (baseline, flat floor, centred mouth)
+
+- `G1_straight_flat_center_{mask,contact_sheet,tracer_sheet}.png`
+- Pipes: chamber (0,c) -> (1,c) -> (2,c) for every column c, straight down, mouth centred on each
+  floor/ceiling (`pipes_g1_straight`). No crossings, no merges -- the control.
+- Initial mass 13068.0, network capacity 18376 cells, **fraction 0.711**. Water/sand conservation
+  err 0.000000. Connectivity 31444/31444, collector reached.
+- Water ticks 0, 150, 600, 2200 (settles by 2200: reservoir 0, collector 8968 of 13068, network
+  4100 -- water sits at a stable equilibrium partway up the middle chambers, not fully drained,
+  which is a property of the vessel's own hydrostatics, not a defect). Dry sand ticks 0, 400,
+  1500, 4500 (residual 83.2 + 77.4 = **160.6 of 13068, 1.23%**, the best drainage of all seven).
+- **Water: every column falls straight down its own pipe with a hard, unmoving red/green
+  boundary the entire way, settling into four solid-colour columns in the collector -- zero
+  mixing, exactly what a control should look like.**
+- **Dry sand: the same four solid, unmixed columns, and critically the pile in every bottom
+  chamber is a full, roughly symmetric mound with no empty corner -- the centred mouth lets
+  material reach both flat-floor corners.**
+
+## G2 -- diagonal shift (wrap crossing accepted)
+
+- `G2_diagonal_shift_{mask,contact_sheet,tracer_sheet}.png`
+- Pipes: column c feeds column (c+1) mod 4 one row down, at every row transition
+  (`pipes_g2_diagonal_shift`). The three short shifts (0->1, 1->2, 2->3) don't cross each other;
+  the wrap (3->0) is a genuine long diagonal that crosses all three short ones -- left as a real
+  crossing per clarification 2, not routed around.
+- Initial mass 13757.0, network capacity 20060 cells, **fraction 0.686**. Conservation err
+  0.000000 (water), 0.000000 (sand). Connectivity 33817/33817, collector reached. Mirror
+  mismatches 5110 (expected -- the wrap is one-directional).
+- Water ticks 0, 300, 900, 2200 (final: reservoir 869, network 4503, collector 8385 of 13757 --
+  not fully settled, still redistributing). Dry sand ticks 0, 300, 900, 3500 (final: reservoir
+  1934, network 4828, collector 6995 -- only ~51% collected, markedly slower than G1's straight
+  columns).
+- **Water: the picture shows the wrap pipe visibly crossing the three short diagonals, with a
+  real (if modest) brownish blended patch exactly at the crossing, and by the final frame a
+  wedge of green has clearly relocated into the bottom-left chamber, which in a straight vessel
+  would be pure red territory.**
+- **Dry sand: the same colour relocation is visible at the crossing, but the blended patch is
+  smaller and sharper-edged than water's -- sand crosses without blending nearly as much.**
+
+## G3 -- merge (red + green into shared chambers)
+
+- `G3_merge_{mask,contact_sheet,tracer_sheet}.png`
+- Pipes (`pipes_g3_merge`): column 0 (red) and column 2 (green) both feed middle chamber 1;
+  column 1 (red) and column 3 (green) both feed middle chamber 2 -- a deliberate red+green merge,
+  twice. The two source pipes for each merge visibly cross each other en route (column 2's pipe
+  to mid-1 crosses column 1's pipe to mid-2). Middle chambers 0 and 3 get no direct top feed, so
+  a lateral (side-wall to side-wall) connector pipe keeps them reachable -- an ordinary connected-
+  vessels link, not a crossing workaround. The same merge pattern repeats middle -> bottom.
+- Initial mass 13282.0, network capacity 19412 cells, **fraction 0.684**. Conservation err
+  0.000000 both materials. Connectivity 32694/32694, collector reached. Mirror mismatches 0.
+- Water ticks 0, 300, 900, 2200 (final: reservoir 3077, network 2808, collector 7398 of 13282).
+  Dry sand ticks 0, 300, 900, 3500 (final: reservoir 1234, network 4229, collector 7819).
+- **Water: both merge points show real mixing -- a speckled, turbulent red/green blend exactly
+  where the two colours' pipes physically cross on the way into the shared chamber -- and by the
+  final frame the lower half of the vessel shows a genuine soft red-to-green gradient rather than
+  a hard seam.**
+- **Dry sand: the same two merge points show a small, sharp mixed patch rather than water's
+  diffuse speckle, and the final frame keeps a visibly cleaner red-left/green-right split below
+  the merges -- sand crosses through the merge without blending nearly as much as water.**
+
+## G4 -- split (every floor has two pipes)
+
+- `G4_split_{mask,contact_sheet,tracer_sheet}.png`
+- Pipes (`pipes_g4_split`): every chamber's floor feeds itself-column and one neighbour (the last
+  column feeds itself and its inward neighbour instead of wrapping, so every run stays short and
+  local). Applied at both row transitions.
+- Initial mass 14054.0, network capacity 20564 cells, **fraction 0.683**. Conservation err
+  0.000000 both materials. Connectivity 34618/34618, collector reached. Mirror mismatches 2936
+  (the last-column special case is one-sided).
+- Water ticks 0, 200, 700, 1500 (final: reservoir 294, network 5558, collector 8203 of 14054).
+  Dry sand ticks 0, 400, 1200, 2800 (final: reservoir 28 -- essentially empty -- network 1974,
+  collector 12052, **86% collected, the fastest-draining sand of all seven**).
+- **Water: the fan-out Y-junctions are visible in the mask, and the picture shows a real, growing
+  mixed-orange zone exactly at the original red/green boundary (columns 1-2) that gets more
+  pronounced over the four frames, while columns 0 and 3 stay pure all the way to the collector;
+  the bottom-left chamber also visibly fills later than its neighbours.**
+- **Dry sand: the same localized mixing at the boundary, narrower than water's, with fast, nearly
+  complete drainage overall.**
+
+## G5 -- crossing fan ("own idea": full reversal, then straight)
+
+- `G5_crossing_fan_{mask,contact_sheet,tracer_sheet}.png`
+- Pipes (`pipes_g5_crossing_fan`): top row reverses column order into the middle row (column c ->
+  middle column 3-c, all four at once -- a deliberate 4-way crossing), then middle -> bottom runs
+  straight (no crossing), so the picture directly contrasts a crossing stage against a clean one.
+- Initial mass 14074.0, network capacity 19294 cells, **fraction 0.729**. Conservation err
+  0.000000 both materials. Connectivity 33368/33368, collector reached. Mirror mismatches 0 (the
+  reversal is symmetric even though it crosses).
+- Water ticks 0, 300, 900, 2500 (final: reservoir 3549, network 5200, collector 5325 of 14074 --
+  **the collector's mass visibly plateaus** at 5188 from tick ~900 onward while network mass keeps
+  climbing to 5200 by 2500, i.e. material backs up ABOVE the straight middle-to-bottom pipes
+  rather than continuing through). Dry sand ticks 0, 300, 900, 3500 (final: reservoir 6390 of
+  14074 -- **45% still sitting in the reservoir**, barely draining after the initial dump at
+  tick ~300).
+- **Water: the full reversal is a clean SWAP, not a blend -- by the final frame green sits on the
+  left and red on the right in the middle/bottom rows, a genuine colour reversal, with only a
+  small mixed dot right at the crossing pinch; the visible plateau in collector mass is a real
+  damming signature at this configuration's middle-to-bottom transition, not just an artifact of
+  the tick choice.**
+- **Dry sand: the same clean reversal with an even smaller mixed dot, and much more severe
+  damming -- the reservoir itself barely empties, meaning this configuration constrains sand flow
+  well above the crossing, not only at it.**
+
+## G6 vs. G7 -- flat vs. sloped floor, same pipe configuration (sand-drainage A/B)
+
+Per clarification 1, this is the SAME pipe list (`pipes_corner_outlet`: straight columns, mouth
+at a corner -- `xfrac = 0.7` -- instead of centred) run against two different chamber floor
+shapes, specifically so the cost/benefit of a slope is visible side by side rather than baked in
+silently.
+
+- `G6_straight_flat_corner_{mask,contact_sheet,tracer_sheet}.png` (flat floor, corner mouth)
+- `G7_straight_sloped_corner_{mask,contact_sheet,tracer_sheet}.png` (sloped floor via
+  `Shape::Poly`/`Grid::sloped_chamber`, same corner mouth -- the slope's deep corner is the same
+  corner the pipe already favours)
+
+G6: initial mass 13068.0, network capacity 18376 cells, fraction 0.711 (identical geometry
+capacity to G1 -- only the mouth position differs). Conservation err 0.000000 both materials.
+Connectivity 31444/31444, collector reached. Mirror mismatches 3920 (the corner mouth is
+one-sided). Water ticks 0, 150, 600, 2200 (final: reservoir 0, network 4100, collector 8968 --
+**bit-for-bit identical to G1's water distribution**, confirming water doesn't care where on a
+flat floor the mouth sits). Dry sand ticks 0, 400, 1500, 4500 (final: reservoir 622, network 69,
+collector 12377 -- residual **690.8 of 13068, 5.29%, the WORST drainage of all seven**, four times
+worse than G1's centred mouth on the identical flat floor).
+
+G7: initial mass 11202.0 (less than G6 -- the sloped floor removes volume from every chamber),
+network capacity 15801 cells, fraction 0.709. Conservation err 0.000000 both materials.
+Connectivity 27003/27003, collector reached. Mirror mismatches 9346. Water ticks 0, 150, 600, 2200
+(final: reservoir 12, network 3537, collector 7653 -- same near-complete-drainage shape as
+G1/G6, just less total volume). Dry sand ticks 0, 400, 1500, 4500 (final: reservoir 29, network
+268, collector 10905 -- residual **296.6 of 11202, 2.65%**, roughly HALF of G6's flat-corner
+residual, but still about DOUBLE G1's flat-centred baseline).
+
+- **G6 water: identical to G1 -- confirms this A/B is a dry-sand-only question at this grid
+  resolution.**
+- **G6 dry sand: every chamber's pile leaves a visible dark, EMPTY wedge in the top corner
+  opposite the outlet, in both the middle and bottom rows, still visible even in the final frame
+  -- the flat floor plus off-centre mouth stalls material in the far corner it never gets pushed
+  out of.**
+- **G7 water: same near-complete drainage shape as G1/G6, just with less total volume (the slope
+  costs capacity even when it isn't limiting anything).**
+- **G7 dry sand: the empty top-corner wedge visible in G6 is much smaller here -- the slope
+  pre-tilts the floor toward the same corner the mouth already favours -- and the measured
+  residual is roughly half of G6's, though still noticeably worse than G1's centred mouth on a
+  flat floor.**
+
+**Read: the slope recovers most, but not all, of what moving the mouth to a corner cost.** Ranked
+dry-sand drainage completeness, best to worst: G1 (flat, centred, 1.2% residual) > G4 (flat,
+split/local, ~14% left in-transit but reservoir itself empty) > G7 (sloped, corner, 2.6%) > ...
+> G6 (flat, corner, 5.3%, worst). The single biggest lever measured here is NOT slope vs. flat in
+isolation -- it's mouth position relative to floor shape: a centred mouth on a flat floor
+out-performs a sloped floor with an off-centre mouth, because a centred mouth already reaches both
+corners symmetrically. Slope is what rescues an off-centre mouth, not a universal improvement on
+its own.
+
+## Summary table
+
+| variant | initial mass | network capacity | fraction | water err | sand err | mirror mismatches | sand residual |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| G1 straight, flat, centred | 13068.0 | 18376 | 0.711 | 0.000000 | 0.000000 | 0 | 1.23% |
+| G2 diagonal shift (wrap) | 13757.0 | 20060 | 0.686 | 0.000000 | 0.000000 | 5110 | n/a (still draining) |
+| G3 merge | 13282.0 | 19412 | 0.684 | 0.000000 | 0.000000 | 0 | n/a (still draining) |
+| G4 split | 14054.0 | 20564 | 0.683 | 0.000000 | 0.000000 | 2936 | ~14% (reservoir empty) |
+| G5 crossing fan | 14074.0 | 19294 | 0.729 | 0.000000 | 0.000000 | 0 | n/a (dammed, see above) |
+| G6 straight, flat, corner | 13068.0 | 18376 | 0.711 | 0.000000 | 0.000000 | 3920 | 5.29% |
+| G7 straight, sloped, corner | 11202.0 | 15801 | 0.709 | 0.000000 | 0.000000 | 9346 | 2.65% |
+
+All seven: exact mass conservation, full connectivity, collector reached, no sealed pockets, no
+leaks, fraction of network comfortably >= 50%.
+
+## Read: which configuration to build on
+
+- **If the goal is a clean, legible baseline:** G1. No mixing, no damming, best sand drainage.
+- **If the goal is visible colour mixing:** G3 is the most direct hit -- it was built specifically
+  to merge red and green and the picture shows real blending at both merge points, more so in
+  water than sand. G2's incidental wrap-crossing and G4's boundary-column mixing are smaller
+  versions of the same effect.
+- **If the goal is a striking but non-mixing visual:** G5's full reversal is the cleanest picture
+  in the set -- colours swap sides crisply -- but it comes with the worst damming of any variant
+  (sand barely leaves the reservoir), so its middle-to-bottom transition would need rework before
+  it could ship.
+- **On flat vs. sloped floors:** don't treat slope as a free win or flat as automatically bad --
+  the mouth's position relative to the floor matters more than the slope by itself. A centred
+  mouth on a flat floor (G1) beat a sloped floor with a corner mouth (G7), which in turn clearly
+  beat a corner mouth on a flat floor (G6). Slope is a recovery mechanism for an off-centre mouth,
+  not an unconditional upgrade.
