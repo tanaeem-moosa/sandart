@@ -374,6 +374,7 @@ fn build_u_tube_filled(w: usize, h: usize, fill_dy_frac: f32) -> (Vec<u8>, Vec<f
                 0.05,
                 1.0,
                 false,
+                crate::NetworkRouting::default(),
             );
             if inside {
                 mask[y * w + x] = crate::MASK_INSIDE;
@@ -1531,6 +1532,7 @@ fn build_u_tube_siphon_primed(w: usize, h: usize) -> (Vec<u8>, Vec<f32>) {
                 0.05,
                 1.0,
                 false,
+                crate::NetworkRouting::default(),
             );
             if inside {
                 mask[y * w + x] = crate::MASK_INSIDE;

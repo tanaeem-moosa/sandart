@@ -65,6 +65,7 @@ const mockWasmState = {
     set_gravity() {},
     set_neck_width() {},
     set_hourglass_curve() {},
+    set_network_routing() {},
     set_quantile_mode() {},
     set_pattern_mode() {},
     load_preset_pattern() {},
@@ -122,9 +123,9 @@ try {
         console.log("✓ populateMaterialSelects() execution PASSED");
     }
 
-    if (typeof sandbox.updateChambersRowVisibility === 'function') {
-        sandbox.updateChambersRowVisibility();
-        console.log("✓ updateChambersRowVisibility() execution PASSED");
+    if (typeof sandbox.updateNetworkRoutingRowVisibility === 'function') {
+        sandbox.updateNetworkRoutingRowVisibility();
+        console.log("✓ updateNetworkRoutingRowVisibility() execution PASSED");
     }
 
     if (typeof sandbox.updateVesselReadouts === 'function') {

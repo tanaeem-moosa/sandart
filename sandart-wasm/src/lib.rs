@@ -6,7 +6,7 @@ use js_sys;
 use web_sys;
 use wasm_bindgen::JsCast;
 
-use sandart_sim::{ActiveBounds, DrawingSimulation, MaterialMode, QuantileMode, SandboxShape, SimulatorMode, MAX_QUANTILE_LINES};
+use sandart_sim::{ActiveBounds, DrawingSimulation, MaterialMode, NetworkRouting, QuantileMode, SandboxShape, SimulatorMode, MAX_QUANTILE_LINES};
 use sandart_render::{HeightmapRenderer, CameraUniforms, LightingUniforms, MarbleUniform};
 use sandart_pattern::{PlaybackController, PlaybackState, parse_gcode, parse_thr};
 
@@ -405,7 +405,7 @@ impl WasmSimulationState {
     /// `HeightmapRenderer`) is a fixed-size allocation made at construction time, so there is no
     /// in-place "resize" — only "replace with a freshly constructed one of the right size". That
     /// necessarily discards the current sand/water contents (same as any other reset), but current
-    /// material, shape, gravity, neck width and chamber curvature
+    /// material, shape, gravity, neck width, chamber curvature and chamber-network routing
     /// survive via `sim.reset()`'s normal contract (it never touches those fields) rather than
     /// reverting to defaults. `renderer` is rebuilt from `sim_size` alone -- the render resolution
     /// `n` is not a GPU resource size anywhere in `sandart-render` (see
@@ -446,6 +446,7 @@ impl WasmSimulationState {
         let gravity_dir = self.sim.gravity_dir;
         let neck_width = self.sim.neck_width;
         let hourglass_curve = self.sim.hourglass_curve;
+        let network_routing = self.sim.network_routing;
 
         let mut sim = DrawingSimulation::new_with_size(size);
         sim.material_mode = self.material_mode;
@@ -453,6 +454,7 @@ impl WasmSimulationState {
         sim.gravity_dir = gravity_dir;
         sim.neck_width = neck_width;
         sim.hourglass_curve = hourglass_curve;
+        sim.network_routing = network_routing;
         sim.reset();
         sim.set_quantile_mode(self.effective_quantile_mode());
         // Fixed page value, not carried from `self.sim` -- see `LATERAL_SUBSTEPS`'s doc comment.
@@ -576,6 +578,22 @@ impl WasmSimulationState {
         self.sim.generate_shape_mask();
     }
 
+    /// `SandboxShape::ChamberNetwork`-only: which two columns of the row below each chamber
+    /// feeds. 0 = R1 (default), 1 = R2 (neighbours, wraps), 2 = R5 (butterfly); any other value
+    /// falls back to R1, same convention as `set_sandbox_shape`'s unknown-id fallback. Only
+    /// regenerates the mask, same as `set_neck_width`/`set_hourglass_curve` -- the caller
+    /// (`demo.js`) follows up with `reset()`, matching the precedent for a control that changes
+    /// the vessel's own topology (see the removed `chambers-slider`'s handler).
+    pub fn set_network_routing(&mut self, routing: u32) {
+        self.sim.network_routing = match routing {
+            0 => NetworkRouting::R1,
+            1 => NetworkRouting::R2,
+            2 => NetworkRouting::R5,
+            _ => NetworkRouting::R1,
+        };
+        self.sim.generate_shape_mask();
+    }
+
     /// The rasterised neck HALF-width, in cells, that `eval_sandbox_shape` actually uses for
     /// the current shape/neck_width/grid-size combination -- i.e. after whatever per-shape cap
     /// and floor logic applies, not just the raw slider fraction. Exists purely for the UI
@@ -679,6 +697,7 @@ impl WasmSimulationState {
             7 => SandboxShape::ProceduralFunnel,
             8 => SandboxShape::MultiNeckHourglass,
             9 => SandboxShape::UTubeFlowThrough,
+            10 => SandboxShape::ChamberNetwork,
             _ => SandboxShape::Circle,
         };
 
@@ -719,6 +738,7 @@ impl WasmSimulationState {
                     | SandboxShape::ProceduralFunnel
                     | SandboxShape::MultiNeckHourglass
                     | SandboxShape::UTubeFlowThrough
+                    | SandboxShape::ChamberNetwork
             )
         {
             self.sim.reset();

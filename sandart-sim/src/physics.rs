@@ -2822,6 +2822,235 @@ pub(crate) const U_TUBE_RECTS: [[f32; 4]; 5] = [
 /// `initialize_hourglass` prefills.
 pub(crate) const U_TUBE_RESERVOIR_RECT: usize = 0;
 
+// -------------------------------------------------------------------------------------------
+// SandboxShape::ChamberNetwork: 12 chambers (4 columns x 3 rows), each chamber in rows 0-1
+// with two outlet pipes into the row below, plus a wide collector pool below row 2. Ported
+// from the Round-3 G4-family prototype (`sandart-sim/examples/proto_networks.rs`), which
+// rasterized this same geometry (as a `Vec<Shape>` union) at a fixed grid of 256; every
+// distance below is expressed as a fraction of `w_f` (the grid is always square, so `w_f ==
+// h_f`), the same convention every other shape in `eval_sandbox_shape_at` already uses, so the
+// vessel scales with resolution instead of only being correct at 256. Constants that were
+// literal cell counts in the prototype (`G_CHAMBER_R`, `G_PIPE_HW`, `G_INSET`, all tuned at
+// grid 256) are instead their `/256.0` fraction here, so the geometry is bit-for-bit the same
+// PROPORTIONS at every resolution rather than the same absolute cell counts.
+//
+// See `artifacts/design/network-2026-09-19/README.md` ("Round 3 -- routing variations on
+// G4 (R1-R6)") for the full family and why only R1/R2/R5 shipped as `NetworkRouting`.
+// -------------------------------------------------------------------------------------------
+
+const NET_COLS: usize = 4;
+const NET_ROWS: usize = 3;
+const NET_HW_X_FRAC: f32 = 0.44;
+const NET_TOTAL_HALF_Y_FRAC: f32 = 0.46;
+/// Row 0 (the reservoir) gets 40% of the vertical budget, rows 1-2 get 19% each, and the
+/// dedicated collector pool below row 2 gets the remaining 22% (`NET_COLLECTOR_FRAC`) -- see
+/// the prototype README's Round 2 section for why row 0 is enlarged (a flat three-equal-rows
+/// split caps the reservoir under 50% of network capacity before a single pipe is added).
+const NET_ROW_FRACS: [f32; 3] = [0.40, 0.19, 0.19];
+const NET_COLLECTOR_FRAC: f32 = 0.22;
+const NET_CHAMBER_FILL_X: f32 = 0.82;
+const NET_CHAMBER_FILL_Y: f32 = 0.68;
+const NET_CHAMBER_R_FRAC: f32 = 3.0 / 256.0;
+const NET_PIPE_HW_FRAC: f32 = 5.0 / 256.0;
+const NET_INSET_FRAC: f32 = 4.0 / 256.0;
+
+/// `table[c] = (a, b)`: the source chamber in column `c` feeds columns `a` and `b` of the row
+/// below. See `NetworkRouting`'s doc comment (`lib.rs`) for what each shipped table looks like
+/// and why R3/R4/R6 were not shipped.
+type NetworkRoute = [(usize, usize); 4];
+const NET_R1_TABLE: NetworkRoute = [(0, 1), (1, 2), (2, 3), (3, 2)];
+const NET_R2_TABLE: NetworkRoute = [(0, 1), (1, 2), (2, 3), (3, 0)];
+const NET_R5_ROW0: NetworkRoute = [(0, 2), (1, 3), (2, 0), (3, 1)];
+const NET_R5_ROW1: NetworkRoute = NET_R2_TABLE;
+
+/// The two routing tables (top->middle, middle->bottom) for a given `NetworkRouting`. R1 and R2
+/// use the same table for both transitions; R5's butterfly uses a different stride for each.
+pub(crate) fn network_routing_tables(routing: crate::NetworkRouting) -> (NetworkRoute, NetworkRoute) {
+    match routing {
+        crate::NetworkRouting::R1 => (NET_R1_TABLE, NET_R1_TABLE),
+        crate::NetworkRouting::R2 => (NET_R2_TABLE, NET_R2_TABLE),
+        crate::NetworkRouting::R5 => (NET_R5_ROW0, NET_R5_ROW1),
+    }
+}
+
+/// Which way an incoming pipe's mouth should lean, based on the column it's coming from --
+/// ported verbatim from the prototype's `lean`.
+fn net_lean(target: usize, source: usize) -> f32 {
+    if target > source {
+        0.35
+    } else if target < source {
+        -0.35
+    } else {
+        0.0
+    }
+}
+
+fn net_rounded_box_inside(dx: f32, dy: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> bool {
+    let qx = (dx - cx).abs() - (hx - r);
+    let qy = (dy - cy).abs() - (hy - r);
+    let ax = qx.max(0.0);
+    let ay = qy.max(0.0);
+    let outside_dist = (ax * ax + ay * ay).sqrt() + qx.max(qy).min(0.0) - r;
+    outside_dist <= 0.0
+}
+
+fn net_capsule_inside(dx: f32, dy: f32, x0: f32, y0: f32, x1: f32, y1: f32, hw: f32) -> bool {
+    let (ex, ey) = (x1 - x0, y1 - y0);
+    let len_sq = (ex * ex + ey * ey).max(1e-6);
+    let t = (((dx - x0) * ex + (dy - y0) * ey) / len_sq).clamp(0.0, 1.0);
+    let (px, py) = (x0 + t * ex, y0 + t * ey);
+    let (rx, ry) = (dx - px, dy - py);
+    (rx * rx + ry * ry).sqrt() <= hw
+}
+
+/// All the fractional-of-`w_f` geometry a `ChamberNetwork` point-test or fill-boundary query
+/// needs, computed once. Mirrors the prototype's `Grid`, but derived from a single `w_f`
+/// (always == `h_f`: the sim grid is always square) rather than separate `w_f`/`h_f` args.
+struct NetGrid {
+    hw_x: f32,
+    col_width: f32,
+    row_y0: [f32; NET_ROWS],
+    row_y1: [f32; NET_ROWS],
+    collector_y0: f32,
+    collector_y1: f32,
+    chamber_hx: f32,
+    chamber_hy: [f32; NET_ROWS],
+    r: f32,
+    pipe_hw: f32,
+    inset: f32,
+}
+
+impl NetGrid {
+    fn new(w_f: f32) -> Self {
+        let hw_x = NET_HW_X_FRAC * w_f;
+        let total_half_y = NET_TOTAL_HALF_Y_FRAC * w_f;
+        let col_width = 2.0 * hw_x / NET_COLS as f32;
+        let total_h = 2.0 * total_half_y;
+        let mut row_y0 = [0.0f32; NET_ROWS];
+        let mut row_y1 = [0.0f32; NET_ROWS];
+        let mut y = -total_half_y;
+        for row in 0..NET_ROWS {
+            row_y0[row] = y;
+            y += NET_ROW_FRACS[row] * total_h;
+            row_y1[row] = y;
+        }
+        let collector_y0 = y;
+        let collector_y1 = y + NET_COLLECTOR_FRAC * total_h;
+        let mut chamber_hy = [0.0f32; NET_ROWS];
+        for row in 0..NET_ROWS {
+            chamber_hy[row] = (row_y1[row] - row_y0[row]) * 0.5 * NET_CHAMBER_FILL_Y;
+        }
+        NetGrid {
+            hw_x,
+            col_width,
+            row_y0,
+            row_y1,
+            collector_y0,
+            collector_y1,
+            chamber_hx: col_width * 0.5 * NET_CHAMBER_FILL_X,
+            chamber_hy,
+            r: NET_CHAMBER_R_FRAC * w_f,
+            pipe_hw: NET_PIPE_HW_FRAC * w_f,
+            inset: NET_INSET_FRAC * w_f,
+        }
+    }
+    fn col_c(&self, col: usize) -> f32 {
+        -self.hw_x + self.col_width * (col as f32 + 0.5)
+    }
+    fn row_c(&self, row: usize) -> f32 {
+        (self.row_y0[row] + self.row_y1[row]) * 0.5
+    }
+    /// The boundary between row 0 (the reservoir) and row 1. Also exposed as
+    /// `chamber_network_reservoir_boundary` for `initialize_hourglass` (`lib.rs`).
+    fn reservoir_boundary(&self) -> f32 {
+        self.row_y1[0]
+    }
+    fn floor_pt(&self, row: usize, col: usize, xfrac: f32) -> (f32, f32) {
+        (self.col_c(col) + xfrac * self.chamber_hx * 0.9, self.row_c(row) + self.chamber_hy[row] - self.inset)
+    }
+    fn top_pt(&self, row: usize, col: usize, xfrac: f32) -> (f32, f32) {
+        (self.col_c(col) + xfrac * self.chamber_hx * 0.9, self.row_c(row) - self.chamber_hy[row] + self.inset)
+    }
+    fn collector_entry(&self, col: usize, side: f32) -> (f32, f32) {
+        (self.col_c(col) + side * 0.15 * self.col_width, self.collector_y0 + self.inset)
+    }
+}
+
+/// Point-in-network test for `SandboxShape::ChamberNetwork`, with an erosion `margin` (in the
+/// same `w_f`-scaled units as everything else here) applied to every chamber/collector
+/// half-extent, corner radius and pipe half-width -- `margin = 0.0` is the real geometry,
+/// `margin > 0.0` is what `is_safe` (the eval function's second return value) uses, matching the
+/// `allowed_hw - 1.5` pattern every other shape's `is_safe` already follows.
+fn chamber_network_inside(dx: f32, dy: f32, w_f: f32, routing: crate::NetworkRouting, margin: f32) -> bool {
+    let g = NetGrid::new(w_f);
+    let shrink = |v: f32| (v - margin).max(0.0);
+
+    for row in 0..NET_ROWS {
+        for col in 0..NET_COLS {
+            let (cx, cy) = (g.col_c(col), g.row_c(row));
+            if net_rounded_box_inside(dx, dy, cx, cy, shrink(g.chamber_hx), shrink(g.chamber_hy[row]), shrink(g.r)) {
+                return true;
+            }
+        }
+    }
+
+    let collector_cy = (g.collector_y0 + g.collector_y1) * 0.5;
+    let collector_hy = (g.collector_y1 - g.collector_y0) * 0.5;
+    if net_rounded_box_inside(dx, dy, 0.0, collector_cy, shrink(g.hw_x), shrink(collector_hy), shrink(g.r)) {
+        return true;
+    }
+
+    let pipe_hw = shrink(g.pipe_hw).max(0.5);
+    for (x0, y0, x1, y1) in chamber_network_pipe_segments(&g, routing) {
+        if net_capsule_inside(dx, dy, x0, y0, x1, y1, pipe_hw) {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Every pipe (top->middle, middle->bottom, and every bottom-row chamber's own two outlets into
+/// the collector) as an `(x0, y0, x1, y1)` centreline segment, in the same `w_f`-fraction units
+/// as everything else here. Shared by `chamber_network_inside` (capsule containment) and the
+/// pipe-slope test (`test_chamber_network_pipe_slopes_clear_the_repose_floor`), so the two can
+/// never test different geometry than what actually rasterises.
+fn chamber_network_pipe_segments(g: &NetGrid, routing: crate::NetworkRouting) -> Vec<(f32, f32, f32, f32)> {
+    let mut segments = Vec::with_capacity(NET_COLS * 2 * 2 + NET_COLS * 2);
+    let (table0, table1) = network_routing_tables(routing);
+    for &(from_row, to_row, table) in &[(0usize, 1usize, table0), (1, 2, table1)] {
+        for c in 0..NET_COLS {
+            let (a, b) = table[c];
+            for &(xfrac, target) in &[(-0.35f32, a), (0.35, b)] {
+                let (x0, y0) = g.floor_pt(from_row, c, xfrac);
+                let (x1, y1) = g.top_pt(to_row, target, net_lean(target, c));
+                segments.push((x0, y0, x1, y1));
+            }
+        }
+    }
+
+    // Every bottom-row (row 2) chamber's own two outlets into the shared collector pool -- the
+    // same for every routing, not part of the routing experiment (mirrors
+    // `apply_bottom_to_collector` in the prototype).
+    for c in 0..NET_COLS {
+        for &side in &[-1.0f32, 1.0] {
+            let (x0, y0) = g.floor_pt(2, c, side * 0.35);
+            let (x1, y1) = g.collector_entry(c, side);
+            segments.push((x0, y0, x1, y1));
+        }
+    }
+
+    segments
+}
+
+/// The `dy` (in raw cell units, not a fraction) below which `ChamberNetwork`'s row 0 chambers
+/// are the reservoir -- the single source of truth `initialize_hourglass` (`lib.rs`) uses to
+/// fill exactly row 0, matching `U_TUBE_RECTS`/`U_TUBE_RESERVOIR_RECT`'s role for
+/// `UTubeFlowThrough` above.
+pub fn chamber_network_reservoir_boundary(w_f: f32) -> f32 {
+    NetGrid::new(w_f).reservoir_boundary()
+}
+
 /// Integer-cell entry point: forwards straight to `eval_sandbox_shape_at` as `(cx as f32, cy as
 /// f32)`, so every existing call site (the sim's own mask generation, every shape test) is
 /// unchanged. See that function for the actual geometry -- this wrapper exists only so
@@ -2836,6 +3065,7 @@ pub fn eval_sandbox_shape(
     neck_width: f32,
     hourglass_curve: f32,
     flipped: bool,
+    network_routing: crate::NetworkRouting,
 ) -> (bool, bool) {
     eval_sandbox_shape_at(
         cx as f32,
@@ -2846,6 +3076,7 @@ pub fn eval_sandbox_shape(
         neck_width,
         hourglass_curve,
         flipped,
+        network_routing,
     )
 }
 
@@ -2866,6 +3097,7 @@ pub fn eval_sandbox_shape_at(
     neck_width: f32,
     hourglass_curve: f32,
     flipped: bool,
+    network_routing: crate::NetworkRouting,
 ) -> (bool, bool) {
     // Cell centres are the integer indices 0..=w-1, so the grid's true mirror axis is at
     // (w-1)/2, not w/2. With w/2 the mirror pair (x, w-1-x) produced dx values that were not
@@ -3193,6 +3425,14 @@ pub fn eval_sandbox_shape_at(
                 && in_union(dx, dy + margin);
 
             (true, is_safe)
+        }
+        crate::SandboxShape::ChamberNetwork => {
+            // Not a tapered funnel -- neck_width/hourglass_curve are unused here, same as
+            // UTubeFlowThrough above.
+            let _ = (neck_width, hourglass_curve);
+            let inside = chamber_network_inside(dx, dy, w_f, network_routing, 0.0);
+            let is_safe = inside && chamber_network_inside(dx, dy, w_f, network_routing, 1.5);
+            (inside, is_safe)
         }
     }
 }
@@ -6502,6 +6742,7 @@ mod tests {
             for x in 0..w {
                 let (inside, _) = eval_sandbox_shape(
                     x, y, w, h, shape, neck_width, hourglass_curve, false,
+                    crate::NetworkRouting::default(),
                 );
                 mask[y * w + x] = if inside { crate::MASK_INSIDE } else { crate::MASK_OUTSIDE };
             }
@@ -10080,7 +10321,7 @@ mod tests {
             let x0 = w / 2;
             let floor_row = (0..h)
                 .rev()
-                .find(|&y| eval_sandbox_shape(x0, y, w, h, SandboxShape::Square, 0.04, 1.0, false).0)
+                .find(|&y| eval_sandbox_shape(x0, y, w, h, SandboxShape::Square, 0.04, 1.0, false, crate::NetworkRouting::default()).0)
                 .expect("container must have at least one inside row at x0");
             ReposeRig { w, h, x0, ramp_row: floor_row - 12 * s, mask, gravity_dir: glam::Vec2::new(0.0, 0.04) }
         }
@@ -10109,12 +10350,12 @@ mod tests {
             // slowly erode and eventually let the ramp above drain into it. Pinning the base
             // edges directly against the wall leaves them nowhere to go.
             let base_x_lo = (0..self.x0)
-                .find(|&x| eval_sandbox_shape(x, self.ramp_row + 1, self.w, self.h, SandboxShape::Square, 0.04, 1.0, false).0)
+                .find(|&x| eval_sandbox_shape(x, self.ramp_row + 1, self.w, self.h, SandboxShape::Square, 0.04, 1.0, false, crate::NetworkRouting::default()).0)
                 .unwrap_or(0)
                 + 1;
             let base_x_hi = (self.x0..self.w)
                 .rev()
-                .find(|&x| eval_sandbox_shape(x, self.ramp_row + 1, self.w, self.h, SandboxShape::Square, 0.04, 1.0, false).0)
+                .find(|&x| eval_sandbox_shape(x, self.ramp_row + 1, self.w, self.h, SandboxShape::Square, 0.04, 1.0, false, crate::NetworkRouting::default()).0)
                 .unwrap_or(self.w - 1);
             for y in (self.ramp_row + 1)..base_row_hi {
                 for x in base_x_lo..base_x_hi {
@@ -17914,6 +18155,206 @@ mod tests {
              expected_spill={expected_spill:.5} (reservoir_area_above_lip={reservoir_area_above_lip:.5}, \
              downstream_capacity={downstream_capacity:.5})"
         );
+    }
+
+    // ---- SandboxShape::ChamberNetwork ("network of chambers") -------------------------------
+    //
+    // Ported from the Round-3 G4-family prototype (`sandart-sim/examples/proto_networks.rs`,
+    // `artifacts/design/network-2026-09-19/README.md`). These four tests exercise the geometry
+    // for all three shipped routings (R1/R2/R5); R3/R4/R6 were never shipped (see
+    // `NetworkRouting`'s doc comment in `lib.rs`) so they have no coverage here.
+
+    /// Discrete mask for `SandboxShape::ChamberNetwork` at a given `routing`, using the same
+    /// integer-cell `eval_sandbox_shape` entry point every other shape's tests use via
+    /// `make_test_mask` -- not reusing `make_test_mask` itself because its signature is shared by
+    /// ~80 other call sites across every other shape and does not take a routing argument.
+    fn make_network_test_mask(w: usize, h: usize, routing: crate::NetworkRouting) -> Vec<u8> {
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        for y in 0..h {
+            for x in 0..w {
+                let (inside, _) = eval_sandbox_shape(
+                    x, y, w, h, SandboxShape::ChamberNetwork, 0.04, 1.0, false, routing,
+                );
+                mask[y * w + x] = if inside { crate::MASK_INSIDE } else { crate::MASK_OUTSIDE };
+            }
+        }
+        mask
+    }
+
+    const CHAMBER_NETWORK_ROUTINGS: [(&str, crate::NetworkRouting); 3] = [
+        ("R1", crate::NetworkRouting::R1),
+        ("R2", crate::NetworkRouting::R2),
+        ("R5", crate::NetworkRouting::R5),
+    ];
+
+    /// Every inside cell must be reachable from the reservoir (row 0), and the reservoir must be
+    /// able to reach the collector -- no sealed pockets, no disconnected islands -- for all three
+    /// shipped routings, at both grid sizes the prototype's own connectivity check was run at
+    /// (128 and 256; the prototype itself only used 256, so 128 additionally confirms the
+    /// `/256.0`-fraction geometry (`NET_CHAMBER_R_FRAC` et al.) doesn't pinch shut at a coarser
+    /// grid).
+    #[test]
+    fn test_chamber_network_is_fully_connected() {
+        for &grid in &[128usize, 256] {
+            for &(name, routing) in &CHAMBER_NETWORK_ROUTINGS {
+                let w = grid;
+                let h = grid;
+                let mask = make_network_test_mask(w, h, routing);
+                let g = NetGrid::new(w as f32);
+                let center_y = h as f32 / 2.0;
+                let reservoir_boundary = g.reservoir_boundary();
+                let collector_boundary = g.collector_y0;
+
+                let total_inside = mask.iter().filter(|&&m| m != crate::MASK_OUTSIDE).count();
+                assert!(total_inside > 0, "{name} grid={grid}: mask is empty");
+
+                let mut visited = vec![false; w * h];
+                let mut stack: Vec<usize> = Vec::new();
+                for y in 0..h {
+                    let dy = y as f32 - center_y;
+                    if dy >= reservoir_boundary {
+                        continue;
+                    }
+                    for x in 0..w {
+                        let idx = y * w + x;
+                        if mask[idx] != crate::MASK_OUTSIDE && !visited[idx] {
+                            visited[idx] = true;
+                            stack.push(idx);
+                        }
+                    }
+                }
+                assert!(!stack.is_empty(), "{name} grid={grid}: no reservoir cell is inside the mask");
+
+                let mut reached_collector = false;
+                while let Some(idx) = stack.pop() {
+                    let x = idx % w;
+                    let y = idx / w;
+                    let dy = y as f32 - center_y;
+                    if dy >= collector_boundary {
+                        reached_collector = true;
+                    }
+                    let neighbors = [
+                        (x.wrapping_sub(1), y),
+                        (x + 1, y),
+                        (x, y.wrapping_sub(1)),
+                        (x, y + 1),
+                    ];
+                    for (nx, ny) in neighbors {
+                        if nx < w && ny < h {
+                            let nidx = ny * w + nx;
+                            if mask[nidx] != crate::MASK_OUTSIDE && !visited[nidx] {
+                                visited[nidx] = true;
+                                stack.push(nidx);
+                            }
+                        }
+                    }
+                }
+
+                let reached = visited.iter().filter(|&&v| v).count();
+                assert_eq!(
+                    reached, total_inside,
+                    "{name} grid={grid}: flood-fill from the reservoir reached {reached} of \
+                     {total_inside} non-OUTSIDE cells -- a sealed pocket exists"
+                );
+                assert!(
+                    reached_collector,
+                    "{name} grid={grid}: the collector is never reached from the reservoir"
+                );
+            }
+        }
+    }
+
+    /// Every pipe's drop/run ratio must clear the ~0.089 (~5.1 degree) dry-sand repose floor --
+    /// the same check the prototype's `worst_pipe_ratio` ran over its own pipe list, over the
+    /// SAME segment geometry (`chamber_network_pipe_segments`) the mask itself rasterises from,
+    /// for all three shipped routings. Purely geometric (no simulation), so it costs nothing to
+    /// run.
+    #[test]
+    fn test_chamber_network_pipe_slopes_clear_the_repose_floor() {
+        const REPOSE_FLOOR: f32 = 0.089;
+        let g = NetGrid::new(256.0);
+        for &(name, routing) in &CHAMBER_NETWORK_ROUTINGS {
+            let segments = chamber_network_pipe_segments(&g, routing);
+            assert!(!segments.is_empty(), "{name}: no pipe segments at all");
+            let mut worst_ratio = f32::INFINITY;
+            let mut worst = (0.0f32, 0.0f32);
+            for (x0, y0, x1, y1) in segments {
+                let run = (x1 - x0).abs();
+                let drop = (y1 - y0).abs();
+                if run < 0.5 {
+                    continue; // near-vertical: no meaningful run, can't be the shallow case
+                }
+                let ratio = drop / run;
+                if ratio < worst_ratio {
+                    worst_ratio = ratio;
+                    worst = (drop, run);
+                }
+            }
+            assert!(
+                worst_ratio > REPOSE_FLOOR,
+                "{name}: shallowest pipe drop/run = {:.3}/{:.1} = {:.4}, at or below the \
+                 {REPOSE_FLOOR} repose floor -- dry sand will not reliably drain through it",
+                worst.0, worst.1, worst_ratio
+            );
+        }
+    }
+
+    /// Dry sand left stranded above the collector (reservoir + rows 1-2, i.e. the same
+    /// "residual" quantity the prototype's README reports) must stay under a bar derived from the
+    /// prototype's own measurements at the same routing: R1 0.4%, R2 0.6%, R5 0.9% (Round 3
+    /// summary table). This sim's tick budget and the prototype's driver differ enough (this test
+    /// calls the real `DrawingSimulation::update` LOD-scheduled path, not the prototype's
+    /// direct-call harness) that matching those figures exactly would be testing the harness, not
+    /// the geometry -- so the bar is 3x the prototype's own figure: enough margin to not fail on
+    /// an unrelated scheduler/solver difference, while still catching a real drainage regression
+    /// (an order of magnitude, not a rounding difference).
+    #[test]
+    fn test_chamber_network_dry_sand_drainage_completeness() {
+        let cases = [
+            ("R1", crate::NetworkRouting::R1, 0.004f32 * 3.0, 3500u32),
+            ("R2", crate::NetworkRouting::R2, 0.006f32 * 3.0, 3800),
+            ("R5", crate::NetworkRouting::R5, 0.009f32 * 3.0, 3800),
+        ];
+        let grid = 256usize;
+        for (name, routing, bar, ticks) in cases {
+            let mut sim = DrawingSimulation::new_with_size(grid);
+            sim.sandbox_shape = SandboxShape::ChamberNetwork;
+            sim.network_routing = routing;
+            sim.gravity_dir = glam::Vec2::new(0.0, 0.04);
+            sim.initialize_hourglass();
+
+            let initial_mass: f32 = sim.heightmap.data.iter().sum();
+            assert!(initial_mass > 0.0, "{name}: initialized with no sand at all");
+
+            let targets = [None; 5];
+            for _ in 0..ticks {
+                sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, sim.sandbox_shape, 16.0, 16.0);
+            }
+
+            let final_mass: f32 = sim.heightmap.data.iter().sum();
+            let mass_err = (final_mass - initial_mass).abs() / initial_mass;
+            assert!(mass_err < 0.0001, "{name}: leaked sand through the geometry, err={mass_err:.6}");
+
+            let g = NetGrid::new(grid as f32);
+            let center_y = grid as f32 / 2.0;
+            let collector_boundary = g.collector_y0;
+            let mut collector_mass = 0.0f32;
+            for y in 0..grid {
+                let dy = y as f32 - center_y;
+                if dy < collector_boundary {
+                    continue;
+                }
+                for x in 0..grid {
+                    collector_mass += sim.heightmap.data[y * grid + x];
+                }
+            }
+            let residual = 1.0 - collector_mass / final_mass;
+            assert!(
+                residual < bar,
+                "{name}: residual {:.4} ({:.2}%) exceeds bar {:.4} ({:.2}%) after {ticks} ticks",
+                residual, residual * 100.0, bar, bar * 100.0
+            );
+        }
     }
 
     /// KERNEL-BENCH SNAPSHOT DUMP. Not a test of anything -- `#[ignore]`d, asserts nothing -- it

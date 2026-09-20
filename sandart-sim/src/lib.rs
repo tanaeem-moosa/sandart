@@ -352,11 +352,49 @@ pub enum SandboxShape {
     /// shorter right arm, spills over its rim (the overflow lip) through a horizontal spout,
     /// and falls into a catch well. See `physics::U_TUBE_RECTS` for the geometry.
     UTubeFlowThrough = 9,
+    /// 12 chambers in a 4-column x 3-row grid, each chamber (rows 0-1) with two outlet pipes
+    /// feeding chambers in the row below, plus a wide collector pool below row 2 -- the
+    /// "network of chambers" the user approved from the Round-3 G4-family prototype
+    /// (`sandart-sim/examples/proto_networks.rs`, `artifacts/design/network-2026-09-19/README.md`).
+    /// The top row starts full and is the reservoir. Which two columns each chamber feeds is
+    /// `network_routing` (R1/R2/R5); see `physics::eval_sandbox_shape_at`'s match arm and
+    /// `NetworkRouting` for the routing tables. Id 10 -- id 4 (`MultiStageHourglass`, deleted
+    /// 2026-09-19) stays retired, not reused.
+    ChamberNetwork = 10,
 }
 
 impl Default for SandboxShape {
     fn default() -> Self {
         Self::Circle
+    }
+}
+
+/// Which two columns of the row below each `ChamberNetwork` chamber feeds -- the only thing
+/// that varies between the three shipped routings; see the Round-3 prototype
+/// (`artifacts/design/network-2026-09-19/README.md`, "R1-R6") for the full family. Only R1, R2
+/// and R5 shipped: R4 and R6 need a perfectly flat (0.089-repose-floor, i.e. zero-degree)
+/// lateral connector purely for reachability, and that flat connector measurably strands
+/// ~10% of the sand (9.8%/10.6% residual vs. R1/R2/R5's 0.4%/0.6%/0.9%). R3 is included in
+/// neither the "ship" nor the "explicitly rejected" list in the prototype write-up but was not
+/// asked for either, so it is left out too.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NetworkRouting {
+    /// `[(0,1),(1,2),(2,3),(3,2)]` for both row transitions -- the baseline the user liked
+    /// (originally "G4"), and the best of the six on both objective measures (water-mixing
+    /// deviation and dry-sand residual).
+    R1,
+    /// `[(0,1),(1,2),(2,3),(3,0)]` for both row transitions -- neighbours, with column 3
+    /// wrapping back to column 0.
+    R2,
+    /// Top->middle `[(0,2),(1,3),(2,0),(3,1)]` (stride 2), middle->bottom `[(0,1),(1,2),(2,3),(3,0)]`
+    /// (stride 1, R2's table) -- the textbook "every top chamber can reach every bottom chamber"
+    /// claim, verified by the prototype's connectivity check.
+    R5,
+}
+
+impl Default for NetworkRouting {
+    fn default() -> Self {
+        Self::R1
     }
 }
 
@@ -603,6 +641,9 @@ pub struct DrawingSimulation {
     pub gravity_dir: Vec2,
     pub neck_width: f32,
     pub hourglass_curve: f32,
+    /// Which two columns of the row below each `SandboxShape::ChamberNetwork` chamber feeds.
+    /// Unused by every other shape (same as `neck_width` is unused by `UTubeFlowThrough`).
+    pub network_routing: NetworkRouting,
 
     /// Precomputed shape mask grid (GRID_SIZE * GRID_SIZE).
     /// Values: MASK_OUTSIDE (0) = wall, MASK_INSIDE (1) = playable interior,
@@ -996,6 +1037,7 @@ impl DrawingSimulation {
             gravity_dir: Vec2::ZERO,
             neck_width: 0.005,
             hourglass_curve: 0.6,
+            network_routing: NetworkRouting::default(),
             shape_mask: vec![MASK_OUTSIDE; grid_size * grid_size],
             shape_mask_dirty: true,
             flipped: false,
@@ -1092,6 +1134,7 @@ impl DrawingSimulation {
                     self.neck_width,
                     self.hourglass_curve,
                     self.flipped,
+                    self.network_routing,
                 );
                 mask[offset + i] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
             }
@@ -1143,6 +1186,7 @@ impl DrawingSimulation {
                 | SandboxShape::ProceduralFunnel
                 | SandboxShape::MultiNeckHourglass
                 | SandboxShape::UTubeFlowThrough
+                | SandboxShape::ChamberNetwork
         ) {
             self.heightmap.reset(0.0);
             self.initialize_hourglass();
@@ -1220,6 +1264,19 @@ impl DrawingSimulation {
                         && dy >= r[2] * h as f32
                         && dy < r[3] * h as f32;
                     self.heightmap.data[idx] = if inside && in_reservoir { 1.00 } else { 0.0 };
+                    continue;
+                }
+
+                // ChamberNetwork's reservoir (row 0, the top row of chambers) is NOT the
+                // `dy < 0.0` half every other shape below uses -- row 0 is enlarged to 40% of
+                // the vertical budget (`physics::NET_ROW_FRACS`), so its lower edge sits well
+                // above the vertical centreline. Using the generic `dy < 0.0` threshold here
+                // would also fill roughly the top half of row 1's chambers, since row 1 straddles
+                // dy = 0. `physics::chamber_network_reservoir_boundary` is the single source of
+                // truth this and `eval_sandbox_shape_at`'s geometry share.
+                if self.sandbox_shape == SandboxShape::ChamberNetwork {
+                    let boundary = physics::chamber_network_reservoir_boundary(h as f32);
+                    self.heightmap.data[idx] = if inside && dy < boundary { 1.00 } else { 0.0 };
                     continue;
                 }
 
@@ -1455,7 +1512,8 @@ impl DrawingSimulation {
             | SandboxShape::StaircaseCascade
             | SandboxShape::ProceduralFunnel
             | SandboxShape::MultiNeckHourglass
-            | SandboxShape::UTubeFlowThrough => {
+            | SandboxShape::UTubeFlowThrough
+            | SandboxShape::ChamberNetwork => {
                 let chamber_r = 0.92 - marble_radius;  // normalized coords
                 let chamber_offset = 0.58;             // normalized vertical offset
                 let neck_hw = 0.07 - marble_radius;    // normalized neck half-width
@@ -1833,13 +1891,14 @@ mod tests {
     /// Every shape offered under the "Sand-fall Funnels" group in the UI. Kept in one place so a
     /// new funnel is covered by the geometry and mass-conservation tests by default rather than
     /// by remembering to add it to each.
-    const SANDFALL_FUNNEL_SHAPES: [SandboxShape; 6] = [
+    const SANDFALL_FUNNEL_SHAPES: [SandboxShape; 7] = [
         SandboxShape::Hourglass,
         SandboxShape::GaltonBoard,
         SandboxShape::StaircaseCascade,
         SandboxShape::ProceduralFunnel,
         SandboxShape::MultiNeckHourglass,
         SandboxShape::UTubeFlowThrough,
+        SandboxShape::ChamberNetwork,
     ];
 
     /// Every material's string id must round-trip through `from_str`/`as_str`, and `ALL` must
@@ -2275,6 +2334,12 @@ mod tests {
         for shape in [
             SandboxShape::StaircaseCascade,
             SandboxShape::ProceduralFunnel,
+            // ChamberNetwork's routing tables are asymmetric by design (R1's `[(0,1),(1,2),
+            // (2,3),(3,2)]` has no left-right symmetry), so it belongs in this structural-flip
+            // check for the same reason as the other two: an asymmetric shape is exactly what
+            // would silently keep its original orientation if `generate_shape_mask()` were ever
+            // skipped from `flip_hourglass()` again.
+            SandboxShape::ChamberNetwork,
         ] {
             let mut sim = super::DrawingSimulation::new();
             sim.sandbox_shape = shape;
@@ -2871,6 +2936,13 @@ mod tests {
     /// symmetric? If it is not, no amount of solver symmetry can produce a symmetric result and
     /// the physics is innocent. Checked at every resolution the UI offers, for the shapes the
     /// asymmetry is reported in.
+    ///
+    /// `SandboxShape::ChamberNetwork` is deliberately NOT in this list. Mirror symmetry was
+    /// waived for it by the user when the routing tables were approved: R1 (the default,
+    /// `[(0,1),(1,2),(2,3),(3,2)]`) and R2 (`[(0,1),(1,2),(2,3),(3,0)]`, a wrap) are both
+    /// asymmetric by construction, and R5's butterfly tables are asymmetric per-transition even
+    /// though the shape as a whole is not. Requiring mirror symmetry here would mean rejecting
+    /// the exact routing tables the user picked from the prototype.
     #[test]
     fn test_vessel_masks_are_left_right_symmetric() {
         let mut worst: Vec<String> = Vec::new();
@@ -2927,6 +2999,7 @@ mod tests {
                 SandboxShape::ProceduralFunnel,
                 SandboxShape::MultiNeckHourglass,
                 SandboxShape::UTubeFlowThrough,
+                SandboxShape::ChamberNetwork,
             ] {
                 let mut sim = DrawingSimulation::new_with_size(w);
                 sim.sandbox_shape = shape;
@@ -2942,7 +3015,7 @@ mod tests {
                     for x in 0..w {
                         let (inside, _safe) = physics::eval_sandbox_shape(
                             x, y, w, h, shape, sim.neck_width, sim.hourglass_curve,
-                            sim.flipped,
+                            sim.flipped, sim.network_routing,
                         );
                         expected[y * w + x] = if inside { MASK_INSIDE } else { MASK_OUTSIDE };
                     }

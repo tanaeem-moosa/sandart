@@ -948,6 +948,16 @@ function pressureRampColor(t) {
     return [0, 1, 2].map((c) => Math.round((a[c] + (b[c] - a[c]) * k) * 255));
 }
 
+const CHAMBER_NETWORK_SHAPE = 10;
+
+function updateNetworkRoutingRowVisibility() {
+    const el = document.getElementById('network-routing-row');
+    if (!el) return;
+    const shapeSelect = document.getElementById('shape-select');
+    const shapeVal = shapeSelect ? parseInt(shapeSelect.value) : 0;
+    el.style.display = (shapeVal === CHAMBER_NETWORK_SHAPE) ? '' : 'none';
+}
+
 function updateVesselReadouts() {
     if (!state) return;
     const neckSlider = document.getElementById('neck-slider');
@@ -990,6 +1000,7 @@ function syncSandFallSettings() {
 
     const neckSlider = document.getElementById('neck-slider');
     const curvatureSlider = document.getElementById('curvature-slider');
+    const routingSelect = document.getElementById('network-routing-select');
 
     if (neckSlider) {
         const neckVal = parseFloat(neckSlider.value);
@@ -1001,6 +1012,10 @@ function syncSandFallSettings() {
         const curveEl = document.getElementById('curvature-val');
         if (curveEl) curveEl.innerText = curveVal.toFixed(1);
         state.set_hourglass_curve(curveVal);
+    }
+
+    if (routingSelect) {
+        state.set_network_routing(parseInt(routingSelect.value));
     }
 
     updateVesselReadouts();
@@ -1030,6 +1045,7 @@ function switchMode(mode) {
             shapeSelect.value = '0';
             state.set_sandbox_shape(0);
         }
+        updateNetworkRoutingRowVisibility();
 
         state.set_simulator_mode(0);
         state.set_gravity(0.0, 0.0);
@@ -1046,6 +1062,7 @@ function switchMode(mode) {
         if (sandfallControls) sandfallControls.style.display = 'block';
 
         if (shapeGroupSandfall) shapeGroupSandfall.hidden = false;
+        updateNetworkRoutingRowVisibility();
 
         state.set_simulator_mode(1);
         syncSandFallSettings();
@@ -1109,6 +1126,7 @@ function setupPanelInput() {
         if (!state) return;
         const shapeVal = parseInt(document.getElementById('shape-select').value);
         state.set_sandbox_shape(shapeVal);
+        updateNetworkRoutingRowVisibility();
         if (isSandFall) {
             // `reset_simulation` was never a real wasm-bound method (checked
             // sandart-wasm/src/lib.rs — only `reset` exists), so this always threw and never
@@ -1253,6 +1271,7 @@ function setupPanelInput() {
 
     const neckSlider = document.getElementById('neck-slider');
     const curvatureSlider = document.getElementById('curvature-slider');
+    const routingSelect = document.getElementById('network-routing-select');
     const quantileSelect = document.getElementById('quantile-select');
 
     if (quantileSelect) {
@@ -1275,6 +1294,18 @@ function setupPanelInput() {
         syncMaterialTheme(true);
     });
 
+    // Chamber-network routing select (ChamberNetwork only)
+    if (routingSelect) {
+        routingSelect.addEventListener('change', () => {
+            syncSandFallSettings();
+            // Changing the routing changes which pipes exist, i.e. the vessel's own topology --
+            // same reset-to-reinitialize contract as neck width/curvature above (and the removed
+            // chambers-slider before them).
+            state.reset();
+            syncMaterialTheme(true);
+        });
+    }
+
     // Toggle Sidebar
     const sidebar = document.getElementById('settings-sidebar');
     const toggleBtn = document.getElementById('toggle-sidebar');
@@ -1296,9 +1327,10 @@ function setupPanelInput() {
         requestAnimationFrame(animateResize);
     });
 
-    // Paint the neck slider's resolution-dependent range and the cell-count readouts once up
-    // front, so they reflect the sim's actual starting state immediately rather than only after
-    // the first slider move or shape/resolution change.
+    // Paint the shape-specific visibility, the neck slider's resolution-dependent range, and the
+    // cell-count readouts once up front, so they reflect the sim's actual starting state
+    // immediately rather than only after the first slider move or shape/resolution change.
+    updateNetworkRoutingRowVisibility();
     updateNeckSliderRange();
     updateVesselReadouts();
 }

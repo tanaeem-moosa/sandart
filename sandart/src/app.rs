@@ -829,6 +829,7 @@ impl eframe::App for SandArtApp {
                             crate::config::SandboxShape::ProceduralFunnel => "Procedural Cave Funnel",
                             crate::config::SandboxShape::MultiNeckHourglass => "Multi-Neck Hourglass",
                             crate::config::SandboxShape::UTubeFlowThrough => "U-Tube Flow-Through",
+                            crate::config::SandboxShape::ChamberNetwork => "Chamber Network",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::Circle, "Circle");
@@ -840,6 +841,7 @@ impl eframe::App for SandArtApp {
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::ProceduralFunnel, "Procedural Cave Funnel");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::MultiNeckHourglass, "Multi-Neck Hourglass");
                             ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::UTubeFlowThrough, "U-Tube Flow-Through");
+                            ui.selectable_value(&mut self.config.sandbox_shape, crate::config::SandboxShape::ChamberNetwork, "Chamber Network");
                         });
 
                     ui.add_space(12.0);
@@ -1193,6 +1195,7 @@ impl eframe::App for SandArtApp {
                     | crate::config::SandboxShape::ProceduralFunnel
                     | crate::config::SandboxShape::MultiNeckHourglass
                     | crate::config::SandboxShape::UTubeFlowThrough
+                    | crate::config::SandboxShape::ChamberNetwork
             ) {
                 self.sim.gravity_dir = glam::Vec2::new(0.0, sandart_sim::SANDFALL_GRAVITY_STRENGTH);
             } else {
