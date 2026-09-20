@@ -357,6 +357,18 @@ export class WasmSimulationState {
         wasm.wasmsimulationstate_set_neck_width(this.__wbg_ptr, width);
     }
     /**
+     * `SandboxShape::ChamberNetwork`-only: which two columns of the row below each chamber
+     * feeds. 0 = R1 (default), 1 = R2 (neighbours, wraps), 2 = R5 (butterfly); any other value
+     * falls back to R1, same convention as `set_sandbox_shape`'s unknown-id fallback. Only
+     * regenerates the mask, same as `set_neck_width`/`set_hourglass_curve` -- the caller
+     * (`demo.js`) follows up with `reset()`, matching the precedent for a control that changes
+     * the vessel's own topology (see the removed `chambers-slider`'s handler).
+     * @param {number} routing
+     */
+    set_network_routing(routing) {
+        wasm.wasmsimulationstate_set_network_routing(this.__wbg_ptr, routing);
+    }
+    /**
      * @param {string} mode
      */
     set_pattern_mode(mode) {
