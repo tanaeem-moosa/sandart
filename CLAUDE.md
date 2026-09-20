@@ -42,7 +42,7 @@ and this is the whole list (`HANDOVER.md` §2's list is stale — it names five 
 with the subsystems they tested):
 
 ```
-cargo test -p sandart-sim --lib --release     # ~35s, the main suite
+cargo test -p sandart-sim --lib --release     # ~65s, the main suite
 cargo test -p sandart-sim --release --test fresh_pressure_field_toggle
 cargo test -p sandart-sim --release --test head_field_transport_toggle
 cargo test -p sandart-sim --release --test perfect_simulation_determinism
@@ -59,7 +59,14 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **96 passed / 3 failed on `main`**, and that is the current expected state.
+The library suite is **99 passed / 3 failed on `main`**, and that is the current expected state
+(99 since 2026-09-19, when `SandboxShape::ChamberNetwork` shipped with three tests: connectivity,
+pipe slopes against the dry-sand repose floor, and dry-sand drainage completeness. That drainage
+test simulates thousands of ticks and is why the suite now takes ~65s rather than ~35s. The vessel
+is 12 chambers in 4 columns x 3 rows, two outlet pipes each, a collector pool, top row as the
+reservoir, with a routing selector — R1/R2/R5, tables in `physics.rs`. It is **deliberately not
+mirror-symmetric** and is exempted from `test_vessel_masks_are_left_right_symmetric`; the user
+waived symmetry for networks. Design record: `artifacts/design/network-2026-09-19/`.)
 On 2026-09-19 the "Merging cascade" vessel (`MultiStageHourglass`) was deleted at the user's request
 (a chamber-network design is replacing it; see `artifacts/design/cascade-2026-09-17/` and
 `artifacts/design/network-2026-09-19/`). Seven tests went with it: six passing ones that exercised
