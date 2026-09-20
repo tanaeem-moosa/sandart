@@ -8,41 +8,41 @@
 //! but the user rejected all three ("None of these are good") and this file no longer builds
 //! them. See git history for that code if it's ever needed again.
 //!
-//! ROUND 2 (this file, now): a concrete spec from the user. **12 rectangular chambers, a fixed
-//! 3-row x 4-column grid (top/middle/bottom, 4 per row), joined by pipes.** The interesting
-//! variable is the PIPE CONFIGURATION (and, per a follow-up clarification, the chamber FLOOR
-//! shape) over that same fixed grid. Geometry is still data for one small rasterizer -- see
-//! `Shape`, `shape_inside`, `network_inside` -- now with a third shape (`Shape::Poly`, an
-//! arbitrary simple polygon) added specifically so a chamber's floor can be sloped, not just
-//! flat.
+//! ROUND 2 prototyped G1-G7 (pipe config + floor shape variants over the same 12-chamber grid) --
+//! their PNGs and README section also stay as the record. The user picked **G4** ("every
+//! chamber's floor has two pipes") as the family to keep, so this file no longer builds G1-G3/
+//! G5-G7 either; see git history for that code (including `Shape::Poly`'s sloped-chamber use,
+//! `all_chambers_sloped`/`sloped_chamber`, kept in the file but currently unused).
 //!
-//! Two follow-up clarifications from the user, both load-bearing:
-//!   1. Chambers need not be strictly rectangular -- sloped floors are a deliberate design
-//!      variable, not a workaround to hide. G6/G7 below are the SAME pipe configuration with a
-//!      flat vs. sloped floor, specifically so the cost/benefit is visible side by side.
-//!   2. **Pipes merging is fine and wanted** -- "that creates interesting effects." Two pipes (or
-//!      two colours) meeting in one pipe or junction chamber is a deliberate design element here,
-//!      not a planar-mask accident to route around. G3 is built specifically to merge a red
-//!      column with a green column early and show what the tracer does there.
+//! ROUND 3 (this file, now): **the routing is now the only variable.** Same fixed 12-chamber
+//! grid, same start (top row full, left pair red, right pair green); the new, uniform rule is
+//! that EVERY chamber in rows 1 and 2 has exactly two outlet pipes, each feeding one chamber of
+//! the row below -- and, so the rule is uniform all the way down, every bottom-row chamber also
+//! gets two outlets, both into one shared collector pool below row 2 (a new dedicated region,
+//! `Grid::collector_shape`, rather than "row 2 and below" being the collector as in Round 2). A
+//! variant is just the pair of target columns chosen for each chamber -- see `RowRoute` and
+//! `build_route_pipes`.
 //!
-//! Variants (all on the same 12-chamber grid; only the pipe list -- and, for G6/G7, the chamber
-//! floor shape -- changes):
-//!   G1 -- straight: each chamber feeds the one directly below. Flat floor, centred pipe mouth.
-//!   G2 -- diagonal shift: each feeds the chamber one column across; the wrap (last column back
-//!         to the first) is a genuine long diagonal that crosses the others -- left as a real
-//!         crossing/merge, per clarification 2.
-//!   G3 -- merge: a red top column and a green top column are deliberately routed into the SAME
-//!         shared chamber, twice, so the tracer shows the merge directly.
-//!   G4 -- split: every chamber's floor has two pipes, feeding two different chambers below.
-//!   G5 -- crossing fan: top row reverses column order into the middle row (a full 4-way crossing
-//!         "own idea" variant), then runs straight into the bottom row for contrast.
-//!   G6 -- straight, flat floor, CORNER pipe mouth (vs. G1's centred mouth) -- sand-drainage A/B.
-//!   G7 -- straight, SLOPED floor, same corner pipe mouth as G6 -- sand-drainage A/B, continued.
+//! Six routing variants over the identical chamber/outlet-count rule:
+//!   R1 -- G4 as-is (the baseline the user liked), stated as a routing table.
+//!   R2 -- neighbours: each feeds itself-below and its right neighbour, wrapping col 3 -> col 0.
+//!   R3 -- wide spread: each feeds (col-1, col+2) mod 4 -- never its own column.
+//!   R4 -- converging: every column's two outlets are BOTH of the two centre columns.
+//!   R5 -- butterfly: row 0->1 stride 2, row 1->2 stride 1 -- the textbook claim is every top
+//!         chamber can reach every bottom chamber; verified from the mixing table, not assumed.
+//!   R6 -- own idea: neighbours into row 1, then converging into row 2.
+//!
+//! Mixing is now MEASURED, not just looked at: `mixing_table` reports, per bottom chamber (and
+//! the collector), the red/green mass split at the final snapshot -- read off the tracer colour
+//! itself via `green_fraction` (linear in the red channel between the two pure tracer colours) --
+//! and the average |deviation from 50/50| across the 4 bottom chambers (lower = more mixed).
+//! `worst_pipe_ratio` checks EVERY pipe's drop/run against the ~0.089 repose floor, not just a
+//! representative one, since these routing tables include longer cross-vessel runs than Round 2.
 //!
 //!   distrobox enter sandart-dev -- bash -lc \
 //!     'cd /home/deck/projects/sandart && CARGO_BUILD_JOBS=2 cargo run -p sandart-sim --release --example proto_networks'
 //!
-//! Writes PNGs and a README to artifacts/design/network-2026-09-19/ (N1/N2/N3's files untouched).
+//! Writes PNGs and a README to artifacts/design/network-2026-09-19/ (N1-N3/G1-G7's files untouched).
 
 use sandart_sim::{
     color_channel, pack_rgba, DrawingSimulation, MaterialMode, MASK_BOUNDARY, MASK_INSIDE,
@@ -471,6 +471,7 @@ struct DesignResult {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_design(
     name: &'static str,
     out_dir: &Path,
@@ -481,7 +482,8 @@ fn run_design(
     network_capacity: usize,
     water_ticks: &[u32],
     sand_ticks: &[u32],
-) -> DesignResult {
+    row_bounds: Option<(f32, f32)>, // (reservoir/row1 boundary is is_reservoir's own; this is (row1/row2, row2/collector) for the finer per-row residue breakdown)
+) -> (DesignResult, Snap, Snap) {
     println!("\n=== {name} ===");
 
     let mismatches = mirror_mismatches(&mask, GRID, GRID);
@@ -525,7 +527,8 @@ fn run_design(
         let center_y = GRID as f32 / 2.0;
         let mut res_mass = 0.0f32;
         let mut col_mass = 0.0f32;
-        let mut mid_mass = 0.0f32;
+        let mut row1_mass = 0.0f32;
+        let mut row2_mass = 0.0f32;
         for y in 0..GRID {
             let dy = y as f32 - center_y;
             for x in 0..GRID {
@@ -535,12 +538,22 @@ fn run_design(
                     res_mass += hgt;
                 } else if is_collector(dx, dy) {
                     col_mass += hgt;
+                } else if let Some((row1_row2, _)) = row_bounds {
+                    if dy < row1_row2 {
+                        row1_mass += hgt;
+                    } else {
+                        row2_mass += hgt;
+                    }
                 } else {
-                    mid_mass += hgt;
+                    row1_mass += hgt;
                 }
             }
         }
-        println!("    [{label}] final (tick {}) distribution: reservoir={res_mass:.1} network={mid_mass:.1} collector={col_mass:.1}", last.tick);
+        if row_bounds.is_some() {
+            println!("    [{label}] final (tick {}) distribution: reservoir={res_mass:.1} row1={row1_mass:.1} row2={row2_mass:.1} collector={col_mass:.1}", last.tick);
+        } else {
+            println!("    [{label}] final (tick {}) distribution: reservoir={res_mass:.1} network={row1_mass:.1} collector={col_mass:.1}", last.tick);
+        }
     }
 
     let mut tiles = Vec::new();
@@ -565,15 +578,21 @@ fn run_design(
         .save(out_dir.join(format!("{name}_tracer_sheet.png")))
         .expect("write tracer sheet");
 
-    DesignResult {
-        name,
-        initial_mass,
-        network_capacity,
-        fraction_of_network,
-        water_mass_err,
-        sand_mass_err,
-        mirror_mismatches: mismatches,
-    }
+    let water_final_snap = water_snaps.into_iter().last().unwrap();
+    let sand_final_snap = sand_snaps.into_iter().last().unwrap();
+    (
+        DesignResult {
+            name,
+            initial_mass,
+            network_capacity,
+            fraction_of_network,
+            water_mass_err,
+            sand_mass_err,
+            mirror_mismatches: mismatches,
+        },
+        water_final_snap,
+        sand_final_snap,
+    )
 }
 
 // -------------------------------------------------------------------------------------------
@@ -585,13 +604,15 @@ const G_ROWS: usize = 3;
 const G_COLS: usize = 4;
 const G_HW_X_FRAC: f32 = 0.44; // * w_f, half-width of the whole grid envelope
 const G_TOTAL_HALF_Y_FRAC: f32 = 0.46; // * h_f, half-height of the whole grid envelope
-// The top row gets a bigger share of the vertical budget than middle/bottom. With three EQUAL
-// rows, the reservoir (4 top chambers) is capped at ~4/(8 chambers + pipes) of the network, i.e.
-// well under 50% before a single pipe is even added -- measured at 0.491 for the sparsest variant
-// (G1, 8 pipes) and as low as 0.474 once a variant's pipe list gets bigger (G4, 16 pipes). Giving
-// row 0 a larger slice fixes this at the geometry level instead of inflating the fill some other
-// way.
-const G_ROW_FRACS: [f32; 3] = [0.42, 0.29, 0.29];
+// The top row gets a bigger share of the vertical budget than middle/bottom, and a dedicated
+// collector zone now sits below row 2 (Round 3: bottom-row chambers get two real outlet pipes
+// into a shared pool, per the user's "give them two outlets as well so the rule is uniform").
+// With rows/collector all equal, the reservoir (4 top chambers) is capped well under 50% of the
+// network before a single pipe is even added -- enlarging row 0's share fixes this at the
+// geometry level. Re-tuned for Round 3's bigger network (more pipes + the new collector box);
+// verified >= 0.50 for every R1-R6 variant, printed per run.
+const G_ROW_FRACS: [f32; 3] = [0.40, 0.19, 0.19]; // + G_COLLECTOR_FRAC = 1.0
+const G_COLLECTOR_FRAC: f32 = 0.22;
 const G_CHAMBER_FILL_X: f32 = 0.82; // fraction of a column's own width slot the chamber fills
 const G_CHAMBER_FILL_Y: f32 = 0.68; // fraction of a row's own height slot the chamber fills
 const G_CHAMBER_R: f32 = 3.0; // corner radius -- small, so chambers still read as rectangular
@@ -604,6 +625,8 @@ struct Grid {
     col_width: f32,
     row_y0: [f32; G_ROWS],
     row_y1: [f32; G_ROWS],
+    collector_y0: f32,
+    collector_y1: f32,
     chamber_hx: f32,
     chamber_hy: [f32; G_ROWS],
 }
@@ -622,11 +645,14 @@ impl Grid {
             y += G_ROW_FRACS[r] * total_h;
             row_y1[r] = y;
         }
+        let collector_y0 = y;
+        y += G_COLLECTOR_FRAC * total_h;
+        let collector_y1 = y;
         let mut chamber_hy = [0.0f32; G_ROWS];
         for r in 0..G_ROWS {
             chamber_hy[r] = (row_y1[r] - row_y0[r]) * 0.5 * G_CHAMBER_FILL_Y;
         }
-        Grid { hw_x, total_half_y, col_width, row_y0, row_y1, chamber_hx: col_width * 0.5 * G_CHAMBER_FILL_X, chamber_hy }
+        Grid { hw_x, total_half_y, col_width, row_y0, row_y1, collector_y0, collector_y1, chamber_hx: col_width * 0.5 * G_CHAMBER_FILL_X, chamber_hy }
     }
     fn col_c(&self, col: usize) -> f32 {
         -self.hw_x + self.col_width * (col as f32 + 0.5)
@@ -638,9 +664,22 @@ impl Grid {
     fn reservoir_boundary(&self) -> f32 {
         self.row_y1[0]
     }
-    /// The boundary between row 1 and row 2 (bottom/collector) -- everything below is "collector".
+    /// The boundary between row 2 (bottom) and the dedicated collector pool below it.
     fn collector_boundary(&self) -> f32 {
+        self.collector_y0
+    }
+    /// The boundary between row 1 (middle) and row 2 (bottom), for the finer per-row dry-sand
+    /// residue breakdown (reservoir / row1 / row2 / collector) requested in Round 3.
+    fn mid_boundary(&self) -> f32 {
         self.row_y1[1]
+    }
+    fn collector_shape(&self) -> Shape {
+        Shape::Chamber { cx: 0.0, cy: (self.collector_y0 + self.collector_y1) / 2.0, hx: self.hw_x, hy: (self.collector_y1 - self.collector_y0) / 2.0, r: G_CHAMBER_R }
+    }
+    /// One of a bottom chamber's two entry points into the shared collector pool, near that
+    /// chamber's own column. `side` -1.0 = left entry, +1.0 = right entry.
+    fn collector_entry(&self, col: usize, side: f32) -> (f32, f32) {
+        (self.col_c(col) + side * 0.15 * self.col_width, self.collector_y0 + G_INSET)
     }
     fn chamber(&self, row: usize, col: usize) -> Shape {
         Shape::Chamber { cx: self.col_c(col), cy: self.row_c(row), hx: self.chamber_hx, hy: self.chamber_hy[row], r: G_CHAMBER_R }
@@ -689,109 +728,190 @@ impl Grid {
 }
 
 // -------------------------------------------------------------------------------------------
-// Variant pipe lists. Chambers are identical across all of these (`Grid::all_chambers_flat`,
-// except G7 which uses `all_chambers_sloped`) -- each function below returns PIPES ONLY.
+// ROUND 3: the user picked G4 ("every chamber's floor has two pipes") as the family and asked
+// for variations that hold the RULE fixed and vary only the ROUTING -- which two chambers below
+// each pipe pair feeds. `RowRoute` is that routing table: `table[c] = (a, b)`, the two target
+// columns chamber (row, c) feeds one row down. Applied identically to both the top->middle and
+// middle->bottom transitions (except where a variant deliberately uses a different table per
+// row, e.g. R5's butterfly). Per the user's uniformity request, bottom-row chambers ALSO get two
+// outlets each -- both into the one shared collector pool below row 2, via `apply_bottom_to_collector`.
 // -------------------------------------------------------------------------------------------
 
-/// G1 -- straight: every chamber feeds the one directly below it. Flat floor, centred mouth.
-fn pipes_g1_straight(g: &Grid) -> Vec<Shape> {
-    let mut v = Vec::new();
-    for c in 0..G_COLS {
-        v.push(g.pipe_floor_to_top((0, c, 0.0), (1, c, 0.0)));
-        v.push(g.pipe_floor_to_top((1, c, 0.0), (2, c, 0.0)));
+type RowRoute = [(usize, usize); 4];
+
+/// Which way an incoming pipe's mouth should lean, based on the column it's coming from.
+fn lean(target: usize, source: usize) -> f32 {
+    if target > source {
+        0.35
+    } else if target < source {
+        -0.35
+    } else {
+        0.0
     }
-    v
 }
 
-/// G2 -- diagonal shift: column c feeds column c+1 one row down, wrapping column 3 back to
-/// column 0. The wrap is a genuine long diagonal that crosses the three short ones -- left as a
-/// real crossing/merge (clarification 2: merging pipes is a wanted effect, not something to
-/// route around). This also means every column has exactly one incoming pipe at every row, so
-/// full connectivity falls out for free with no extra connector pipes needed.
-fn pipes_g2_diagonal_shift(g: &Grid) -> Vec<Shape> {
-    let mut v = Vec::new();
+/// Adds 2 pipes per source chamber in `from_row` (columns 0..4), routed per `table`, into
+/// `to_row`. The two outlets always leave from a source chamber's own floor at xfrac -0.35/+0.35
+/// (two visibly separate mouths), matching the "every chamber has two outlets" rule.
+fn apply_route(g: &Grid, from_row: usize, to_row: usize, table: &RowRoute, v: &mut Vec<Shape>) {
     for c in 0..G_COLS {
-        let to = (c + 1) % G_COLS;
-        // sign: which way the mouth/entry lean -- rightward for the three short shifts (to > c),
-        // leftward for the one wrap (to < c, column 3 back to column 0).
-        let sign = if to > c { 1.0 } else { -1.0 };
-        v.push(g.pipe_floor_to_top((0, c, 0.3 * sign), (1, to, -0.3 * sign)));
-        v.push(g.pipe_floor_to_top((1, c, 0.3 * sign), (2, to, -0.3 * sign)));
+        let (a, b) = table[c];
+        v.push(g.pipe_floor_to_top((from_row, c, -0.35), (to_row, a, lean(a, c))));
+        v.push(g.pipe_floor_to_top((from_row, c, 0.35), (to_row, b, lean(b, c))));
     }
-    v
 }
 
-/// G3 -- merge: deliberately routes a RED top column and a GREEN top column into the SAME
-/// shared chamber, twice (clarification 2's dedicated "colours actually meet" variant). Columns
-/// 0-1 start red, 2-3 start green (see `set_tracer_colors` below), so pairing (0,2) -> mid col 1
-/// and (1,3) -> mid col 2 guarantees both merge points combine one red source and one green
-/// source. Mid columns 0 and 3 get no direct feed from this pairing, so a lateral connector pipe
-/// (side wall to side wall, not floor-to-top) keeps them reachable -- an ordinary "connected
-/// vessels" link, not a crossing workaround. The same pattern repeats mid -> bottom.
-fn pipes_g3_merge(g: &Grid) -> Vec<Shape> {
-    let mut v = Vec::new();
-    // top -> mid: (0,2) -> mid col 1, (1,3) -> mid col 2.
-    v.push(g.pipe_floor_to_top((0, 0, 0.5), (1, 1, -0.4)));
-    v.push(g.pipe_floor_to_top((0, 2, -0.5), (1, 1, 0.4)));
-    v.push(g.pipe_floor_to_top((0, 1, 0.5), (1, 2, -0.4)));
-    v.push(g.pipe_floor_to_top((0, 3, -0.5), (1, 2, 0.4)));
-    v.push(g.pipe_side_to_side((1, 0, 1.0, 0.0), (1, 1, -1.0, 0.0)));
-    v.push(g.pipe_side_to_side((1, 2, 1.0, 0.0), (1, 3, -1.0, 0.0)));
-    // mid -> bottom: same merge pattern one row down.
-    v.push(g.pipe_floor_to_top((1, 0, 0.5), (2, 1, -0.4)));
-    v.push(g.pipe_floor_to_top((1, 2, -0.5), (2, 1, 0.4)));
-    v.push(g.pipe_floor_to_top((1, 1, 0.5), (2, 2, -0.4)));
-    v.push(g.pipe_floor_to_top((1, 3, -0.5), (2, 2, 0.4)));
-    v.push(g.pipe_side_to_side((2, 0, 1.0, 0.0), (2, 1, -1.0, 0.0)));
-    v.push(g.pipe_side_to_side((2, 2, 1.0, 0.0), (2, 3, -1.0, 0.0)));
-    v
-}
-
-/// G4 -- split: every chamber's floor has TWO pipes, feeding two different chambers below (the
-/// last column feeds itself and its inward neighbour instead of wrapping, to keep every run
-/// short and local).
-fn pipes_g4_split(g: &Grid) -> Vec<Shape> {
-    let fan = |from_row: usize, to_row: usize, v: &mut Vec<Shape>| {
-        for c in 0..G_COLS - 1 {
-            v.push(g.pipe_floor_to_top((from_row, c, -0.3), (to_row, c, 0.3)));
-            v.push(g.pipe_floor_to_top((from_row, c, 0.3), (to_row, c + 1, -0.3)));
+/// Every bottom-row (row 2) chamber gets its own two outlets too, both landing in the ONE shared
+/// collector pool near that chamber's own column -- "give them two outlets as well so the rule
+/// is uniform" (the user's words). This is the same for every variant; it is not part of the
+/// routing experiment.
+fn apply_bottom_to_collector(g: &Grid, v: &mut Vec<Shape>) {
+    for c in 0..G_COLS {
+        for side in [-1.0f32, 1.0] {
+            let (x0, y0) = g.floor_pt(2, c, side * 0.35);
+            let (x1, y1) = g.collector_entry(c, side);
+            v.push(Shape::Channel { x0, y0, x1, y1, hw: G_PIPE_HW });
         }
-        let last = G_COLS - 1;
-        v.push(g.pipe_floor_to_top((from_row, last, 0.3), (to_row, last, -0.3)));
-        v.push(g.pipe_floor_to_top((from_row, last, -0.3), (to_row, last - 1, 0.3)));
-    };
-    let mut v = Vec::new();
-    fan(0, 1, &mut v);
-    fan(1, 2, &mut v);
-    v
+    }
 }
 
-/// G5 -- crossing fan ("own idea"): top row reverses column order into the middle row (col c ->
-/// mid col 3-c), a deliberate 4-way crossing/merge in the middle of the vessel; middle -> bottom
-/// then runs straight (no crossing) so the picture contrasts a crossing stage against a clean one.
-fn pipes_g5_crossing_fan(g: &Grid) -> Vec<Shape> {
+/// A side-to-side connector between two same-row chambers, used ONLY where a routing table
+/// leaves a column with no direct feed (e.g. R4's convergence). An ordinary connected-vessels
+/// link, not a crossing workaround.
+fn lateral_fix(g: &Grid, row: usize, col_a: usize, col_b: usize, v: &mut Vec<Shape>) {
+    v.push(g.pipe_side_to_side((row, col_a, 1.0, 0.0), (row, col_b, -1.0, 0.0)));
+}
+
+fn build_route_pipes(g: &Grid, table0: &RowRoute, table1: &RowRoute, laterals: &[(usize, usize, usize)]) -> Vec<Shape> {
     let mut v = Vec::new();
-    for c in 0..G_COLS {
-        v.push(g.pipe_floor_to_top((0, c, 0.0), (1, G_COLS - 1 - c, 0.0)));
-    }
-    for c in 0..G_COLS {
-        v.push(g.pipe_floor_to_top((1, c, 0.0), (2, c, 0.0)));
+    apply_route(g, 0, 1, table0, &mut v);
+    apply_route(g, 1, 2, table1, &mut v);
+    apply_bottom_to_collector(g, &mut v);
+    for &(row, a, b) in laterals {
+        lateral_fix(g, row, a, b, &mut v);
     }
     v
 }
 
-/// G6/G7 share this pipe list (same configuration, per the sand-drainage A/B request) -- only
-/// the chamber floor shape differs between the two (flat for G6, sloped for G7). The pipe mouth
-/// sits at a corner (xfrac 0.7) rather than centred, which for G7 is also where the sloped floor
-/// is deepest.
-fn pipes_corner_outlet(g: &Grid) -> Vec<Shape> {
-    let mut v = Vec::new();
-    let xf = 0.7;
-    for c in 0..G_COLS {
-        v.push(g.pipe_floor_to_top((0, c, xf), (1, c, xf)));
-        v.push(g.pipe_floor_to_top((1, c, xf), (2, c, xf)));
+// R1 = G4 as-is (the baseline the user liked): each column feeds itself and its right neighbour;
+// the last column feeds itself and its LEFT neighbour instead of wrapping. Full column coverage,
+// no laterals needed.
+const R1_TABLE: RowRoute = [(0, 1), (1, 2), (2, 3), (3, 2)];
+// R2 neighbours: each feeds itself-below and its right neighbour, wrapping column 3 -> column 0
+// (a genuine crossing, left in per "pipes merging is fine"). Full coverage, no laterals.
+const R2_TABLE: RowRoute = [(0, 1), (1, 2), (2, 3), (3, 0)];
+// R3 wide spread: each feeds (c-1, c+2) mod 4 -- neither target is the source's own column, and
+// several are 2-3 columns away. Full coverage, no laterals.
+const R3_TABLE: RowRoute = [(3, 2), (0, 3), (1, 0), (2, 1)];
+// R4 converging: every column's two outlets are BOTH the two centre columns (1, 2), so the two
+// colours are driven into the same middle chambers regardless of which half they start in.
+// Columns 0 and 3 get no direct feed from this table, so a lateral connector is added at every
+// row this table is applied to.
+const R4_TABLE: RowRoute = [(1, 2), (1, 2), (1, 2), (1, 2)];
+// R5 butterfly: row 0->1 uses stride 2 (the classic first butterfly stage: c and c+2 swap
+// halves), row 1->2 uses stride 1 (R2's table) -- so a top chamber's material can reach every
+// bottom chamber via SOME path, the textbook claim for a butterfly network. Verified, not
+// assumed, from the mixing table below.
+const R5_ROW0: RowRoute = [(0, 2), (1, 3), (2, 0), (3, 1)];
+const R5_ROW1: RowRoute = R2_TABLE;
+// R6 (own, informed by R1-R5): neighbours into row 1 (full coverage, like R2), then converge
+// into row 2 (like R4) -- tests whether a clean stage followed by a convergent stage mixes
+// better than either alone. Row 1 needs no laterals (R2's table covers it); row 2 does (R4's
+// table only hits columns 1-2).
+const R6_ROW0: RowRoute = R2_TABLE;
+const R6_ROW1: RowRoute = R4_TABLE;
+
+/// The shallowest (worst-case) drop/run ratio among all `Shape::Channel`s in `shapes`, against
+/// the ~0.089 (~5.1 degree) dry-sand repose floor -- checked for every pipe, not just a
+/// representative one, since Round 3's routing tables include long cross-vessel runs R1-R5
+/// didn't have.
+fn worst_pipe_ratio(shapes: &[Shape]) -> (f32, f32, f32) {
+    let mut worst_ratio = f32::INFINITY;
+    let mut worst_drop = 0.0;
+    let mut worst_run = 0.0;
+    for s in shapes {
+        if let Shape::Channel { x0, y0, x1, y1, .. } = s {
+            let run = (x1 - x0).abs();
+            let drop = (y1 - y0).abs();
+            if run < 0.5 {
+                continue; // near-vertical pipe: no meaningful run, can't be the shallow case
+            }
+            let ratio = drop / run;
+            if ratio < worst_ratio {
+                worst_ratio = ratio;
+                worst_drop = drop;
+                worst_run = run;
+            }
+        }
     }
-    v
+    (worst_ratio, worst_drop, worst_run)
+}
+
+// -------------------------------------------------------------------------------------------
+// Measuring mixing: for each of the 4 bottom chambers (and the collector), the RED vs GREEN mass
+// share at the final snapshot. `green_fraction` reads it off the tracer colour directly rather
+// than tracking a separate scalar field -- the two tracer colours are (225,40,40) red and
+// (40,200,90) green, which differ enough in the red channel alone (225 vs 40) to use as a linear
+// interpolation parameter for however much a cell's colour has blended toward green. A chamber
+// at 50/50 is fully mixed; 100/0 (or 0/100) is unmixed.
+// -------------------------------------------------------------------------------------------
+
+fn green_fraction(color: u32) -> f32 {
+    let r = color_channel(color, 0) as f32;
+    ((225.0 - r) / (225.0 - 40.0)).clamp(0.0, 1.0)
+}
+
+fn region_color_mass(mask: &[u8], heights: &[f32], colors: &[u32], w: usize, h: usize, region: impl Fn(f32, f32) -> bool) -> (f32, f32) {
+    let center_x = (w - 1) as f32 / 2.0;
+    let center_y = w as f32 / 2.0;
+    let mut red = 0.0f32;
+    let mut green = 0.0f32;
+    for y in 0..h {
+        let dy = y as f32 - center_y;
+        for x in 0..w {
+            let dx = x as f32 - center_x;
+            let idx = y * w + x;
+            if mask[idx] == MASK_OUTSIDE || !region(dx, dy) {
+                continue;
+            }
+            let hgt = heights[idx];
+            if hgt < 0.005 {
+                continue;
+            }
+            let gf = green_fraction(colors[idx]);
+            green += hgt * gf;
+            red += hgt * (1.0 - gf);
+        }
+    }
+    (red, green)
+}
+
+/// Prints the mixing table for one (variant, material) at its final snapshot: red/green mass and
+/// green share for each of the 4 bottom chambers and the collector, plus the average absolute
+/// deviation from 50/50 across the 4 bottom chambers (lower = more mixed). Returns that average.
+fn mixing_table(label: &str, g: &Grid, mask: &[u8], snap: &Snap) -> f32 {
+    println!("  -- mixing table [{label}] --");
+    let mut abs_dev_sum = 0.0f32;
+    for c in 0..G_COLS {
+        let (cx, cy, hx, hy) = (g.col_c(c), g.row_c(2), g.chamber_hx, g.chamber_hy[2]);
+        let (red, green) = region_color_mass(mask, &snap.heights, &snap.colors, GRID, GRID, |dx, dy| rounded_box_inside(dx, dy, cx, cy, hx, hy, G_CHAMBER_R));
+        let total = red + green;
+        // A chamber with ~no mass at the final snapshot counts as FULLY UNMIXED (deviation 0.5),
+        // not excluded from the average -- excluding it would silently reward a routing that
+        // simply never delivers anything there (or drains it before the snapshot) as if it were
+        // perfectly mixed. "Received nothing" is not mixing.
+        let share = if total > 1e-3 { green / total } else { 0.5 };
+        let dev = if total > 1e-3 { (share - 0.5).abs() } else { 0.5 };
+        abs_dev_sum += dev;
+        println!("    bottom col {c}: red={red:7.1} green={green:7.1} green_share={share:.3} (mass={total:.1})");
+    }
+    let (red_c, green_c) = region_color_mass(mask, &snap.heights, &snap.colors, GRID, GRID, |_dx, dy| dy >= g.collector_boundary());
+    let total_c = red_c + green_c;
+    let share_c = if total_c > 1e-3 { green_c / total_c } else { 0.5 };
+    println!("    collector : red={red_c:7.1} green={green_c:7.1} green_share={share_c:.3}");
+    let avg_dev = abs_dev_sum / G_COLS as f32;
+    println!("    avg |deviation from 0.5| across bottom chambers = {avg_dev:.3}");
+    avg_dev
 }
 
 fn main() {
@@ -811,50 +931,37 @@ fn main() {
         let b = g.collector_boundary();
         move |_dx: f32, dy: f32| dy >= b
     };
-
-    // Report the geometric drop/run ratio for a representative diagonal pipe (G2/G4/G5's short
-    // shift) and the long G2 wrap, against the ~0.089 (~5 degree) dry-sand repose floor, rather
-    // than asserting steepness -- see the printed numbers below and the dry-sand traces/pictures
-    // for whether each actually keeps flowing.
-    // A floor-to-top pipe's endpoints are each inset INTO their own chamber, so measure the
-    // actual drop directly from a representative pipe's own endpoints (row 1 -> row 2, the
-    // smaller of the two gaps now that row 0 is enlarged) rather than re-deriving it from row
-    // geometry by hand.
-    let (fx0, fy0) = g.floor_pt(1, 0, 0.0);
-    let (tx0, ty0) = g.top_pt(2, 0, 0.0);
-    let short_drop = ty0 - fy0;
-    let short_run = g.col_width;
-    let _ = (fx0, tx0);
-    let wrap_run = (G_COLS - 1) as f32 * g.col_width;
-    println!(
-        "geometry: short diagonal drop/run = {:.3}/{:.1} = {:.3} ({:.1} deg); long wrap drop/run = {:.3}/{:.1} = {:.3} ({:.1} deg); repose floor = 0.089 (~5.1 deg)",
-        short_drop, short_run, short_drop / short_run, (short_drop / short_run).atan().to_degrees(),
-        short_drop, wrap_run, short_drop / wrap_run, (short_drop / wrap_run).atan().to_degrees()
-    );
+    let row_bounds = Some((g.mid_boundary(), g.collector_boundary()));
 
     struct Variant {
         name: &'static str,
-        chambers: Vec<Shape>,
         pipes: Vec<Shape>,
         water_ticks: [u32; 4],
         sand_ticks: [u32; 4],
     }
 
     let variants = vec![
-        Variant { name: "G1_straight_flat_center", chambers: g.all_chambers_flat(), pipes: pipes_g1_straight(&g), water_ticks: [0, 150, 600, 2200], sand_ticks: [0, 400, 1500, 4500] },
-        Variant { name: "G2_diagonal_shift", chambers: g.all_chambers_flat(), pipes: pipes_g2_diagonal_shift(&g), water_ticks: [0, 300, 900, 2200], sand_ticks: [0, 300, 900, 3500] },
-        Variant { name: "G3_merge", chambers: g.all_chambers_flat(), pipes: pipes_g3_merge(&g), water_ticks: [0, 300, 900, 2200], sand_ticks: [0, 300, 900, 3500] },
-        Variant { name: "G4_split", chambers: g.all_chambers_flat(), pipes: pipes_g4_split(&g), water_ticks: [0, 200, 700, 1500], sand_ticks: [0, 400, 1200, 2800] },
-        Variant { name: "G5_crossing_fan", chambers: g.all_chambers_flat(), pipes: pipes_g5_crossing_fan(&g), water_ticks: [0, 300, 900, 2500], sand_ticks: [0, 300, 900, 3500] },
-        Variant { name: "G6_straight_flat_corner", chambers: g.all_chambers_flat(), pipes: pipes_corner_outlet(&g), water_ticks: [0, 150, 600, 2200], sand_ticks: [0, 400, 1500, 4500] },
-        Variant { name: "G7_straight_sloped_corner", chambers: g.all_chambers_sloped(1.0), pipes: pipes_corner_outlet(&g), water_ticks: [0, 150, 600, 2200], sand_ticks: [0, 400, 1500, 4500] },
+        Variant { name: "R1_g4_baseline", pipes: build_route_pipes(&g, &R1_TABLE, &R1_TABLE, &[]), water_ticks: [0, 200, 700, 1600], sand_ticks: [0, 400, 1300, 3200] },
+        Variant { name: "R2_neighbours", pipes: build_route_pipes(&g, &R2_TABLE, &R2_TABLE, &[]), water_ticks: [0, 200, 700, 1800], sand_ticks: [0, 400, 1300, 3500] },
+        Variant { name: "R3_wide_spread", pipes: build_route_pipes(&g, &R3_TABLE, &R3_TABLE, &[]), water_ticks: [0, 200, 700, 2200], sand_ticks: [0, 400, 1300, 4500] },
+        Variant { name: "R4_converging", pipes: build_route_pipes(&g, &R4_TABLE, &R4_TABLE, &[(1, 0, 1), (1, 2, 3), (2, 0, 1), (2, 2, 3)]), water_ticks: [0, 300, 1000, 2800], sand_ticks: [0, 500, 1800, 5500] },
+        Variant { name: "R5_butterfly", pipes: build_route_pipes(&g, &R5_ROW0, &R5_ROW1, &[]), water_ticks: [0, 200, 700, 1800], sand_ticks: [0, 400, 1300, 3500] },
+        Variant { name: "R6_neighbours_then_converge", pipes: build_route_pipes(&g, &R6_ROW0, &R6_ROW1, &[(2, 0, 1), (2, 2, 3)]), water_ticks: [0, 200, 700, 1900], sand_ticks: [0, 400, 1300, 4800] },
     ];
 
     let mut results = Vec::new();
     let mut all_masks = Vec::new();
+    let mut ranking: Vec<(&'static str, f32, f32, f32, f32)> = Vec::new(); // (name, water_dev, sand_dev, sand_residual_frac, worst_ratio)
     for variant in variants {
-        let mut shapes = variant.chambers;
-        shapes.extend(variant.pipes);
+        let mut shapes = g.all_chambers_flat();
+        shapes.push(g.collector_shape());
+        shapes.extend(variant.pipes.clone());
+        let (worst_ratio, worst_drop, worst_run) = worst_pipe_ratio(&variant.pipes);
+        println!(
+            "\n{} geometry: worst pipe drop/run = {:.3}/{:.1} = {:.3} ({:.1} deg) vs repose floor 0.089 (~5.1 deg)",
+            variant.name, worst_drop, worst_run, worst_ratio, worst_ratio.atan().to_degrees()
+        );
+
         let shapes = std::rc::Rc::new(shapes);
         let inside = {
             let shapes = shapes.clone();
@@ -877,26 +984,51 @@ fn main() {
             let mut sim = build_sim(mask.clone(), fill.clone(), GRID);
             trace_mass(variant.name, &mut sim, MaterialMode::Water, 2500, 50, is_reservoir.clone(), is_collector.clone());
             let mut sim = build_sim(mask.clone(), fill.clone(), GRID);
-            trace_mass(variant.name, &mut sim, MaterialMode::DrySand, 3500, 100, is_reservoir.clone(), is_collector.clone());
+            trace_mass(variant.name, &mut sim, MaterialMode::DrySand, 4000, 100, is_reservoir.clone(), is_collector.clone());
         }
 
         all_masks.push(mask_image(&mask, GRID, GRID));
-        let result = run_design(
+        let (result, water_final, sand_final) = run_design(
             variant.name,
             out_dir,
-            mask,
+            mask.clone(),
             fill,
             is_reservoir.clone(),
             is_collector.clone(),
             network_cap,
             &variant.water_ticks,
             &variant.sand_ticks,
+            row_bounds,
         );
+
+        let water_dev = mixing_table(&format!("{} water", variant.name), &g, &mask, &water_final);
+        let sand_dev = mixing_table(&format!("{} dry sand", variant.name), &g, &mask, &sand_final);
+
+        // Sand residual: fraction of total mass still in reservoir + row1 + row2 (i.e. NOT yet
+        // in the collector) at the final sand snapshot -- the damming measure that killed G5.
+        let center_x = (GRID - 1) as f32 / 2.0;
+        let center_y = GRID as f32 / 2.0;
+        let mut collector_mass = 0.0f32;
+        let mut total_mass = 0.0f32;
+        for y in 0..GRID {
+            let dy = y as f32 - center_y;
+            for x in 0..GRID {
+                let dx = x as f32 - center_x;
+                let hgt = sand_final.heights[y * GRID + x];
+                total_mass += hgt;
+                if is_collector(dx, dy) {
+                    collector_mass += hgt;
+                }
+            }
+        }
+        let sand_residual_frac = if total_mass > 0.0 { 1.0 - collector_mass / total_mass } else { f32::NAN };
+
+        ranking.push((variant.name, water_dev, sand_dev, sand_residual_frac, worst_ratio));
         results.push(result);
     }
 
-    contact_sheet(&all_masks, 4)
-        .save(out_dir.join("G_all_masks_comparison.png"))
+    contact_sheet(&all_masks, 3)
+        .save(out_dir.join("R_all_masks_comparison.png"))
         .expect("write comparison sheet");
 
     println!("\n=== summary ===");
@@ -905,5 +1037,19 @@ fn main() {
             "{}: mass={:.1} network_capacity={} fraction_of_network={:.3} water_err={:.6} sand_err={:.6} mirror_mismatches={}",
             r.name, r.initial_mass, r.network_capacity, r.fraction_of_network, r.water_mass_err, r.sand_mass_err, r.mirror_mismatches
         );
+    }
+
+    println!("\n=== ranking (lower mixing deviation = more mixed; lower sand residual = better drained) ===");
+    let mut by_mix = ranking.clone();
+    by_mix.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    println!("by water mixing deviation (best/most-mixed first):");
+    for (name, wd, sd, res, ratio) in &by_mix {
+        println!("  {name}: water_dev={wd:.3} sand_dev={sd:.3} sand_residual={:.1}% worst_pipe_ratio={ratio:.3}", res * 100.0);
+    }
+    let mut by_residual = ranking.clone();
+    by_residual.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap());
+    println!("by dry-sand residual (best-drained first):");
+    for (name, wd, sd, res, ratio) in &by_residual {
+        println!("  {name}: sand_residual={:.1}% water_dev={wd:.3} sand_dev={sd:.3} worst_pipe_ratio={ratio:.3}", res * 100.0);
     }
 }

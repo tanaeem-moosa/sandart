@@ -401,3 +401,178 @@ leaks, fraction of network comfortably >= 50%.
   mouth on a flat floor (G1) beat a sloped floor with a corner mouth (G7), which in turn clearly
   beat a corner mouth on a flat floor (G6). Slope is a recovery mechanism for an off-centre mouth,
   not an unconditional upgrade.
+
+---
+
+# Round 3 -- routing variations on G4 (R1-R6)
+
+The user picked **G4** ("G4 is good. let's make variations of it but make sure to give every box
+two outlets") and fixed the family: **every chamber in rows 1 and 2 has exactly two outlet
+pipes, each feeding one chamber of the row below.** Bottom-row chambers get two outlets too, both
+into one shared collector pool below row 2 (a new dedicated region -- Round 2's "collector" was
+just "row 2 and everything below"; Round 3 gives it its own box, `Grid::collector_shape`, since
+the rule needs somewhere for the bottom row's second outlet to go). The ONLY thing that varies
+between R1-R6 is the routing table: which two columns of the row below each chamber feeds. Same
+12 chambers, same start (top row full, columns 0-1 red, columns 2-3 green), same rasterizer.
+
+`R_all_masks_comparison.png` puts all six masks side by side (3 per row) -- the collector box at
+the bottom of every mask is new this round, and each bottom chamber's double outlet into it is
+visible as a small paired notch.
+
+## The routing tables
+
+`table[c] = (a, b)`: chamber (row, c) feeds columns a and b of the row below. Applied to both the
+top->middle and middle->bottom transitions unless noted.
+
+| variant | table (both transitions unless noted) | laterals added (connectivity only) |
+|---|---|---|
+| R1 (= G4) | `[(0,1),(1,2),(2,3),(3,2)]` | none |
+| R2 neighbours | `[(0,1),(1,2),(2,3),(3,0)]` (wraps) | none |
+| R3 wide spread | `[(3,2),(0,3),(1,0),(2,1)]` (never own column) | none |
+| R4 converging | `[(1,2),(1,2),(1,2),(1,2)]` (every column -> both centre columns) | mid0<->mid1, mid2<->mid3, bottom0<->bottom1, bottom2<->bottom3 |
+| R5 butterfly | top->mid: `[(0,2),(1,3),(2,0),(3,1)]` (stride 2); mid->bottom: `[(0,1),(1,2),(2,3),(3,0)]` (stride 1, = R2's table) | none |
+| R6 (own) | top->mid: R2's table (neighbours); mid->bottom: R4's table (converging) | bottom0<->bottom1, bottom2<->bottom3 |
+
+R4 and R6's lateral connectors exist ONLY because their routing table doesn't cover every column
+(R4's table never targets columns 0 or 3 at all; R6's mid->bottom table has the same gap) -- an
+ordinary connected-vessels link added for reachability, not a routing choice being tested.
+
+## Measuring mixing and slope, not just looking
+
+**Mixing table** (`mixing_table`): at the final snapshot, the red/green mass split in each of the
+4 bottom chambers and the collector, read off the tracer colour itself (linear in the red channel
+between the two pure tracer colours -- `green_fraction`). A chamber at 50/50 is fully mixed; 100/0
+is unmixed. The headline number is the **average |deviation from 0.5| across the 4 bottom
+chambers** -- lower is more mixed. **A chamber with ~no mass at the final snapshot counts as
+FULLY UNMIXED (deviation 0.5), not excluded** -- excluding it would silently reward a routing that
+just never delivers there (or drains it before the snapshot) as if it were perfectly mixed.
+
+**Pipe slope** (`worst_pipe_ratio`): the SHALLOWEST drop/run ratio among every `Shape::Channel` in
+a variant's pipe list (not a representative one), against the ~0.089 (~5.1 degree) repose floor.
+
+## Per-variant results
+
+All six: exact mass conservation (`0.000000` err, both materials), full connectivity (flood-fill
+verified, collector reached, no sealed pockets), fraction of network 0.52-0.53 (comfortably over
+the 50% target with no re-tuning needed this round). Mirror mismatches vary with each table's own
+symmetry (0 for R4's fully-symmetric convergence, up to 3816 for R1's asymmetric last-column rule)
+and are not a target either way.
+
+| variant | initial mass | network capacity | fraction | worst pipe ratio (deg) | water mix dev | sand mix dev | sand residual |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| R1 g4 baseline | 13616.0 | 26052 | 0.523 | 0.315 (17.5) | **0.345** | 0.382 | **0.4%** |
+| R2 neighbours | 13877.0 | 26596 | 0.522 | 0.122 (6.9) | 0.415 | 0.499 | 0.6% |
+| R3 wide spread | 14085.0 | 27299 | 0.516 | 0.122 (6.9) | 0.461 | 0.498 | 5.9% |
+| R4 converging | 14116.0 | 26876 | 0.525 | **0.000 (0.0)** | 0.489 | 0.499 | 9.8% |
+| R5 butterfly | 14061.0 | 26876 | 0.523 | 0.122 (6.9) | 0.431 | 0.498 | 0.9% |
+| R6 neighbours->converge | 13877.0 | 26802 | 0.518 | **0.000 (0.0)** | 0.465 | 0.500 | 10.6% |
+
+**R4 and R6's worst pipe is their own lateral connector -- a perfectly flat, 0.0 degree pipe, AT
+the repose floor rather than above it.** These are the only pipes in six variants that fail the
+steepness check outright; both are also the two worst dry-sand drainers, and the traces/pictures
+below confirm the mechanism, not just the coincidence.
+
+### R1 -- G4 baseline
+
+- `R1_g4_baseline_{mask,contact_sheet,tracer_sheet}.png`
+- **Water**: red and green descend mostly straight, converging visibly at columns 2-3 where the
+  table's crossing lands, producing a real partial blend there (57.5% and 80.6% green share) --
+  but columns 0-1 empty out entirely into the collector before the final frame (tick 1600), so
+  they contribute the maximum 0.5 deviation to the average by having delivered nothing left to
+  measure, not by being mixed.
+- **Dry sand**: same crossing shape, but almost everything has already drained to the collector by
+  tick 3200 -- each bottom chamber holds only a few grams, split close to pure by column.
+
+### R2 -- neighbours (wrap accepted)
+
+- `R2_neighbours_{mask,contact_sheet,tracer_sheet}.png`
+- **Water**: the wrap pipe (column 3 back to column 0) visibly crosses the other three, but its
+  effect is mostly RELOCATION, not blending -- column 1 stays almost pure red (0.1% green) while
+  columns 2-3 pick up most of the green (65.9%, 100%).
+- **Dry sand**: same crossing, even less residence -- every bottom chamber resolves to a handful
+  of grams of essentially one colour.
+
+### R3 -- wide spread
+
+- `R3_wide_spread_{mask,contact_sheet,tracer_sheet}.png`
+- **Water**: the widest, busiest-looking tangle of the six in the mask, but the bottom chambers
+  still resolve mostly pure (0%, 7%, 91% green, and column 3 empty) -- visual crossing density
+  does not by itself produce measured mixing.
+- **Dry sand**: same near-zero mixing, and notably the **worst dry-sand drainage among the
+  non-lateral-connector variants** (5.9% residual, reservoir still holding 677 of 14085 at the
+  final tick) -- these longer, shallower (6.9 degree) crossing pipes move sand markedly slower
+  than R1/R2's shorter ones even though both are above the repose floor.
+
+### R4 -- converging
+
+- `R4_converging_{mask,contact_sheet,tracer_sheet}.png`
+- **Water**: the most visually striking mask and tracer picture of the six -- both halves funnel
+  into the two centre columns in a tight hourglass braid -- but the picture shows the two colours
+  passing through those shared chambers largely SIDE BY SIDE rather than blending (97.9% green in
+  one centre chamber, 2.2% in the other). **Convergence into the same chambers is not by itself a
+  mixing mechanism.** Columns 0 and 3 receive only whatever leaks sideways through the flat
+  lateral connectors.
+- **Dry sand**: the same funnel shape, but sand drains through it far slower than any other
+  variant -- **worst residual of all six (9.8%)**, reservoir still holding 1180 of 14116 even at a
+  final tick already extended to 5500 specifically to give it more time. Consistent with the
+  connectivity-fix laterals being perfectly flat (0.0 degrees, AT the repose floor): columns 0 and
+  3 barely receive anything, visible in the picture as those chambers staying nearly empty
+  throughout.
+
+### R5 -- butterfly
+
+- `R5_butterfly_{mask,contact_sheet,tracer_sheet}.png`
+- **Water**: both differently-strided crossing stages are visible as real braided tangles, and
+  unlike R4 they DO leave a genuine partial blend in the two chambers the crossings land on
+  (3% and 75% green) -- but columns 0 and 3 still end up essentially pure. **The textbook claim --
+  every bottom chamber is reachable from every top chamber -- is VERIFIED** (connectivity check
+  passes, and the picture shows braided paths reaching every column); **the claim that this
+  produces even mixing is REFUTED** -- two of four bottom chambers stay unmixed regardless, and
+  the average deviation (0.431) is worse than R1's.
+- **Dry sand**: same braided crossings, almost no residence-driven blending -- every bottom
+  chamber resolves to a single colour, statistically indistinguishable from R2/R3/R6's
+  essentially-unmixed sand result (0.498).
+
+### R6 -- neighbours, then converge (own idea)
+
+- `R6_neighbours_then_converge_{mask,contact_sheet,tracer_sheet}.png`
+- **Water**: a clean braided crossing into row 1, then the same centre-funnel as R4 into row 2 --
+  the picture looks like R4's second stage: red and green share the two centre bottom chambers
+  side by side (87.6%, 1.4% green) rather than blending, with the same flat-lateral leak into
+  columns 0 and 3.
+- **Dry sand**: the convergence stage measurably dams sand here too -- row 1 ALONE holds 1136 of
+  13877 at the final tick (visible in the picture as mass pooling above the flat connectors rather
+  than passing through), the **second-worst drainage after R4**.
+
+## Ranking
+
+By water mixing deviation (lower = more mixed) and by dry-sand residual (lower = better drained),
+both computed above -- see the summary table. Both rankings put the **same order**:
+**R1 < R2 < R5 < R3 < R6 < R4** (best to worst) for water mixing, and
+**R1 < R2 < R5 < R3 < R4 < R6** for sand residual (R4 and R6 swap last place depending on the
+measure, both dominated by their flat lateral connectors).
+
+## Read: what actually explains the numbers
+
+- **The collector itself is close to 50/50 in every single variant (0.477-0.510)**, almost
+  regardless of routing, because with full connectivity ALL material eventually passes through
+  one shared pool -- given enough time, the asymptotic split is bounded by the initial 50/50 red/
+  green fill, not by the routing. This is why the ranking uses the BOTTOM CHAMBER breakdown, not
+  the collector number: the collector saturates near 0.5 too quickly to discriminate between
+  variants, and the real differences are in how material is distributed on the way there.
+- **R1, the variant the user already liked, also comes out on top of both objective measures** --
+  though "on top" here still means far from real mixing (0.345 average deviation, nowhere near
+  0.0). No variant achieves anything close to a uniformly mixed bottom row.
+- **Dry sand does not measurably mix in ANY of the six variants** (all sand deviations are
+  0.38-0.50, i.e. statistically close to fully segregated) -- consistent with every earlier round
+  of this file: water blends at crossings and merges, dry sand essentially does not.
+- **R5's butterfly is the clearest verify-or-refute result the ticket asked for**: full graph
+  reachability is real (verified), but it does not translate into even mixing at any bottom
+  chamber (refuted) -- two of four stay pure regardless of how many paths could theoretically
+  reach them.
+- **R4/R6's convergence produces the most dramatic PICTURE (a genuine hourglass braid) but the
+  worst physics** -- funnelling two streams into the same chambers doesn't blend them without a
+  turbulence-inducing mechanism (like a real crossing or merge, as G3 showed last round), and the
+  lateral connectors needed to keep the unfed columns reachable are exactly flat, which is a real,
+  measured repose-floor violation, not a cosmetic one -- it visibly dams dry sand in the picture
+  and the numbers agree (worst two residuals of the six).
