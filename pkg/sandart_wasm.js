@@ -263,7 +263,8 @@ export class WasmSimulationState {
     }
     /**
      * Change the render/display resolution `n` to 64, 128, 256, 512, or 1024 (`GRID_SIZE`, the
-     * shipped default, is unchanged by this feature). Rejects the change (and leaves the current
+     * `sandart-sim` library/native-app default, is unchanged by this feature; the page's own
+     * startup value is `DEFAULT_RENDER_SIZE`). Rejects the change (and leaves the current
      * dims untouched) if the RESULTING simulation size `S = n / sim_downscale` would fall outside
      * 64..=512 -- in particular `n = 1024` is only valid alongside `sim_downscale >= 2`, since
      * `S` would otherwise be 1024, one power-of-two step past the simulation's own supported
@@ -420,8 +421,9 @@ export class WasmSimulationState {
     }
     /**
      * Change the simulation downscale factor `m` to 1, 2, or 4: the simulation runs at
-     * `S = render_size / m` while the display stays at `render_size`. `m = 1` (the shipped
-     * default) is simulation-at-display-resolution, unchanged from before this feature existed.
+     * `S = render_size / m` while the display stays at `render_size`. `m = 1` is
+     * simulation-at-display-resolution, the behaviour from before this feature existed (the
+     * page's own startup value is `DEFAULT_SIM_DOWNSCALE`, not 1, as of 2026-09-19).
      * Rejected the same way `set_grid_size` is if the resulting `S` would fall outside 64..=512
      * or not divide evenly -- see `apply_grid_dims`.
      * @param {number} m
