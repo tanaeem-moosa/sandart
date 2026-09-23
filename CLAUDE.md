@@ -59,9 +59,14 @@ container that sizes it and shipped a blank page to Pages. The Rust suite and th
 both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
 `index.html`, run this.**
 
-The library suite is **99 passed / 3 failed on `main`**, and that is the current expected state
+The library suite is **101 passed / 3 failed on `main`**, and that is the current expected state
 (99 since 2026-09-19, when `SandboxShape::ChamberNetwork` shipped with three tests: connectivity,
-pipe slopes against the dry-sand repose floor, and dry-sand drainage completeness. That drainage
+pipe slopes against the dry-sand repose floor, and dry-sand drainage completeness; 101 since
+2026-09-23, when the geometry was reworked to thinner pipes and thicker walls and gained
+`test_chamber_network_chambers_never_merge` and `test_chamber_network_no_pipe_enters_an_unrouted_chamber`.
+The second is zero-tolerance: R2's and R5's wrap-around pipes used to cut straight through a
+chamber they were not routed to, and pipes spanning two or more columns are now drop/lateral/drop
+doglegs confined to the gap between rows. That drainage
 test simulates thousands of ticks and is why the suite now takes ~65s rather than ~35s. The vessel
 is 12 chambers in 4 columns x 3 rows, two outlet pipes each, a collector pool, top row as the
 reservoir, with a routing selector — R1/R2/R5, tables in `physics.rs`. It is **deliberately not
