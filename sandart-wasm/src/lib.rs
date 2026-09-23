@@ -23,22 +23,26 @@ pub struct WasmSimulationState {
     /// scratch (GPU textures can't be resized in place — a resolution change is a full
     /// teardown/rebuild of both `sim` and `renderer`, not a mutation of either).
     target_format: wgpu::TextureFormat,
-    /// Render/display grid resolution `n` (64/128/256/512/1024, default 512) -- what the
-    /// resolution `<select>` sets. Decoupled from `sim_size` below by the simulation-downscale
-    /// feature: `n` sizes nothing on the sim side and nothing GPU-side except the
-    /// `LightingUniforms.render_size` scalar (the handful of shader quantities that are genuinely
-    /// per-render-pixel, e.g. the grain hash) -- everything else (the sim grid itself, every
-    /// texel-per-cell texture including the shape mask) is sized by `sim_size`.
+    /// Render/display grid resolution `n` (64/128/256/512/1024, page default 1024 as of
+    /// 2026-09-19 -- see `DEFAULT_RENDER_SIZE`) -- what the resolution `<select>` sets. Decoupled
+    /// from `sim_size` below by the simulation-downscale feature: `n` sizes nothing on the sim
+    /// side and nothing GPU-side except the `LightingUniforms.render_size` scalar (the handful of
+    /// shader quantities that are genuinely per-render-pixel, e.g. the grain hash) -- everything
+    /// else (the sim grid itself, every texel-per-cell texture including the shape mask) is sized
+    /// by `sim_size`.
     render_size: usize,
-    /// Simulation downscale factor `m` (1/2/4, default 1) -- what the "Simulation downscale"
-    /// `<select>` sets. `sim_size = render_size / sim_downscale`; kept in sync with both by
-    /// `apply_grid_dims`, the only place any of these three fields is allowed to change.
+    /// Simulation downscale factor `m` (1/2/4, page default 4 as of 2026-09-19 -- see
+    /// `DEFAULT_SIM_DOWNSCALE`) -- what the "Simulation downscale" `<select>` sets. `sim_size =
+    /// render_size / sim_downscale`; kept in sync with both by `apply_grid_dims`, the only place
+    /// any of these three fields is allowed to change.
     sim_downscale: usize,
-    /// Simulation grid resolution `S = render_size / sim_downscale` (64/128/256/512, default
-    /// 512). Single source of truth for sizing CPU-side upload buffers in `render()` — replaces
-    /// the old hardcoded module-level `GRID_SIZE` constant at every read site that depends on the
-    /// *current* sim grid, not the compile-time default. Stored rather than recomputed on every
-    /// read since `render()`'s hot path and several UI-facing getters read it every frame.
+    /// Simulation grid resolution `S = render_size / sim_downscale` (64/128/256/512, page default
+    /// 256 as of 2026-09-19 -- see `DEFAULT_SIM_SIZE`). Single source of truth for sizing CPU-side
+    /// upload buffers in `render()` — replaces the old hardcoded module-level `GRID_SIZE` constant
+    /// at every read site that depends on the *current* sim grid, not the compile-time default
+    /// (`GRID_SIZE` (512) remains the library/native-app default; the page no longer starts
+    /// there). Stored rather than recomputed on every read since `render()`'s hot path and several
+    /// UI-facing getters read it every frame.
     sim_size: usize,
     full_upload_needed: bool,
 
@@ -226,8 +230,8 @@ impl WasmSimulationState {
         };
         surface.configure(&device, &surface_config);
 
-        let renderer = HeightmapRenderer::new(&device, target_format, GRID_SIZE, GRID_SIZE);
-        let mut sim = DrawingSimulation::new();
+        let renderer = HeightmapRenderer::new(&device, target_format, DEFAULT_SIM_SIZE, DEFAULT_RENDER_SIZE);
+        let mut sim = DrawingSimulation::new_with_size(DEFAULT_SIM_SIZE);
         sim.lateral_substeps = LATERAL_SUBSTEPS;
         let playback = PlaybackController::new();
 
@@ -240,18 +244,28 @@ impl WasmSimulationState {
             queue,
             surface_config,
             target_format,
-            render_size: GRID_SIZE,
-            sim_downscale: 1,
-            sim_size: GRID_SIZE,
+            render_size: DEFAULT_RENDER_SIZE,
+            sim_downscale: DEFAULT_SIM_DOWNSCALE,
+            sim_size: DEFAULT_SIM_SIZE,
             full_upload_needed: true,
             temporal_smoothing_enabled: true,
             temporal_alpha: 0.4,
-            displayed_height: vec![0.0; GRID_SIZE * GRID_SIZE],
-            displayed_wetness: vec![0.0; GRID_SIZE * GRID_SIZE],
+            displayed_height: vec![0.0; DEFAULT_SIM_SIZE * DEFAULT_SIM_SIZE],
+            displayed_wetness: vec![0.0; DEFAULT_SIM_SIZE * DEFAULT_SIM_SIZE],
             settling_box: ActiveBounds { min_x: 0, max_x: 0, min_y: 0, max_y: 0, active: false },
             simulator_mode: SimulatorMode::Sandbox,
             marble_count: 1,
             material_mode: MaterialMode::DrySand,
+            // Deliberately left at `Circle`, `DrawingSimulation::new_with_size`'s own default,
+            // rather than `MultiNeckHourglass` (the page's new startup shape) -- `set_sandbox_shape`
+            // below treats "requested shape == already-recorded shape" as a no-op that skips
+            // `sim.reset()` (see that guard's own doc comment: it exists so dragging an unrelated
+            // slider doesn't wipe the container mid-session). If this field started already equal
+            // to the funnel `shape-select` defaults to, the FIRST `syncSettings()` call in
+            // demo.js's `start()` would hit that guard, regenerate only the mask, and skip
+            // `initialize_hourglass()` -- shipping the correct vessel outline with no material in
+            // it. Leaving this at `Circle` (which is never the `<select>`'s default) guarantees
+            // that first call sees a real change and takes the reset+fill path.
             sandbox_shape: SandboxShape::Circle,
             marble_size: 0.018,
             speed: 0.5,
@@ -364,7 +378,8 @@ impl WasmSimulationState {
     }
 
     /// Change the render/display resolution `n` to 64, 128, 256, 512, or 1024 (`GRID_SIZE`, the
-    /// shipped default, is unchanged by this feature). Rejects the change (and leaves the current
+    /// `sandart-sim` library/native-app default, is unchanged by this feature; the page's own
+    /// startup value is `DEFAULT_RENDER_SIZE`). Rejects the change (and leaves the current
     /// dims untouched) if the RESULTING simulation size `S = n / sim_downscale` would fall outside
     /// 64..=512 -- in particular `n = 1024` is only valid alongside `sim_downscale >= 2`, since
     /// `S` would otherwise be 1024, one power-of-two step past the simulation's own supported
@@ -375,8 +390,9 @@ impl WasmSimulationState {
     }
 
     /// Change the simulation downscale factor `m` to 1, 2, or 4: the simulation runs at
-    /// `S = render_size / m` while the display stays at `render_size`. `m = 1` (the shipped
-    /// default) is simulation-at-display-resolution, unchanged from before this feature existed.
+    /// `S = render_size / m` while the display stays at `render_size`. `m = 1` is
+    /// simulation-at-display-resolution, the behaviour from before this feature existed (the
+    /// page's own startup value is `DEFAULT_SIM_DOWNSCALE`, not 1, as of 2026-09-19).
     /// Rejected the same way `set_grid_size` is if the resulting `S` would fall outside 64..=512
     /// or not divide evenly -- see `apply_grid_dims`.
     pub fn set_sim_downscale(&mut self, m: u32) -> Result<(), JsValue> {
@@ -1493,6 +1509,21 @@ impl WasmSimulationState {
 }
 
 pub const GRID_SIZE: usize = 512;
+
+/// Page startup render resolution, as of the 2026-09-19 default-scene change: the user measured
+/// under 20ms/frame at 1024 render / 4x simulation downscale with the multi-neck hourglass, and
+/// asked for that to be what the page opens with instead of 512/1x. Distinct from `GRID_SIZE`
+/// (512, unchanged), which remains the `sandart-sim` library default and the native app's size --
+/// only the wasm page's own startup state moves. Kept as named constants (rather than inlined at
+/// each of the three call sites in `create()`) so the triple can't drift out of the
+/// `apply_grid_dims` validation range (64/128/256/512/1024 render, 1/2/4 downscale, 64..=512 sim)
+/// by editing one and forgetting the others.
+const DEFAULT_RENDER_SIZE: usize = 1024;
+/// Page startup simulation downscale -- see `DEFAULT_RENDER_SIZE`.
+const DEFAULT_SIM_DOWNSCALE: usize = 4;
+/// Page startup simulation grid resolution, `DEFAULT_RENDER_SIZE / DEFAULT_SIM_DOWNSCALE` = 256 --
+/// see `DEFAULT_RENDER_SIZE`.
+const DEFAULT_SIM_SIZE: usize = DEFAULT_RENDER_SIZE / DEFAULT_SIM_DOWNSCALE;
 
 /// Fixed page value for `DrawingSimulation::lateral_substeps` (library default is `1.0`; see
 /// `sandart_sim::DrawingSimulation::new_with_size`). Reruns the lateral (cross-gravity) edge pass
