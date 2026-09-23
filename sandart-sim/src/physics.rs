@@ -2850,9 +2850,54 @@ const NET_ROW_FRACS: [f32; 3] = [0.40, 0.19, 0.19];
 const NET_COLLECTOR_FRAC: f32 = 0.22;
 const NET_CHAMBER_FILL_X: f32 = 0.82;
 const NET_CHAMBER_FILL_Y: f32 = 0.68;
-const NET_CHAMBER_R_FRAC: f32 = 3.0 / 256.0;
-const NET_PIPE_HW_FRAC: f32 = 5.0 / 256.0;
-const NET_INSET_FRAC: f32 = 4.0 / 256.0;
+// 2026-09-19 "read as connected" pass (`artifacts/design/network-2026-09-19/geometry_sweep.png`):
+// pipe half-width up from 5 to 8 (60% thicker) and chamber inset down from 4 to 2 (pipes meet
+// the chamber wall more flush, less of a visible step). Corner radius went the OPPOSITE way the
+// task brief guessed -- UP from 3 to 9, not down -- because the sweep's own geometry (not a
+// picture) found that a diagonal "lean" outlet whose target is a different column runs close
+// to its SOURCE row's neighbouring chamber (e.g. R1's `(1,0)->(2,1)` pipe passes near chamber
+// (1,1)), and rounding that neighbour's corner MORE is what buys the widened pipe clearance, not
+// shrinking it. See `test_chamber_network_geometry_does_not_worsen_pipe_chamber_clearance`'s doc
+// comment for the full account, including the pre-existing "wraparound" case (R2/R5's `col3 ->
+// col0` pipe, already overlapping a middle chamber's box at the SHIPPED baseline) this did not
+// introduce and only partly widens.
+const NET_CHAMBER_R_FRAC: f32 = 9.0 / 256.0;
+const NET_PIPE_HW_FRAC: f32 = 8.0 / 256.0;
+const NET_INSET_FRAC: f32 = 2.0 / 256.0;
+
+/// The pre-2026-09-19 shipped geometry, kept ONLY as the reference
+/// `test_chamber_network_geometry_does_not_worsen_pipe_chamber_clearance` measures the current
+/// constants against -- see that test's doc comment. `#[cfg(test)]` since nothing outside that
+/// test reads it.
+#[cfg(test)]
+const NET_BASELINE_GEOMETRY: NetGeometry =
+    NetGeometry { r_frac: 3.0 / 256.0, pipe_hw_frac: 5.0 / 256.0, inset_frac: 4.0 / 256.0 };
+
+/// Overridable fractional geometry for `SandboxShape::ChamberNetwork`'s chamber corner radius,
+/// pipe half-width and chamber inset -- the three constants
+/// `artifacts/design/network-2026-09-19/geometry_sweep.png` sweeps. `Default` reproduces the
+/// shipped constants above exactly, so the real path (`chamber_network_inside`, called with no
+/// geometry argument via `NetGrid::new`) is bit-for-bit what it always was; only
+/// `chamber_network_mask_with_geometry` (the sweep/example entry point) and
+/// `test_chamber_network_geometry_does_not_worsen_pipe_chamber_clearance` (which also checks the
+/// pre-2026-09-19 baseline geometry, not just the shipped one) ever construct a non-default
+/// value.
+#[derive(Clone, Copy, Debug)]
+pub struct NetGeometry {
+    pub r_frac: f32,
+    pub pipe_hw_frac: f32,
+    pub inset_frac: f32,
+}
+
+impl Default for NetGeometry {
+    fn default() -> Self {
+        NetGeometry {
+            r_frac: NET_CHAMBER_R_FRAC,
+            pipe_hw_frac: NET_PIPE_HW_FRAC,
+            inset_frac: NET_INSET_FRAC,
+        }
+    }
+}
 
 /// `table[c] = (a, b)`: the source chamber in column `c` feeds columns `a` and `b` of the row
 /// below. See `NetworkRouting`'s doc comment (`lib.rs`) for what each shipped table looks like
@@ -2885,13 +2930,20 @@ fn net_lean(target: usize, source: usize) -> f32 {
     }
 }
 
-fn net_rounded_box_inside(dx: f32, dy: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> bool {
+/// Signed distance from `(dx, dy)` to the rounded box's boundary -- negative inside, positive
+/// outside, zero on the boundary. `net_rounded_box_inside` is `sdf <= 0.0`;
+/// `net_worst_pipe_clearance_margin` uses the positive (outside) case directly, to ask "how far
+/// is this box from this pipe's centreline", not just yes/no.
+fn net_rounded_box_sdf(dx: f32, dy: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> f32 {
     let qx = (dx - cx).abs() - (hx - r);
     let qy = (dy - cy).abs() - (hy - r);
     let ax = qx.max(0.0);
     let ay = qy.max(0.0);
-    let outside_dist = (ax * ax + ay * ay).sqrt() + qx.max(qy).min(0.0) - r;
-    outside_dist <= 0.0
+    (ax * ax + ay * ay).sqrt() + qx.max(qy).min(0.0) - r
+}
+
+fn net_rounded_box_inside(dx: f32, dy: f32, cx: f32, cy: f32, hx: f32, hy: f32, r: f32) -> bool {
+    net_rounded_box_sdf(dx, dy, cx, cy, hx, hy, r) <= 0.0
 }
 
 fn net_capsule_inside(dx: f32, dy: f32, x0: f32, y0: f32, x1: f32, y1: f32, hw: f32) -> bool {
@@ -2922,6 +2974,12 @@ struct NetGrid {
 
 impl NetGrid {
     fn new(w_f: f32) -> Self {
+        Self::with_geometry(w_f, NetGeometry::default())
+    }
+    /// Same layout as `new`, but with the corner-radius/pipe-half-width/chamber-inset fractions
+    /// taken from `geo` instead of the module constants -- what a geometry sweep varies. `new`
+    /// is `Self::with_geometry(w_f, NetGeometry::default())`, so the shipped path is unaffected.
+    fn with_geometry(w_f: f32, geo: NetGeometry) -> Self {
         let hw_x = NET_HW_X_FRAC * w_f;
         let total_half_y = NET_TOTAL_HALF_Y_FRAC * w_f;
         let col_width = 2.0 * hw_x / NET_COLS as f32;
@@ -2949,9 +3007,9 @@ impl NetGrid {
             collector_y1,
             chamber_hx: col_width * 0.5 * NET_CHAMBER_FILL_X,
             chamber_hy,
-            r: NET_CHAMBER_R_FRAC * w_f,
-            pipe_hw: NET_PIPE_HW_FRAC * w_f,
-            inset: NET_INSET_FRAC * w_f,
+            r: geo.r_frac * w_f,
+            pipe_hw: geo.pipe_hw_frac * w_f,
+            inset: geo.inset_frac * w_f,
         }
     }
     fn col_c(&self, col: usize) -> f32 {
@@ -2982,7 +3040,21 @@ impl NetGrid {
 /// `margin > 0.0` is what `is_safe` (the eval function's second return value) uses, matching the
 /// `allowed_hw - 1.5` pattern every other shape's `is_safe` already follows.
 fn chamber_network_inside(dx: f32, dy: f32, w_f: f32, routing: crate::NetworkRouting, margin: f32) -> bool {
-    let g = NetGrid::new(w_f);
+    chamber_network_inside_geo(dx, dy, w_f, routing, margin, NetGeometry::default())
+}
+
+/// Same as `chamber_network_inside`, but at an explicit `NetGeometry` instead of the module
+/// constants -- what `chamber_network_mask_with_geometry` (the sweep/example entry point) and
+/// `chamber_network_inside` (which is just this with `NetGeometry::default()`) both call.
+fn chamber_network_inside_geo(
+    dx: f32,
+    dy: f32,
+    w_f: f32,
+    routing: crate::NetworkRouting,
+    margin: f32,
+    geo: NetGeometry,
+) -> bool {
+    let g = NetGrid::with_geometry(w_f, geo);
     let shrink = |v: f32| (v - margin).max(0.0);
 
     for row in 0..NET_ROWS {
@@ -3001,8 +3073,8 @@ fn chamber_network_inside(dx: f32, dy: f32, w_f: f32, routing: crate::NetworkRou
     }
 
     let pipe_hw = shrink(g.pipe_hw).max(0.5);
-    for (x0, y0, x1, y1) in chamber_network_pipe_segments(&g, routing) {
-        if net_capsule_inside(dx, dy, x0, y0, x1, y1, pipe_hw) {
+    for seg in chamber_network_pipe_segments(&g, routing) {
+        if net_capsule_inside(dx, dy, seg.x0, seg.y0, seg.x1, seg.y1, pipe_hw) {
             return true;
         }
     }
@@ -3010,12 +3082,31 @@ fn chamber_network_inside(dx: f32, dy: f32, w_f: f32, routing: crate::NetworkRou
     false
 }
 
+/// One pipe centreline segment plus which chamber it starts and ends at. `from`/`to` are `(row,
+/// col)` pairs; `to.0 == NET_ROWS` (an out-of-range row, since real rows are `0..NET_ROWS`) is
+/// the sentinel for "ends at the collector pool", not a chamber. Existing callers that only need
+/// the coordinates (`chamber_network_inside_geo`, the pipe-slope test) destructure just
+/// `x0`/`y0`/`x1`/`y1`; `net_worst_pipe_clearance_margin` uses `from`/`to` to know which chamber
+/// a widened pipe is ALLOWED to touch. `from`/`to` are only read under `#[cfg(test)]`, hence the
+/// `allow` -- a non-test build never constructs the geometry sweep this struct exists for.
+#[allow(dead_code)]
+struct PipeSegment {
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    from: (usize, usize),
+    to: (usize, usize),
+}
+
 /// Every pipe (top->middle, middle->bottom, and every bottom-row chamber's own two outlets into
-/// the collector) as an `(x0, y0, x1, y1)` centreline segment, in the same `w_f`-fraction units
-/// as everything else here. Shared by `chamber_network_inside` (capsule containment) and the
-/// pipe-slope test (`test_chamber_network_pipe_slopes_clear_the_repose_floor`), so the two can
-/// never test different geometry than what actually rasterises.
-fn chamber_network_pipe_segments(g: &NetGrid, routing: crate::NetworkRouting) -> Vec<(f32, f32, f32, f32)> {
+/// the collector) as a `PipeSegment`, in the same `w_f`-fraction units as everything else here.
+/// Shared by `chamber_network_inside_geo` (capsule containment) and the pipe-slope/leak tests
+/// (`test_chamber_network_pipe_slopes_clear_the_repose_floor`,
+/// `test_chamber_network_chambers_never_merge`,
+/// `test_chamber_network_geometry_does_not_worsen_pipe_chamber_clearance`), so none of them can
+/// ever test different geometry than what actually rasterises.
+fn chamber_network_pipe_segments(g: &NetGrid, routing: crate::NetworkRouting) -> Vec<PipeSegment> {
     let mut segments = Vec::with_capacity(NET_COLS * 2 * 2 + NET_COLS * 2);
     let (table0, table1) = network_routing_tables(routing);
     for &(from_row, to_row, table) in &[(0usize, 1usize, table0), (1, 2, table1)] {
@@ -3024,23 +3115,50 @@ fn chamber_network_pipe_segments(g: &NetGrid, routing: crate::NetworkRouting) ->
             for &(xfrac, target) in &[(-0.35f32, a), (0.35, b)] {
                 let (x0, y0) = g.floor_pt(from_row, c, xfrac);
                 let (x1, y1) = g.top_pt(to_row, target, net_lean(target, c));
-                segments.push((x0, y0, x1, y1));
+                segments.push(PipeSegment { x0, y0, x1, y1, from: (from_row, c), to: (to_row, target) });
             }
         }
     }
 
     // Every bottom-row (row 2) chamber's own two outlets into the shared collector pool -- the
     // same for every routing, not part of the routing experiment (mirrors
-    // `apply_bottom_to_collector` in the prototype).
+    // `apply_bottom_to_collector` in the prototype). `to = (NET_ROWS, c)` is the collector
+    // sentinel described on `PipeSegment`.
     for c in 0..NET_COLS {
         for &side in &[-1.0f32, 1.0] {
             let (x0, y0) = g.floor_pt(2, c, side * 0.35);
             let (x1, y1) = g.collector_entry(c, side);
-            segments.push((x0, y0, x1, y1));
+            segments.push(PipeSegment { x0, y0, x1, y1, from: (2, c), to: (NET_ROWS, c) });
         }
     }
 
     segments
+}
+
+/// Rasterizes `SandboxShape::ChamberNetwork`'s mask at an explicit `NetGeometry`, using the SAME
+/// `dx`/`dy` convention (`center_x = (w - 1) / 2`, `center_y = h / 2`) as
+/// `eval_sandbox_shape_at`, so a candidate geometry can be previewed exactly as it would render
+/// in the real app. Used by the `dump_chamber_network_masks` example's sweep mode; the real path
+/// (`eval_sandbox_shape_at`) always uses `NetGeometry::default()`, never this function.
+pub fn chamber_network_mask_with_geometry(
+    w: usize,
+    h: usize,
+    routing: crate::NetworkRouting,
+    geo: NetGeometry,
+) -> Vec<u8> {
+    let w_f = w as f32;
+    let center_x = (w as isize - 1) as f32 / 2.0;
+    let center_y = h as f32 / 2.0;
+    let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+    for y in 0..h {
+        let dy = y as f32 - center_y;
+        for x in 0..w {
+            let dx = x as f32 - center_x;
+            let inside = chamber_network_inside_geo(dx, dy, w_f, routing, 0.0, geo);
+            mask[y * w + x] = if inside { crate::MASK_INSIDE } else { crate::MASK_OUTSIDE };
+        }
+    }
+    mask
 }
 
 /// The `dy` (in raw cell units, not a fraction) below which `ChamberNetwork`'s row 0 chambers
@@ -18278,9 +18396,9 @@ mod tests {
             assert!(!segments.is_empty(), "{name}: no pipe segments at all");
             let mut worst_ratio = f32::INFINITY;
             let mut worst = (0.0f32, 0.0f32);
-            for (x0, y0, x1, y1) in segments {
-                let run = (x1 - x0).abs();
-                let drop = (y1 - y0).abs();
+            for seg in segments {
+                let run = (seg.x1 - seg.x0).abs();
+                let drop = (seg.y1 - seg.y0).abs();
                 if run < 0.5 {
                     continue; // near-vertical: no meaningful run, can't be the shallow case
                 }
@@ -18297,6 +18415,114 @@ mod tests {
                 worst.0, worst.1, worst_ratio
             );
         }
+    }
+
+    /// Number of contiguous "inside" runs at row `row`'s vertical centreline (`row_c`, which sits
+    /// far from every pipe's inset-adjusted mouth, so a run count below `NET_COLS` here can only
+    /// be the chamber boxes themselves overlapping, not a pipe touching one). Should always be
+    /// exactly `NET_COLS` -- used by both the hard merge guard below and the geometry-sweep
+    /// diagnostic.
+    fn net_row_chamber_run_count(g: &NetGrid, w_f: f32, dy: f32, routing: crate::NetworkRouting) -> usize {
+        let mut runs = 0usize;
+        let mut was_inside = false;
+        let samples = 2000usize;
+        let scan_hw = g.hw_x + g.pipe_hw + 2.0;
+        for i in 0..=samples {
+            let dx = -scan_hw + (2.0 * scan_hw) * (i as f32 / samples as f32);
+            let inside = chamber_network_inside(dx, dy, w_f, routing, 0.0);
+            if inside && !was_inside {
+                runs += 1;
+            }
+            was_inside = inside;
+        }
+        runs
+    }
+
+    /// Worst (smallest) clearance between any pipe's centreline and any chamber box it is NOT
+    /// routed to, over every pipe and every routing, at the given `geo`. Negative means some
+    /// pipe's capsule (radius `pipe_hw`) actually overlaps a chamber it wasn't routed to.
+    fn net_worst_pipe_clearance_margin(w_f: f32, geo: NetGeometry) -> f32 {
+        let g = NetGrid::with_geometry(w_f, geo);
+        let mut worst_margin = f32::INFINITY;
+        for &(_name, routing) in &CHAMBER_NETWORK_ROUTINGS {
+            let segments = chamber_network_pipe_segments(&g, routing);
+            for seg in &segments {
+                for row in 0..NET_ROWS {
+                    for col in 0..NET_COLS {
+                        if (row, col) == seg.from || (row, col) == seg.to {
+                            continue;
+                        }
+                        let (cx, cy) = (g.col_c(col), g.row_c(row));
+                        let mut min_sdf = f32::INFINITY;
+                        let steps = 200usize;
+                        for s in 0..=steps {
+                            let t = s as f32 / steps as f32;
+                            let px = seg.x0 + t * (seg.x1 - seg.x0);
+                            let py = seg.y0 + t * (seg.y1 - seg.y0);
+                            let sdf = net_rounded_box_sdf(px, py, cx, cy, g.chamber_hx, g.chamber_hy[row], g.r);
+                            min_sdf = min_sdf.min(sdf);
+                        }
+                        worst_margin = worst_margin.min(min_sdf - g.pipe_hw);
+                    }
+                }
+            }
+        }
+        worst_margin
+    }
+
+    /// No two same-row chambers merge into one region, for all three shipped routings, on the
+    /// real path (`NetGrid::new`, i.e. `NetGeometry::default()`) -- exactly what widening the
+    /// pipes / shrinking the chamber corner radius and inset risks (2026-09-19's "read as
+    /// connected" task, `artifacts/design/network-2026-09-19/geometry_sweep.png`). Unlike the
+    /// pipe-clearance check below, this one has no known pre-existing exception: every geometry
+    /// tried during that sweep (`diag_chamber_network_geometry_sweep`) kept every row at exactly
+    /// `NET_COLS` separate chambers, so it is a hard assertion, not a baseline-relative one.
+    #[test]
+    fn test_chamber_network_chambers_never_merge() {
+        let w_f = 256.0f32;
+        let g = NetGrid::new(w_f);
+        for &(name, routing) in &CHAMBER_NETWORK_ROUTINGS {
+            for row in 0..NET_ROWS {
+                let dy = g.row_c(row);
+                let runs = net_row_chamber_run_count(&g, w_f, dy, routing);
+                assert_eq!(
+                    runs, NET_COLS,
+                    "{name} row {row}: expected {NET_COLS} separate chambers at the row's \
+                     vertical centreline (dy={dy:.2}), found {runs} contiguous run(s) -- two \
+                     chambers have merged"
+                );
+            }
+        }
+    }
+
+    /// A pipe's capsule (its centreline within `pipe_hw`) reaching a chamber it is not routed to
+    /// is NOT a new failure mode this task introduces: at the pre-2026-09-19 SHIPPED baseline
+    /// (`NET_BASELINE_GEOMETRY`, r=3 hw=5 inset=4), R2 and R5's `(1,3)->(2,0)` pipe -- the
+    /// "wraparound" connector back to column 0, the longest lateral run in either routing table --
+    /// already runs close enough to pass through chamber (2,1)'s box (worst margin -3.74 cells at
+    /// grid 256), well before this task touched anything. R1 had no such case (worst margin
+    /// +1.74, i.e. genuinely clear). `diag_chamber_network_geometry_sweep` (deleted once the
+    /// setting was picked; see git history if you need to re-run it) found that pipe half-width
+    /// alone erodes clearance roughly 1:1 and chamber corner radius buys it back roughly 1:3 --
+    /// the OPPOSITE of the task brief's "corner radius downward" guess -- which is why the
+    /// shipped constants raise `NET_CHAMBER_R_FRAC` (3 -> 9) rather than lowering it. At the
+    /// chosen geometry (r=9 hw=8 inset=2) R1's margin is +0.47 (still clear) and R2/R5's is -5.11
+    /// (the same pre-existing overlap, ~1.4 cells deeper). This test is therefore a REGRESSION
+    /// guard, not a zero-tolerance one (see "Guard accepted defects" in project memory): it
+    /// asserts the current geometry's worst margin is never more than `TOLERANCE` cells worse
+    /// than the baseline's, so a future change can still widen pipes further within this same
+    /// budget but cannot silently blow through it.
+    #[test]
+    fn test_chamber_network_geometry_does_not_worsen_pipe_chamber_clearance() {
+        const TOLERANCE: f32 = 2.0;
+        let w_f = 256.0f32;
+        let baseline_margin = net_worst_pipe_clearance_margin(w_f, NET_BASELINE_GEOMETRY);
+        let current_margin = net_worst_pipe_clearance_margin(w_f, NetGeometry::default());
+        assert!(
+            current_margin >= baseline_margin - TOLERANCE,
+            "worst pipe/chamber clearance margin regressed by more than {TOLERANCE} cells: \
+             baseline (pre-2026-09-19) = {baseline_margin:.3}, current = {current_margin:.3}"
+        );
     }
 
     /// Dry sand left stranded above the collector (reservoir + rows 1-2, i.e. the same
