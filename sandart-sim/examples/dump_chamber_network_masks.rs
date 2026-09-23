@@ -5,21 +5,25 @@
 //! magnification) so the two can be compared pixel-for-pixel by eye against
 //! `R1_g4_baseline_mask.png` / `R2_neighbours_mask.png` / `R5_butterfly_mask.png`.
 //!
-//! Also renders the "read as connected" geometry sweep (2026-09-19 task: smaller chamber corner
-//! radius/inset, thicker pipes) as two labelled contact sheets:
+//! 2026-09-19 pass (kept for the historical record; wrong brief, see CLAUDE.md): rendered
+//! `geometry_sweep.png` / `geometry_chosen_all_routings.png`, widening pipes and shrinking
+//! walls. 2026-09-22 correction -- the user actually wanted the OPPOSITE (thinner pipes,
+//! thicker walls) -- adds:
 //!
-//!   - `geometry_sweep.png` -- several candidate `(corner radius, pipe half-width, chamber
-//!     inset)` settings at routing R1, grid 256, each tile labelled with its numbers (as
-//!     `/256`-fractions, matching how the constants are declared in `physics.rs`).
-//!   - `geometry_chosen_all_routings.png` -- the geometry that ends up shipped as
-//!     `NetGeometry::default()` (i.e. whatever `NET_CHAMBER_R_FRAC`/`NET_PIPE_HW_FRAC`/
-//!     `NET_INSET_FRAC` currently are), rendered for all three routings, so the chosen setting
-//!     can be checked against every shipped routing, not just R1.
+//!   - `geometry_sweep_v2.png` -- candidate `(pipe half-width, wall thickness via
+//!     `NetGeometry::fill_x`)` settings at routing R1 (no dogleg pipes, so this isolates the
+//!     pure thin-pipe/thick-wall effect), grid 256, each tile labelled with its numbers and its
+//!     wall-island count (`W<n>`, `chamber_network_wall_islands` -- the number of DISCONNECTED
+//!     wall regions inside the vessel's own bounding frame; `W1` means the wall reads as one
+//!     connected piece).
+//!   - `geometry_chosen_all_routings_v2.png` -- the geometry that ends up shipped as
+//!     `NetGeometry::default()`, rendered for all three routings (R2/R5 exercise the dogleg
+//!     wrap-pipe fix; R1 doesn't), each labelled with its wall-island count too.
 //!
 //!   distrobox enter sandart-dev -- bash -lc \
 //!     'cd /home/deck/projects/sandart && CARGO_BUILD_JOBS=2 cargo run -p sandart-sim --release --example dump_chamber_network_masks'
 
-use sandart_sim::physics::{chamber_network_mask_with_geometry, NetGeometry};
+use sandart_sim::physics::{chamber_network_mask_with_geometry, chamber_network_wall_islands, NetGeometry};
 use sandart_sim::{DrawingSimulation, NetworkRouting, SandboxShape, MASK_BOUNDARY, MASK_OUTSIDE};
 use std::fs;
 use std::path::Path;
@@ -101,6 +105,9 @@ fn glyph_rows(c: char) -> [&'static str; 5] {
         'R' => ["##.", "#.#", "##.", "#.#", "#.#"],
         'H' => ["#.#", "#.#", "###", "#.#", "#.#"],
         'I' => ["###", ".#.", ".#.", ".#.", "###"],
+        'P' => ["##.", "#.#", "##.", "#..", "#.."],
+        'F' => ["###", "#..", "##.", "#..", "#.."],
+        'W' => ["#.#", "#.#", "#.#", "###", "#.#"],
         _ => ["...", "...", "...", "...", "..."],
     }
 }
@@ -162,42 +169,72 @@ fn main() {
             .expect("write mask png");
     }
 
-    // ---- Geometry sweep: several (corner radius, pipe half-width, chamber inset) candidates,
-    // all as /256 fractions (matching how NET_CHAMBER_R_FRAC et al. are declared), rendered at
-    // routing R1, grid 256. Ordered from the shipped baseline through progressively thicker
-    // pipes / smaller corners and inset, ending in one deliberately-too-thick case to show where
-    // it breaks.
-    let candidates: [(&str, NetGeometry); 7] = [
-        ("R3 H5 I4", NetGeometry { r_frac: 3.0 / 256.0, pipe_hw_frac: 5.0 / 256.0, inset_frac: 4.0 / 256.0 }),
-        ("R2 H8 I3", NetGeometry { r_frac: 2.0 / 256.0, pipe_hw_frac: 8.0 / 256.0, inset_frac: 3.0 / 256.0 }),
-        ("R1 H11 I2", NetGeometry { r_frac: 1.0 / 256.0, pipe_hw_frac: 11.0 / 256.0, inset_frac: 2.0 / 256.0 }),
-        ("R1 H14 I1", NetGeometry { r_frac: 1.0 / 256.0, pipe_hw_frac: 14.0 / 256.0, inset_frac: 1.0 / 256.0 }),
-        ("R1 H17 I1", NetGeometry { r_frac: 1.0 / 256.0, pipe_hw_frac: 17.0 / 256.0, inset_frac: 1.0 / 256.0 }),
-        ("R0.5 H14 I1", NetGeometry { r_frac: 0.5 / 256.0, pipe_hw_frac: 14.0 / 256.0, inset_frac: 1.0 / 256.0 }),
-        // Chosen: found not from the picture but from the sweep's own leak metric
-        // (`diag_chamber_network_geometry_sweep`, run and then removed once this was picked) --
-        // a large-hw / small-r candidate always leaked a diagonal outlet into its source row's
-        // neighbour chamber, so corner radius went UP (buys clearance) while pipe half-width
-        // went up more modestly and inset came down (flush pipe-to-wall meet).
-        ("R9 H8 I2 (chosen)", NetGeometry { r_frac: 9.0 / 256.0, pipe_hw_frac: 8.0 / 256.0, inset_frac: 2.0 / 256.0 }),
+    // ---- 2026-09-19 sweep (HISTORICAL -- wrong brief, widened pipes/shrunk walls; kept only so
+    // the two sweeps can be compared). `NetGeometry` has grown fields since (`dogleg_pipe_hw_frac`,
+    // `fill_x`, `fill_y`), so each literal takes `..NetGeometry::default()` for them now; that
+    // default is today's (2026-09-22) shipped geometry, not what shipped when this sweep was
+    // made, so these r/pipe_hw/inset numbers are what matters here, not the rendered wall/pipe
+    // proportions elsewhere in the tile (fill_x/fill_y/dogleg_hw are the 2026-09-22 ones).
+    let candidates_v1: [(&str, NetGeometry); 7] = [
+        ("R3 H5 I4", NetGeometry { r_frac: 3.0 / 256.0, pipe_hw_frac: 5.0 / 256.0, inset_frac: 4.0 / 256.0, ..NetGeometry::default() }),
+        ("R2 H8 I3", NetGeometry { r_frac: 2.0 / 256.0, pipe_hw_frac: 8.0 / 256.0, inset_frac: 3.0 / 256.0, ..NetGeometry::default() }),
+        ("R1 H11 I2", NetGeometry { r_frac: 1.0 / 256.0, pipe_hw_frac: 11.0 / 256.0, inset_frac: 2.0 / 256.0, ..NetGeometry::default() }),
+        ("R1 H14 I1", NetGeometry { r_frac: 1.0 / 256.0, pipe_hw_frac: 14.0 / 256.0, inset_frac: 1.0 / 256.0, ..NetGeometry::default() }),
+        ("R1 H17 I1", NetGeometry { r_frac: 1.0 / 256.0, pipe_hw_frac: 17.0 / 256.0, inset_frac: 1.0 / 256.0, ..NetGeometry::default() }),
+        ("R0.5 H14 I1", NetGeometry { r_frac: 0.5 / 256.0, pipe_hw_frac: 14.0 / 256.0, inset_frac: 1.0 / 256.0, ..NetGeometry::default() }),
+        ("R9 H8 I2", NetGeometry { r_frac: 9.0 / 256.0, pipe_hw_frac: 8.0 / 256.0, inset_frac: 2.0 / 256.0, ..NetGeometry::default() }),
     ];
-
-    let sweep_tiles: Vec<image::RgbImage> = candidates
+    let sweep_tiles_v1: Vec<image::RgbImage> = candidates_v1
         .iter()
-        .map(|(label, geo)| {
-            let mask = chamber_network_mask_with_geometry(GRID, GRID, NetworkRouting::R1, *geo);
-            let inside = mask.iter().filter(|&&m| m != MASK_OUTSIDE).count();
-            println!("sweep {label}: {inside} inside cells of {}", GRID * GRID);
-            with_label(mask_image(&mask, GRID, GRID), label)
-        })
+        .map(|(label, geo)| with_label(mask_image(&chamber_network_mask_with_geometry(GRID, GRID, NetworkRouting::R1, *geo), GRID, GRID), label))
         .collect();
-
-    contact_sheet(&sweep_tiles, 3)
+    contact_sheet(&sweep_tiles_v1, 3)
         .save(out_dir.join("geometry_sweep.png"))
         .expect("write geometry_sweep.png");
 
-    // ---- Chosen setting, all three routings -- whatever NetGeometry::default() currently is
-    // (i.e. the module constants in physics.rs at the time this runs).
+    // ---- 2026-09-22 sweep: thinner pipes (`pipe_hw_frac` DOWN from the original 5/256, never
+    // below 2/256 -- 2 cells wide at grid 128, matching the task's floor) and thicker walls
+    // (`fill_x` DOWN from the original 0.82 -- more gap, i.e. more wall, between same-row
+    // chambers). Corner radius and inset stay at their ORIGINAL values (3/256, 4/256 -- the user
+    // never asked to change either); `fill_y`/`dogleg_pipe_hw_frac` stay at the shipped default
+    // throughout (they don't affect R1, which has no dogleg pipes -- see the module comment).
+    // Routing R1 only, so this isolates the pure thin-pipe/thick-wall visual effect from the
+    // wrap-pipe fix (which only R2/R5 exercise; see `geometry_chosen_all_routings_v2.png`).
+    let r3_i4 = |pipe_hw: f32, fill_x: f32| NetGeometry {
+        r_frac: 3.0 / 256.0,
+        pipe_hw_frac: pipe_hw / 256.0,
+        inset_frac: 4.0 / 256.0,
+        fill_x,
+        ..NetGeometry::default()
+    };
+    let candidates_v2: [(&str, NetGeometry); 6] = [
+        ("P5 F82", r3_i4(5.0, 0.82)), // original shipped baseline
+        ("P4 F78", r3_i4(4.0, 0.78)),
+        ("P3 F82", r3_i4(3.0, 0.82)), // thin pipe, ORIGINAL wall -- isolates the pipe-only effect
+        ("P3 F72", r3_i4(3.0, 0.72)), // CHOSEN
+        ("P3 F66", r3_i4(3.0, 0.66)), // thin pipe, even thicker wall
+        ("P2 F72", r3_i4(2.0, 0.72)), // thinnest pipe allowed (2 cells wide at grid 128)
+    ];
+    let sweep_tiles_v2: Vec<image::RgbImage> = candidates_v2
+        .iter()
+        .map(|(label, geo)| {
+            let mask = chamber_network_mask_with_geometry(GRID, GRID, NetworkRouting::R1, *geo);
+            let islands = chamber_network_wall_islands(GRID, NetworkRouting::R1, *geo);
+            let big_islands = islands.iter().filter(|&&s| s >= 20).count();
+            println!(
+                "sweep_v2 {label}: {} wall components ({big_islands} >= 20 cells), sizes(top 6)={:?}",
+                islands.len(),
+                &islands[..islands.len().min(6)]
+            );
+            with_label(mask_image(&mask, GRID, GRID), &format!("{label} W{}", islands.len()))
+        })
+        .collect();
+    contact_sheet(&sweep_tiles_v2, 3)
+        .save(out_dir.join("geometry_sweep_v2.png"))
+        .expect("write geometry_sweep_v2.png");
+
+    // ---- Chosen setting (2026-09-22, i.e. today's `NetGeometry::default()`), all three
+    // routings, each labelled with its own wall-island count.
     let chosen_tiles: Vec<image::RgbImage> = [
         ("R1", NetworkRouting::R1),
         ("R2", NetworkRouting::R2),
@@ -205,12 +242,15 @@ fn main() {
     ]
     .iter()
     .map(|&(name, routing)| {
-        let mask = chamber_network_mask_with_geometry(GRID, GRID, routing, NetGeometry::default());
-        with_label(mask_image(&mask, GRID, GRID), name)
+        let geo = NetGeometry::default();
+        let mask = chamber_network_mask_with_geometry(GRID, GRID, routing, geo);
+        let islands = chamber_network_wall_islands(GRID, routing, geo);
+        println!("chosen {name}: {} wall components, sizes(top 6)={:?}", islands.len(), &islands[..islands.len().min(6)]);
+        with_label(mask_image(&mask, GRID, GRID), &format!("{name} W{}", islands.len()))
     })
     .collect();
 
     contact_sheet(&chosen_tiles, 3)
-        .save(out_dir.join("geometry_chosen_all_routings.png"))
-        .expect("write geometry_chosen_all_routings.png");
+        .save(out_dir.join("geometry_chosen_all_routings_v2.png"))
+        .expect("write geometry_chosen_all_routings_v2.png");
 }
