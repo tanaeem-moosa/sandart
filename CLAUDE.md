@@ -72,6 +72,23 @@ is 12 chambers in 4 columns x 3 rows, two outlet pipes each, a collector pool, t
 reservoir, with a routing selector — R1/R2/R5, tables in `physics.rs`. It is **deliberately not
 mirror-symmetric** and is exempted from `test_vessel_masks_are_left_right_symmetric`; the user
 waived symmetry for networks. Design record: `artifacts/design/network-2026-09-19/`.)
+
+**Later the same day (2026-09-23), the dogleg mechanism described in the paragraph above was
+deleted.** The user found R2/R5's wide dogleg pipes (needed for the wrap-around/butterfly
+routing) still read as heavy horizontal bands even after the rest of the network thinned, and
+asked for pipes thin everywhere. Reshaping the dogleg elbow was tried and bounded rather than
+pursued indefinitely (R5's dogleg drainage cost came from the elbow at every width tried, not
+just wide ones), so R2 and R5's routing tables were redesigned instead so no pipe spans more than
+one column (`|Δcol| <= 1`) — the "wrap-around"/"butterfly" topology that needed a dogleg is gone,
+along with `net_dogleg_margin`/`net_row_to_row_path`/`NET_DOGLEG_PIPE_HW_FRAC`.
+`test_chamber_network_no_pipe_enters_an_unrouted_chamber` stays (general-purpose, not dogleg-
+specific) but now only ever exercises plain single-column diagonals. Pipe half-width came down
+further, 3/256 -> 2.5/256 (2/256 missed R1's drainage bar); a cell-floor
+(`NET_PIPE_HW_MIN_CELLS`) was added so the rasterized width never seals a pipe shut at small
+grids, the same pattern as the Galton board's `PEG_RADIUS_MIN`/`PEG_SPACING_MIN`. Test count is
+unchanged (still 101/3): no test was specific to the dogleg code path. Design record:
+`artifacts/design/network-2026-09-19/geometry_chosen_all_routings_v3.png`.
+
 On 2026-09-19 the "Merging cascade" vessel (`MultiStageHourglass`) was deleted at the user's request
 (a chamber-network design is replacing it; see `artifacts/design/cascade-2026-09-17/` and
 `artifacts/design/network-2026-09-19/`). Seven tests went with it: six passing ones that exercised

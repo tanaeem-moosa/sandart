@@ -11,14 +11,34 @@
 //! thicker walls) -- adds:
 //!
 //!   - `geometry_sweep_v2.png` -- candidate `(pipe half-width, wall thickness via
-//!     `NetGeometry::fill_x`)` settings at routing R1 (no dogleg pipes, so this isolates the
-//!     pure thin-pipe/thick-wall effect), grid 256, each tile labelled with its numbers and its
-//!     wall-island count (`W<n>`, `chamber_network_wall_islands` -- the number of DISCONNECTED
-//!     wall regions inside the vessel's own bounding frame; `W1` means the wall reads as one
-//!     connected piece).
-//!   - `geometry_chosen_all_routings_v2.png` -- the geometry that ends up shipped as
-//!     `NetGeometry::default()`, rendered for all three routings (R2/R5 exercise the dogleg
-//!     wrap-pipe fix; R1 doesn't), each labelled with its wall-island count too.
+//!     `NetGeometry::fill_x`)` settings at routing R1, grid 256, each tile labelled with its
+//!     numbers and its wall-island count (`W<n>`, `chamber_network_wall_islands` -- the number of
+//!     DISCONNECTED wall regions inside the vessel's own bounding frame; `W1` means the wall
+//!     reads as one connected piece).
+//!   - `geometry_chosen_all_routings_v2.png` -- the geometry shipped as `NetGeometry::default()`
+//!     on 2026-09-22, rendered for all three routings, each labelled with its wall-island count.
+//!     R2/R5 exercised that pass's "dogleg" wrap-pipe fix; R1 didn't. The dogleg mechanism (and
+//!     R2/R5's wrap/butterfly tables that needed it) is gone as of 2026-09-23 -- see
+//!     `geometry_chosen_all_routings_v3.png` below -- so this PNG is now historical, kept for
+//!     comparison, and as of 2026-09-23 is FROZEN: this binary no longer regenerates it (see the
+//!     comment at that call site for why it can't be faithfully re-rendered any more).
+//!
+//! 2026-09-23 pass -- thin pipes EVERYWHERE, including what used to be R2/R5's wider dogleg
+//! pipes (the user found the wide doglegs read as heavy horizontal bands). Reshaping the elbow
+//! was bounded rather than pursued indefinitely (R5's dogleg drainage cost came from the elbow at
+//! every width tried, including the pre-existing 3/256 uniform width, well before this pass
+//! thinned anything further); the user chose instead to redesign R2 and R5's routing tables so no
+//! pipe spans more than one column, which deletes the dogleg mechanism entirely (see
+//! `physics::NetworkRoute`'s doc comment). Adds:
+//!
+//!   - `geometry_chosen_all_routings_v3.png` -- today's `NetGeometry::default()` (`NET_PIPE_HW_FRAC`
+//!     2.5/256, no separate dogleg width), all three (redesigned) routings, grid 256.
+//!   - A grid 64/128/256/512 sweep (stdout only, all three routings): inside-cell count and
+//!     whether the mask is a single connected component -- the failure mode `NET_PIPE_HW_MIN_CELLS`
+//!     exists to prevent (a pipe rasterizing to zero width at small grids would split the network
+//!     into disconnected chamber islands). Also writes one PNG per grid to
+//!     `floor_check_<grid>_<routing>.png` and prints an ASCII dump of grid 64 (small enough to
+//!     read directly in a terminal) so the floor can be eyeballed, not just asserted.
 //!
 //!   distrobox enter sandart-dev -- bash -lc \
 //!     'cd /home/deck/projects/sandart && CARGO_BUILD_JOBS=2 cargo run -p sandart-sim --release --example dump_chamber_network_masks'
@@ -170,11 +190,11 @@ fn main() {
     }
 
     // ---- 2026-09-19 sweep (HISTORICAL -- wrong brief, widened pipes/shrunk walls; kept only so
-    // the two sweeps can be compared). `NetGeometry` has grown fields since (`dogleg_pipe_hw_frac`,
-    // `fill_x`, `fill_y`), so each literal takes `..NetGeometry::default()` for them now; that
-    // default is today's (2026-09-22) shipped geometry, not what shipped when this sweep was
-    // made, so these r/pipe_hw/inset numbers are what matters here, not the rendered wall/pipe
-    // proportions elsewhere in the tile (fill_x/fill_y/dogleg_hw are the 2026-09-22 ones).
+    // the two sweeps can be compared). `NetGeometry` has grown fields since (`fill_x`, `fill_y`),
+    // so each literal takes `..NetGeometry::default()` for them now; that default is TODAY's
+    // shipped geometry, not what shipped when this sweep was made, so these r/pipe_hw/inset
+    // numbers are what matters here, not the rendered wall/pipe proportions elsewhere in the tile
+    // (fill_x/fill_y are today's).
     let candidates_v1: [(&str, NetGeometry); 7] = [
         ("R3 H5 I4", NetGeometry { r_frac: 3.0 / 256.0, pipe_hw_frac: 5.0 / 256.0, inset_frac: 4.0 / 256.0, ..NetGeometry::default() }),
         ("R2 H8 I3", NetGeometry { r_frac: 2.0 / 256.0, pipe_hw_frac: 8.0 / 256.0, inset_frac: 3.0 / 256.0, ..NetGeometry::default() }),
@@ -192,14 +212,14 @@ fn main() {
         .save(out_dir.join("geometry_sweep.png"))
         .expect("write geometry_sweep.png");
 
-    // ---- 2026-09-22 sweep: thinner pipes (`pipe_hw_frac` DOWN from the original 5/256, never
-    // below 2/256 -- 2 cells wide at grid 128, matching the task's floor) and thicker walls
-    // (`fill_x` DOWN from the original 0.82 -- more gap, i.e. more wall, between same-row
-    // chambers). Corner radius and inset stay at their ORIGINAL values (3/256, 4/256 -- the user
-    // never asked to change either); `fill_y`/`dogleg_pipe_hw_frac` stay at the shipped default
-    // throughout (they don't affect R1, which has no dogleg pipes -- see the module comment).
-    // Routing R1 only, so this isolates the pure thin-pipe/thick-wall visual effect from the
-    // wrap-pipe fix (which only R2/R5 exercise; see `geometry_chosen_all_routings_v2.png`).
+    // ---- 2026-09-22 sweep (HISTORICAL -- superseded by the 2026-09-23 pipe width, see
+    // `NET_PIPE_HW_FRAC`'s doc comment; kept for the visual record). Thinner pipes (`pipe_hw_frac`
+    // DOWN from the original 5/256) and thicker walls (`fill_x` DOWN from the original 0.82 --
+    // more gap, i.e. more wall, between same-row chambers). Corner radius and inset stay at their
+    // ORIGINAL values (3/256, 4/256 -- the user never asked to change either); `fill_y` stays at
+    // the shipped default throughout. Routing R1 only, so this isolates the pure thin-pipe/
+    // thick-wall visual effect from the (since-removed) dogleg wrap-pipe mechanism, which only
+    // R2/R5 ever exercised.
     let r3_i4 = |pipe_hw: f32, fill_x: f32| NetGeometry {
         r_frac: 3.0 / 256.0,
         pipe_hw_frac: pipe_hw / 256.0,
@@ -233,9 +253,28 @@ fn main() {
         .save(out_dir.join("geometry_sweep_v2.png"))
         .expect("write geometry_sweep_v2.png");
 
-    // ---- Chosen setting (2026-09-22, i.e. today's `NetGeometry::default()`), all three
-    // routings, each labelled with its own wall-island count.
-    let chosen_tiles: Vec<image::RgbImage> = [
+    // ---- HISTORICAL (2026-09-22) -- deliberately NOT regenerated. This used to render
+    // `geometry_chosen_all_routings_v2.png` from `NetGeometry::default()` plus R1/R2/R5, but both
+    // moved on 2026-09-23 (`NET_PIPE_HW_FRAC` 3 -> 2.5/256, and R2/R5's routing tables were
+    // redesigned to drop every multi-column pipe -- see `physics::NetworkRoute`'s doc comment).
+    // `chamber_network_mask_with_geometry` takes geometry but NOT routing tables as a parameter
+    // (those come from the `NetworkRouting` match in `network_routing_tables`, which has no
+    // override), so there is no way to re-render 2026-09-22's actual topology from this binary
+    // any more -- rerunning this block would silently replace the 2026-09-22 evidence with
+    // today's topology under a "v2" label that no longer describes it. The real 2026-09-22 PNG
+    // stays as committed; see `geometry_chosen_all_routings_v3.png` below for today's geometry
+    // and topology.
+
+    println!(
+        "\nnote: geometry_chosen_all_routings_v2.png is frozen (2026-09-22 state) and was NOT \
+         regenerated by this run -- see the comment above this line."
+    );
+
+    // ---- 2026-09-23 "thin edges everywhere" pass: today's `NetGeometry::default()`
+    // (`NET_PIPE_HW_FRAC` 2.5/256, no separate dogleg width -- the dogleg mechanism and R2/R5's
+    // multi-column routing tables are gone; see `physics::NetworkRoute`'s doc comment), all
+    // three routings, grid 256.
+    let chosen_tiles_v3: Vec<image::RgbImage> = [
         ("R1", NetworkRouting::R1),
         ("R2", NetworkRouting::R2),
         ("R5", NetworkRouting::R5),
@@ -245,12 +284,83 @@ fn main() {
         let geo = NetGeometry::default();
         let mask = chamber_network_mask_with_geometry(GRID, GRID, routing, geo);
         let islands = chamber_network_wall_islands(GRID, routing, geo);
-        println!("chosen {name}: {} wall components, sizes(top 6)={:?}", islands.len(), &islands[..islands.len().min(6)]);
+        println!("chosen_v3 {name}: {} wall components, sizes(top 6)={:?}", islands.len(), &islands[..islands.len().min(6)]);
         with_label(mask_image(&mask, GRID, GRID), &format!("{name} W{}", islands.len()))
     })
     .collect();
 
-    contact_sheet(&chosen_tiles, 3)
-        .save(out_dir.join("geometry_chosen_all_routings_v2.png"))
-        .expect("write geometry_chosen_all_routings_v2.png");
+    contact_sheet(&chosen_tiles_v3, 3)
+        .save(out_dir.join("geometry_chosen_all_routings_v3.png"))
+        .expect("write geometry_chosen_all_routings_v3.png");
+
+    // ---- Resolution-floor verification for `NET_PIPE_HW_MIN_CELLS`: at grid 64, `NET_PIPE_HW_FRAC
+    // * 64` (2.5/256 * 64 = 0.625 cells) is thin enough that, without the floor, some pipes'
+    // sub-cell phase rasterizes them to zero width, sealing a chamber off from the network. Checks
+    // every shipped routing at every grid the UI offers (64/128/256/512): the mask must be exactly
+    // one connected component (4-connectivity) with a non-trivial inside-cell count. Also writes
+    // one PNG per (grid, routing) so the result can be eyeballed, and prints an ASCII dump of grid
+    // 64 (small enough to read directly in a terminal).
+    println!("\n---- resolution-floor check (NET_PIPE_HW_MIN_CELLS) ----");
+    let mut any_disconnected = false;
+    for &grid in &[64usize, 128, 256, 512] {
+        for &(name, routing) in &[("r1", NetworkRouting::R1), ("r2", NetworkRouting::R2), ("r5", NetworkRouting::R5)] {
+            let geo = NetGeometry::default();
+            let mask = chamber_network_mask_with_geometry(grid, grid, routing, geo);
+            let inside = mask.iter().filter(|&&m| m != MASK_OUTSIDE).count();
+            let components = count_connected_components(&mask, grid, grid);
+            if components != 1 {
+                any_disconnected = true;
+            }
+            println!(
+                "floor_check grid={grid} {name}: {inside} inside cells, {components} connected component(s){}",
+                if components != 1 { "  <-- SEALED PIPE" } else { "" }
+            );
+            mask_image(&mask, grid, grid)
+                .save(out_dir.join(format!("floor_check_{grid}_{name}.png")))
+                .expect("write floor_check png");
+        }
+    }
+    assert!(!any_disconnected, "a routing/grid combination above has a sealed pipe -- NET_PIPE_HW_MIN_CELLS is not enough");
+
+    println!("\n---- ASCII dump, grid 64, R1 ('#' = inside, '.' = outside) ----");
+    let ascii_mask = chamber_network_mask_with_geometry(64, 64, NetworkRouting::R1, NetGeometry::default());
+    for y in 0..64 {
+        let row: String = (0..64)
+            .map(|x| if ascii_mask[y * 64 + x] != MASK_OUTSIDE { '#' } else { '.' })
+            .collect();
+        println!("{row}");
+    }
+}
+
+/// 4-connectivity BFS component count over the whole mask (not restricted to any bounding box,
+/// unlike `chamber_network_wall_islands`, which only measures the WALL and only inside the
+/// vessel's own frame) -- counts components of `MASK_INSIDE`/`MASK_BOUNDARY` cells (anything not
+/// `MASK_OUTSIDE`). A network with every pipe open rasterizes to exactly 1 component (every
+/// chamber and the collector, all connected); a sealed pipe would split it into more.
+fn count_connected_components(mask: &[u8], w: usize, h: usize) -> usize {
+    let mut visited = vec![false; w * h];
+    let mut components = 0usize;
+    for start in 0..w * h {
+        if mask[start] == MASK_OUTSIDE || visited[start] {
+            continue;
+        }
+        components += 1;
+        let mut stack = vec![start];
+        visited[start] = true;
+        while let Some(idx) = stack.pop() {
+            let x = idx % w;
+            let y = idx / w;
+            let neighbors = [(x.wrapping_sub(1), y), (x + 1, y), (x, y.wrapping_sub(1)), (x, y + 1)];
+            for (nx, ny) in neighbors {
+                if nx < w && ny < h {
+                    let nidx = ny * w + nx;
+                    if mask[nidx] != MASK_OUTSIDE && !visited[nidx] {
+                        visited[nidx] = true;
+                        stack.push(nidx);
+                    }
+                }
+            }
+        }
+    }
+    components
 }

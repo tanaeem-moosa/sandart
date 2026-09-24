@@ -377,18 +377,31 @@ impl Default for SandboxShape {
 /// ~10% of the sand (9.8%/10.6% residual vs. R1/R2/R5's 0.4%/0.6%/0.9%). R3 is included in
 /// neither the "ship" nor the "explicitly rejected" list in the prototype write-up but was not
 /// asked for either, so it is left out too.
+///
+/// 2026-09-23: all three tables were redesigned so every pipe spans at most one column
+/// (`|Δcol| <= 1`) -- see `physics::NetworkRoute`'s doc comment for why (thin pipes everywhere,
+/// including what used to be R2/R5's multi-column "dogleg" pipes, cost more dry-sand drainage at
+/// the elbow than the width bought back, so the wraparound/butterfly topology that needed those
+/// long pipes was replaced instead of re-widened). The original prototype's R2 (a wrap from
+/// column 3 back to column 0) and R5 (a stride-2 "butterfly") are gone; what ships as R2 and R5
+/// now are this crate's own single-column-span designs, not the prototype's.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NetworkRouting {
     /// `[(0,1),(1,2),(2,3),(3,2)]` for both row transitions -- the baseline the user liked
     /// (originally "G4"), and the best of the six on both objective measures (water-mixing
-    /// deviation and dry-sand residual).
+    /// deviation and dry-sand residual). No crossing: each column mostly feeds itself and its
+    /// right neighbour.
     R1,
-    /// `[(0,1),(1,2),(2,3),(3,0)]` for both row transitions -- neighbours, with column 3
-    /// wrapping back to column 0.
+    /// `[(0,1),(0,2),(2,3),(3,2)]` for both row transitions -- differs from R1 at column 1 only
+    /// (columns 0 and 3 only have one valid neighbour each under the `|Δcol| <= 1` rule, so they
+    /// match R1, and column 2 is also left as R1's chain). Column 1 skips itself and feeds column
+    /// 0 AND column 2 instead, crossing over column 2's own stream.
     R2,
-    /// Top->middle `[(0,2),(1,3),(2,0),(3,1)]` (stride 2), middle->bottom `[(0,1),(1,2),(2,3),(3,0)]`
-    /// (stride 1, R2's table) -- the textbook "every top chamber can reach every bottom chamber"
-    /// claim, verified by the prototype's connectivity check.
+    /// `[(0,1),(0,2),(1,3),(3,2)]` top->middle -- the fuller "X" cross, both columns 1 and 2
+    /// skipping themselves, not just column 1 like R2 -- then R1's chain table `[(0,1),(1,2),
+    /// (2,3),(3,2)]` middle->bottom. Streams that crossed in the first transition recombine
+    /// differently in the second, so a chamber's contents take a different-shaped path each row
+    /// instead of the same table applied twice (as R1 and R2 both do).
     R5,
 }
 
@@ -2939,10 +2952,11 @@ mod tests {
     ///
     /// `SandboxShape::ChamberNetwork` is deliberately NOT in this list. Mirror symmetry was
     /// waived for it by the user when the routing tables were approved: R1 (the default,
-    /// `[(0,1),(1,2),(2,3),(3,2)]`) and R2 (`[(0,1),(1,2),(2,3),(3,0)]`, a wrap) are both
-    /// asymmetric by construction, and R5's butterfly tables are asymmetric per-transition even
+    /// `[(0,1),(1,2),(2,3),(3,2)]`) and R2 (`[(0,1),(0,2),(2,3),(3,2)]`, a cross) are both
+    /// asymmetric by construction, and R5's two tables are asymmetric per-transition even
     /// though the shape as a whole is not. Requiring mirror symmetry here would mean rejecting
-    /// the exact routing tables the user picked from the prototype.
+    /// the routing tables the user picked (2026-09-19, then redesigned 2026-09-23 to drop every
+    /// pipe spanning more than one column -- see `NetworkRouting`'s doc comment).
     #[test]
     fn test_vessel_masks_are_left_right_symmetric() {
         let mut worst: Vec<String> = Vec::new();

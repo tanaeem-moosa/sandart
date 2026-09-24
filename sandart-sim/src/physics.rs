@@ -2848,48 +2848,63 @@ const NET_TOTAL_HALF_Y_FRAC: f32 = 0.46;
 /// split caps the reservoir under 50% of network capacity before a single pipe is added).
 const NET_ROW_FRACS: [f32; 3] = [0.40, 0.19, 0.19];
 const NET_COLLECTOR_FRAC: f32 = 0.22;
-// 2026-09-22 "thinner edges, thicker walls" correction (`artifacts/design/network-2026-09-19/
-// geometry_sweep_v2.png`) of the 2026-09-19 pass above, which had misread the brief backwards
-// (widened pipes, shrunk walls). The user's actual ask: thinner pipes, thicker WALL material
-// between chambers, so the wall reads as one connected frame with channels cut through it
-// instead of scattered slivers. Corner radius is back to its original 3/256 (never asked to
-// change). Pipe half-width came down from the original 5/256. Chamber inset is back to the
-// original 4/256. `NET_CHAMBER_FILL_X` came down (bigger gap, i.e. thicker wall, between
-// same-row chambers) and `NET_CHAMBER_FILL_Y` came down substantially (thicker wall AND more
-// vertical room between rows) -- see `net_row_to_row_path` below for why the vertical room is
-// load-bearing, not just cosmetic: it is what lets a long lateral pipe (R2/R5's column-3 ->
-// column-0 wraparound) clear the dry-sand repose floor while routing through a band that is
-// provably outside every chamber it is not routed to. See
-// `test_chamber_network_no_pipe_enters_an_unrouted_chamber`.
+// 2026-09-23 "thin edges everywhere" correction of the 2026-09-22 pass above. That pass widened
+// only the dogleg (|Δcol| >= 2) pipes (6.5/256 vs 3/256 direct) because the elbow -- not the
+// width -- was costing dry-sand drainage; the user then asked for the dogleg pipes thinned to
+// match the direct ones too, since R2/R5's wide doglegs still read as heavy horizontal bands.
+// Reshaping the elbow (steeper lateral, chamfered joints) was tried and bounded rather than
+// pursued indefinitely: R5's dogleg drainage cost came from the elbow at EVERY width tried
+// (uniform 3/256 already missed R5's bar before the dogleg was widened at all -- see the git
+// history for `NET_DOGLEG_PIPE_HW_FRAC`), so a further-thinned dogleg was never going to clear
+// the bar without either widening again (rejected: that's the visible heavy band the user is
+// asking to remove) or changing the topology. The user chose topology: R2 and R5's routing
+// tables were redesigned so no pipe spans more than one column (see `NET_R2_TABLE`/
+// `NET_R5_ROW0`/`NET_R5_ROW1` below) -- every pipe is the plain single-segment diagonal that was
+// already established safe by construction in the 2026-09-19 sweep, so the whole dogleg
+// mechanism (`net_dogleg_margin`, `net_row_to_row_path`, a per-segment dogleg half-width) is
+// gone, not just unused: no shipped routing can ever reach it. `NET_CHAMBER_FILL_Y` stays at its
+// 2026-09-22 value (thick wall is still wanted on its own merits); it no longer has to also
+// reserve vertical room for a dogleg's lateral run.
 const NET_CHAMBER_FILL_X: f32 = 0.72;
 const NET_CHAMBER_FILL_Y: f32 = 0.50;
 const NET_CHAMBER_R_FRAC: f32 = 3.0 / 256.0;
-const NET_PIPE_HW_FRAC: f32 = 3.0 / 256.0;
+/// Pipe half-width, as a fraction of `w_f` -- the ONLY pipe width in the network now that every
+/// routing is direct-diagonal-only (see the module comment above). Down from 3/256 (2026-09-22).
+/// 2/256 (the task's first target) was tried first and missed R1's drainage bar (1.35% residual
+/// vs. the 1.20% bar, `test_chamber_network_dry_sand_drainage_completeness`); 2.5/256 clears all
+/// three with margin (R1 1.12%/1.20%, R2 1.22%/1.80%, R5 1.02%/2.70%). See `NET_PIPE_HW_MIN_CELLS`
+/// for why the RASTERIZED width can be wider than this fraction implies at small grids.
+const NET_PIPE_HW_FRAC: f32 = 2.5 / 256.0;
 const NET_INSET_FRAC: f32 = 4.0 / 256.0;
-/// Half-width for the "dogleg" pipes only (`net_row_to_row_path`, `|Δcol| >= 2` -- one or two
-/// per routing table, e.g. R2/R5's column-3 -> column-0 wraparound). These carry the SAME
-/// traffic as before over a longer, bent path, and empirically that elbow -- not the width --
-/// costs dry-sand throughput: at the uniform thin width (`NET_PIPE_HW_FRAC`) R5 (the routing
-/// with the most dogleg pipes) missed its drainage bar (2.90% at half-width 4.5/256, bar 2.70%);
-/// only the pipes that actually need the detour get this wider half-width, so most of the
-/// network -- every adjacent-column pipe, which is what a person actually looks at -- is thinner
-/// than the pre-2026-09-19 shipped 5/256.
-const NET_DOGLEG_PIPE_HW_FRAC: f32 = 6.5 / 256.0;
+/// Floor, in raw CELLS (not a fraction of `w_f`), under the rasterized pipe half-width --
+/// the `PEG_RADIUS_MIN`/`PEG_SPACING_MIN` pattern below applied to pipes: `NET_PIPE_HW_FRAC *
+/// w_f` alone is under 1 cell for every `w_f < 410` or so (2.5/256 * 64 = 0.625 at grid 64), and
+/// CLAUDE.md's half-integer mirror-axis note is a special case of a more general problem -- a
+/// thin capsule has little to no margin against quantization, so whether any given pipe actually
+/// rasterizes to a non-empty, connected channel depends on the sub-cell phase of its centreline,
+/// which varies by column and by routing. Confirmed by dumping every routing's mask at grid 64
+/// with the floor disabled: some pipes rasterize to zero width. `1.0` cell (a full cell of
+/// clearance on each side of the centreline, i.e. the capsule always covers at least the one
+/// cell nearest its centreline regardless of phase) is the smallest floor
+/// `dump_chamber_network_masks`'s grid 64/128/256/512 sweep found with every pipe open and the
+/// network fully connected at every grid and routing; `w_f = 512` never reaches this floor
+/// (`2.5/256 * 512 = 5.0`), so the shipped default resolution is untouched by it, same as
+/// `PEG_RADIUS_MIN`/`PEG_SPACING_MIN`.
+const NET_PIPE_HW_MIN_CELLS: f32 = 1.0;
 
-/// Overridable fractional geometry for `SandboxShape::ChamberNetwork` -- the six constants
+/// Overridable fractional geometry for `SandboxShape::ChamberNetwork` -- the constants
 /// `artifacts/design/network-2026-09-19/geometry_sweep_v2.png` sweeps: chamber corner radius,
-/// pipe half-width (direct and dogleg), chamber inset, and the two same-row/same-column "fill"
-/// fractions that control wall thickness (a smaller fill leaves more of each column/row's own
-/// span as wall material around the chamber). `Default` reproduces the shipped constants above
-/// exactly, so the real path (`chamber_network_inside`, called with no geometry argument via
-/// `NetGrid::new`) is bit-for-bit what it always was; only `chamber_network_mask_with_geometry`
-/// (the sweep/example entry point) and `chamber_network_wall_islands` (the connectivity metric)
-/// ever construct a non-default value.
+/// pipe half-width, chamber inset, and the two same-row/same-column "fill" fractions that
+/// control wall thickness (a smaller fill leaves more of each column/row's own span as wall
+/// material around the chamber). `Default` reproduces the shipped constants above exactly, so
+/// the real path (`chamber_network_inside`, called with no geometry argument via `NetGrid::new`)
+/// is bit-for-bit what it always was; only `chamber_network_mask_with_geometry` (the
+/// sweep/example entry point) and `chamber_network_wall_islands` (the connectivity metric) ever
+/// construct a non-default value.
 #[derive(Clone, Copy, Debug)]
 pub struct NetGeometry {
     pub r_frac: f32,
     pub pipe_hw_frac: f32,
-    pub dogleg_pipe_hw_frac: f32,
     pub inset_frac: f32,
     pub fill_x: f32,
     pub fill_y: f32,
@@ -2900,7 +2915,6 @@ impl Default for NetGeometry {
         NetGeometry {
             r_frac: NET_CHAMBER_R_FRAC,
             pipe_hw_frac: NET_PIPE_HW_FRAC,
-            dogleg_pipe_hw_frac: NET_DOGLEG_PIPE_HW_FRAC,
             inset_frac: NET_INSET_FRAC,
             fill_x: NET_CHAMBER_FILL_X,
             fill_y: NET_CHAMBER_FILL_Y,
@@ -2911,14 +2925,44 @@ impl Default for NetGeometry {
 /// `table[c] = (a, b)`: the source chamber in column `c` feeds columns `a` and `b` of the row
 /// below. See `NetworkRouting`'s doc comment (`lib.rs`) for what each shipped table looks like
 /// and why R3/R4/R6 were not shipped.
+///
+/// 2026-09-23: every entry in every shipped table now satisfies `|a - c| <= 1 && |b - c| <= 1`
+/// (no pipe spans more than one column) -- see the module comment above for why. Column 0 only
+/// has neighbours {0, 1} and column 3 only has neighbours {2, 3}, so those two columns' pairs
+/// are forced identical (as a set) across every table below; the only freedom is columns 1 and
+/// 2, which is where R1/R2/R5 actually differ from each other.
 type NetworkRoute = [(usize, usize); 4];
+/// The "chain" table: every column feeds itself (Δcol = 0) and its right neighbour (Δcol = +1);
+/// column 3, with no right neighbour, feeds itself and its LEFT neighbour instead. No crossing --
+/// two of the four pipes (columns 1 and 3's `a` targets) are dead vertical, which is also why
+/// this table drains best of the three (`test_chamber_network_dry_sand_drainage_completeness`:
+/// R1 1.12% vs. its 1.20% bar).
 const NET_R1_TABLE: NetworkRoute = [(0, 1), (1, 2), (2, 3), (3, 2)];
-const NET_R2_TABLE: NetworkRoute = [(0, 1), (1, 2), (2, 3), (3, 0)];
-const NET_R5_ROW0: NetworkRoute = [(0, 2), (1, 3), (2, 0), (3, 1)];
-const NET_R5_ROW1: NetworkRoute = NET_R2_TABLE;
+/// The "cross" table: column 1 skips itself and feeds column 0 AND column 2 instead (both
+/// Δcol = ±1, no Δcol = 0 pipe), so the stream that would have gone straight down column 1
+/// crosses over column 2's stream instead. Columns 0, 2 and 3 are unchanged from `NET_R1_TABLE`.
+/// Differs from `NET_R1_TABLE` at column 1 only (columns 0 and 3 are forced identical by the
+/// single-column-span rule; a symmetric full cross at BOTH columns 1 and 2 -- `(0,2),(1,3)` --
+/// was tried and tested first, since it reads as a cleaner "X" than crossing at just one column,
+/// but removing both of R1's Δcol=0 pipes at once cost too much drainage: R1's own bar (1.20%)
+/// missed at 4.68% residual with that table. One crossing keeps R1's other Δcol=0 pipe (column
+/// 3's `b` target) and clears every bar; see `NET_R5_ROW0` for where the fuller cross still gets
+/// used.
+const NET_R2_TABLE: NetworkRoute = [(0, 1), (0, 2), (2, 3), (3, 2)];
+/// R5's two transitions use the fuller "X" cross top->middle (both columns 1 and 2 skip
+/// themselves: `(0,2)` and `(1,3)`, no Δcol=0 pipe in either), then `NET_R1_TABLE`'s chain
+/// middle->bottom -- cross first, then re-sort -- so a chamber's contents take a different-shaped
+/// path each row and streams that crossed in row 0->1 recombine differently in row 1->2, rather
+/// than both transitions reusing one table like R1 and R2 do. The fuller cross alone missed R1's
+/// bar (see `NET_R2_TABLE`'s doc comment), but R5's own bar is 2.7% (the network's most
+/// convoluted, and most permissive) and this combination clears it with the widest margin of the
+/// three routings (1.02% residual).
+const NET_R5_ROW0: NetworkRoute = [(0, 1), (0, 2), (1, 3), (3, 2)];
+const NET_R5_ROW1: NetworkRoute = NET_R1_TABLE;
 
 /// The two routing tables (top->middle, middle->bottom) for a given `NetworkRouting`. R1 and R2
-/// use the same table for both transitions; R5's butterfly uses a different stride for each.
+/// use the same table for both transitions; R5's two transitions (`NET_R5_ROW0`/`NET_R5_ROW1`)
+/// differ from each other (see `NET_R5_ROW0`'s doc comment).
 pub(crate) fn network_routing_tables(routing: crate::NetworkRouting) -> (NetworkRoute, NetworkRoute) {
     match routing {
         crate::NetworkRouting::R1 => (NET_R1_TABLE, NET_R1_TABLE),
@@ -2978,7 +3022,6 @@ struct NetGrid {
     chamber_hy: [f32; NET_ROWS],
     r: f32,
     pipe_hw: f32,
-    dogleg_pipe_hw: f32,
     inset: f32,
 }
 
@@ -3018,8 +3061,7 @@ impl NetGrid {
             chamber_hx: col_width * 0.5 * geo.fill_x,
             chamber_hy,
             r: geo.r_frac * w_f,
-            pipe_hw: geo.pipe_hw_frac * w_f,
-            dogleg_pipe_hw: geo.dogleg_pipe_hw_frac * w_f,
+            pipe_hw: (geo.pipe_hw_frac * w_f).max(NET_PIPE_HW_MIN_CELLS),
             inset: geo.inset_frac * w_f,
         }
     }
@@ -3095,14 +3137,15 @@ fn chamber_network_inside_geo(
 
 /// One pipe centreline segment plus which chamber it starts and ends at, and its own half-width.
 /// `from`/`to` are `(row, col)` pairs; `to.0 == NET_ROWS` (an out-of-range row, since real rows
-/// are `0..NET_ROWS`) is the sentinel for "ends at the collector pool", not a chamber. `hw` is
-/// per-segment rather than a single value for the whole network because dogleg segments
-/// (`net_row_to_row_path`) use a wider half-width than direct ones (`NET_DOGLEG_PIPE_HW_FRAC` vs
-/// `NET_PIPE_HW_FRAC`) -- see that constant's doc comment for why. Existing callers that only
-/// need the coordinates (the pipe-slope test) destructure just `x0`/`y0`/`x1`/`y1`;
-/// `test_chamber_network_no_pipe_enters_an_unrouted_chamber` uses `from`/`to` to know which
-/// chamber a given segment is ALLOWED to touch. `from`/`to` are only read under `#[cfg(test)]`,
-/// hence the `allow` -- a non-test build never constructs that check.
+/// are `0..NET_ROWS`) is the sentinel for "ends at the collector pool", not a chamber. `hw` used
+/// to vary per segment (dogleg segments were wider than direct ones, pre-2026-09-23 -- see
+/// `net_row_to_row_segments`'s doc comment); every segment now carries the same `g.pipe_hw`, but
+/// the field stays per-segment since nothing requires it to be uniform and
+/// `chamber_network_inside_geo`'s margin-erosion path (`shrink(seg.hw)`) already reads it that
+/// way. Existing callers that only need the coordinates (the pipe-slope test) destructure just
+/// `x0`/`y0`/`x1`/`y1`; `test_chamber_network_no_pipe_enters_an_unrouted_chamber` uses `from`/`to`
+/// to know which chamber a given segment is ALLOWED to touch. `from`/`to` are only read under
+/// `#[cfg(test)]`, hence the `allow` -- a non-test build never constructs that check.
 #[allow(dead_code)]
 #[derive(Clone)]
 struct PipeSegment {
@@ -3115,111 +3158,15 @@ struct PipeSegment {
     to: (usize, usize),
 }
 
-/// A row-to-row pipe as a 3-segment polyline (drop / lateral / drop) instead of one straight
-/// diagonal, so its lateral travel is CONFINED to a band that is provably outside every chamber
-/// in `from_row` and `to_row`, at every column -- not just the source and target. Every chamber
-/// in a row shares that row's `row_c`/`chamber_hy` (chamber size varies by row, never by
-/// column), so `safe_top` (the true bottom edge of every `from_row` chamber) and `safe_bottom`
-/// (the true top edge of every `to_row` chamber) bound a horizontal strip that is clear for ANY
-/// x, regardless of how far apart the source and target columns are. This is what fixes R2/R5's
-/// column-3 -> column-0 "wraparound" pipe (`test_chamber_network_no_pipe_enters_an_unrouted_chamber`):
-/// its old single-segment diagonal cut straight through chamber (2,1), a chamber it was never
-/// routed to, at every geometry tried, including the pre-2026-09-19 shipped one.
-///
-/// Only used when `|to_col - from_col| >= 2` (`net_row_to_row_segments` picks this or the plain
-/// single-segment diagonal): an adjacent-column pipe's straight diagonal was already established
-/// safe by construction in the 2026-09-19 sweep (tuned corner radius/inset), and keeping it as a
-/// single segment matters for drainage -- an early version of this fix routed EVERY row-to-row
-/// pipe through this dogleg and dry-sand residue rose well past the bar (R1 1.65% -> 3.49% at
-/// `w=256`even with the pipe half-width unchanged, i.e. the elbow itself, not the width, was the
-/// cost); scoping the dogleg to only the connections that actually need it (one or two per
-/// routing table -- see `NET_R2_TABLE`'s `(3,0)` wraparound and `NET_R5_ROW0`'s `|Δcol|=2`
-/// entries) recovers that.
-///
-/// The two "drop" segments are exactly vertical (`x0 == x1`), so
-/// `test_chamber_network_pipe_slopes_clear_the_repose_floor` (which only scores segments with a
-/// real run) skips them, same as it always skipped a purely-vertical pipe. The lateral segment is
-/// what that test scores, and why `NET_CHAMBER_FILL_Y` came down substantially in this pass: the
-/// worst case (the 3-column-wide wraparound run) needs the safe band tall enough that even a
-/// shallow slope across that run still clears the dry-sand repose floor.
-/// The minimum `margin` (how far `net_row_to_row_path`'s waypoints sit inside the safe band,
-/// measured from each end) that still clears every INTERVENING column's chamber -- the columns
-/// strictly between `from_col` and `to_col`, the only ones a straight line between the waypoints
-/// can come close to -- by `g.dogleg_pipe_hw`. A blanket margin (e.g. "always leave room for the
-/// full pipe half-width at both ends") wastes most of the safe band on columns nowhere near the
-/// path and starves the slope the repose floor needs; this instead finds, for each intervening
-/// column, the SINGLE point where the straight line first comes within that column's x-range
-/// (nearest the source, checked against `from_row`'s edge; nearest the target, checked against
-/// `to_row`'s edge -- a linear path's y is monotonic, so if it clears at the near edge of a
-/// column's x-range it clears for that column's whole width) and solves for the margin that
-/// makes THAT point exactly `dogleg_pipe_hw` clear. Chamber rounding (`g.r`) is ignored here
-/// (treated as a sharp rectangle), which only makes this conservative -- rounding cuts the
-/// corner, i.e. more clearance than assumed.
-fn net_dogleg_margin(g: &NetGrid, from_col: usize, to_col: usize, sx: f32, tx: f32, span: f32) -> f32 {
-    if span <= 0.0 {
-        return 0.0;
-    }
-    let run = tx - sx;
-    if run.abs() < 1e-3 {
-        return (span * 0.1).min(span * 0.45);
-    }
-    let (lo_col, hi_col) = (from_col.min(to_col), from_col.max(to_col));
-    let mut needed = 0.0f32;
-    for ic in (lo_col + 1)..hi_col {
-        let cx = g.col_c(ic);
-        let hx = g.chamber_hx;
-        // t at each x edge of this column's box, sorted so t_lo < t_hi regardless of `run`'s
-        // sign. y(t) = (safe_top + margin) + t * (span - 2*margin) is monotonic in t, so the
-        // column's box is closest to `from_row`'s edge at t_lo (its smallest y in this window)
-        // and closest to `to_row`'s edge at t_hi (its largest y).
-        let ta = ((cx - hx - sx) / run).clamp(0.0, 1.0);
-        let tb = ((cx + hx - sx) / run).clamp(0.0, 1.0);
-        let (t_lo, t_hi) = (ta.min(tb), ta.max(tb));
-        // Clearance from `from_row`'s edge: margin + t_lo*(span - 2*margin) >= dogleg_pipe_hw.
-        if t_lo < 0.5 {
-            needed = needed.max((g.dogleg_pipe_hw - t_lo * span) / (1.0 - 2.0 * t_lo));
-        }
-        // Clearance from `to_row`'s edge: span - margin - t_hi*(span - 2*margin) >= dogleg_pipe_hw.
-        if t_hi > 0.5 {
-            needed = needed.max((g.dogleg_pipe_hw - span * (1.0 - t_hi)) / (2.0 * t_hi - 1.0));
-        }
-    }
-    needed.max(span * 0.02).min(span * 0.48)
-}
-
-fn net_row_to_row_path(
-    g: &NetGrid,
-    from_row: usize,
-    from_col: usize,
-    xfrac: f32,
-    to_row: usize,
-    to_col: usize,
-    lean: f32,
-) -> [PipeSegment; 3] {
-    let (sx, sy) = g.floor_pt(from_row, from_col, xfrac);
-    let (tx, ty) = g.top_pt(to_row, to_col, lean);
-
-    let safe_top = g.row_c(from_row) + g.chamber_hy[from_row];
-    let safe_bottom = g.row_c(to_row) - g.chamber_hy[to_row];
-    let span = (safe_bottom - safe_top).max(0.0);
-    let margin = net_dogleg_margin(g, from_col, to_col, sx, tx, span);
-    let my0 = safe_top + margin;
-    let my1 = (safe_bottom - margin).max(my0);
-
-    let from = (from_row, from_col);
-    let to = (to_row, to_col);
-    let hw = g.dogleg_pipe_hw;
-    [
-        PipeSegment { x0: sx, y0: sy, x1: sx, y1: my0, hw, from, to },
-        PipeSegment { x0: sx, y0: my0, x1: tx, y1: my1, hw, from, to },
-        PipeSegment { x0: tx, y0: my1, x1: tx, y1: ty, hw, from, to },
-    ]
-}
-
-/// One row-to-row pipe, as either a single diagonal segment (adjacent columns, `|Δcol| <= 1`,
-/// same as every routing used before 2026-09-22) or the safe-band dogleg (`net_row_to_row_path`,
-/// `|Δcol| >= 2`). See `net_row_to_row_path`'s doc comment for why this is scoped rather than
-/// universal.
+/// One row-to-row pipe, as a single straight diagonal segment. Before 2026-09-23 this also had a
+/// `|Δcol| >= 2` branch (`net_row_to_row_path`/`net_dogleg_margin`, a 3-segment drop/lateral/drop
+/// polyline confined to a safe band between the two rows) for R2/R5's wraparound pipes, which
+/// spanned more than one column. That branch is gone, not just unused: every shipped routing
+/// table now satisfies `|Δcol| <= 1` (see the module comment above `NetworkRoute`), so every pipe
+/// this function is ever called with is exactly the case the plain diagonal already handled --
+/// established safe by construction in the 2026-09-19 sweep (tuned corner radius/inset) -- and
+/// no routing can reach the removed branch. Kept returning a single-element `Vec` (rather than a
+/// bare `PipeSegment`) so its one caller's `.extend(...)` didn't need to change.
 fn net_row_to_row_segments(
     g: &NetGrid,
     from_row: usize,
@@ -3229,14 +3176,9 @@ fn net_row_to_row_segments(
     to_col: usize,
 ) -> Vec<PipeSegment> {
     let lean = net_lean(to_col, from_col);
-    let col_delta = (to_col as isize - from_col as isize).abs();
-    if col_delta <= 1 {
-        let (x0, y0) = g.floor_pt(from_row, from_col, xfrac);
-        let (x1, y1) = g.top_pt(to_row, to_col, lean);
-        vec![PipeSegment { x0, y0, x1, y1, hw: g.pipe_hw, from: (from_row, from_col), to: (to_row, to_col) }]
-    } else {
-        net_row_to_row_path(g, from_row, from_col, xfrac, to_row, to_col, lean).to_vec()
-    }
+    let (x0, y0) = g.floor_pt(from_row, from_col, xfrac);
+    let (x1, y1) = g.top_pt(to_row, to_col, lean);
+    vec![PipeSegment { x0, y0, x1, y1, hw: g.pipe_hw, from: (from_row, from_col), to: (to_row, to_col) }]
 }
 
 /// Every pipe (top->middle, middle->bottom, and every bottom-row chamber's own two outlets into
