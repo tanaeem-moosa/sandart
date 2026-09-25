@@ -16,7 +16,8 @@ This WebAssembly build (`sandart-wasm`, auto-deployed from `main` — see `docs/
 1. **Realistic Sand & Liquid Physics**:
    - **Heightmap Simulation**: A dynamic 2D heightmap, settled by a conservative per-edge flux solver (see `docs/ARCHITECTURE.md` §4) rather than an unconstrained cellular automaton.
    - **Marble Displacement Mode**: As the marble rolls, it pushes sand outward, creating realistic grooves and side ridges, with gravity pulling sand back down past its angle of repose.
-   - **Sand-fall Mode**: Directional gravity, pourable materials (sand and liquid presets), and a library of container shapes — Hourglass, MultiStageHourglass, GaltonBoard, StaircaseCascade, ProceduralFunnel, MultiNeckHourglass (funnel-style) plus Circle/Square/Oval (flat bed style), switching solver behavior automatically per shape.
+   - **Sand-fall Mode**: Directional gravity, pourable materials (sand and liquid presets), and a library of container shapes — classic hourglass, multi-neck hourglass, Galton board, staircase cascade, procedural cave, U-tube flow-through, and a 12-chamber network with three selectable pipe routings (R1/R2/R5) — plus Circle/Square/Oval (flat bed style), switching solver behavior automatically per shape. The vessel shape is defined once and is both the physics mask and the rendered outline.
+   - **Resolution & upscaling**: grids from 64² to 1024², optionally simulated at ½ or ¼ resolution and upscaled for display.
    - **Per-Cell Material Properties**: Wetness, threshold, flow rate, and grain size are conserved, advected scalars per cell, not a single global material — a cell of wet sand and a cell of dry sand can sit side by side and mix physically as material flows between them.
 
 2. **Stunning Visuals & Lighting**:
@@ -130,21 +131,20 @@ The project is built in incremental, testable blocks:
 
 ---
 
-## Project notes, backlog and handover
+## Project status
 
-Design docs, the full ticket backlog and handovers written for whoever picks this up next live in
-[`artifacts/`](artifacts/).
+**Finished (September 2026).** The live page above is the release. The project is no longer under
+active development.
 
-**Start with [`CLAUDE.md`](CLAUDE.md).** It is the authority on the build/test loop (there is no
-linker on the dev host; everything compiles inside `distrobox enter sandart-dev`), the current test
-state, and the one test that is *meant* to fail.
-
-[`artifacts/HANDOVER.md`](artifacts/HANDOVER.md) is a **historical** document as of 2026-08-31 —
-the overfill model, the hierarchical coarse level and the block-clock scheduler it describes were
-deleted on 2026-08-30. It is kept for its record of what was tried and why it failed, which is the
-part that cannot be recovered from the code. See
-[`artifacts/design/SESSION-HANDOVER-2026-08-30.md`](artifacts/design/SESSION-HANDOVER-2026-08-30.md)
-for that decision and the bisect behind it.
+- **Build & test:** see [`CLAUDE.md`](CLAUDE.md) — the authority on the build/test loop (on the
+  Steam Deck dev host everything compiles inside `distrobox enter sandart-dev`) and the test suites.
+  All suites pass. Known, accepted defects (a small residual left/right asymmetry in draining
+  liquid, liquid clinging to walls slightly longer while draining, and a period-2 pulse next to
+  the hourglass neck) are pinned by "must not grow" guard tests rather than left failing.
+- **Design history:** [`artifacts/`](artifacts/) holds the design records — including the designs
+  that were tried and rejected, and why — plus the backlog of ideas that were never built.
+  [`artifacts/HANDOVER.md`](artifacts/HANDOVER.md) and the `SESSION-HANDOVER-*` files are
+  historical; they describe subsystems that were later deleted.
 
 ## License & Disclaimers
 
@@ -159,7 +159,7 @@ This project was built using "vibe coding" — designed, refactored, and impleme
 ### License
 Copyright 2026 Google LLC
 
-Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0 (the "License") — full text in [`LICENSE`](LICENSE); you may not use this file except in compliance with the License. You may obtain a copy of the License at
 
     http://www.apache.org/licenses/LICENSE-2.0
 

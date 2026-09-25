@@ -1,15 +1,10 @@
 # Working on this repo
 
-This file exists because the build/test loop is not discoverable from the code, and getting it
-wrong produces confident, wrong conclusions. It was written after a session concluded "the tests
-cannot be run here" and committed that claim — the loop was documented in `README.md` and
-`artifacts/HANDOVER.md` §1 the whole time.
-
-**This file is the authority.** `artifacts/HANDOVER.md` was written on 2026-08-17 and is now a
-HISTORICAL document: most of what it describes as live — the overfill model, the hierarchical
-coarse level, the block-clock scheduler and their overlays — was deleted on 2026-08-30. Its build
-and test instructions are still correct; its account of what the code does is not. Read it for why
-things were tried, never for what exists.
+**The project was declared finished on 2026-09-24.** The live GitHub Pages build is the release.
+This file records the final state and the build/test loop, which is not discoverable from the
+code. The earlier, much longer running log of this file is in git history (`git log -p CLAUDE.md`);
+`artifacts/HANDOVER.md` and `artifacts/design/SESSION-HANDOVER-*` are historical and describe
+subsystems that no longer exist. Read them for why things were tried, never for what exists.
 
 ## There is no linker on the host
 
@@ -19,17 +14,16 @@ Anything that compiles must run inside the container:
 distrobox enter sandart-dev -- bash -lc '<command>'
 ```
 
-The host has `cargo` but no `cc`, `gcc` or `libgcc`, so `cargo build` and `cargo test` fail on the
-host with `linker 'cc' not found`. **That error means you are outside the container, not that the
-work cannot be verified.**
-
-The container has `cargo`, `wasm-pack` and `wasm-opt`. It does **not** have `git` or `jj`. So the
-loop is: **edit and commit on the host, compile and test in the container.**
+The host has `cargo` but no `cc`, so `cargo build`/`cargo test` fail on the host with
+`linker 'cc' not found`. **That error means you are outside the container, not that the work
+cannot be verified.** The container has `cargo`, `wasm-pack` and `wasm-opt` but not `git` — edit
+and commit on the host, compile and test in the container. Use `CARGO_BUILD_JOBS=2` and run cargo
+in the foreground; background cargo gets OOM-killed.
 
 ## `cargo check -p sandart-wasm` typechecks nothing
 
 The crate is `#![cfg(target_arch = "wasm32")]`-gated, so a host-target check compiles an empty
-crate and passes no matter what you broke. Always:
+crate. Always:
 
 ```
 cargo check -p sandart-wasm --target wasm32-unknown-unknown --release
@@ -37,9 +31,7 @@ cargo check -p sandart-wasm --target wasm32-unknown-unknown --release
 
 ## Tests
 
-Integration tests do **not** run in the main test command; run them separately. There are five,
-and this is the whole list (`HANDOVER.md` §2's list is stale — it names five more that were deleted
-with the subsystems they tested):
+Integration tests do not run in the main test command; run them separately. This is the whole list:
 
 ```
 cargo test -p sandart-sim --lib --release     # ~65s, the main suite
@@ -48,162 +40,66 @@ cargo test -p sandart-sim --release --test head_field_transport_toggle
 cargo test -p sandart-sim --release --test perfect_simulation_determinism
 cargo test -p sandart-sim --release --test pressure_heatmap_head_field_toggle
 cargo test -p sandart-sim --release --test pressure_sensitive_flow_toggle
-node scripts/check_js.js                      # REQUIRED before any web/ push -- see below
+cargo test -p sandart-render --release
+node scripts/check_js.js                      # REQUIRED before any web/ push
 ```
 
-`scripts/check_js.js` is not only a JS syntax check. It also validates `index.html`: `<div>`
-nesting balance, that `#viewport-container` is still inside `#app-container`, and that every
-`getElementById(...)` in `demo.js` resolves to an id that exists. Those HTML checks were added on
-2026-08-31 after a cleanup left one unmatched `</div>`, which re-parented the canvas out of the
-container that sizes it and shipped a blank page to Pages. The Rust suite and the old `check_js`
-both passed on that commit, because nothing anywhere looked at the HTML. **If you edit
-`index.html`, run this.**
+**Final state (2026-09-24): everything passes.** Lib suite 104 passed / 0 failed; all five
+integration targets, the render tests, doctests and `check_js.js` pass. Do not report "tests pass"
+without saying which target you ran.
 
-The library suite is **101 passed / 3 failed on `main`**, and that is the current expected state
-(99 since 2026-09-19, when `SandboxShape::ChamberNetwork` shipped with three tests: connectivity,
-pipe slopes against the dry-sand repose floor, and dry-sand drainage completeness; 101 since
-2026-09-23, when the geometry was reworked to thinner pipes and thicker walls and gained
-`test_chamber_network_chambers_never_merge` and `test_chamber_network_no_pipe_enters_an_unrouted_chamber`.
-The second is zero-tolerance: R2's and R5's wrap-around pipes used to cut straight through a
-chamber they were not routed to, and pipes spanning two or more columns are now drop/lateral/drop
-doglegs confined to the gap between rows. That drainage
-test simulates thousands of ticks and is why the suite now takes ~65s rather than ~35s. The vessel
-is 12 chambers in 4 columns x 3 rows, two outlet pipes each, a collector pool, top row as the
-reservoir, with a routing selector — R1/R2/R5, tables in `physics.rs`. It is **deliberately not
-mirror-symmetric** and is exempted from `test_vessel_masks_are_left_right_symmetric`; the user
-waived symmetry for networks. Design record: `artifacts/design/network-2026-09-19/`.)
+`scripts/check_js.js` also validates `index.html` — `<div>` nesting balance, that
+`#viewport-container` is still inside `#app-container`, and that every `getElementById(...)` in
+`demo.js` resolves. A cleanup once left one unmatched `</div>` and shipped a blank page while every
+Rust test passed. **If you edit `index.html`, run this.**
 
-**Later the same day (2026-09-23), the dogleg mechanism described in the paragraph above was
-deleted.** The user found R2/R5's wide dogleg pipes (needed for the wrap-around/butterfly
-routing) still read as heavy horizontal bands even after the rest of the network thinned, and
-asked for pipes thin everywhere. Reshaping the dogleg elbow was tried and bounded rather than
-pursued indefinitely (R5's dogleg drainage cost came from the elbow at every width tried, not
-just wide ones), so R2 and R5's routing tables were redesigned instead so no pipe spans more than
-one column (`|Δcol| <= 1`) — the "wrap-around"/"butterfly" topology that needed a dogleg is gone,
-along with `net_dogleg_margin`/`net_row_to_row_path`/`NET_DOGLEG_PIPE_HW_FRAC`.
-`test_chamber_network_no_pipe_enters_an_unrouted_chamber` stays (general-purpose, not dogleg-
-specific) but now only ever exercises plain single-column diagonals. Pipe half-width came down
-further, 3/256 -> 2.5/256 (2/256 missed R1's drainage bar); a cell-floor
-(`NET_PIPE_HW_MIN_CELLS`) was added so the rasterized width never seals a pipe shut at small
-grids, the same pattern as the Galton board's `PEG_RADIUS_MIN`/`PEG_SPACING_MIN`. Test count is
-unchanged (still 101/3): no test was specific to the dogleg code path. Design record:
-`artifacts/design/network-2026-09-19/geometry_chosen_all_routings_v3.png`.
+## Accepted defects are guarded, not failing
 
-On 2026-09-19 the "Merging cascade" vessel (`MultiStageHourglass`) was deleted at the user's request
-(a chamber-network design is replacing it; see `artifacts/design/cascade-2026-09-17/` and
-`artifacts/design/network-2026-09-19/`). Seven tests went with it: six passing ones that exercised
-only that shape, and the former known failure
-`test_cascade_no_dam_or_neck_merge_across_chamber_count_range`. `SandboxShape` now has explicit
-discriminants; id 4 is retired, never reuse it, since the UI sends shapes as integers. The three
-remaining failures:
+Four known defects were reviewed and accepted by the user. Each is pinned by a test that fails
+only if the defect grows past 1.25x its measured baseline. **If a change REDUCES one, lower its
+baseline. Never raise a baseline to silence a failure.** Each test's header comment has the
+numbers and the history.
 
-- `test_water_blob_stays_left_right_symmetric_under_gravity` — the deliberate #56 marker that must
-  keep failing. See HANDOVER.md §1.
-- `test_sandbox_wave_stays_left_right_symmetric` — the residual SOLVER asymmetry, deliberately left
-  visible. Its mirror error no longer decays (peaks 4.7e-7, still 4.4e-7 at tick 400) against an
-  assertion demanding `final < 0.25 * worst`. The magnitude is tiny; what matters is that it is now
-  measurable at all. It was partly hidden before 2026-09-08 because the mirror comparison skips
-  cells whose mask mirror is OUTSIDE, and the mask was asymmetric, so many cells were skipped.
-- `test_liquid_flowing_liquid_does_not_stand_in_walls` — **a deliberately shipped regression, on
-  main so it can be looked at, and a revert candidate.** The red-black lateral pass (2026-09-08)
-  takes enclosed void cells from 51/2/9509 to 167/77/20658 against thresholds 150/20/34000, i.e.
-  draining liquid clings to walls ~3x longer. It is the cost side of a real trade: the same change
-  cuts mid-drain mirror asymmetry 27-36%. **Do not silently re-baseline these thresholds** — they
-  are the only thing recording what the symmetry win cost. See `artifacts/design/ASYMMETRY-2026-09-08.md`
-  §8 for the measured trade curve and the operator-rebalance hypothesis for fixing both at once.
+- `test_neck_pulse_does_not_grow` (`task55_head_spec.rs`) — period-2 mass pulse in the column next
+  to the hourglass neck (~6.5 cells/tick at w=64, ~38 at w=512).
+- `test_water_blob_stays_left_right_symmetric_under_gravity` — residual lean in draining water
+  (the former #56 marker).
+- `test_sandbox_wave_stays_left_right_symmetric` — residual solver mirror error (~4.7e-7 peak,
+  does not decay).
+- `test_liquid_flowing_liquid_does_not_stand_in_walls` — draining liquid clings to walls ~3x
+  longer than before the red-black lateral pass (2026-09-08). This is the cost side of a trade:
+  the same change cut mid-drain mirror asymmetry 27-36%. Original and pre-red-black numbers are in
+  the test comment; see `artifacts/design/ASYMMETRY-2026-09-08.md` §8.
 
-**The near-neck pulse is a known, ACCEPTED oscillation, guarded rather than failing (2026-09-13).**
-In `build_drain_scenario` the column next to the neck swings in mass from tick to tick.
-- On the shipped path it is a strict period-2 pulse: ~6.5 cells/tick at w=64, ~38 at w=512.
-- It predates the array-form lateral pass (eeefce7); traced identical before and after.
-- The user reviewed it and accepted it at this level.
-- `test_neck_pulse_does_not_grow` fails if it exceeds 1.25x that baseline. If a change REDUCES it,
-  lower the baseline. Never raise the baseline to silence a failure.
-- `spec_draining_vessel_surface_dips` used to read the dip at ONE tick, so it was measuring which
-  phase of the pulse tick 150 landed on. It failed with `head_field_transport=true` after eeefce7
-  for that reason alone. It now averages over the last 50 ticks against the unchanged `tol`.
+## Invariants that have burned people
 
-**`test_sandbox_wave_reach_is_budget_independent` was resolved on 2026-09-02, by fixing the test.**
-Its bit-identical-amplitude-across-budgets assertion was wrong in principle: `budget_n` exists to
-skip blocks whose contribution is *negligible, not zero*, so demanding identical output across
-budgets demanded the budget be a no-op. It had only ever passed on headroom — instrumenting the
-classification loop showed the budget tier starving on 1140 of 1200 ticks at budget 32, because
-`must_simulate` alone exceeds `budget_n` from tick 13 (MUST is budget-exempt; `budget_n` does not
-in fact cap the simulated block count, contrary to what a comment in `physics.rs` claimed). The
-underlying physics was never wrong: the full-simulation far-peak is unchanged from when the test
-was written (0.00779 then, 0.007786 now); only low-budget fidelity had drifted. The test now
-asserts reach EXACTLY across budgets and amplitude within 15% of the full-simulation reference.
-Read that test's header comment before touching it.
-
-**History, because the framing here was wrong twice.** From 2026-08-16 to 2026-08-30 the suite was
-102 passed / 10 failed, and successive handovers called that "pre-existing" or "the known-good
-state". It was neither: at `f43920a`, immediately before the first overfill commit, the suite was
-103 passed / 1 failed. Nine were regressions. They were **bisected on 2026-08-30** and traced to two
-commits inside a single 45-minute window on 2026-08-16, both adding a filter to the edge velocity in
-two different functions — `33b3059` in `flux_edge_apply` and `73b71a8` in `flux_edge_candidate`.
-Reverting both fixed eight of the nine. See the TOMBSTONE comment in `physics.rs` before touching
-that expression, and `artifacts/design/SESSION-HANDOVER-2026-08-29.md` §1 for how the label slipped.
-
-Do not report "tests pass" without saying which target you ran — earlier entries claiming the tests
-pass were about the integration suites, not `--lib`. The integration suites all pass (5 targets).
-
-**On 2026-08-30 the overfill model, the hierarchical coarse level and the block-clock scheduler were
-deleted.** ~13k lines: `coarse.rs`, the overfill law and its equilibrium solver, the overclocking
-scheduler and early-stop machinery, the lateral-correction and delta-transport experiments, five
-toggle test suites, 25 diagnostic examples, and the debug overlays those fed. The library suite lost
-13 tests with them (12 `coarse::tests::*` plus one overlay test) — that is the whole 110 -> 98 drop;
-no physics test was lost. The reason is in the git history and in `artifacts/design/`, which was
-kept in full: overfill's own instruments recorded no benefit, and the coarse level and scheduler
-were reachable only through it. See `artifacts/design/SESSION-HANDOVER-2026-08-30.md` for the
-bisect that preceded it and the full account.
-
-**Doctests pass** (`cargo test -p sandart-sim --doc --release`, 0 tests). Earlier revisions of this
-file recorded a permanent `physics::EQUILIBRIUM_LUT_SIZE` doctest failure and called it unrelated
-pre-existing noise. It was neither: the 4-space-indented formula rustdoc kept trying to compile was
-part of the overfill equilibrium solver's doc comment, and it went when the solver did.
-
-**On 2026-09-02 the LOD block geometry changed back to a constant 8-cell block**
-(`DEFAULT_BLOCK_SIZE`), so the block grid scales with resolution again — 8x8 at grid 64 up to
-64x64 at 512. `block_size = grid/64` existed only to make a block and a `coarse.rs` pressure tile
-the same square, and the coarse level was deleted on 2026-08-30. At grid 512 (the shipped
-`GRID_SIZE`) the two geometries are identical, so this is a no-op at the default resolution; it
-removes the degenerate `block_size = 1` at grid 64 and `= 2` at 128. `budget_n` and the adaptive
-controller's throttles are now derived from the block count (`budget_throttles`) instead of
-hardcoded, and reproduce the old absolutes exactly at 512. See `artifacts/design/BLOCK-GEOMETRY-2026-09-02.md`.
-
-**On 2026-09-08 `eval_sandbox_shape`'s mirror axis was corrected from `w/2` to `(w-1)/2`.**
-Cell centres are the integer indices `0..=w-1`, so the true axis is `(w-1)/2`; with `w/2` the
-mirror pair `(x, w-1-x)` differed by exactly one cell and **every vessel in the app was asymmetric
-by construction**, at every resolution. `test_vessel_masks_are_left_right_symmetric` pins it (all
-shapes now report zero mirror mismatches). Measured effect on water draining an hourglass: the
-persistent settled lean, which was ~1% of total mass and always the same direction, goes to zero.
-
-Three consequences to know before touching symmetry work:
-
-- The axis is a HALF-INTEGER for even `w`, so a cell's `|dx|` is always 0.5, 1.5, 2.5... Any
-  threshold compared with a strict `|dx| < allowed` must account for that: a half-width of exactly
-  0.5 now admits NO cell. Symmetric necks on this axis are necessarily even-width.
-- `test_water_blob_stays_left_right_symmetric_under_gravity` had **documented the bug as a fact**,
-  adapting its mirror map to `x -> w - x`. That accommodation is gone. Note this means the
-  red-black experiment `d6d843b`'s conclusion — that the residual lean is order-independent — was
-  drawn against an off-axis metric; it was re-tested on 2026-09-08 with the corrected axis and
-  metric and **still holds**: `late_persistent_run` stays 75/43.
-- `test_no_floating_sand_under_gravity` reimplemented the vessel boundary inline, twice, with a
-  hardcoded `center_x = 32.0`. It now fills and asserts from the real mask. If you find another
-  test with its own copy of the shape math, that is the bug.
-
-See `artifacts/design/ASYMMETRY-2026-09-08.md`.
+- **Shape ids are wire format.** `SandboxShape` has explicit discriminants because the UI sends
+  shapes as integers. Id 4 (`MultiStageHourglass`, deleted 2026-09-19) is retired; never reuse it.
+- **The vessel shape is the physics mask.** Structure is defined once in `eval_sandbox_shape`; the
+  rendered outline is the same function at render resolution. If a test has its own copy of the
+  shape math, that is the bug.
+- **The mirror axis is `(w-1)/2`, a half-integer for even `w`.** A strict `|dx| < 0.5` admits no
+  cell; symmetric necks are necessarily even-width. `test_vessel_masks_are_left_right_symmetric`
+  pins it. `ChamberNetwork` is deliberately asymmetric and exempted.
+- **Chamber network pipes span at most one column** (`|Δcol| <= 1`); the dogleg pipes that
+  wider routings needed were removed. Pipe width has a cell floor (`NET_PIPE_HW_MIN_CELLS`) so
+  small grids don't seal pipes. Design record: `artifacts/design/network-2026-09-19/`.
+- **Edge-velocity filters are a known trap.** Two filters added to the edge velocity on 2026-08-16
+  caused nine test regressions that were labelled "pre-existing" for two weeks. See the TOMBSTONE
+  comment in `physics.rs` before touching that expression.
+- **LOD blocks are a constant 8 cells** (`DEFAULT_BLOCK_SIZE`); `budget_n` and the adaptive
+  throttles derive from block count. `budget_n` does not cap simulated blocks (MUST is exempt).
 
 ## Verification is the deployed page
 
 `main` auto-deploys to GitHub Pages via `.github/workflows/deploy.yml`. The wasm build is the only
-surface the project is actually tested against, so nothing is really verified until it is pushed
-and loaded there. There is no working browser driver on this machine — never claim to have
-screenshotted or visually confirmed the app.
+surface the project is tested against, so nothing is verified until it is pushed and loaded there.
+There is no working browser driver on this machine — never claim to have screenshotted or visually
+confirmed the app.
 
 ## Before proposing a design
 
-Search `artifacts/design/` for prior attempts at the same lever before agreeing to a mechanism, not
-at review time. This project rejects designs that measured *well* — `LATERAL-COARSE-CORRECTION.md`
-Design 1 scored +41% spread and was killed on visible seams — so "would this help?" will not
-surface the prior attempt. Only the archive will.
+Search `artifacts/design/` for prior attempts at the same lever before agreeing to a mechanism.
+This project rejected designs that measured *well* (`LATERAL-COARSE-CORRECTION.md` Design 1 scored
++41% spread and was killed on visible seams; sub-cell coverage and the overfill model likewise).
+Open ideas that were never built are in `artifacts/tickets/INDEX.md`.
