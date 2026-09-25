@@ -2,6 +2,7 @@
 name = "sandart-sim"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
 glam = "0.29.0"
@@ -18,7 +19,6 @@ phase-timing = []
 pprof = { version = "0.13.0", features = ["flamegraph"] }
 sandart-pattern = { path = "../sandart-pattern" }
 # Already resolved in the workspace Cargo.lock at this exact version (pulled in transitively via
-# egui/eframe's dependency graph), so this adds no new external dependency -- just makes an
-# already-locked crate available to sandart-sim's own examples. Used only by
-# examples/diag_upscale_reconstruction.rs to write PNG crops; never touches wasm.
+# egui/eframe's dependency graph), so this adds no new external dependency. Used only by
+# examples/proto_networks.rs to write PNG frames; never touches wasm.
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
