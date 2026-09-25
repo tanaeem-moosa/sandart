@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -58,8 +56,6 @@ pub struct AppConfig {
     pub marble_size: f32,
     /// Spacing between spiral turns as a fraction of the table radius (0.005 to 0.2).
     pub spiral_spacing: f32,
-    /// Flag to enable auto-play of the spiral pattern.
-    pub auto_play: bool,
     /// Light brightness slider (0.0 to 3.0).
     pub light_brightness: f32,
     /// Selection of current drawing pattern source.
@@ -106,7 +102,6 @@ impl Default for AppConfig {
             speed: 0.5,
             marble_size: 0.018,
             spiral_spacing: 0.030,
-            auto_play: false,
             light_brightness: 1.3,
             pattern_mode: PatternMode::Manual,
             custom_file_path: String::new(),
@@ -141,7 +136,6 @@ mod tests {
         assert_eq!(config.marble_size, 0.018);
         assert_eq!(config.spiral_spacing, 0.030);
         assert_eq!(config.light_brightness, 1.3);
-        assert!(!config.auto_play);
         assert_eq!(config.pattern_mode, PatternMode::Manual);
         assert_eq!(config.custom_file_path, "");
         assert_eq!(config.light_angle, 0.7853982);

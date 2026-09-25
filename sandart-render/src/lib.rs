@@ -48,11 +48,13 @@ pub struct LightingUniforms {
     pub led_mode: u32,         // 0 = Single, 1 = RainbowRing, 2 = ColorCycle
     pub time: f32,             // elapsed animation time
     pub marble_count: u32,     // active marbles count (1 to 5)
-    pub material_mode: u32,    // active material preset (0 to 8)
-    pub sandbox_shape: u32,    // active sandbox shape (0 = Circle, 1 = Square, 2 = Oval)
+    // `material_mode`, `sandbox_shape`, `neck_width` and `hourglass_curve` used to sit here:
+    // uploaded by every caller (sandart-wasm, the desktop app, this crate's own tests) but never
+    // read by shader.wgsl -- the vessel outline and any material-dependent colouring come from
+    // `shape_mask_tex`/`cell_colors` instead, not from these scalars. Removed 2026-09-24; see
+    // this struct's byte-count comments below for how the removal (16 bytes, 4 whole u32/f32
+    // scalars) kept every later field's offset a clean multiple of 4 without new padding.
     pub color_mode: u32,       // active color mode (0 = Solid, 1 = Gradient/Pattern)
-    pub neck_width: f32,       // user-controlled neck width
-    pub hourglass_curve: f32,  // user-controlled hourglass shape curvature
     pub quantile_count: u32,  // active quantile lines: 0 = off, 3 = quartiles, 9 = deciles
     /// Simulation grid resolution `S` (64/128/256/512), as f32 for direct use in shader
     /// texel-coordinate math. Replaces what used to be a pure alignment-padding field
@@ -104,8 +106,8 @@ pub struct LightingUniforms {
     /// `S` split from `n` (`S = n / m`, `sandart-wasm`'s `set_sim_downscale`). Unlike `sim_size`
     /// this is NOT a repurposed padding slot: at the time this field was added every one of
     /// `_pad_heatmap_tail0..3`'s slots was already spent by the four now-removed debug overlay
-    /// flags (see `_pad_heatmap_tail0`'s doc comment above), so this grows the struct from 240 to
-    /// 256 bytes -- the next 16-byte multiple, since the struct's overall alignment is 16 (forced
+    /// flags (see `_pad_heatmap_tail0`'s doc comment above), so this grows the struct from 224 to
+    /// 240 bytes -- the next 16-byte multiple, since the struct's overall alignment is 16 (forced
     /// by `quantile_positions`/`marbles`). Used only where a shader quantity is genuinely
     /// per-render-pixel rather than per-simulation-cell -- currently just the grain hash
     /// (`hash(floor(uv * render_size))`), which is meant to look like fixed-size sand grains on
@@ -114,8 +116,8 @@ pub struct LightingUniforms {
     pub render_size: f32,
     /// Explicit trailing padding, added alongside `render_size` above for the same reason
     /// `_pad_heatmap_tail0..3` originally existed (see that field's doc comment): `render_size`
-    /// lands the struct at 244 bytes, and Rust would otherwise silently insert 12 bytes of
-    /// TRAILING padding to round back up to the next 16-byte multiple (256) -- which
+    /// lands the struct at 228 bytes, and Rust would otherwise silently insert 12 bytes of
+    /// TRAILING padding to round back up to the next 16-byte multiple (240) -- which
     /// `derive(Pod)` correctly refuses to allow, since padding bytes are uninitialized and Pod
     /// promises every byte is defined. Three bare `u32` fields, NOT `[u32; 3]`: WGSL's
     /// uniform-address-space layout rules force an array's per-element stride to 16 bytes (see
@@ -822,11 +824,7 @@ mod tests {
                 led_mode: 1,
                 time: 0.0,
                 marble_count: 1,
-                material_mode: 0,
-                sandbox_shape: 0,
                 color_mode: 0,
-                neck_width: 0.005,
-                hourglass_curve: 0.6,
                 quantile_count: 0,
                 sim_size: GRID_SIZE as f32,
                 quantile_positions: [[0.0; 4]; 3],
@@ -980,243 +978,8 @@ mod tests {
             read_buffer.unmap();
         });
     }
-
-    #[test]
-    #[ignore] // Run this test explicitly to save a render to disk
-    fn test_save_render() {
-        pollster::block_on(async {
-            let Some((device, queue)) = get_device_and_queue().await else {
-                eprintln!("Skipping GPU test: No compatible wgpu adapter found.");
-                return;
-            };
-
-            let width = 512;
-            let height = 512;
-            let target_format = wgpu::TextureFormat::Rgba8Unorm;
-
-            let mut resources = HeightmapRenderer::new(&device, target_format, GRID_SIZE, GRID_SIZE);
-
-            let camera_uniforms = CameraUniforms {
-                view_proj: [
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
-                ],
-                camera_pos: [0.0, 0.0, 2.0, 0.0],
-            };
-            resources.update_camera(&queue, &camera_uniforms);
-
-            let texture_desc = wgpu::TextureDescriptor {
-                label: Some("test_target_texture"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: target_format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            };
-
-            let depth_texture_desc = wgpu::TextureDescriptor {
-                label: Some("test_depth_texture"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth24Plus,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            };
-
-            let buffer_desc = wgpu::BufferDescriptor {
-                label: Some("test_readback_buffer"),
-                size: (width * height * 4) as u64,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            };
-
-            let configs = [
-                // (suffix, material_mode, led_mode, marble_count, marble_pos_x, marble_pos_y, marble_z)
-                ("water_moonlight_circle", 9, 3, 1, 0.0, 0.0, 0.35),
-                ("vegetable_oil_moonlight", 12, 3, 1, 0.0, 0.0, 0.35),
-                ("ferrofluid_moonlight", 11, 3, 1, 0.0, 0.0, 0.35),
-                ("water_rainbowmoon", 9, 4, 1, 0.0, 0.0, 0.35),
-                ("calm_water_moonlight", 13, 3, 1, 0.0, 0.0, 0.35),
-                ("yogurt_moonlight", 14, 3, 1, 0.0, 0.0, 0.35),
-                ("coarse_sand_moonlight", 15, 3, 1, 0.0, 0.0, 0.35),
-            ];
-
-            for (suffix, mat_mode, led_mode, marble_count, m_x, m_y, m_z) in configs {
-                let mut heightmap_data = vec![0.0f32; GRID_SIZE * GRID_SIZE * 4];
-                let (wetness, grain_size) = match mat_mode {
-                    9 => (1.00, 0.00), // Water
-                    11 => (0.00, 0.45), // Ferrofluid (which is magnetism-less dry sand now, since magnetism was removed as part of this)
-                    12 => (0.85, 0.00), // VegetableOil
-                    13 => (0.90, 0.00), // CalmWater
-                    14 => (0.75, 0.08), // Yogurt
-                    15 => (0.00, 0.80), // CoarseSand
-                    _ => (0.00, 0.45), // Default
-                };
-
-                for y in 0..GRID_SIZE {
-                    for x in 0..GRID_SIZE {
-                        let dx = (x as f32 - (GRID_SIZE / 2) as f32) / (GRID_SIZE as f32);
-                        let dy = (y as f32 - (GRID_SIZE / 2) as f32) / (GRID_SIZE as f32);
-                        let r = (dx * dx + dy * dy).sqrt();
-
-                        let h = if mat_mode == 11 { // Ferrofluid
-                            let mut spike_pattern = 0.0f32;
-                            if r < 0.22 {
-                                let weight = (1.0 - r / 0.22).max(0.0);
-                                let base_pull = weight * 0.25;
-                                let angle = dy.atan2(dx);
-                                let radial_spikes = (angle * 24.0).cos();
-                                let concentric_spikes = (r * 2.0 * std::f32::consts::PI / 0.012).cos();
-                                let pattern = 0.5 + 0.5 * radial_spikes * concentric_spikes;
-                                spike_pattern = base_pull * (0.3 + 0.7 * pattern);
-                            }
-                            (0.35 + spike_pattern).clamp(0.0, 1.0)
-                        } else {
-                            let decay = if mat_mode == 13 { 20.0 } else { 6.0 };
-                            let ripple = 0.045 * (r * 75.0).cos() * (-r * decay).exp();
-                            (0.35 + ripple).clamp(0.0, 1.0)
-                        };
-
-                        let idx = y * GRID_SIZE + x;
-                        heightmap_data[idx * 4 + 0] = h;
-                        heightmap_data[idx * 4 + 1] = wetness;
-                        heightmap_data[idx * 4 + 2] = grain_size;
-                        heightmap_data[idx * 4 + 3] = 1.0;
-                    }
-                }
-                resources.update_heightmap(&queue, &heightmap_data);
-
-                let uniforms = LightingUniforms {
-                    light_dir: [0.0, 0.0, 1.0, 0.0],
-                    light_color: [0.85, 0.90, 0.95, 1.0],
-                    sand_color: [0.92, 0.89, 0.82, 1.0],
-                    light_brightness: 1.4,
-                    shadow_enabled: 1,
-                    led_mode,
-                    time: 0.0,
-                    marble_count,
-                    material_mode: mat_mode,
-                    sandbox_shape: 0, // Circle
-                    color_mode: 0,
-                    neck_width: 0.005,
-                    hourglass_curve: 0.6,
-                    quantile_count: 0,
-                    sim_size: GRID_SIZE as f32,
-                    quantile_positions: [[0.0; 4]; 3],
-                    marbles: [
-                        MarbleUniform { pos: [m_x, m_y], radius: 0.018, z_pos: m_z },
-                        MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
-                        MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
-                        MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
-                        MarbleUniform { pos: [0.0, 0.0], radius: 0.018, z_pos: 0.35 },
-                    ],
-                    _pad_heatmap_tail0: 0,
-                    _pad_heatmap_tail1: 0,
-                    _pad_heatmap_tail2: 0,
-                    _pad_heatmap_tail3: 0,
-                    render_size: GRID_SIZE as f32,
-                    _pad_uniform_tail0: 0,
-                    _pad_uniform_tail1: 0,
-                    _pad_uniform_tail2: 0,
-                };
-                resources.update_uniforms(&queue, &uniforms);
-
-                let texture = device.create_texture(&texture_desc);
-                let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let depth_texture = device.create_texture(&depth_texture_desc);
-                let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-                let read_buffer = device.create_buffer(&buffer_desc);
-
-                let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("test_encoder"),
-                });
-
-                {
-                    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("test_render_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: &texture_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: &depth_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
-
-                    render_pass.set_viewport(0.0, 0.0, width as f32, height as f32, 0.0, 1.0);
-                    resources.draw(&mut render_pass, &camera_uniforms, &uniforms);
-                }
-
-                encoder.copy_texture_to_buffer(
-                    wgpu::ImageCopyTexture {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    wgpu::ImageCopyBuffer {
-                        buffer: &read_buffer,
-                        layout: wgpu::ImageDataLayout {
-                            offset: 0,
-                            bytes_per_row: Some(width * 4),
-                            rows_per_image: Some(height),
-                        },
-                    },
-                    wgpu::Extent3d {
-                        width,
-                        height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-
-                queue.submit(Some(encoder.finish()));
-
-                let buffer_slice = read_buffer.slice(..);
-                let (tx, rx) = std::sync::mpsc::channel();
-                buffer_slice.map_async(wgpu::MapMode::Read, move |res| {
-                    tx.send(res).unwrap();
-                });
-
-                device.poll(wgpu::Maintain::Wait);
-                rx.recv().unwrap().expect("Failed to map readback buffer");
-
-                let data = buffer_slice.get_mapped_range();
-                let raw_data = data.to_vec();
-                drop(data);
-                read_buffer.unmap();
-
-                let filename = format!("target/{}.raw", suffix);
-                std::fs::write(filename, raw_data).unwrap();
-            }
-        });
-    }
 }
 
 // Compile-time layout/size verification assertions for WebGPU uniform alignments
-const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 256);
+const _: () = assert!(std::mem::size_of::<LightingUniforms>() == 240);
 const _: () = assert!(std::mem::size_of::<CameraUniforms>() == 80);

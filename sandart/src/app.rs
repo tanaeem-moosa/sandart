@@ -989,11 +989,7 @@ impl eframe::App for SandArtApp {
                 },
                 time: self.elapsed_time % (2.0 * std::f32::consts::PI * 100.0),
                 marble_count: self.config.marble_count,
-                material_mode: self.config.material_mode as u32,
-                sandbox_shape: self.config.sandbox_shape as u32,
                 color_mode: 0,
-                neck_width: self.sim.neck_width,
-                hourglass_curve: self.sim.hourglass_curve,
                 // The mass-distribution quantile overlay is a sandart-wasm/web feature only;
                 // the native desktop app doesn't have a control for it, so it stays off here.
                 quantile_count: 0,

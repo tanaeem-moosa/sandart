@@ -8,7 +8,7 @@ use wasm_bindgen::JsCast;
 
 use sandart_sim::{ActiveBounds, DrawingSimulation, MaterialMode, NetworkRouting, QuantileMode, SandboxShape, SimulatorMode, MAX_QUANTILE_LINES};
 use sandart_render::{HeightmapRenderer, CameraUniforms, LightingUniforms, MarbleUniform};
-use sandart_pattern::{PlaybackController, PlaybackState, parse_gcode, parse_thr};
+use sandart_pattern::{PlaybackController, PlaybackState};
 
 #[wasm_bindgen]
 pub struct WasmSimulationState {
@@ -486,17 +486,8 @@ impl WasmSimulationState {
     /// feature name for JS-side compatibility -- every existing caller in `demo.js` (buffer
     /// sizing, neck-slider readouts) already wants the SIM size specifically, not the render size,
     /// so this getter's semantics are unchanged even though what it reads is now derived
-    /// (`render_size / sim_downscale`) rather than the only size in the app. Same value as
-    /// `get_sim_size` below; both exist so new call sites can name their intent.
+    /// (`render_size / sim_downscale`) rather than the only size in the app.
     pub fn get_grid_size(&self) -> u32 {
-        self.sim_size as u32
-    }
-
-    /// Current simulation grid resolution `S` (64/128/256/512) -- identical to `get_grid_size`,
-    /// under the name that matches `set_sim_downscale`/`get_render_size` below. New call sites
-    /// should prefer this one; `get_grid_size` stays only for JS callers written before the
-    /// sim-downscale feature existed.
-    pub fn get_sim_size(&self) -> u32 {
         self.sim_size as u32
     }
 
@@ -846,60 +837,6 @@ impl WasmSimulationState {
         self.temporal_alpha = alpha.clamp(0.01, 1.0);
     }
 
-    pub fn load_pattern_gcode(&mut self, content: &str) -> bool {
-        if let Ok(points) = parse_gcode(content) {
-            self.playback.clear_waypoints();
-            self.playback.waypoints[0] = points;
-            self.playback.randomize_speeds(1, self.sim.seed);
-            self.playback.state = PlaybackState::Playing;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn load_pattern_thr(&mut self, content: &str) -> bool {
-        if let Ok(points) = parse_thr(content) {
-            self.playback.clear_waypoints();
-            self.playback.waypoints[0] = points;
-            self.playback.randomize_speeds(1, self.sim.seed);
-            self.playback.state = PlaybackState::Playing;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn load_multi_pattern(&mut self, format: &str, file_content: &str, arms: u32) -> bool {
-        let arms = arms.clamp(1, 5) as usize;
-        let points_res = if format == "thr" {
-            parse_thr(file_content)
-        } else {
-            parse_gcode(file_content)
-        };
-
-        if let Ok(base_points) = points_res {
-            self.playback.clear_waypoints();
-            for j in 0..arms {
-                let angle_offset = (j as f32 / arms as f32) * 2.0 * std::f32::consts::PI;
-                let mut rotated = Vec::with_capacity(base_points.len());
-                for p in &base_points {
-                    let cos_a = angle_offset.cos();
-                    let sin_a = angle_offset.sin();
-                    let rx = p.x * cos_a - p.y * sin_a;
-                    let ry = p.x * sin_a + p.y * cos_a;
-                    rotated.push(glam::Vec2::new(rx, ry));
-                }
-                self.playback.waypoints[j] = rotated;
-            }
-            self.playback.randomize_speeds(arms, self.sim.seed);
-            self.playback.state = PlaybackState::Playing;
-            true
-        } else {
-            false
-        }
-    }
-
     pub fn load_preset_pattern(&mut self, pattern_type: &str) -> bool {
         self.playback.clear_waypoints();
         self.playback.loop_pattern = true;
@@ -1170,10 +1107,10 @@ impl WasmSimulationState {
             };
         }
 
-        let (render_shape, render_marble_count) = if self.simulator_mode == SimulatorMode::SandFall {
-            (self.sandbox_shape as u32, 0u32)
+        let render_marble_count = if self.simulator_mode == SimulatorMode::SandFall {
+            0u32
         } else {
-            (self.sandbox_shape as u32, self.marble_count)
+            self.marble_count
         };
 
         // --- Quantile mass-distribution lines (Sand-fall only) ---
@@ -1236,11 +1173,7 @@ impl WasmSimulationState {
             led_mode: self.led_mode,
             time: self.elapsed_time,
             marble_count: render_marble_count,
-            material_mode: self.material_mode as u32,
-            sandbox_shape: render_shape,
             color_mode: self.color_mode,
-            neck_width: self.sim.neck_width,
-            hourglass_curve: self.sim.hourglass_curve,
             quantile_count,
             sim_size: self.sim_size as f32,
             quantile_positions: quantile_positions_uniform,
@@ -1456,10 +1389,6 @@ impl WasmSimulationState {
             }
         }
         self.renderer.update_heightmap_partial(&self.queue, &interleaved, render_bounds);
-    }
-
-    pub fn get_heightmap(&self) -> js_sys::Float32Array {
-        unsafe { js_sys::Float32Array::view(self.sim.heightmap.as_slice()) }
     }
 
     pub fn get_active_block_counts(&self) -> js_sys::Int32Array {

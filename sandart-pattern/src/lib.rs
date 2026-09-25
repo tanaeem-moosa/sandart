@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use glam::Vec2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1057,7 +1055,7 @@ mod tests {
         }
 
         // Multi-spiral
-        let multi = multi_spiral_helper(0.03, 3);
+        let multi = generate_multi_spiral(0.03, 3);
         assert_eq!(multi.len(), 3);
         for arm in &multi {
             assert!(!arm.is_empty());
@@ -1101,8 +1099,4 @@ mod tests {
             assert!(p.length() <= 0.92, "Unicorn point {:?} out of bounds", p);
         }
     }
-}
-
-fn multi_spiral_helper(spacing: f32, count: usize) -> Vec<Vec<Vec2>> {
-    generate_multi_spiral(spacing, count)
 }

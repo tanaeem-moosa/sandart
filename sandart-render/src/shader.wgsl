@@ -68,11 +68,10 @@ struct LightingUniforms {
     led_mode: u32,
     time: f32,
     marble_count: u32,
-    material_mode: u32,
-    sandbox_shape: u32,
+    // `material_mode`, `sandbox_shape`, `neck_width` and `hourglass_curve` used to sit here --
+    // uploaded from Rust but never read below. Removed 2026-09-24; see the matching Rust-side
+    // `LightingUniforms` doc comment in sandart-render/src/lib.rs.
     color_mode: u32,
-    neck_width: f32,
-    hourglass_curve: f32,
     quantile_count: u32,
     // Simulation grid resolution `S`. Mirrors the Rust-side `LightingUniforms::sim_size` in
     // sandart-render/src/lib.rs exactly -- see that field's doc comment for why every
