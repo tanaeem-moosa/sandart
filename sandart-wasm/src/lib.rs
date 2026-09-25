@@ -120,7 +120,6 @@ pub struct WasmSimulationState {
     light_angle: f32,
     shadows_enabled: bool,
     elapsed_time: f32,
-    clock_minute: u32,
     color_mode: u32,
 
     // Quantile mass-distribution overlay (UI-facing setting; only actually applied to `sim`
@@ -288,7 +287,6 @@ impl WasmSimulationState {
             light_angle: 0.0,
             shadows_enabled: true,
             elapsed_time: 0.0,
-            clock_minute: 99,
             color_mode: 0,
             quantile_mode: QuantileMode::Off,
             last_dt: 1.0 / 60.0,
@@ -321,18 +319,6 @@ impl WasmSimulationState {
         let mut targets = [None; 5];
 
         if self.simulator_mode == SimulatorMode::Sandbox {
-            if self.pattern_mode == "Clock" {
-                let date = js_sys::Date::new_0();
-                let m = date.get_minutes();
-
-                if m != self.clock_minute {
-                    self.sim.reset();
-                    self.full_upload_needed = true;
-                    self.clock_minute = m;
-                    self.load_preset_pattern("clock");
-                }
-            }
-
             if self.pattern_mode == "Manual" {
                 let mut target_pos = None;
                 if shift_pressed {
@@ -916,7 +902,7 @@ impl WasmSimulationState {
 
     pub fn load_preset_pattern(&mut self, pattern_type: &str) -> bool {
         self.playback.clear_waypoints();
-        self.playback.loop_pattern = pattern_type != "clock";
+        self.playback.loop_pattern = true;
 
         let base_waypoints = match pattern_type {
             "spiral" => {
@@ -976,13 +962,6 @@ impl WasmSimulationState {
             }
             "unicorn" => {
                 sandart_pattern::generate_unicorn()
-            }
-            "clock" => {
-                let date = js_sys::Date::new_0();
-                let h = date.get_hours();
-                let m = date.get_minutes();
-                self.clock_minute = m;
-                sandart_pattern::generate_clock_pattern(h, m, 0.0, 1)
             }
             _ => return false,
         };

@@ -87,8 +87,6 @@ pub struct SandArtApp {
     pub camera_elevation: f32,
     /// Camera zoom (distance from origin).
     pub camera_zoom: f32,
-    /// Track the current clock minute for Clock Mode transitions.
-    pub clock_minute: u32,
 }
 
 impl SandArtApp {
@@ -137,7 +135,6 @@ impl SandArtApp {
             camera_azimuth: 0.0,
             camera_elevation: 0.8, // ~45 degrees
             camera_zoom: 2.8,
-            clock_minute: 99,
         }
     }
 
@@ -209,7 +206,7 @@ impl SandArtApp {
     /// Helper to load the selected mathematical pattern based on config parameters
     fn load_selected_pattern(&mut self) {
         self.playback.clear_waypoints();
-        self.playback.loop_pattern = self.config.pattern_mode != crate::config::PatternMode::Clock;
+        self.playback.loop_pattern = true;
         self.pattern_error = None;
 
         let base_waypoints = match self.config.pattern_mode {
@@ -261,14 +258,6 @@ impl SandArtApp {
             }
             crate::config::PatternMode::ZenMandala => {
                 crate::pattern::generate_zen_mandala()
-            }
-            crate::config::PatternMode::Clock => {
-                use chrono::Timelike;
-                let now = chrono::Local::now();
-                let h = now.hour();
-                let m = now.minute();
-                self.clock_minute = m;
-                crate::pattern::generate_clock_pattern(h, m, 0.0, 1)
             }
             crate::config::PatternMode::Dinosaur => {
                 crate::pattern::generate_dinosaur()
@@ -374,19 +363,6 @@ impl eframe::App for SandArtApp {
         self.dt = ctx.input(|i| i.stable_dt).min(0.1);
         self.elapsed_time += self.dt;
 
-        // Dynamic clock state checking if clock mode is selected
-        if self.config.pattern_mode == crate::config::PatternMode::Clock {
-            use chrono::Timelike;
-            let now = chrono::Local::now();
-            let m = now.minute();
-
-            if m != self.clock_minute {
-                self.sim.reset();
-                self.full_upload_needed = true;
-                self.clock_minute = m;
-                self.load_selected_pattern();
-            }
-        }
 
 
         // Draw the top panel for basic info
@@ -566,13 +542,6 @@ impl eframe::App for SandArtApp {
                                     &mut self.config.pattern_mode,
                                     crate::config::PatternMode::Unicorn,
                                     "Unicorn Outline",
-                                )
-                                .changed();
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.config.pattern_mode,
-                                    crate::config::PatternMode::Clock,
-                                    "Clock Mode",
                                 )
                                 .changed();
                             if changed {

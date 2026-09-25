@@ -20,7 +20,6 @@ pub enum PatternMode {
     Butterfly,
     ZenWaves,
     ZenMandala,
-    Clock,
     Dinosaur,
     Unicorn,
 }
