@@ -927,11 +927,7 @@ function loadActivePattern() {
         state.set_pattern_mode('Manual');
         return;
     }
-    if (type === 'clock') {
-        state.set_pattern_mode('Clock');
-    } else {
-        state.set_pattern_mode('Pattern');
-    }
+    state.set_pattern_mode('Pattern');
     state.load_preset_pattern(type);
 }
 

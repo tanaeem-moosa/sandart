@@ -1179,20 +1179,12 @@ function __wbg_get_imports() {
             const ret = arg0.getExtension(getStringFromWasm0(arg1, arg2));
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
         }, arguments); },
-        __wbg_getHours_91ac680ae491b8ea: function(arg0) {
-            const ret = arg0.getHours();
-            return ret;
-        },
         __wbg_getIndexedParameter_b89471689978f243: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = arg0.getIndexedParameter(arg1 >>> 0, arg2 >>> 0);
             return ret;
         }, arguments); },
         __wbg_getMappedRange_4f36f39e059a63c6: function(arg0, arg1, arg2) {
             const ret = arg0.getMappedRange(arg1, arg2);
-            return ret;
-        },
-        __wbg_getMinutes_c1c2573becc0c7b5: function(arg0) {
-            const ret = arg0.getMinutes();
             return ret;
         },
         __wbg_getParameter_015942a7ad566b20: function() { return handleError(function (arg0, arg1) {
@@ -1612,10 +1604,6 @@ function __wbg_get_imports() {
         },
         __wbg_navigator_391291470f58c650: function(arg0) {
             const ret = arg0.navigator;
-            return ret;
-        },
-        __wbg_new_0_445c13a750296eb6: function() {
-            const ret = new Date();
             return ret;
         },
         __wbg_new_227d7c05414eb861: function() {
