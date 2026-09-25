@@ -19,7 +19,7 @@ recorded here and their text is in git history. OPEN ticket files are kept in th
 
 ## Summary
 
-37 DONE, 4 OBSOLETE, 18 OPEN.
+36 DONE, 13 OBSOLETE, 10 OPEN (updated 2026-09-24 after the head-field subsystem was deleted).
 
 ## Table
 
@@ -68,21 +68,21 @@ recorded here and their text is in git history. OPEN ticket files are kept in th
 | 52 | 2.29 — Material forms straight VERTICAL lines: no lateral mixing in the draining funnel | OPEN | Its lead hypothesis (sand can't move sideways at depth) was refuted, and its mirrored-pair measurement technique was reused to close #44 — but the vertical-line report itself was never explicitly closed. |
 | 53 | 2.30 — Pressure projection costs +33% to +53% ms/tick | OPEN | Documented, accepted cost at the time; no optimisation pass found in git history since. |
 | 54 | 2.31 — Make pressure drive EVERY flow | OPEN | Vertical half ("deep material falls faster") shipped in `bb0633e`. Lateral half ("empty space next to material spreads sideways under pressure") was never delivered. |
-| 55 | 2.32 — REWRITE: unified hydraulic-head field for liquid AND solids | DONE | The field (`task55_head_field::advance_head_field`, max-propagation) is shipped and deployed; transport is wired and correct on every spec, default OFF. Its known follow-on defects are tracked as their own tickets below (#62, #64, #66, #67, #68, #69), all still open. |
+| 55 | 2.32 — REWRITE: unified hydraulic-head field for liquid AND solids | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
 | 56 | 2.33 — ASYMMETRY HUB | DONE | The macroscopic MultiNeckHourglass pile asymmetry this ticket chased is resolved by the same 2026-09-08 mirror-axis fix as #44. The ticket's own randomness/edge-ownership hypotheses were correctly demoted before that fix landed. |
-| 57 | 2.34 — BLOCKS making the fresh pressure field default | OPEN | `fresh_pressure_field` is still `false` by default in `sandart-sim/src/lib.rs` and the toggle was never deleted; the walls-test regression this ticket diagnosed (66/20 at grid 64) still blocks making it default. |
+| 57 | 2.34 — BLOCKS making the fresh pressure field default | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
 | 58 | 2.35 — "is not supported" primitive: support_fraction | DONE | Shipped `23e48e9`, reused by #47's predicate exactly as this ticket intended. |
 | 59 | 2.36 — NOT A DEFECT: hourglass discharge IS fill-height independent | DONE | Confirmed not a defect; original 14x reading was a drained-reservoir measurement-window artifact. |
 | 60 | 2.37 — VERTICAL_PRESSURE_CAP_MULT clamps the vertical head at <1 cell of depth | OPEN | Still `const VERTICAL_PRESSURE_CAP_MULT: f32 = 1.0;` in `physics.rs` — #54's "deep material falls faster" is still capped inert beyond roughly one cell of depth, exactly as this ticket found. |
 | 61 | 2.38 — Add a U-shaped flow-through vessel | DONE | Shipped `53516eb`; `SandboxShape::UTubeFlowThrough` (id 9) still present. |
-| 62 | 2.39 — Warm-start the head field with a decay term | OPEN | Explicitly gated on a motivating measurement ("do not start without one") that was never taken; not started. |
-| 63 | 2.40 — Make material flow rate sensitive to pressure | OPEN | Base feature shipped behind a toggle (`73adbf6`), but the user's nonlinear 10-vs-20-depth requirement is blocked by #67, which is also still open. |
-| 64 | 2.41 — Surface levelling does not complete at w=512 | OPEN | No fix found in git history since the 2026-08-07 measurement; head-field transport is still recorded as slower than legacy at w=512. |
+| 62 | 2.39 — Warm-start the head field with a decay term | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
+| 63 | 2.40 — Make material flow rate sensitive to pressure | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
+| 64 | 2.41 — Surface levelling does not complete at w=512 | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
 | 65 | 2.42 — MISATTRIBUTED, closed | DONE | Closed correctly as misattribution (missing change-listener, not the block heat-map); the real defect was re-filed as #68. |
-| 66 | 2.43 — Advancing the head field costs +219% ms/tick at w=512 | OPEN | Allocation hypothesis (`advance_head_field` allocating six whole-grid Vecs/tick) was never confirmed or fixed in git history. |
-| 67 | 2.44 — The head field pins an entire DRAINING column to zero pressure | OPEN | No fix found; transitive-support-as-free-fall bug over orifices appears unaddressed. |
-| 68 | 2.45 — Head-field liquid transport BREAKS the pressure field | OPEN | No fix found; this is what blocks #55's transport path from ever being enabled by default. |
-| 69 | 2.46 — Pressure-sensitive flow badly slows a FED falling stream | OPEN | No fix found; the free-fall exemption still only covers compact unsupported slabs, not a fed stream landing on standing material. |
+| 66 | 2.43 — Advancing the head field costs +219% ms/tick at w=512 | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
+| 67 | 2.44 — The head field pins an entire DRAINING column to zero pressure | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
+| 68 | 2.45 — Head-field liquid transport BREAKS the pressure field | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
+| 69 | 2.46 — Pressure-sensitive flow badly slows a FED falling stream | OBSOLETE | Head-field / pressure-toggle subsystem deleted 2026-09-24 in the end-of-project cleanup: it was default-off and unreachable from the app. Text and code are in git history. |
 | 70 | 2.47 — DESIGN DIRECTION: replace the equilibrium head field with per-cell OVERFILL | OBSOLETE | Implemented in full (`c844d68` through the multiplicative/pressure-domain/stiffness-dial iterations) and then entirely deleted 2026-08-30 — "its own instruments recorded no benefit" (`CLAUDE.md`, `artifacts/design/SESSION-HANDOVER-2026-08-30.md`). Superseded, not pursued further. |
 
 ## Open tickets (18), kept as files

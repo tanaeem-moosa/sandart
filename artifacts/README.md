@@ -13,7 +13,7 @@ and how to build/test it. `HANDOVER.md` below is historical.
 | Path | What is in it |
 |---|---|
 | `tickets/INDEX.md` | Full triage of all 59 exported tickets: shipped, deleted-with-their-subsystem, or still-open ideas. Read this before the ticket files themselves. |
-| `tickets/*.md` | Only the 18 tickets still triaged OPEN — real ideas or real unfixed defects, mostly clustered around the hydraulic-head-field subsystem (#55, default-off) and its follow-on bugs (#62–#69). DONE and OBSOLETE tickets were removed; their text is in git history and their outcome is in the index. |
+| `tickets/*.md` | Only the 10 tickets still triaged OPEN — real ideas or real unfixed defects in the shipped simulation. The hydraulic-head-field subsystem (#55) and its follow-on tickets were deleted with that code on 2026-09-24. DONE and OBSOLETE tickets were removed; their text is in git history and their outcome is in the index. |
 | `design/*.md` | Task briefs and findings written before/during the larger pieces of work, including several **rejected** designs — read before proposing a mechanism that resembles one of these; see `CLAUDE.md`'s "Before proposing a design" section. |
 | `design/cascade-2026-09-17/`, `design/network-2026-09-19/`, `design/upscale-2026-09-14/` | Prototype contact sheets and masks for, respectively, the (later deleted) cascade redesign, the chamber-network vessel that replaced it, and the upscale/downscale reconstruction work. Kept in full as the visual evidence behind those design docs. |
 | `HANDOVER.md` | Historical (superseded 2026-08-31, see the banner at its top) — the mid-project state before the overfill/coarse/block-clock deletion. Read it for why things were tried, never for what exists. |
@@ -29,7 +29,7 @@ surviving document.
 - `design/ASYMMETRY-2026-09-08.md` — the mirror-axis bug (`w/2` vs `(w-1)/2`) that made every
   vessel in the app asymmetric by construction; fixed the persistent left-drift/tendril complaints
   (tickets #44, #56); the residual mid-drain asymmetry is what `test_sandbox_wave_stays_left_right_symmetric`
-  and the #56 marker test still track.
+  and the water-blob guard test (the former #56 marker) still track.
 - `design/SESSION-HANDOVER-2026-08-30.md` — the bisect and deletion record for the overfill
   pressure model, the hierarchical coarse level, and the block-clock scheduler (~13k lines,
   measured no benefit over three weeks).
@@ -44,5 +44,6 @@ surviving document.
 - `upscale-2026-09-14/README.md` — the round-trip method (512 snapshot → downscale → upscale →
   compare) for judging any upscaling/reconstruction scheme.
 - `design/TASK55-*.md` — the hydraulic-head-field series (max-propagation head, elliptic solve,
-  multigrid attempt, perf work); the field it produced is shipped and default-off, see
+  multigrid attempt, perf work); the field it produced shipped default-off and was deleted
+  2026-09-24 as unreachable from the app, see
   `tickets/INDEX.md` #55.

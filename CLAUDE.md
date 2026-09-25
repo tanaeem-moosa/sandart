@@ -31,22 +31,18 @@ cargo check -p sandart-wasm --target wasm32-unknown-unknown --release
 
 ## Tests
 
-Integration tests do not run in the main test command; run them separately. This is the whole list:
-
 ```
-cargo test -p sandart-sim --lib --release     # ~65s, the main suite
-cargo test -p sandart-sim --release --test fresh_pressure_field_toggle
-cargo test -p sandart-sim --release --test head_field_transport_toggle
-cargo test -p sandart-sim --release --test perfect_simulation_determinism
-cargo test -p sandart-sim --release --test pressure_heatmap_head_field_toggle
-cargo test -p sandart-sim --release --test pressure_sensitive_flow_toggle
-cargo test -p sandart-render --release
+cargo test --workspace --release              # ~60s; sandart-sim's lib suite is the bulk of it
 node scripts/check_js.js                      # REQUIRED before any web/ push
 ```
 
-**Final state (2026-09-24): everything passes.** Lib suite 104 passed / 0 failed; all five
-integration targets, the render tests, doctests and `check_js.js` pass. Do not report "tests pass"
-without saying which target you ran.
+**Final state (2026-09-24): everything passes, with zero compiler warnings.** sandart-sim lib
+suite 101 passed / 0 failed / 0 ignored; sandart-render, sandart-pattern and the desktop app's
+tests pass; `check_js.js` passes. There are no integration-test targets, examples or ignored
+diagnostics any more: the end-of-project cleanup deleted everything the shipped app cannot reach
+(the hydraulic-head-field subsystem and its five switches, all prototypes, profilers and
+diagnostic tests), proven behaviour-preserving by identical whole-state hashes across six
+scenarios before and after. Do not report "tests pass" without saying which target you ran.
 
 `scripts/check_js.js` also validates `index.html` — `<div>` nesting balance, that
 `#viewport-container` is still inside `#app-container`, and that every `getElementById(...)` in
@@ -60,7 +56,7 @@ only if the defect grows past 1.25x its measured baseline. **If a change REDUCES
 baseline. Never raise a baseline to silence a failure.** Each test's header comment has the
 numbers and the history.
 
-- `test_neck_pulse_does_not_grow` (`task55_head_spec.rs`) — period-2 mass pulse in the column next
+- `test_neck_pulse_does_not_grow` — period-2 mass pulse in the column next
   to the hourglass neck (~6.5 cells/tick at w=64, ~38 at w=512).
 - `test_water_blob_stays_left_right_symmetric_under_gravity` — residual lean in draining water
   (the former #56 marker).
