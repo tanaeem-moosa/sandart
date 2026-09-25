@@ -935,19 +935,6 @@ function loadActivePattern() {
     state.load_preset_pattern(type);
 }
 
-// The pressure heat-map's colour ramp, mirrored from sandart-render/src/shader.wgsl: deep violet
-// -> hot magenta -> pale warm yellow, piecewise-linear with the knee at 0.5. Kept in sync BY HAND
-// -- if that ramp changes, this legend silently starts lying, which is worse than having no
-// legend, so change both together. Takes the normalised [0,1] texel value, returns 0-255 RGB.
-function pressureRampColor(t) {
-    const cold = [0.20, 0.05, 0.35];
-    const mid = [0.85, 0.10, 0.55];
-    const hot = [1.0, 0.92, 0.55];
-    const x = Math.max(0, Math.min(1, t));
-    const [a, b, k] = x < 0.5 ? [cold, mid, x * 2.0] : [mid, hot, (x - 0.5) * 2.0];
-    return [0, 1, 2].map((c) => Math.round((a[c] + (b[c] - a[c]) * k) * 255));
-}
-
 const CHAMBER_NETWORK_SHAPE = 10;
 
 function updateNetworkRoutingRowVisibility() {

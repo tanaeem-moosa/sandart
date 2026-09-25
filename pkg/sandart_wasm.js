@@ -93,20 +93,12 @@ export class WasmSimulationState {
      * feature name for JS-side compatibility -- every existing caller in `demo.js` (buffer
      * sizing, neck-slider readouts) already wants the SIM size specifically, not the render size,
      * so this getter's semantics are unchanged even though what it reads is now derived
-     * (`render_size / sim_downscale`) rather than the only size in the app. Same value as
-     * `get_sim_size` below; both exist so new call sites can name their intent.
+     * (`render_size / sim_downscale`) rather than the only size in the app.
      * @returns {number}
      */
     get_grid_size() {
         const ret = wasm.wasmsimulationstate_get_grid_size(this.__wbg_ptr);
         return ret >>> 0;
-    }
-    /**
-     * @returns {Float32Array}
-     */
-    get_heightmap() {
-        const ret = wasm.wasmsimulationstate_get_heightmap(this.__wbg_ptr);
-        return ret;
     }
     /**
      * Current render/display grid resolution `n` (64/128/256/512/1024) -- what the resolution
@@ -129,17 +121,6 @@ export class WasmSimulationState {
         return ret >>> 0;
     }
     /**
-     * Current simulation grid resolution `S` (64/128/256/512) -- identical to `get_grid_size`,
-     * under the name that matches `set_sim_downscale`/`get_render_size` below. New call sites
-     * should prefer this one; `get_grid_size` stays only for JS callers written before the
-     * sim-downscale feature existed.
-     * @returns {number}
-     */
-    get_sim_size() {
-        const ret = wasm.wasmsimulationstate_get_sim_size(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
      * List every material as `[id, label, wetness, threshold, flow_rate, grain_size]` rows, in
      * menu order. The web UI should build its material `<select>` options from this at
      * startup rather than hardcoding its own copy of the material list — that hardcoded-copy
@@ -150,40 +131,6 @@ export class WasmSimulationState {
     static list_materials() {
         const ret = wasm.wasmsimulationstate_list_materials();
         return ret;
-    }
-    /**
-     * @param {string} format
-     * @param {string} file_content
-     * @param {number} arms
-     * @returns {boolean}
-     */
-    load_multi_pattern(format, file_content, arms) {
-        const ptr0 = passStringToWasm0(format, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(file_content, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmsimulationstate_load_multi_pattern(this.__wbg_ptr, ptr0, len0, ptr1, len1, arms);
-        return ret !== 0;
-    }
-    /**
-     * @param {string} content
-     * @returns {boolean}
-     */
-    load_pattern_gcode(content) {
-        const ptr0 = passStringToWasm0(content, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmsimulationstate_load_pattern_gcode(this.__wbg_ptr, ptr0, len0);
-        return ret !== 0;
-    }
-    /**
-     * @param {string} content
-     * @returns {boolean}
-     */
-    load_pattern_thr(content) {
-        const ptr0 = passStringToWasm0(content, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmsimulationstate_load_pattern_thr(this.__wbg_ptr, ptr0, len0);
-        return ret !== 0;
     }
     /**
      * @param {string} pattern_type
@@ -2169,17 +2116,17 @@ function __wbg_get_imports() {
             arg0.writeTexture(arg1, arg2, arg3, arg4);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2109, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 2107, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_19e72e13a434ff99___convert__closures_____invoke___wasm_bindgen_19e72e13a434ff99___JsValue__core_ed718c3d60ebd546___result__Result_____wasm_bindgen_19e72e13a434ff99___JsError___true_);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 59, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 57, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_19e72e13a434ff99___convert__closures_____invoke___wasm_bindgen_19e72e13a434ff99___JsValue______true_);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 59, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUUncapturedErrorEvent")], shim_idx: 57, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_19e72e13a434ff99___convert__closures_____invoke___wasm_bindgen_19e72e13a434ff99___JsValue______true__2);
             return ret;
         },
