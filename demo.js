@@ -524,6 +524,28 @@ function generateColormap(pattern, color1Hex, color2Hex) {
     return data;
 }
 
+// Two-color presets, keyed by swatch `data-preset`. Rainbow is NOT one of these: it is a color
+// SCHEME (the `color-pattern` select), and the rainbow swatch is just a shortcut to that scheme.
+// It used to be stored as a preset too, which made it sticky -- every later sync saw
+// preset === 'rainbow' and forced the scheme back to "Rainbow, linear", so neither "Rainbow,
+// radial" nor any non-rainbow scheme could be selected until a different swatch was clicked.
+const COLOR_PRESETS = {
+    black_white: ['#ffffff', '#050505'],
+    desert: ['#ebd9bb', '#8b5a2b'],
+    ocean: ['#008080', '#e0f7fa'],
+    forest: ['#228b22', '#ffd700'],
+    vaporwave: ['#ff007f', '#00f0ff'],
+    sunset: ['#ff4500', '#ffd700'],
+};
+
+function isRainbowScheme(pattern) {
+    return pattern === 'rainbow_linear' || pattern === 'rainbow_radial';
+}
+
+// The scheme to return to when a two-color preset is picked while a rainbow scheme is showing
+// (the preset's colors would otherwise be invisible). Tracks the last non-rainbow scheme used.
+let lastTwoColorScheme = 'gradient';
+
 function syncColorTheme() {
     const patternSelect = document.getElementById('color-pattern');
     const presetSelect = document.getElementById('color-preset');
@@ -536,56 +558,30 @@ function syncColorTheme() {
 
     const pattern = patternSelect.value;
     const preset = presetSelect.value;
+    const rainbow = isRainbowScheme(pattern);
+    if (!rainbow) lastTwoColorScheme = pattern;
 
-    // 1. Handle presets override
-    if (preset === 'rainbow') {
-        patternSelect.value = 'rainbow_linear';
-        customDiv.style.display = 'none';
-    } else if (preset !== 'custom') {
-        customDiv.style.display = 'block';
-        if (preset === 'black_white') {
-            colorInput1.value = '#ffffff';
-            colorInput2.value = '#050505';
-        } else if (preset === 'desert') {
-            colorInput1.value = '#ebd9bb';
-            colorInput2.value = '#8b5a2b';
-        } else if (preset === 'ocean') {
-            colorInput1.value = '#008080';
-            colorInput2.value = '#e0f7fa';
-        } else if (preset === 'forest') {
-            colorInput1.value = '#228b22';
-            colorInput2.value = '#ffd700';
-        } else if (preset === 'vaporwave') {
-            colorInput1.value = '#ff007f';
-            colorInput2.value = '#00f0ff';
-        } else if (preset === 'sunset') {
-            colorInput1.value = '#ff4500';
-            colorInput2.value = '#ffd700';
-        }
-    } else {
-        customDiv.style.display = 'block';
+    if (COLOR_PRESETS[preset]) {
+        [colorInput1.value, colorInput2.value] = COLOR_PRESETS[preset];
     }
 
-    // 2. Handle pattern inputs visibility
-    const updatedPattern = patternSelect.value;
-    if (updatedPattern === 'solid') {
-        colorInput2Wrapper.style.display = 'none';
-    } else if (updatedPattern === 'rainbow_linear' || updatedPattern === 'rainbow_radial') {
-        customDiv.style.display = 'none';
-    } else {
-        customDiv.style.display = 'block';
-        colorInput2Wrapper.style.display = 'flex';
-    }
+    // Rainbow schemes ignore both colors, so hide the pickers rather than show dead controls.
+    customDiv.style.display = rainbow ? 'none' : 'block';
+    colorInput2Wrapper.style.display = pattern === 'solid' ? 'none' : 'flex';
 
-    // 3. Update WASM state color mode
+    // Highlight the swatch that matches what is actually on screen.
+    document.querySelectorAll('.swatch').forEach(sw => {
+        const active = rainbow ? sw.dataset.preset === 'rainbow' : sw.dataset.preset === preset;
+        sw.classList.toggle('active', active);
+    });
+
     if (state) {
-        const isSolid = updatedPattern === 'solid';
-        state.set_color_mode(isSolid ? 0 : 1);
-        
+        state.set_color_mode(pattern === 'solid' ? 0 : 1);
+
         const c1 = hexToRgb(colorInput1.value);
         state.set_sand_color(c1[0], c1[1], c1[2]);
 
-        const colormapData = generateColormap(updatedPattern, colorInput1.value, colorInput2.value);
+        const colormapData = generateColormap(pattern, colorInput1.value, colorInput2.value);
         state.update_colormap(colormapData);
     }
 }
@@ -1107,14 +1103,18 @@ function setupPanelInput() {
     // Preset Swatches Click Listeners
     document.querySelectorAll('.swatch').forEach(sw => {
         sw.addEventListener('click', () => {
-            document.querySelectorAll('.swatch').forEach(s => s.classList.remove('active'));
-            sw.classList.add('active');
             const preset = sw.dataset.preset;
+            const patternSelect = document.getElementById('color-pattern');
             const presetSelect = document.getElementById('color-preset');
-            if (presetSelect) {
+            if (!patternSelect || !presetSelect) return;
+            if (preset === 'rainbow') {
+                // Keep "Rainbow, radial" if that is already showing; otherwise go linear.
+                if (!isRainbowScheme(patternSelect.value)) patternSelect.value = 'rainbow_linear';
+            } else {
                 presetSelect.value = preset;
-                syncColorTheme();
+                if (isRainbowScheme(patternSelect.value)) patternSelect.value = lastTwoColorScheme;
             }
+            syncColorTheme();
         });
     });
 
