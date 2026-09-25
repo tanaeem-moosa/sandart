@@ -22,6 +22,14 @@ let cursorY = 0;
 
 // Camera state parameters matching desktop defaults
 let cameraAzimuth = 0.0;
+
+// Starting azimuth per mode, applied on every mode switch. The camera orbits the table at
+// (cos az, sin az), and grid row 0 (the top, where Sand-fall gravity pulls away from) sits at
+// world y = +1 (see vs_main's uv mapping). At azimuth 0 the camera looks along -x, so gravity
+// ran left-to-right across the screen. -PI/2 puts the camera on the grid-bottom side, so
+// material falls down the screen.
+const SANDBOX_CAMERA_AZIMUTH = 0.0;
+const SANDFALL_CAMERA_AZIMUTH = -Math.PI / 2;
 let cameraElevation = 0.8;
 let cameraZoom = 2.8;
 
@@ -1041,6 +1049,8 @@ function switchMode(mode) {
 
         state.set_simulator_mode(0);
         state.set_gravity(0.0, 0.0);
+        cameraAzimuth = SANDBOX_CAMERA_AZIMUTH;
+        updateCamera();
 
         syncSettings();
         loadActivePattern();
@@ -1057,6 +1067,8 @@ function switchMode(mode) {
         updateNetworkRoutingRowVisibility();
 
         state.set_simulator_mode(1);
+        cameraAzimuth = SANDFALL_CAMERA_AZIMUTH;
+        updateCamera();
         syncSandFallSettings();
         syncMaterialTheme(true);
     }
