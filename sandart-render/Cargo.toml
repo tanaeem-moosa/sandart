@@ -2,6 +2,7 @@
 name = "sandart-render"
 version = "0.1.0"
 edition = "2024"
+license = "Apache-2.0"
 
 [dependencies]
 wgpu = "23.0.0"
