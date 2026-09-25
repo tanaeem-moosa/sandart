@@ -7,18 +7,3 @@ license = "Apache-2.0"
 [dependencies]
 glam = "0.29.0"
 serde = { version = "1.0.217", features = ["derive"] }
-
-[features]
-# Opt-in, off by default, and never enabled for wasm (std::time::Instant panics on
-# wasm32-unknown-unknown without a JS shim). Times a handful of sections inside
-# settle_tick/update and accumulates them into a thread-local an example can read and print.
-# With the feature off, every site compiles to nothing -- see `phase_timing` module.
-phase-timing = []
-
-[dev-dependencies]
-pprof = { version = "0.13.0", features = ["flamegraph"] }
-sandart-pattern = { path = "../sandart-pattern" }
-# Already resolved in the workspace Cargo.lock at this exact version (pulled in transitively via
-# egui/eframe's dependency graph), so this adds no new external dependency. Used only by
-# examples/proto_networks.rs to write PNG frames; never touches wasm.
-image = { version = "=0.25.10", default-features = false, features = ["png"] }

@@ -1,5 +1,4 @@
 pub mod grid;
-pub mod phase_timing;
 pub mod physics;
 pub mod quantiles;
 
@@ -49,15 +48,6 @@ pub const SANDFALL_GRAVITY_STRENGTH: f32 = 0.06;
 pub const MASK_OUTSIDE: u8 = 0;
 pub const MASK_INSIDE: u8 = 1;
 pub const MASK_BOUNDARY: u8 = 2;
-
-/// Height above which a cell counts as "holding material" for the "perfect simulation" debug
-/// toggle's non-trivial-block scan (`DrawingSimulation::perfect_simulation`, `DrawingSimulation
-/// ::update`). Not `0.0` exactly — draining can leave a cell at a sub-float residue that will
-/// never itself flow anywhere, and forcing its block to simulate forever over dust like that
-/// would turn the toggle's "every tick" promise into pointless busywork. Comfortably below
-/// `physics::MUST_SIMULATE_THRESHOLD` (1e-4): this only decides whether a block is worth waking
-/// up at all, not whether it's expected to move once it has.
-const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
 
 
 
@@ -626,24 +616,6 @@ pub struct DrawingSimulation {
     /// tick-to-tick like `edge_vel_h`/`edge_vel_v` so a column under a sleeping block keeps the
     /// last depth it actually computed.
     pub column_depth: Vec<f32>,
-    /// Task #55 step 2 (rebuilt): the PERSISTENT hydraulic head field
-    /// (`physics::task55_head_field::advance_head_field`). Unlike `column_depth`, this is not
-    /// maintained every tick unconditionally -- `settle_tick` only advances it while EITHER
-    /// `head_field_transport` OR `pressure_heatmap_head_field` is on (see those fields' own doc
-    /// comments), since those are its only two consumers: the former reads it as the edge solvers'
-    /// driving head, the latter reads it (via `head_field_to_pressure`) for the pressure heat-map
-    /// overlay. Advancing it for the overlay alone does NOT make it feed transport -- the edge
-    /// solvers' own gate is unchanged, tied only to `head_field_transport`/`head_field_gate` (see
-    /// `settle_tick`'s `head_field_active` vs. `head_field_needs_advance`) -- so turning the
-    /// overlay on cannot perturb the simulation, only what this buffer itself contains. While BOTH
-    /// are off, this buffer simply holds whatever it was last relaxed to (or its zero-filled
-    /// initial state, if neither has been turned on since the last reset/resize) -- it is never
-    /// rebuilt from scratch on a per-read basis the way the deleted `compute_head_field` was; see
-    /// `physics::task55_head_field`'s module doc comment for why that per-call-solve design was
-    /// replaced. Read by `pressure_field_texels` when `pressure_heatmap_head_field` is set, and
-    /// resized/zero-filled everywhere `column_depth` is (construction, `reset()`,
-    /// `flip_hourglass()`, and any grid-size change via `set_grid_size`'s sim rebuild).
-    pub head_field: Vec<f32>,
     /// Seed for marble movement noise.
     pub seed: u32,
 
@@ -734,134 +706,6 @@ pub struct DrawingSimulation {
     /// rendering concern and belongs to the consumer (sandart-wasm), not the simulation.
     quantile_targets: Vec<f32>,
 
-    /// "Perfect simulation" debug toggle. Off by default (today's shipped, budget-limited
-    /// scheduler behaviour). When on, `update` force-admits every non-trivial block (inside the
-    /// shape mask AND holding material — see `PERFECT_SIM_MATERIAL_EPSILON`) into
-    /// `settle_tick`'s unconditional MUST tier every tick, ignoring `budget_n` entirely. This
-    /// exists so the adaptive scheduler's own approximation can be A/B'd against the ground
-    /// truth: several visual artifacts (gaps, slabs, stalled material) trace back to blocks that
-    /// lost the budget competition, and this toggle shows what the simulation looks like without
-    /// that competition. It is deliberately expensive — that is the point, not a bug.
-    pub perfect_simulation: bool,
-
-    /// "Fresh pressure field" debug toggle. Off by default (today's shipped in-loop, order-
-    /// dependent `column_depth` computation, unchanged). When on, `column_depth`
-    /// (depth-integrated lateral pressure — see `physics::LATERAL_PRESSURE_SCALE`'s doc comment)
-    /// is instead computed by a standalone, unconditional pass (`physics::recompute_column_depth`)
-    /// run once per tick, before `settle_tick`'s phase loop, over the frozen pre-tick heightmap
-    /// snapshot, with the old in-loop write disabled for that tick. This is `settle_tick`'s
-    /// `fresh_pressure_field` parameter, threaded straight through — see its doc comment there for
-    /// the full mechanics and the one metric (`test_liquid_flowing_liquid_does_not_stand_in_walls`'s
-    /// voids@160) it has actually been measured against, which is not an improvement on that
-    /// metric. This toggle exists to let the standalone pass's actual on-screen behaviour be
-    /// judged directly (A/B'd against the current default) rather than only through that one
-    /// scalar — it is experimental, not a settled replacement for the default.
-    pub fresh_pressure_field: bool,
-
-    /// Which quantity feeds the per-cell pressure heat-map overlay (`pressure_field_texels`).
-    /// `false` (default): today's shipped `column_depth`, unchanged. `true`: the PERSISTENT
-    /// hydraulic head field (`head_field` below; task #55 step 2, rebuilt as incremental
-    /// propagation -- see `physics::task55_head_field`'s module doc comment), converted to a
-    /// pressure-like quantity via `physics::task55_head_field::head_field_to_pressure` (`p =
-    /// head(i) - z(i)`, the same datum `task55_head_spec::head_at`/`pressure_at` use) so it lands
-    /// on the SAME scale `column_depth` already renders through -- see `pressure_field_texels`
-    /// for the shared normalisation both sources go through.
-    ///
-    /// Plumbed exactly like `fresh_pressure_field` just above: a plain
-    /// UI-facing debug toggle, carried through `set_grid_size`'s sim rebuild rather than reset,
-    /// never read by `settle_tick` or anything else that advances the simulation. This is
-    /// VISUALISATION ONLY -- flipping it changes what `pressure_field_texels` returns and nothing
-    /// about how `heightmap`/`column_depth`/any other simulation state evolves.
-    ///
-    /// COST: `head_field_to_pressure` is a pure `O(cells)` read-and-convert over the already-
-    /// maintained `head_field` buffer -- no relaxation happens inside `pressure_field_texels`
-    /// itself any more (unlike the deleted per-call `compute_head_field`, which measured 11.4ms
-    /// at w=512 in release). The relaxation that actually populates `head_field` happens inside
-    /// `settle_tick`, which advances it whenever EITHER `head_field_transport` OR this field is
-    /// set (see `settle_tick`'s own `head_field_needs_advance`) -- so setting THIS field alone,
-    /// with transport left off, is now enough to give the overlay a live, relaxing buffer;
-    /// `head_field_transport` no longer needs to be on for this overlay to show anything
-    /// meaningful. With BOTH left off, `head_field` sits at whatever `reset()`/construction last
-    /// zero-filled it to, and this overlay source reads as uniformly dark for the same reason
-    /// `column_depth` would over an unsimulated sim -- an honest reflection of what the persistent
-    /// buffer currently holds, not a bug -- see `head_field`'s own doc comment. Note this does NOT
-    /// make the two toggles equivalent: setting only THIS field advances `head_field` but never
-    /// routes it into the edge solvers, so `update`'s simulation output stays byte-identical
-    /// regardless of this field's value (`pressure_heatmap_head_field_toggle.rs`).
-    pub pressure_heatmap_head_field: bool,
-
-
-
-
-
-    /// "Drive transport from the head field" debug toggle (task #55 step 3). Off by default
-    /// (today's shipped `column_depth`/`GRAVITY_HEAD_SCALE`-derived driving head, unchanged --
-    /// bit-identical). When on, `settle_tick`'s lateral and vertical (gravity-aligned) edge
-    /// solvers read their driving head from the persistent `head_field` buffer instead, for
-    /// edges where BOTH endpoints are liquid (`liquidity(wetness) >= LIQUID_ELLIPTIC_THRESHOLD`).
-    /// This is `settle_tick`'s `head_field_transport` parameter, threaded straight through, same
-    /// shape as `fresh_pressure_field` above. Also (but not EXCLUSIVELY any more --
-    /// see `pressure_heatmap_head_field`'s own doc comment) one of the two conditions that makes
-    /// `head_field` advance at all this tick (`physics::task55_head_field::advance_head_field`,
-    /// called once per tick from inside `settle_tick` when this OR `pressure_heatmap_head_field`
-    /// is on).
-    ///
-    /// Scope: LIQUID ONLY, deliberately. The field has no yield criterion yet, so applying it to
-    /// granular material would flatten a resting pile's angle of repose (a permanent surface
-    /// gradient that must produce ZERO flow) -- a prior shipped attempt at #55 (the "fast liquid
-    /// levelling" multigrid pass, since deleted) made exactly this mistake in a different way
-    /// (moving HEIGHTS globally instead of driving the existing local flux solver) and was
-    /// visually refuted: water moved too fast, falling water drifted sideways, and the
-    /// surface stayed dead flat across actively draining necks. This toggle instead only replaces
-    /// the DRIVING HEAD inside the existing, mass-conserving, per-edge flux solver -- the solver's
-    /// own donor/acceptor clamps (`clamp_edge_feasible`) and per-edge momentum/damping (the
-    /// velocity bound) are inherited unchanged, not reinvented.
-    ///
-    /// COST: `physics::task55_head_field::HEAD_FIELD_SWEEPS_PER_TICK` (2) local relaxation sweeps
-    /// over the wet cells, `O(wet_cells)` and fixed regardless of grid resolution -- see that
-    /// constant's own doc comment. This REPLACES the old design's per-call solve-to-convergence
-    /// (measured 11.4ms at w=512 in release, and which did not actually converge at that scale --
-    /// see `physics::task55_head_field`'s module doc comment), so the ongoing per-tick cost while
-    /// this flag is on is now small and fixed rather than large and unbounded; still paid only
-    /// while this flag (or the test gate) is on, never otherwise.
-    pub head_field_transport: bool,
-
-    /// "Pressure-sensitive flow rate" debug toggle (task #63). Off by default (today's shipped
-    /// conveyance coefficient, independent of how much head a cell carries -- bit-identical).
-    /// When on, a LIQUID-ONLY edge's conveyance coefficient (`physics::flux_edge_candidate`'s
-    /// `c_sq`) is scaled by `sqrt(donor head / PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD)`, clamped at
-    /// `1.0`, at both the vertical and lateral edge sites. So water 20 reference rows deep pushes
-    /// at the full shipped rate, water 10 rows deep at 0.71 of it, and a one-row surface film at
-    /// 0.22 -- a depth ORDERING, not just a thin-film cutoff.
-    ///
-    /// The square root is Torricelli (`v = sqrt(2*g*h)`), not a fitted curve; the reference depth
-    /// is a stated design choice, because the top of the range is already at the CFL bound and so
-    /// a depth ordering can only be produced by slowing the shallow end. See both constants' doc
-    /// comments in `physics.rs`.
-    ///
-    /// SLOWS THE LOW END, never speeds the high end. The multiplier
-    /// (`physics::pressure_rate_factor`) is capped at exactly `1.0` and is exactly `1.0` at and
-    /// above the reference depth, so the deepest water in a scene is untouched and nothing can be
-    /// pushed past the CFL bound `c_sq` was chosen to respect. Whatever this does to a scenario,
-    /// it can only ever be a REDUCTION in flux relative to the toggle being off.
-    ///
-    /// FREE FALL IS EXEMPT, by construction rather than by a special case. Pressure comes from
-    /// the head field, which pins unsupported material to `head = z` and therefore to exactly zero
-    /// head; the rate law returns `1.0` there. A ballistic parcel has no contact pressure for a
-    /// pressure-derived rate to be sensitive to, so it keeps falling at full speed. See
-    /// `physics::task55_head_field::rows_of_head_at` for why the zero/positive separation is
-    /// exact and not an epsilon.
-    ///
-    /// INDEPENDENT OF `head_field_transport` above, deliberately. This reads `head_field` for the
-    /// donor's pressure but does not change which driving head any edge uses, so the two can be
-    /// evaluated separately -- which matters while transport is still blocked on #64. It is a
-    /// third condition (alongside `head_field_transport` and `pressure_heatmap_head_field`) that
-    /// makes `head_field` advance at all this tick, so turning this on alone keeps the field live.
-    ///
-    /// Scope: LIQUID ONLY, same `LIQUID_ELLIPTIC_THRESHOLD` gate on both edge endpoints as
-    /// `head_field_transport`, and for the same reason -- the head field has no yield criterion,
-    /// so it must never reach granular material.
-    pub pressure_sensitive_flow: bool,
 
     /// How many times the cross-gravity (lateral) edge pass runs per tick, as a real-valued dial
     /// (NOT an integer count) -- the fix for a settled liquid facet staying at a straight ~45
@@ -999,7 +843,6 @@ impl DrawingSimulation {
         let edge_vel_h = vec![0.0f32; grid_size * grid_size];
         let edge_vel_v = vec![0.0f32; grid_size * grid_size];
         let column_depth = vec![0.0f32; grid_size * grid_size];
-        let head_field = vec![0.0f32; grid_size * grid_size];
         let cell_colors = vec![pack_rgba(210, 180, 140, 255); grid_size * grid_size];
         // Initialize with default DrySand preset
         let cell_props = CellProps::filled(grid_size * grid_size, 0.00, 0.08, 0.25, 0.45);
@@ -1042,7 +885,6 @@ impl DrawingSimulation {
             edge_vel_h,
             edge_vel_v,
             column_depth,
-            head_field,
             seed: 98765u32,
             marble_radius: 0.018,
             material_mode: MaterialMode::default(),
@@ -1077,11 +919,6 @@ impl DrawingSimulation {
             quantile_mode: QuantileMode::default(),
             row_mass: vec![0.0f32; grid_size],
             quantile_targets: Vec::new(),
-            perfect_simulation: false,
-            fresh_pressure_field: false,
-            pressure_heatmap_head_field: false,
-            head_field_transport: false,
-            pressure_sensitive_flow: false,
             lateral_substeps: 1.0,
         };
         sim.generate_shape_mask();
@@ -1211,7 +1048,6 @@ impl DrawingSimulation {
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
         self.column_depth.fill(0.0);
-        self.head_field.fill(0.0);
         // Deliberately does NOT touch `cell_colors`. A reset is a physics-state reset (heights,
         // velocities, bounds) — the color theme the caller pushed via `set_cell_colors` is a
         // separate concern and has no reason to revert to the placeholder tan `new_with_size`
@@ -1346,7 +1182,6 @@ impl DrawingSimulation {
         self.edge_vel_h.fill(0.0);
         self.edge_vel_v.fill(0.0);
         self.column_depth.fill(0.0);
-        self.head_field.fill(0.0);
 
         // Turn the *structure* over too, not just what is in it. Symmetric shapes are unaffected
         // by construction; the asymmetric ones (StaircaseCascade's alternating shelves,
@@ -1687,62 +1522,8 @@ impl DrawingSimulation {
 
 
 
-        // "Perfect simulation" debug toggle: bypass the LOD scheduler's adaptive budget by
-        // pre-loading every non-trivial block's recorded displacement above
-        // `physics::MUST_SIMULATE_THRESHOLD` — exactly the bar `settle_tick`'s own
-        // classification loop uses to admit a block into its unconditional MUST tier (see that
-        // loop's doc comment in physics.rs). Routing through the SAME admission path every other
-        // MUST block goes through — rather than adding a second bypass mechanism to
-        // `settle_tick` itself — means `settle_tick`'s signature and its ~20 test call sites in
-        // physics.rs stay untouched, and the ordinary scheduler path is provably unaffected:
-        // this whole block only ever runs when `perfect_simulation` is set, and when it isn't,
-        // `last_displacements` is left exactly as `settle_tick` last wrote it.
-        //
-        // "Non-trivial" is inside the shape mask AND holding material that could move (see
-        // `PERFECT_SIM_MATERIAL_EPSILON`) — an empty block, or one entirely outside the mask, is
-        // left alone; it already reads displacement 0.0 here, nowhere near the MUST bar.
-        let mut perfect_sim_found_material = false;
-        if self.perfect_simulation {
-            // `w`/`h`/`block_size`/`cols`/`rows` are the same grid-geometry locals `update`
-            // already computed above for the marble-displacement block activation, reused here
-            // rather than recomputed.
-            for by in 0..rows {
-                for bx in 0..cols {
-                    let start_x = bx * block_size;
-                    let end_x = ((bx + 1) * block_size).min(w);
-                    let start_y = by * block_size;
-                    let end_y = ((by + 1) * block_size).min(h);
-                    let mut has_material = false;
-                    'scan: for y in start_y..end_y {
-                        let row_offset = y * w;
-                        for x in start_x..end_x {
-                            let idx = row_offset + x;
-                            if self.shape_mask[idx] != MASK_OUTSIDE
-                                && self.heightmap.data[idx] > PERFECT_SIM_MATERIAL_EPSILON
-                            {
-                                has_material = true;
-                                break 'scan;
-                            }
-                        }
-                    }
-                    if has_material {
-                        self.last_displacements[by * cols + bx] = physics::MUST_SIMULATE_THRESHOLD;
-                        perfect_sim_found_material = true;
-                    }
-                }
-            }
-        }
-
-
         // Run the gravity-driven settling cellular automata tick
-        //
-        // `perfect_sim_found_material` is OR'd in explicitly rather than relying on the injected
-        // displacement value alone to trip the `> 3e-4` check just below: `settle_tick`'s own
-        // MUST bar (`physics::MUST_SIMULATE_THRESHOLD` = 1e-4) sits below this gate's 3e-4 by
-        // design (see that constant's doc comment), so a freshly-injected 1e-4 would silently
-        // fail to mark the tick active without this.
-        let has_active = perfect_sim_found_material
-            || self.last_displacements.iter().any(|&x| x > 3e-4)
+        let has_active = self.last_displacements.iter().any(|&x| x > 3e-4)
             || self.marbles.iter().any(|m| m.was_active)
             || self.gravity_dir.length_squared() > 1e-6;
         if has_active {
@@ -1764,7 +1545,6 @@ impl DrawingSimulation {
                 }
             }
 
-            let __pt_t0 = phase_timing::start();
             let fresh_active = physics::compute_fresh_active(
                 w,
                 h,
@@ -1778,8 +1558,6 @@ impl DrawingSimulation {
                 &self.edge_vel_v,
                 &self.last_displacements,
             );
-            phase_timing::add(phase_timing::SEC_FRESH_ACTIVE, __pt_t0);
-            let __pt_t0 = phase_timing::start();
             settle_tick(
                     &mut self.heightmap,
                     &mut self.temp_heights,
@@ -1797,20 +1575,14 @@ impl DrawingSimulation {
                     &mut self.edge_vel_h,
                     &mut self.edge_vel_v,
                     &mut self.column_depth,
-                    &mut self.head_field,
                     &self.shape_mask,
                     self.tick_count,
                     self.gravity_dir,
-                    self.fresh_pressure_field,
-                    self.head_field_transport,
-                    self.pressure_heatmap_head_field,
-                    self.pressure_sensitive_flow,
                     // CLASSIFICATION-HOIST.md Stage 1: computed once, just above.
                     Some(&fresh_active),
                     self.liquid_fall_jitter,
                     self.lateral_substeps,
                 );
-            phase_timing::add(phase_timing::SEC_SETTLE_TICK_TOTAL, __pt_t0);
         } else {
             self.active_bounds.active = false;
         }
@@ -2544,66 +2316,6 @@ mod tests {
                 w, y_lo, bottom_row
             );
         }
-    }
-
-    #[test]
-    #[ignore = "DIAGNOSTIC (Stage C task report): does DrySand still scatter across the Galton \
-                board's pegs -- the shape whose whole visual point is a spread bottom \
-                distribution -- once its lateral transport runs on the yield-stress flux edge \
-                instead of the old CA's stochastic dispersion? Not a behavioural spec (no fixed \
-                pass/fail bar on the spread number itself, since there was never a prior \
-                assertion establishing what it should be), just a printed measurement to compare \
-                against a pre-Stage-C checkout. Run with --ignored --nocapture."]
-    fn diag_galton_board_bottom_spread() {
-        let mut sim = DrawingSimulation::new();
-        sim.sandbox_shape = SandboxShape::GaltonBoard;
-        sim.gravity_dir = Vec2::new(0.0, 0.04);
-        sim.apply_preset(MaterialMode::DrySand);
-        sim.initialize_hourglass();
-
-        let targets = [None; 5];
-        for _ in 0..1500 {
-            sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::GaltonBoard, 0.0, 16.0);
-        }
-
-        let w = sim.heightmap.width;
-        let h = sim.heightmap.height;
-        // Bottom collection zone: below the peg field (see the shafts test above for where the
-        // peg field itself lives, `dy` in (6, 0.38 * h) below the neck).
-        let y_lo = h / 2 + (0.40 * h as f32) as usize;
-        let mut col_mass = vec![0.0f64; w];
-        let mut total = 0.0f64;
-        let mut occupied_cols = 0usize;
-        for x in 0..w {
-            let mut m = 0.0f64;
-            for y in y_lo..h {
-                m += sim.heightmap.data[y * w + x] as f64;
-            }
-            col_mass[x] = m;
-            total += m;
-            if m > 0.01 {
-                occupied_cols += 1;
-            }
-        }
-        let mean_x: f64 = if total > 0.0 {
-            col_mass.iter().enumerate().map(|(x, &m)| x as f64 * m).sum::<f64>() / total
-        } else {
-            f64::NAN
-        };
-        let var_x: f64 = if total > 0.0 {
-            col_mass.iter().enumerate().map(|(x, &m)| (x as f64 - mean_x).powi(2) * m).sum::<f64>() / total
-        } else {
-            f64::NAN
-        };
-        // Peak concentration: the single fullest column's share of the bottom-zone mass. A
-        // Galton board that scatters should have this well under 1.0 (mass spread over many
-        // columns); a board that funnels straight down a single channel would have it near 1.0.
-        let peak_frac = col_mass.iter().cloned().fold(0.0f64, f64::max) / total.max(1e-12);
-        println!(
-            "diag_galton_board_bottom_spread: total_mass={:.2} occupied_cols={} mean_x={:.2} \
-             std_x={:.2} (grid w={}) peak_col_frac={:.4}",
-            total, occupied_cols, mean_x, var_x.sqrt(), w, peak_frac
-        );
     }
 
     #[test]

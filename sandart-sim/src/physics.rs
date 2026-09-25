@@ -1,5 +1,7 @@
 use crate::grid::Heightmap;
-use crate::{color_channel, pack_rgba, set_color_channel, unpack_rgba, CellProps};
+use crate::{set_color_channel, unpack_rgba, CellProps};
+#[cfg(test)]
+use crate::{color_channel, pack_rgba};
 use glam::Vec2;
 
 /// Bounding coordinates to optimize Cellular Automata settling.
@@ -928,9 +930,9 @@ thread_local! {
 /// future change could plausibly build `column_depth` from `1.0 - support_fraction` (or some
 /// function of it) rather than `in_transit_at`, which would likely fix the same under-detection
 /// there that this function fixes for scheduling here. That is deliberately NOT done by this
-/// change: it is a separate, contested decision -- see `fresh_pressure_field`'s doc comment for
-/// the confirmed, unexplained standing-arch regression a previous, unrelated attempt at touching
-/// that path caused -- and this function feeds block activation only, today.
+/// change: it is a separate, contested decision -- a previous, unrelated attempt at touching that
+/// path caused a confirmed, unexplained standing-arch regression -- and this function feeds block
+/// activation only, today.
 #[inline]
 fn support_fraction(
     idx: usize,
@@ -1047,11 +1049,11 @@ fn in_transit_at(
 /// over the whole grid interior, reading a caller-supplied `source_heights` array instead of
 /// chaining off values computed earlier in the same per-cell loop.
 ///
-/// NOW WIRED UP behind the `fresh_pressure_field` debug toggle (`settle_tick`'s own parameter of
-/// that name, `DrawingSimulation::fresh_pressure_field`) at the ONCE-PER-TICK placement described
-/// below — run once, before the `for phase in 0..2` loop, reading the frozen pre-tick
-/// `heightmap.data` snapshot. Off by default; the fallback (this function unused, `column_depth`
-/// computed inline instead) is what every existing test still exercises. Task #54 originally
+/// Was wired up behind a `fresh_pressure_field` debug toggle at the ONCE-PER-TICK placement
+/// described below — run once, before the `for phase in 0..2` loop, reading the frozen pre-tick
+/// `heightmap.data` snapshot (that toggle was later deleted; this function is unused,
+/// `column_depth` computed inline instead, which is what every existing test still exercises).
+/// Task #54 originally
 /// tried promoting this to a free function so `settle_tick` could call it once at the TOP OF EACH
 /// PHASE instead (once reading `heightmap.data` at the top of phase 0, where it is bit-identical
 /// to `temp_heights`; once again reading `temp_heights` at the top of phase 1, after phase 0's
@@ -1076,14 +1078,10 @@ fn in_transit_at(
 /// the once-per-tick placement, which itself performs WORSE (voids@160=66, still over the <= 20
 /// bound) than the in-loop fallback that shipped after Task #54 (which passes the full suite).
 /// Neither of this function's two possible call placements fixes the target regression, which is
-/// why the DEFAULT stays the in-loop fallback (see the `if gravity_active && !fresh_pressure_field`
-/// block ahead of the `for phase in 0..2` loop in `settle_tick`, and the inline computation inside
-/// phase 1's CA branch) -- steps 2-4 (vertical overburden bonus, CFL cap, Janssen transform)
-/// WITHOUT step 1 (this standalone pass), `column_depth` computed in-loop, order-dependent. The
-/// once-per-tick placement is exposed anyway, opt-in only, as `fresh_pressure_field` -- not because
-/// it is known to be an improvement (the walls-test regression above says it visibly is not, by
-/// this one metric) but so its actual on-screen behaviour can be judged directly rather than only
-/// through this one scalar; see the task report for the full numbers.
+/// why the DEFAULT stays the in-loop fallback (the `if gravity_active` block ahead of the
+/// `for phase in 0..2` loop in `settle_tick`, and the inline computation inside phase 1's CA
+/// branch) -- steps 2-4 (vertical overburden bonus, CFL cap, Janssen transform) WITHOUT step 1
+/// (this standalone pass), `column_depth` computed in-loop, order-dependent.
 ///
 /// `source_heights` is the current heights to accumulate depth from (`temp_heights` at a
 /// once-per-phase call site, or the frozen `heightmap.data` snapshot at a once-per-tick site).
@@ -1250,8 +1248,8 @@ pub(crate) fn compute_fresh_active(
 /// satisfies `variant` (see `FreshOverburdenVariant`'s own comments for what each one checks).
 ///
 /// `heightmap_data`/`external_mass_this_tick` should be the tick's frozen pre-tick snapshot (the
-/// same once-per-tick placement `recompute_column_depth`'s own doc comment describes for the
-/// `fresh_pressure_field` toggle) — but note this is computed into a throwaway local buffer, never
+/// same once-per-tick placement `recompute_column_depth`'s own doc comment describes) — but note
+/// this is computed into a throwaway local buffer, never
 /// `column_depth` itself, and is used only to decide which blocks `settle_tick` runs, never as a
 /// physics term.
 #[allow(clippy::too_many_arguments)]
@@ -1815,16 +1813,6 @@ fn accumulate_edge_jitter(
 }
 
 
-/// Threshold on `liquidity(wetness)` for a cell to be eligible as a node in
-/// the head field's liquid-only domain. See `head_field_transport`'s "Why liquid-only" note:
-/// measured directly that running the (structurally similar) multiplicative lateral head over
-/// granular material flattens `test_dry_sand_has_angle_of_repose`'s pile to 0 degrees, because
-/// `flux ~ conveyance * grad(surface)` has no yield criterion. `0.999`, not `1.0`, only to tolerate
-/// float round-trip through `liquidity`'s smoothstep for a material whose `wetness` is nominally
-/// 1.0 (pure Water); anything with genuine granular character reads well under this on the
-/// `liquidity` smoothstep's own steep part (its ramp spans `wetness` in `[0.65, 0.85]`).
-const LIQUID_ELLIPTIC_THRESHOLD: f32 = 0.999;
-
 
 /// Sleeping predicate for a flux edge: `true` when `flux_edge` would provably realise a flux of
 /// *exactly* zero this tick, so the whole call — and the `*v_e` write that goes with it — can be
@@ -1960,9 +1948,6 @@ pub(crate) mod upstream_wake_gate {
     thread_local! {
         static DISABLED: Cell<bool> = const { Cell::new(false) };
     }
-    pub fn set_disabled(v: bool) {
-        DISABLED.with(|c| c.set(v));
-    }
     #[inline(always)]
     pub fn is_disabled() -> bool {
         DISABLED.with(|c| c.get())
@@ -2006,14 +1991,6 @@ pub(crate) mod fresh_overburden_gate {
     pub fn is_disabled() -> bool {
         DISABLED.with(|c| c.get())
     }
-    /// Task #47 round 2: lets a diagnostic run `settle_tick` with a specific
-    /// `FreshOverburdenVariant` without a second compile. Reset to the shipped default at the
-    /// start of every comparison loop that uses it (see `diag_task47_variant_divergence_comparison`)
-    /// so an early return/panic in one iteration can't leak a non-default variant into the next
-    /// test that runs on this thread.
-    pub fn set_variant(v: FreshOverburdenVariant) {
-        VARIANT.with(|c| c.set(v));
-    }
     #[inline(always)]
     pub fn variant() -> FreshOverburdenVariant {
         VARIANT.with(|c| c.get())
@@ -2034,7 +2011,7 @@ mod fresh_overburden_gate {
 
 /// TASK #55 DIAGNOSTIC-ONLY A/B TOGGLE for the multiplicative lateral driving head (see
 /// `mult_lateral_driving`'s doc comment for the mechanism). Same thread-local-per-test pattern as
-/// `upstream_wake_gate`/`fresh_overburden_gate`/`head_field_gate` -- `#[cfg(test)]`-gated so it does
+/// `upstream_wake_gate`/`fresh_overburden_gate` -- `#[cfg(test)]`-gated so it does
 /// not exist in production at all, `#[cfg(not(test))]` twin hardcodes the shipped choice so a
 /// non-test build pays no thread-local read.
 ///
@@ -2068,96 +2045,6 @@ mod multiplicative_lateral_gate {
     }
 }
 
-/// TASK #55 step 3. Same pattern as `multiplicative_lateral_gate`:
-/// `#[cfg(test)]`-gated thread-local so it does not exist in production at all, `#[cfg(not(test))]`
-/// twin hardcodes the shipped choice (off) so a non-test build pays no thread-local read. `false`
-/// by default.
-///
-/// Gates the head-field-driven driving head on the liquid-only lateral and vertical edge sites in
-/// `settle_tick` (see `DrawingSimulation::head_field_transport`'s doc comment for what it
-/// switches). NOTE: this thread-local is a TEST-ONLY diagnostics knob, letting a test force the
-/// branch on for a scenario built through `TestSim`/other test helpers that never expose the real
-/// `head_field_transport` parameter directly (e.g. `test_dry_sand_has_angle_of_repose`'s
-/// `ReposeRig`) -- it is not how the branch is reachable from the shipped app. The real,
-/// user-facing route is `settle_tick`'s own `head_field_transport` parameter
-/// (`DrawingSimulation::head_field_transport`), OR'd with `is_enabled()` below at the call site so
-/// both routes keep working without interfering with each other.
-#[cfg(test)]
-pub(crate) mod head_field_gate {
-    use std::cell::Cell;
-    thread_local! {
-        static ENABLED: Cell<bool> = const { Cell::new(false) };
-    }
-    pub fn set_enabled(v: bool) {
-        ENABLED.with(|c| c.set(v));
-    }
-    #[inline(always)]
-    pub fn is_enabled() -> bool {
-        ENABLED.with(|c| c.get())
-    }
-}
-#[cfg(not(test))]
-mod head_field_gate {
-    #[inline(always)]
-    pub fn is_enabled() -> bool {
-        false
-    }
-}
-
-
-
-
-/// EXPERIMENTAL DIAGNOSTIC (see the tick-phase-order hypothesis test plan): per-tick, per-phase
-/// flux attribution. Not used by any assertion; `#[cfg(test)]`-gated and thread-local like
-/// `edge_sleep_stats`, so it costs nothing in production and cannot interact with parallel tests.
-/// Records the *magnitude* of every flux this tick, bucketed by which phase realised it (0 =
-/// gravity-aligned edge, 1 = everything else — lateral liquid edge and the granular CA's lateral
-/// `try_move`s). This is a direct, model-free measurement of "how much of the capacity that
-/// opened up this tick did each phase actually consume", with no assumption about mechanism.
-#[cfg(test)]
-mod phase_flow_stats {
-    use std::cell::Cell;
-
-    thread_local! {
-        static FLOW: Cell<(f64, f64)> = const { Cell::new((0.0, 0.0)) };
-    }
-
-    #[inline(always)]
-    pub fn note(phase: usize, flux: f32) {
-        if flux == 0.0 {
-            return;
-        }
-        let mag = flux.abs() as f64;
-        FLOW.with(|c| {
-            let (p0, p1) = c.get();
-            if phase == 0 {
-                c.set((p0 + mag, p1));
-            } else {
-                c.set((p0, p1 + mag));
-            }
-        });
-    }
-
-    pub fn reset() {
-        FLOW.with(|c| c.set((0.0, 0.0)));
-    }
-
-    /// `(phase0_flow, phase1_flow)` since the last `reset`.
-    pub fn take() -> (f64, f64) {
-        FLOW.with(|c| c.get())
-    }
-}
-
-#[cfg(test)]
-#[inline(always)]
-fn note_phase_flow(phase: usize, flux: f32) {
-    phase_flow_stats::note(phase, flux);
-}
-#[cfg(not(test))]
-#[inline(always)]
-#[allow(dead_code)]
-fn note_phase_flow(_phase: usize, _flux: f32) {}
-
 // TOMBSTONE (2026-09-12): a temporary `oobleck_diag` instrumentation module lived here for one
 // diagnostic run (Oobleck-removal task, step 1 addendum) to measure, before removal, which lateral
 // solver a band-adjacent edge actually went through. It found that the granular CA was NOT dead
@@ -2170,110 +2057,6 @@ fn note_phase_flow(_phase: usize, _flux: f32) {}
 // `diag_gradient_cliffs`'s before/after report for the measured before/after effect of removing
 // the band entirely.
 
-/// MEASUREMENT-ONLY DIAGNOSTIC (LOD-FLUX-BUDGET-SURVEY, see `diag_lod_flux_budget_survey` in
-/// `tests`). `#[cfg(test)]`-gated and thread-local like `phase_flow_stats`/`BIND_CENSUS`, so it
-/// costs nothing in production and cannot interact with parallel tests. Disabled (`ENABLED ==
-/// false`) unless a diagnostic explicitly turns it on, so it also costs nothing in every OTHER
-/// test.
-///
-/// Records, per block, the realised (post-arbitration, actually-applied) flux this tick -- NOT
-/// the speculative wake hints (`UPSTREAM_DISPLACEMENT_HINT`/`SIDE_DISPLACEMENT_HINT`), which never
-/// flow through `flux_edge_apply` at all. For each block: the largest single-edge magnitude seen
-/// (and whether that edge was interior to the block or a boundary edge shared with a neighbour
-/// block), the sum of every edge magnitude touching the block, and (separately) the sum
-/// restricted to `phase >= 2` -- the EXTRA `lateral_substeps` passes beyond the baseline phase-1
-/// pass -- so a block's extra-pass contribution can be compared against its total.
-#[cfg(test)]
-mod lod_diag {
-    use std::cell::{Cell, RefCell};
-    use std::collections::HashMap;
-
-    thread_local! {
-        static ENABLED: Cell<bool> = Cell::new(false);
-        // block -> (max_abs_flux_this_tick, sum_abs_flux_this_tick, max_flux_was_a_cross_block_edge)
-        static BLOCK_FLUX: RefCell<HashMap<usize, (f32, f64, bool)>> = RefCell::new(HashMap::new());
-        // block -> sum of |flux| realised during phase >= 2 (the EXTRA lateral_substeps passes) this tick
-        static BLOCK_EXTRA_LATERAL: RefCell<HashMap<usize, f64>> = RefCell::new(HashMap::new());
-        static TOTAL_FLUX: Cell<f64> = Cell::new(0.0);
-        // (phase0_ns, phase1_ns, extra_lateral_ns) -- wall time inside the phase loop's body only.
-        static PHASE_COST: Cell<(u128, u128, u128)> = Cell::new((0, 0, 0));
-    }
-
-    pub fn set_enabled(v: bool) {
-        ENABLED.with(|c| c.set(v));
-    }
-    pub fn is_enabled() -> bool {
-        ENABLED.with(|c| c.get())
-    }
-
-    pub fn reset_tick() {
-        BLOCK_FLUX.with(|m| m.borrow_mut().clear());
-        BLOCK_EXTRA_LATERAL.with(|m| m.borrow_mut().clear());
-        TOTAL_FLUX.with(|c| c.set(0.0));
-    }
-    pub fn reset_cost() {
-        PHASE_COST.with(|c| c.set((0, 0, 0)));
-    }
-
-    // Flux recording is a separate switch from `ENABLED` (which also gates phase timing) so a
-    // timing sample can be taken on a tick where the per-edge HashMap bookkeeping below is OFF --
-    // otherwise the timing measures this instrument, not the solver.
-    thread_local! {
-        static FLUX: Cell<bool> = Cell::new(false);
-    }
-    pub fn set_flux(v: bool) {
-        FLUX.with(|c| c.set(v));
-    }
-
-    pub fn note_flux(block: usize, mag: f32, is_cross: bool, phase: usize) {
-        if !FLUX.with(|c| c.get()) {
-            return;
-        }
-        BLOCK_FLUX.with(|m| {
-            let mut m = m.borrow_mut();
-            let e = m.entry(block).or_insert((0.0f32, 0.0f64, false));
-            if mag > e.0 {
-                e.0 = mag;
-                e.2 = is_cross;
-            }
-            e.1 += mag as f64;
-        });
-        if phase >= 2 {
-            BLOCK_EXTRA_LATERAL.with(|m| {
-                *m.borrow_mut().entry(block).or_insert(0.0) += mag as f64;
-            });
-        }
-    }
-    pub fn note_total(mag: f32) {
-        TOTAL_FLUX.with(|c| c.set(c.get() + mag as f64));
-    }
-    pub fn note_phase_cost(phase: usize, ns: u128) {
-        PHASE_COST.with(|c| {
-            let (mut p0, mut p1, mut lat) = c.get();
-            if phase == 0 {
-                p0 += ns;
-            } else if phase == 1 {
-                p1 += ns;
-            } else {
-                lat += ns;
-            }
-            c.set((p0, p1, lat));
-        });
-    }
-
-    pub fn take_block_flux() -> HashMap<usize, (f32, f64, bool)> {
-        BLOCK_FLUX.with(|m| m.borrow().clone())
-    }
-    pub fn take_extra_lateral() -> HashMap<usize, f64> {
-        BLOCK_EXTRA_LATERAL.with(|m| m.borrow().clone())
-    }
-    pub fn take_total() -> f64 {
-        TOTAL_FLUX.with(|c| c.get())
-    }
-    pub fn take_phase_cost() -> (u128, u128, u128) {
-        PHASE_COST.with(|c| c.get())
-    }
-}
 
 fn wave_params(wetness: f32) -> (f32, f32) {
     if wetness <= 0.75 {
@@ -2290,66 +2073,6 @@ fn wave_params(wetness: f32) -> (f32, f32) {
     } else {
         let t = ((wetness - 0.95) / 0.05).min(1.0);
         (0.16 + (0.24 - 0.16) * t, 0.86 + (0.98 - 0.86) * t)
-    }
-}
-
-/// TASK #63. The depth, in REFERENCE ROWS of head (see `task55_head_field::rows_of_head_at`), at
-/// and beyond which a donor conveys at the solver's full shipped rate.
-///
-/// TWENTY ROWS, and this one IS a stated design choice rather than a derived quantity -- unlike
-/// the `sqrt` in `pressure_rate_factor` below, which is not. What forces a choice here is that the
-/// top of the range cannot move: `wave_params`' `(c_sq, damping)` already sit at the CFL bound, so
-/// no depth can be made to convey FASTER than today. A depth-ordered rate therefore has to be
-/// produced by slowing everything shallower than some reference depth, and this constant names
-/// that depth -- "the shipped rate is taken to be correct at 20 reference rows of head".
-///
-/// USER-SPECIFIED, 2026-08-07: "I want 20 depth to have higher flow than 10 but it doesn't have to
-/// be linear." 20 rows is that request read literally -- the grading has to still be climbing at
-/// 20 for a 20-deep body to beat a 10-deep one, so the neutral point cannot be below it. Raising
-/// it grades a deeper range and slows more of the simulation; lowering it flattens the ordering
-/// the user asked for. Both are real trades, neither is a bug to be tuned away.
-///
-/// In REFERENCE rows, so this is one physical depth at every resolution: 20 local cells at w=512,
-/// 2.5 at w=64. See `rows_of_head_at` for why the unit has to be reference rows and not cells.
-const PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD: f32 = 20.0;
-
-/// TASK #63. Multiplier on a liquid edge's conveyance coefficient (`flux_edge_candidate`'s `c_sq`)
-/// as a function of the DONOR cell's hydrostatic head, in reference rows. Never exceeds `1.0`, so
-/// it can only ever REDUCE a flux the solver would otherwise have produced -- which is what makes
-/// it safe against `spec_transport_speed_is_bounded` by construction rather than by measurement.
-///
-/// **SQUARE ROOT, and that is Torricelli, not a curve picked to look right.** Efflux velocity
-/// under a head `h` is `v = sqrt(2*g*h)`, so flow rate scales as the SQUARE ROOT of depth. The
-/// shipped solver's rate is independent of depth given the same driving head, so the correction
-/// that restores the physical law is exactly `sqrt(h / h_ref)`, clamped at 1 because the top of
-/// the range is already at the CFL bound and cannot be raised.
-///
-/// The concavity is also what makes the feature affordable. The user's requirement is an ordering
-/// out at 10-vs-20 rows of head, and a LINEAR ramp to 20 would deliver that only by running a
-/// 1-row film at 5% of rate and a 5-row puddle at 25% -- a near-freeze of every free surface in
-/// the scene. `sqrt` gives the same ordering at the top (0.71 at 10 rows against 1.00 at 20, a
-/// 1.41x spread) while leaving the shallow end far more alive: 0.22 at one row, 0.50 at five.
-/// Diminishing returns with depth is both the physically correct shape and the affordable one.
-///
-/// **Free fall is exempt, and the exemption is exact, not an epsilon.** `rows_of_head_at` returns
-/// exactly `0.0` for a cell `advance_head_field` classified as unsupported (it WRITES `head = z`
-/// there rather than taking a max), and strictly more than `0.0` for every supported wet cell
-/// however thin -- see that function's own doc comment. So `<= 0.0` reads "outside the pressure
-/// model" and not "very little water", and returning `1.0` there is not a special case bolted on
-/// to protect free fall: a ballistic parcel has no contact pressure to be sensitive TO, so a
-/// pressure-derived rate simply does not apply to it. Attenuating it instead would freeze falling
-/// water in mid-air, which is the one outcome this task must not produce.
-///
-/// NOT a saturating `p / (p + ref)` form, which was considered and rejected: it never reaches
-/// `1.0`, so it would slow the deepest water in the scene too and silently retune every edge in
-/// the simulation rather than only the graded range. Clamped-`sqrt` is EXACTLY neutral at and
-/// above `PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD`.
-#[inline]
-fn pressure_rate_factor(rows_of_head: f32) -> f32 {
-    if rows_of_head <= 0.0 {
-        1.0
-    } else {
-        (rows_of_head / PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD).sqrt().min(1.0)
     }
 }
 
@@ -2754,23 +2477,6 @@ fn lateral_pass_roll(time_seed: u32, tick_count: u32) -> f32 {
     h = h.wrapping_mul(0x846c_a68b);
     h ^= h >> 16;
     (h >> 8) as f32 / 16_777_216.0 // [0, 1)
-}
-
-// TEMPORARY (cfg(test)-gated): tallies (times the roll bumped the pass count, times the roll was
-// considered at all) so `diag_lateral_substeps_perf` can report the empirical extra-pass fraction
-// as a check on `lateral_pass_roll`'s distribution against `frac(lateral_substeps)`. Never
-// compiled into the shipped wasm.
-#[cfg(test)]
-thread_local! {
-    static LATERAL_ROLL_STATS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
-}
-#[cfg(test)]
-fn lateral_roll_stats_reset() {
-    LATERAL_ROLL_STATS.with(|c| c.set((0, 0)));
-}
-#[cfg(test)]
-fn lateral_roll_stats_get() -> (u64, u64) {
-    LATERAL_ROLL_STATS.with(|c| c.get())
 }
 
 /// Deterministic pseudo-random float in [0, 1) from an integer seed. Used to give
@@ -3710,10 +3416,10 @@ pub fn eval_sandbox_shape_at(
 /// needed by both `settle_tick`'s flux-edge loops and `try_move`'s granular-CA path — can force
 /// a block straight into that tier by name instead of duplicating the magic number.
 ///
-/// `pub(crate)` (rather than private) so `DrawingSimulation::update`'s "perfect simulation"
-/// debug toggle (`sandart-sim/src/lib.rs`) can push a block into this exact tier by writing this
-/// exact threshold into `last_displacements`, instead of `settle_tick` growing a second bypass
-/// parameter that every one of its ~20 test call sites would also have to learn.
+/// `pub(crate)` (rather than private) so this crate's own test scaffolding (`perfect_sim_tick`,
+/// below) can push a block into this exact tier by writing this exact threshold into
+/// `last_displacements`, instead of `settle_tick` growing a second bypass parameter that every
+/// one of its test call sites would also have to learn.
 pub(crate) const MUST_SIMULATE_THRESHOLD: f32 = 1e-2;
 
 /// Task #47 ("sand-slab" scheduling defect): fresh-overburden MUST-simulate predicate constants.
@@ -3721,9 +3427,9 @@ pub(crate) const MUST_SIMULATE_THRESHOLD: f32 = 1e-2;
 /// STALE/REST classification loop) for the mechanism and why every other activation signal in
 /// this scheduler is historical (one tick late) while this one is not.
 ///
-/// Material-presence bar: mirrors `PERFECT_SIM_MATERIAL_EPSILON` in `lib.rs` (same value, same
-/// meaning -- "holding material that could move") but declared here rather than reached into from
-/// `lib.rs`, since this module owns the predicate and the two are not required to move together.
+/// Material-presence bar: mirrors this module's own test-only `PERFECT_SIM_MATERIAL_EPSILON`
+/// (same value, same meaning -- "holding material that could move") but declared here since this
+/// module owns the predicate and the two are not required to move together.
 const FRESH_OVERBURDEN_MATERIAL_EPSILON: f32 = 1e-5;
 
 /// Overburden bar, in units of "resting cells directly above" rather than raw `column_depth`
@@ -4005,25 +3711,6 @@ pub(crate) fn phase_offset(k: usize) -> u32 {
     PHASE_OFFSETS.with(|o| o[k].get())
 }
 
-/// Set the diagnostic tick-phase offset for mechanism `k` (test builds only). Scoped to the
-/// calling thread, so it cannot disturb tests running concurrently on other threads; a
-/// measurement must still reset its own offsets between rows so they don't leak from one row of
-/// the sweep to the next.
-#[cfg(test)]
-pub(crate) fn set_phase(k: usize, v: u32) {
-    PHASE_OFFSETS.with(|o| o[k].set(v));
-}
-
-/// Reset every mechanism's phase offset to 0, on the calling thread.
-#[cfg(test)]
-pub(crate) fn reset_phase_offsets() {
-    PHASE_OFFSETS.with(|o| {
-        for c in o.iter() {
-            c.set(0);
-        }
-    });
-}
-
 /// Production build: always 0, `#[inline(always)]` so the optimizer folds every `phase_offset(K)`
 /// call site down to the literal `0` and production codegen is bit-identical to before this
 /// instrumentation existed.
@@ -4193,10 +3880,8 @@ struct LateralScratch {
     avail: Vec<f32>,
     freecap: Vec<f32>,
     head_base: Vec<f32>,
-    head_base_field: Vec<f32>,
     eta_base: Vec<f32>,
     conveyance: Vec<f32>,
-    pressure_rate: Vec<f32>,
     out_total: Vec<f32>,
     in_total: Vec<f32>,
     out_total_jit: Vec<f32>,
@@ -4225,10 +3910,8 @@ impl LateralScratch {
             self.avail.resize(n, 0.0);
             self.freecap.resize(n, 0.0);
             self.head_base.resize(n, 0.0);
-            self.head_base_field.resize(n, 0.0);
             self.eta_base.resize(n, 0.0);
             self.conveyance.resize(n, 0.0);
-            self.pressure_rate.resize(n, 0.0);
             self.out_total.resize(n, 0.0);
             self.in_total.resize(n, 0.0);
             self.out_total_jit.resize(n, 0.0);
@@ -4263,8 +3946,7 @@ mod lateral_scratch {
 /// per-cell/per-edge math allows it -- kernel A in `sandart-kernel-bench` (see
 /// `artifacts/design/KERNEL-BENCH-2026-09-13.md`), rebuilt here against the full production
 /// configuration space (the bench only ported the production-default branches:
-/// `head_field_active = false`, `multiplicative_lateral_gate` off, `pressure_sensitive_flow =
-/// false`).
+/// `multiplicative_lateral_gate` off).
 ///
 /// **Structure.** For each span: stage 1 computes every per-cell frozen quantity once (avail,
 /// freecap, the additive/field/multiplicative head terms, granular share, ...); stage 2 computes
@@ -4291,7 +3973,7 @@ mod lateral_scratch {
 /// it) -- so whenever this pass reads a NEIGHBOUR row (`in_transit_at`'s `y + 1`, always downward
 /// regardless of gravity direction) that row has not been touched yet this call, and reading it
 /// live reproduces exactly the frozen pre-pass value a whole-grid clone would also have produced.
-/// `edge_vel_v`, `column_depth`, `head_field`, `shape_mask` and (for the base pass) the pre-tick
+/// `edge_vel_v`, `column_depth`, `shape_mask` and (for the base pass) the pre-tick
 /// `heightmap_data` are never mutated by any lateral pass at all, so they are always safe to read
 /// live too. Only THIS row's own cells need an explicit frozen copy (stage 1's per-span scratch,
 /// sized to at most `w + 1` cells), since stages 4+5 mutate them in place before the pass moves to
@@ -4308,11 +3990,8 @@ fn run_lateral_edge_pass(
     gravity_dir: Vec2,
     time_seed: u32,
     lateral_passes_this_tick: f32,
-    head_field_active: bool,
-    pressure_sensitive_flow: bool,
     shape_mask: &[u8],
     column_depth: &[f32],
-    head_field: &[f32],
     heightmap_data: &[f32],
     temp_heights: &mut [f32],
     cell_props: &mut CellProps,
@@ -4328,7 +4007,6 @@ fn run_lateral_edge_pass(
 ) {
     const MIN_FLUX: f32 = 1e-7;
     let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-    let head_scale = GRAVITY_HEAD_SCALE / depth_scale;
     let mult_gate_on = multiplicative_lateral_gate::is_enabled();
 
     for span in spans {
@@ -4374,17 +4052,10 @@ fn run_lateral_edge_pass(
             // lives only there. See `lateral_substeps`'s doc comment on `settle_tick`.
             let h_for_head = if phase >= 2 { hh } else { heightmap_data[idx] };
             scratch.head_base[i] = h_for_head + k * LATERAL_PRESSURE_SCALE * depth;
-            if head_field_active {
-                scratch.head_base_field[i] = head_field[idx] * head_scale;
-            }
             if mult_gate_on {
                 let h_ref = h_for_head * depth_scale;
                 scratch.eta_base[i] = h_ref + column_depth[idx];
                 scratch.conveyance[i] = mult_lateral_conveyance(h_ref, column_depth[idx], k, liq);
-            }
-            if pressure_sensitive_flow {
-                scratch.pressure_rate[i] =
-                    pressure_rate_factor(task55_head_field::rows_of_head_at(idx, w, head_field));
             }
         }
 
@@ -4456,14 +4127,7 @@ fn run_lateral_edge_pass(
             let disp_roll = ((seed ^ (nb_idx as u32).wrapping_mul(823)) & 0xFF) as f32 / 255.0;
             let dispersion = (disp_roll - 0.5) * 2.0 * DISPERSION_TAU_FRAC * tau;
 
-            let (head_a, head_b_full, tau_eff) = if head_field_active
-                && liq_a >= LIQUID_ELLIPTIC_THRESHOLD
-                && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
-            {
-                let head_a_field = scratch.head_base_field[e] + gravity_dir.x * GRAVITY_HEAD_SCALE + dispersion;
-                let head_b_field = scratch.head_base_field[e + 1];
-                (head_a_field, head_b_field, tau)
-            } else if mult_gate_on {
+            let (head_a, head_b_full, tau_eff) = if mult_gate_on {
                 let eta_a = scratch.eta_base[e] + gravity_dir.x * GRAVITY_HEAD_SCALE;
                 let eta_b = scratch.eta_base[e + 1];
                 let conveyance = 0.5 * (scratch.conveyance[e] + scratch.conveyance[e + 1]);
@@ -4495,14 +4159,7 @@ fn run_lateral_edge_pass(
                 continue;
             }
 
-            let pressure_weight = if pressure_sensitive_flow
-                && liq_a >= LIQUID_ELLIPTIC_THRESHOLD
-                && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
-            {
-                scratch.pressure_rate[e]
-            } else {
-                1.0
-            };
+            let pressure_weight = 1.0;
             let (c_sq, damping) = wave_params(scratch.wetness[e]);
             let candidate = flux_edge_candidate(
                 head_a,
@@ -4611,8 +4268,6 @@ fn run_lateral_edge_pass(
                 // comment on `settle_tick` for why velocity and mass must diverge here.
                 edge_vel_h[idx] = scratch.candidate[e] * scale;
             }
-            #[cfg(test)]
-            note_phase_flow(phase, final_flux);
 
             let mag = final_flux.abs();
             if mag > MIN_FLUX {
@@ -4626,15 +4281,6 @@ fn run_lateral_edge_pass(
                 flux_dir_record(mag, true, a_b != b_b);
                 activate_neighbor(a_b, mag, modified, next_displacements);
                 activate_neighbor(b_b, mag, modified, next_displacements);
-
-                #[cfg(test)]
-                if lod_diag::is_enabled() {
-                    lod_diag::note_total(mag);
-                    lod_diag::note_flux(a_b, mag, a_b != b_b, phase);
-                    if b_b != a_b {
-                        lod_diag::note_flux(b_b, mag, true, phase);
-                    }
-                }
 
                 if !upstream_wake_gate::is_disabled() {
                     let up_x = if final_flux > 0.0 {
@@ -4750,75 +4396,14 @@ pub fn settle_tick(
     last_simulated_ticks: &mut Vec<u32>,
     budget_n: usize,
     block_size: usize,
-    active_marbles: &[ActiveMarbleInfo],
+    _active_marbles: &[ActiveMarbleInfo],
     time_seed: u32,
     edge_vel_h: &mut Vec<f32>,
     edge_vel_v: &mut Vec<f32>,
     column_depth: &mut Vec<f32>,
-    // TASK #55 step 2 (rebuilt): the PERSISTENT hydraulic head field (see
-    // `task55_head_field`'s module doc comment for why this is now incremental state rather than
-    // a per-call solve). Owned by the caller (`DrawingSimulation::head_field` in production, a
-    // plain local `Vec` in test/spec harnesses) exactly like `column_depth` just above --
-    // resized/zero-filled at construction, `reset()`, and any grid-size change, never rebuilt
-    // from scratch here. Relaxed one tick further (`task55_head_field::advance_head_field`) only
-    // while `head_field_active` (below) is true; otherwise left untouched, so an unused field
-    // costs nothing beyond the one resize check.
-    head_field: &mut Vec<f32>,
     shape_mask: &[u8],
     tick_count: u32,
     gravity_dir: glam::Vec2,
-    // "Fresh pressure field" debug toggle (`DrawingSimulation::fresh_pressure_field`; see that
-    // field's doc comment). `false` (default): `column_depth` is computed exactly as before --
-    // inline, order-dependent, inside phase 1's own CA branch (see the "FALLBACK MEASUREMENT"
-    // comments at that site and just above the `for phase in 0..2` loop) -- bit-for-bit
-    // unchanged from the tree before this toggle existed. `true`: `column_depth` is instead
-    // computed once per tick, unconditionally, over the whole grid, by `recompute_column_depth`
-    // reading the frozen pre-tick `heightmap.data` snapshot -- see that function's own doc
-    // comment for what this is and the numbers it was measured against
-    // (`test_liquid_flowing_liquid_does_not_stand_in_walls`'s voids@160 metric: 66, at this
-    // once-per-tick/before-phase-0 placement, vs. 85 for a once-per-phase placement that was
-    // also tried and rejected).
-    fresh_pressure_field: bool,
-    // TASK #55 step 3: "drive transport from the head field" debug toggle
-    // (`DrawingSimulation::head_field_transport`; see that field's doc comment). `false`
-    // (default): unchanged from the tree before this parameter existed -- bit-identical. `true`:
-    // the lateral and vertical (gravity-aligned) edge solvers, for LIQUID-ONLY edges (both
-    // endpoints at `liquidity(wetness) >= LIQUID_ELLIPTIC_THRESHOLD`), read their driving head
-    // from `task55_head_field::compute_head_field` (computed once per tick, below, before the
-    // phase loop -- same placement as `fresh_pressure_field` above) instead
-    // of from `column_depth`/`GRAVITY_HEAD_SCALE`. Granular edges and mixed liquid/granular edges
-    // are entirely unaffected -- see the call sites in phase 0 and phase 1 for the exact gate.
-    head_field_transport: bool,
-    // TASK #55 step 2/3 fix: "show the pressure heat-map's new-field source" debug toggle
-    // (`DrawingSimulation::pressure_heatmap_head_field`). Does NOT gate anything about transport --
-    // `head_field_active` just below (built from `head_field_transport`/`head_field_gate` alone,
-    // unchanged) still owns whether the edge solvers read their driving head from `head_field`, so
-    // this parameter cannot perturb `update`'s simulation output (`heightmap`/`cell_colors`/
-    // `cell_props`), matching `pressure_heatmap_head_field_toggle.rs`'s no-perturbation contract.
-    // Its ONLY effect is on whether `head_field` itself gets this tick's relaxation sweeps
-    // (`head_field_needs_advance` below): previously `head_field` was advanced ONLY while
-    // `head_field_transport` was on, so the pressure heat-map's "new field" source rendered a
-    // buffer that had never been touched since the last reset/resize (all zeros) whenever a user
-    // turned the overlay on without also turning transport on -- exactly the reported "no heatmap
-    // shows for new field" defect. Advancing `head_field` costs nothing beyond
-    // `HEAD_FIELD_SWEEPS_PER_TICK` local sweeps (see that constant's own doc comment), so paying it
-    // for the overlay alone is cheap and keeps the "both off costs nothing" property intact.
-    pressure_heatmap_head_field: bool,
-    // TASK #63: "pressure-sensitive flow rate" debug toggle
-    // (`DrawingSimulation::pressure_sensitive_flow`; see that field's doc comment). `false`
-    // (default): unchanged from the tree before this parameter existed -- bit-identical. `true`:
-    // a LIQUID-ONLY edge whose DONOR carries less than `PRESSURE_RATE_FULL_AT_ROWS_OF_HEAD`
-    // reference rows of hydrostatic head has its conveyance coefficient scaled by the square root
-    // of the fraction it does carry
-    // (`pressure_rate_factor`, applied to `c_sq` at both the phase-0 vertical and phase-1 lateral
-    // edge sites). Free-falling material is exempt by construction; granular and mixed edges are
-    // untouched.
-    //
-    // DELIBERATELY INDEPENDENT OF `head_field_transport`. This reads `head_field` for the donor's
-    // pressure but does NOT change which driving head the edge uses, so it can be evaluated on its
-    // own while transport stays off (transport is still blocked on #64). It therefore joins
-    // `head_field_needs_advance` below -- turning this on alone is enough to keep the field live.
-    pressure_sensitive_flow: bool,
     // CLASSIFICATION-HOIST.md Stage 1: `Some(cached)` reuses a `fresh_active[]` mask computed
     // once for the whole rendered frame (`compute_fresh_active`, called by `lib.rs`'s overclocking
     // repetition loop before its first `settle_tick` call) instead of recomputing it -- ~54% of an
@@ -4950,13 +4535,6 @@ pub fn settle_tick(
     if column_depth.len() != heightmap.data.len() {
         column_depth.resize(heightmap.data.len(), 0.0);
     }
-    // Persistent, like `column_depth` just above -- see this parameter's own doc comment and
-    // `task55_head_field`'s module doc comment. Zero-fill on (re)size, matching every other
-    // persistent per-cell buffer's resize-safety fallback in this function.
-    if head_field.len() != heightmap.data.len() {
-        head_field.resize(heightmap.data.len(), 0.0);
-    }
-    
     // RE-APPLIED (previously "tried and reverted"; see git history for the original attempt and
     // the task report for the full re-measurement this decision is based on). A one-tick-lagged
     // snapshot of `column_depth`, taken before anything below writes to it this tick, used only
@@ -5034,16 +4612,13 @@ pub fn settle_tick(
     // packed mass (only its own leading/trailing edges read nonzero), so that version only ever
     // caught the outermost row or two of a falling body. `support_fraction` has no such blind spot.
     //
-    // Deliberately does NOT touch `column_depth` or route through the `fresh_pressure_field`
-    // toggle: `support_fraction` and `fresh_overburden_must_blocks` read only function-local state
-    // and are called by nothing outside this block. `column_depth` itself, and every physics term
-    // the driving head builds from it, is computed exactly as it is today, below, unconditionally
-    // on this predicate. This predicate only ever adds indices to `must_simulate`; it never feeds a
-    // physics quantity. Block activation and the driving head are independent consumers of
-    // "does this material press on what is below it" — see `fresh_pressure_field`'s own doc comment
-    // for the confirmed, unexplained standing-arch regression that toggle causes, which this
-    // predicate must not inherit, and `support_fraction`'s own doc comment for why it is a
-    // plausible candidate to replace `in_transit_at` there too, deliberately not done by this task.
+    // Deliberately does NOT touch `column_depth`: `support_fraction` and
+    // `fresh_overburden_must_blocks` read only function-local state and are called by nothing
+    // outside this block. `column_depth` itself, and every physics term the driving head builds
+    // from it, is computed exactly as it is today, below, unconditionally on this predicate. This
+    // predicate only ever adds indices to `must_simulate`; it never feeds a physics quantity. See
+    // `support_fraction`'s own doc comment for why it is a plausible candidate to replace
+    // `in_transit_at` there too, deliberately not done by this task.
     //
     // CLASSIFICATION-HOIST.md Stage 1: this scan is ~54% of an overclocked frame (measured,
     // SCAFFOLDING-BREAKDOWN.md) and used to run once per `settle_tick` CALL, i.e. once per
@@ -5102,7 +4677,6 @@ pub fn settle_tick(
     // With both, that same settled pool measures 0 MUST block-ticks at 0.35 *and* at 0.50
     // (`test_settled_sandbox_pool_does_not_stay_hot`) and reach stops depending on the budget at
     // all (`test_sandbox_wave_reach_is_budget_independent`).
-    let __pt_cls_t0 = crate::phase_timing::start();
     let active_threshold = MUST_SIMULATE_THRESHOLD;
     for b in 0..expected_len {
         let displacement = last_displacements[b];
@@ -5129,7 +4703,6 @@ pub fn settle_tick(
 
     // Quick exit check if no blocks are active
     if must_simulate.is_empty() && stale_simulate.is_empty() && rest_candidates.is_empty() {
-        crate::phase_timing::add(crate::phase_timing::SEC_CLASSIFICATION, __pt_cls_t0);
         active_bounds.active = false;
         active_blocks.fill(crate::BlockActivity::Inactive);
         return 0.0;
@@ -5175,7 +4748,6 @@ pub fn settle_tick(
     for &b in &budget_simulate {
         active_blocks[b] = crate::BlockActivity::Medium;
     }
-    crate::phase_timing::add(crate::phase_timing::SEC_CLASSIFICATION, __pt_cls_t0);
 
     // Use precomputed shape mask instead of per-frame eval_sandbox_shape
     // shape_mask values: 0 = OUTSIDE (wall), 1 = INSIDE (safe), 2 = BOUNDARY (inside, near wall)
@@ -5186,9 +4758,7 @@ pub fn settle_tick(
     let mut modified = will_simulate.clone();
 
     // 1. Copy heightmap to working buffer at start of frame
-    let __pt_copy_t0 = crate::phase_timing::start();
     temp_heights.copy_from_slice(&heightmap.data);
-    crate::phase_timing::add(crate::phase_timing::SEC_TEMP_HEIGHTS_COPY, __pt_copy_t0);
 
     let gravity_active = gravity_dir.length_squared() > 1e-6;
 
@@ -5204,89 +4774,14 @@ pub fn settle_tick(
     }
     let mut lateral_scratch_buf = lateral_scratch::take();
 
-    // FALLBACK CONFIGURATION (Task #54): by default (`fresh_pressure_field == false`),
     // `column_depth` (depth-integrated lateral pressure; see `LATERAL_PRESSURE_SCALE`'s doc
     // comment for what this quantity means) is NOT computed here or by any standalone pass. It is
     // computed inline, order-dependent, inside phase 1's own CA branch below (see the "FALLBACK
-    // MEASUREMENT" comment at that site and at the top of the `for phase in 0..2` loop) —
-    // exactly as it was before this task touched this pass. A standalone-pass version
-    // (`recompute_column_depth`, called once per phase) was written and measured; it did not fix
-    // the target regression and is kept unused for reference — see that function's own doc
-    // comment for the numbers and the root-cause instrumentation.
-    //
-    // FRESH PRESSURE FIELD (`fresh_pressure_field == true`; see this function's own doc comment
-    // on that parameter): run `recompute_column_depth` here instead, once per tick,
-    // unconditionally, over the WHOLE grid, reading this tick's frozen `heightmap.data` snapshot
-    // for both `source_heights` and `heightmap_data` (they are the same array at this
-    // once-per-tick/before-phase-0 call site — see `recompute_column_depth`'s doc comment on why
-    // those two parameters can differ at other call sites but do not here). The inline write
-    // inside phase 1's CA branch is skipped whenever this is on (see the matching
-    // "FRESH PRESSURE FIELD" guard at that site), so the two configurations never both write
-    // `column_depth` the same tick.
-    if fresh_pressure_field {
-        recompute_column_depth(
-            w,
-            h,
-            shape_mask,
-            &heightmap.data,
-            &heightmap.data,
-            &heightmap.external_mass_this_tick,
-            cell_props,
-            edge_vel_v,
-            &mut column_depth[..],
-        );
-    }
+    // MEASUREMENT" comment at that site and at the top of the `for phase in 0..2` loop).
 
     let mut total_flow = 0.0f32;
     let mut next_displacements = vec![0.0f32; expected_len];
     let mut flow_occurred = false;
-
-
-    // TASK #55 step 2/3 (rebuilt): the PERSISTENT hydraulic head field is advanced by exactly one
-    // tick's worth of local relaxation here -- same placement/reasoning as `fresh_pressure_field`'s
-    // `recompute_column_depth` call just above: reads
-    // `heightmap.data` as the tick's frozen, not-yet-mutated snapshot, so both phases below see
-    // one consistent field. Moves no mass itself (see `task55_head_field`'s module doc comment)
-    // -- it is read-only input to the phase-0/phase-1 edge solvers' driving head, gated per-edge
-    // on `head_field_transport` and liquid-only endpoints (see those call sites).
-    //
-    // UNLIKE the deleted `compute_head_field`, this does NOT solve to convergence here -- it
-    // mutates the caller-owned persistent `head_field` buffer by exactly
-    // `task55_head_field::HEAD_FIELD_SWEEPS_PER_TICK` local sweeps and returns, carrying whatever
-    // state of relaxation it reaches over to the NEXT tick's call. Cost is therefore
-    // `O(wet_cells)`, fixed and small regardless of grid resolution -- see that constant's own
-    // doc comment for the propagation-speed argument this is sized from. Skipped entirely while
-    // inactive, so an unused field costs nothing beyond the one resize check above.
-    //
-    // OR'd with `head_field_gate::is_enabled()` -- a `#[cfg(test)]`-only thread-local, same
-    // pattern as `fresh_pressure_field`/`multiplicative_lateral_gate` -- so a test built through
-    // `TestSim`/other helpers that never expose this parameter directly (e.g.
-    // `test_dry_sand_has_angle_of_repose`'s `ReposeRig`) can still force the branch on to check
-    // it against a scenario this parameter has no other route into.
-    //
-    // This is deliberately UNCHANGED from before `pressure_heatmap_head_field` existed, and stays
-    // the only thing gating the phase-0/phase-1 edge solvers' driving-head selection just below --
-    // the overlay toggle must never change what mass moves. `head_field_needs_advance` is the
-    // (strictly wider) condition for whether `head_field` gets THIS tick's relaxation sweeps at
-    // all: also true when only the overlay is on, so the pressure heat-map's new-field source has
-    // a live buffer to read even with transport off (see `pressure_heatmap_head_field` parameter's
-    // own doc comment for the defect this fixes).
-    let head_field_active = head_field_transport || head_field_gate::is_enabled();
-    // TASK #63 joins this gate but NOT `head_field_active`: `pressure_sensitive_flow` reads the
-    // field for the donor's pressure without changing which driving head any edge uses, so it
-    // needs the field LIVE but must not switch transport on as a side effect.
-    let head_field_needs_advance =
-        head_field_active || pressure_heatmap_head_field || pressure_sensitive_flow;
-    if head_field_needs_advance {
-        task55_head_field::advance_head_field(
-            w,
-            h,
-            shape_mask,
-            &heightmap.data,
-            cell_props,
-            &mut head_field[..],
-        );
-    }
 
     // --- Frozen-Jacobi candidate-flux state (edge-flux solver only; the granular CA's own
     //     `try_move` transfers are untouched and still apply immediately, sequentially) ---
@@ -5398,17 +4893,6 @@ pub fn settle_tick(
         let floor_n = lateral_substeps.floor();
         let frac = lateral_substeps - floor_n;
         let bump = if frac > 0.0 && lateral_pass_roll(time_seed, tick_count) < frac { 1.0 } else { 0.0 };
-        // TEMPORARY (cfg(test)-gated, not compiled into the shipped wasm): tallies how often the
-        // roll bumps the pass count, so a diagnostic can report the empirical extra-pass fraction
-        // against `frac(lateral_substeps)` as a check on `lateral_pass_roll`'s distribution. See
-        // `diag_lateral_substeps_perf`.
-        #[cfg(test)]
-        {
-            LATERAL_ROLL_STATS.with(|c| {
-                let (bumped, total) = c.get();
-                c.set((bumped + bump as u64, total + 1));
-            });
-        }
         floor_n + bump
     } else {
         lateral_substeps
@@ -5420,13 +4904,6 @@ pub fn settle_tick(
     };
     let total_phases = 2usize + extra_lateral_passes;
     for phase in 0..total_phases {
-        // LOD-FLUX-BUDGET-SURVEY (see `lod_diag`): wall time for this phase's whole loop body
-        // (COLLECT + ARBITRATE/APPLY), bucketed by phase index at the matching `note_phase_cost`
-        // call just before the loop's closing brace. A rough native-only proxy for wasm cost --
-        // see that diagnostic's own doc comment.
-        #[cfg(test)]
-        let __lod_diag_phase_t0 =
-            if lod_diag::is_enabled() { Some(std::time::Instant::now()) } else { None };
         // phase 0 only exists for in-plane gravity; at g = 0 there is no gravity-aligned
         // direction and the Sandbox liquid solver handles both of its edges in phase 1.
         if phase == 0 && !gravity_active {
@@ -5466,7 +4943,6 @@ pub fn settle_tick(
     // whole traversal -- the granular CA, the g=0 Sandbox liquid solver and phase 0's
     // gravity-aligned edges all run exactly once per tick, only in their normal phase -- and go
     // straight to section 2b's lateral COLLECT below.
-    let __pt_trav_t0 = crate::phase_timing::start();
     if phase <= 1 {
     for idx_b in 0..b_len {
         let b = if phase == 0 {
@@ -5641,58 +5117,7 @@ pub fn settle_tick(
                         } else {
                             0.0
                         };
-                        // TASK #55 step 3, LIQUID ONLY (both endpoints at or above
-                        // `LIQUID_ELLIPTIC_THRESHOLD`, the head field's own
-                        // domain restriction -- see that constant's doc comment for "why
-                        // liquid-only": the field has no yield criterion, so a granular pile at
-                        // its angle of repose is a permanent surface gradient that must produce
-                        // ZERO flow, and only a hard liquid gate guarantees that).
-                        //
-                        // The field's own `z` term (`-row * depth_scale`, `task55_head_field`'s
-                        // doc comment) already IS the gravitational potential in reference-row
-                        // units, so `head_field[a] - head_field[b]` carries the gravity drive AND
-                        // the pressure difference in one physically consistent number -- that is
-                        // the entire point of a unified head, and `base_head`/`vertical_bonus`
-                        // must NOT be added alongside it (that would double-count exactly what
-                        // the field already supplies).
-                        //
-                        // UNIT CONVERSION (comment which side, per this task's own history of a
-                        // silent-mismatch bug here): `head_field` is in `task55_head_field`'s
-                        // reference-row units (`depth_scale = REFERENCE_GRID_HEIGHT / w`);
-                        // `head_a`/`head_b` must be in the SAME local-cell units `h_a`/`cap_a` and
-                        // `flux_edge_candidate`'s `c_sq`/`tau` are calibrated against, so the
-                        // FIELD SIDE is divided by `depth_scale` to convert reference-row units
-                        // down to local-cell units -- the inverse of `recompute_column_depth`'s
-                        // own local -> reference-row multiplication.
-                        //
-                        // ...AND THEN MULTIPLIED BY `GRAVITY_HEAD_SCALE`, which the first version
-                        // of this branch omitted. Dividing by `depth_scale` alone leaves the field
-                        // in units of CELLS OF ELEVATION -- one row of drop is a driving head of
-                        // exactly `1.0`. The `else` branch below drives that same one-row drop with
-                        // `base_head = gravity_dir.y * GRAVITY_HEAD_SCALE` = `25.0`. So the field
-                        // branch was driving every liquid edge 25x too weakly, which does not read
-                        // as "somewhat slow" -- it lands under the solver's own thresholds and
-                        // reads as a COMPLETELY FROZEN simulation. Measured: with the toggle on,
-                        // `spec_falling_water_does_not_drift_sideways` and
-                        // `spec_draining_vessel_surface_dips` both reported `total_flow = 0.0000`,
-                        // a blob that never fell and a vessel that never drained.
-                        //
-                        // `GRAVITY_HEAD_SCALE` is the existing, already-calibrated conversion from
-                        // "one cell of elevation" to this solver's driving-head units, so this is
-                        // a unit reconciliation, NOT a tuned gain: at one row of free fall the two
-                        // branches now produce the identical number (`25.0`), which is the check
-                        // that says the conversion is right.
-                        let liq_b = liquidity(cell_props.wetness[nb_idx]);
-                        let (head_a, head_b) = if head_field_active
-                            && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
-                            && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
-                        {
-                            let head_scale =
-                                GRAVITY_HEAD_SCALE / (REFERENCE_GRID_HEIGHT as f32 / w as f32);
-                            (head_field[center_idx] * head_scale, head_field[nb_idx] * head_scale)
-                        } else {
-                            (h_a / cap_a + base_head + vertical_bonus, h_b / cap_b)
-                        };
+                        let (head_a, head_b) = (h_a / cap_a + base_head + vertical_bonus, h_b / cap_b);
                         // Sleeping edge (see `edge_sleeps`). This is the pass where sleeping pays
                         // most, because it is the one every cell in the domain enters: the
                         // interior of a filled chamber/pile is room-blocked in both directions,
@@ -5726,16 +5151,7 @@ pub fn settle_tick(
                         let (liquid_c_sq, liquid_damping) = wave_params(wetness);
                         let c_sq = GRANULAR_FALL_C_SQ * (1.0 - cell_liquidity) + liquid_c_sq * cell_liquidity;
                         let damping = GRANULAR_FALL_DAMPING * (1.0 - cell_liquidity) + liquid_damping * cell_liquidity;
-                        let pressure_weight = if pressure_sensitive_flow
-                            && cell_liquidity >= LIQUID_ELLIPTIC_THRESHOLD
-                            && liq_b >= LIQUID_ELLIPTIC_THRESHOLD
-                        {
-                            pressure_rate_factor(task55_head_field::rows_of_head_at(
-                                    center_idx, w, head_field,
-                                ))
-                        } else {
-                            1.0
-                        };
+                        let pressure_weight = 1.0;
                         // `cap_a_eff`/`cap_b_eff` (computed above, before the sleep check) are the
                         // capacity-aware bound explained there -- reused here rather than
                         // re-derived from the raw `cap_a`/`cap_b` so the actual acceptance clamp
@@ -6071,12 +5487,7 @@ pub fn settle_tick(
                     // standalone pass (see git history / the per-phase version) once this
                     // measurement is taken; do not leave the tree in this state.
                     //
-                    // FRESH PRESSURE FIELD: `&& !fresh_pressure_field` added so this inline write
-                    // never runs when the once-per-tick standalone pass above (in this function's
-                    // preamble, before the `for phase in 0..2` loop) already populated
-                    // `column_depth` for this tick — the two must never both write the same cell
-                    // the same tick, or whichever ran second would silently win.
-                    if gravity_active && !fresh_pressure_field {
+                    if gravity_active {
                         let above_idx = center_idx - w; // safe: the CA guard above requires y > 0
                         let depth_above = if is_inside(x, y - 1) {
                             let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
@@ -6322,8 +5733,6 @@ pub fn settle_tick(
                                         &mut modified, &mut next_displacements,
                                         &mut total_flow, &mut cell_flowed, &mut flow_occurred,
                                     );
-                                    #[cfg(test)]
-                                    note_phase_flow(phase, clamped_flow);
                                 }
                             }
                             avalanche_checked = true;
@@ -6533,8 +5942,6 @@ pub fn settle_tick(
                                         &mut modified, &mut next_displacements,
                                         &mut total_flow, &mut cell_flowed, &mut flow_occurred,
                                     );
-                                    #[cfg(test)]
-                                    note_phase_flow(phase, clamped_flow);
                                 }
                             }
                         }
@@ -6546,11 +5953,6 @@ pub fn settle_tick(
         }
     }
     } // end `if phase <= 1` -- the per-cell traversal only runs in the two normal phases.
-    if phase == 0 {
-        crate::phase_timing::add(crate::phase_timing::SEC_PHASE0_COLLECT, __pt_trav_t0);
-    } else if phase == 1 {
-        crate::phase_timing::add(crate::phase_timing::SEC_PHASE1_TRAVERSAL, __pt_trav_t0);
-    }
 
     // 2b. RED-BLACK EDGE COLOURING of the liquid+granular lateral (cross-gravity) edge.
     //
@@ -6598,15 +6000,13 @@ pub fn settle_tick(
     // unchanged in effect from `phase == 1 && gravity_active` for every phase that existed before
     // this parameter did.
     if phase >= 1 && gravity_active {
-        let __pt_lat_t0 = crate::phase_timing::start();
         run_lateral_edge_pass(
             w, h, cols, rows, block_size, phase, gravity_dir, time_seed, lateral_passes_this_tick,
-            head_field_active, pressure_sensitive_flow, shape_mask, column_depth, head_field,
+            shape_mask, column_depth,
             &heightmap.data, temp_heights, cell_props, cell_colors, edge_vel_h, edge_vel_v,
             &lateral_spans, &mut lateral_scratch_buf, &mut modified, &mut next_displacements,
             &mut total_flow, &mut flow_occurred,
         );
-        crate::phase_timing::add(crate::phase_timing::SEC_LATERAL_EDGE_PASS, __pt_lat_t0);
     }
 
 
@@ -6630,7 +6030,6 @@ pub fn settle_tick(
     // whether any cell did. That one bool is what lets both APPLY loops below skip
     // `edge_share_jitter` and `edge_arbitration_scale` entirely in the common case -- see
     // `accumulate_edge_jitter`'s doc comment for what that is worth and why it is exact.
-    let __pt_apply_t0 = crate::phase_timing::start();
     if oversubscribed {
         for &idx in &touched_h {
             accumulate_edge_jitter(
@@ -6697,22 +6096,6 @@ pub fn settle_tick(
             &mut modified, &mut next_displacements,
             &mut total_flow, &mut flow_occurred,
         );
-        #[cfg(test)]
-        note_phase_flow(phase, final_flux);
-        // LOD-FLUX-BUDGET-SURVEY (see `lod_diag`): record the REALISED flux, excluding wake
-        // hints, against both endpoint blocks -- once each, so an interior edge (a_b == nb_b)
-        // contributes to that one block's sum once, not twice.
-        #[cfg(test)]
-        if lod_diag::is_enabled() {
-            let mag = final_flux.abs();
-            if mag > 1e-7 {
-                lod_diag::note_total(mag);
-                lod_diag::note_flux(a_b, mag, a_b != nb_b, phase);
-                if nb_b != a_b {
-                    lod_diag::note_flux(nb_b, mag, true, phase);
-                }
-            }
-        }
 
         // Upstream wake. `flux_edge_apply` above activates only `a_b`/`nb_b`, the two blocks
         // THIS edge touches. A cell one row further upstream of the donor -- e.g. directly
@@ -6799,21 +6182,6 @@ pub fn settle_tick(
         if phase >= 2 {
             edge_vel_h[idx] = cand_h_unweighted[idx] * scale;
         }
-        #[cfg(test)]
-        note_phase_flow(phase, final_flux);
-        // LOD-FLUX-BUDGET-SURVEY (see `lod_diag`): see the identical comment on the vertical
-        // (`touched_v`) loop above.
-        #[cfg(test)]
-        if lod_diag::is_enabled() {
-            let mag = final_flux.abs();
-            if mag > 1e-7 {
-                lod_diag::note_total(mag);
-                lod_diag::note_flux(a_b, mag, a_b != nb_b, phase);
-                if nb_b != a_b {
-                    lod_diag::note_flux(nb_b, mag, true, phase);
-                }
-            }
-        }
 
         // Upstream wake -- lateral counterpart of the vertical edge's identical fix just above
         // (see its comment for the general argument, and the touched_v loop's "Speculative
@@ -6868,20 +6236,10 @@ pub fn settle_tick(
         }
     }
 
-    // LOD-FLUX-BUDGET-SURVEY (see `lod_diag`): see the matching comment at the top of this loop.
-    #[cfg(test)]
-    if let Some(__t0) = __lod_diag_phase_t0 {
-        lod_diag::note_phase_cost(phase, __t0.elapsed().as_nanos());
-    }
-    if phase == 0 {
-        crate::phase_timing::add(crate::phase_timing::SEC_PHASE0_APPLY, __pt_apply_t0);
-    }
-
     } // end `for phase` — body left at the original indentation so the operator split reads as a
       // wrapper rather than as a 600-line reformat of the solver.
 
     // 3. Copy back updated blocks
-    let __pt_copyback_t0 = crate::phase_timing::start();
     for b in 0..expected_len {
         if modified[b] {
             let bx = b % cols;
@@ -6897,7 +6255,6 @@ pub fn settle_tick(
             }
         }
     }
-    crate::phase_timing::add(crate::phase_timing::SEC_COPY_BACK, __pt_copyback_t0);
 
     // Compute updated active bounds for this frame
     let mut min_bx = cols;
@@ -7075,32 +6432,9 @@ mod tests {
         edge_vel_h: Vec<f32>,
         edge_vel_v: Vec<f32>,
         column_depth: Vec<f32>,
-        /// Mirrors `DrawingSimulation::head_field` -- the persistent hydraulic head buffer (task
-        /// #55 step 2 rebuilt). Owned here exactly like `column_depth` just above.
-        head_field: Vec<f32>,
         mask: Vec<u8>,
         block_size: usize,
         tick_count: u32,
-        /// Mirrors `DrawingSimulation::fresh_pressure_field` / `settle_tick`'s parameter of the
-        /// same name. Defaults to `false` in `new()` so every existing `TestSim`-based test is
-        /// unaffected; set directly (`sim.fresh_pressure_field = true`) to A/B the standalone
-        /// `column_depth` pass against a specific scenario without touching `tick()`'s signature.
-        fresh_pressure_field: bool,
-        /// Mirrors `DrawingSimulation::head_field_transport` / `settle_tick`'s parameter of the
-        /// same name (TASK #55 step 3). Defaults to `false` in `new()` so every existing
-        /// `TestSim`-based test is unaffected; set directly (`sim.head_field_transport = true`)
-        /// to exercise the new head-field-driven liquid transport branch on a specific scenario
-        /// without touching `tick()`'s signature.
-        head_field_transport: bool,
-        /// Mirrors `DrawingSimulation::pressure_sensitive_flow` / `settle_tick`'s parameter of the
-        /// same name (TASK #63). Defaults to `false` in `new()` so every existing `TestSim`-based
-        /// test is unaffected; set directly (`sim.pressure_sensitive_flow = true`) to exercise the
-        /// pressure-attenuated conveyance rate on a specific scenario.
-        pressure_sensitive_flow: bool,
-        /// Mirrors `DrawingSimulation::overfill_pressure` / `settle_tick`'s parameter of the
-        /// same name (TASK #70). Defaults to `false` in `new()`.
-        pub overfill_pressure: bool,
-        pub overfill_ratio: f32,
         /// Mirrors `DrawingSimulation::lateral_substeps` / `settle_tick`'s parameter of the same
         /// name. Defaults to `1.0` in `new()` (bit-identical) so every existing `TestSim`-based
         /// test is unaffected; set directly (`sim.lateral_substeps = 2.0`) to exercise the extra
@@ -7126,15 +6460,9 @@ mod tests {
                 edge_vel_h: vec![0.0; w * h],
                 edge_vel_v: vec![0.0; w * h],
                 column_depth: vec![0.0; w * h],
-                head_field: vec![0.0; w * h],
                 mask,
                 block_size,
                 tick_count: 0,
-                fresh_pressure_field: false,
-                head_field_transport: false,
-                pressure_sensitive_flow: false,
-                overfill_pressure: false,
-                overfill_ratio: 0.50,
                 lateral_substeps: 1.0,
             }
         }
@@ -7157,14 +6485,9 @@ mod tests {
                 &mut self.edge_vel_h,
                 &mut self.edge_vel_v,
                 &mut self.column_depth,
-                &mut self.head_field,
                 &self.mask,
                 self.tick_count,
                 gravity_dir,
-                self.fresh_pressure_field,
-                self.head_field_transport,
-                false,
-                self.pressure_sensitive_flow,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 self.lateral_substeps,
@@ -7462,7 +6785,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; 512 * 512];
         let mut edge_vel_v = vec![0.0; 512 * 512];
         let mut column_depth = vec![0.0; 512 * 512];
-        let mut head_field = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = vec![1.0; 256];
         let mut last_simulated_ticks = vec![0; 256];
@@ -7489,13 +6811,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 glam::Vec2::ZERO,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -7538,7 +6856,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; 512 * 512];
         let mut edge_vel_v = vec![0.0; 512 * 512];
         let mut column_depth = vec![0.0; 512 * 512];
-        let mut head_field = vec![0.0; 512 * 512];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = Vec::new();
         let mut last_simulated_ticks = Vec::new();
@@ -7563,13 +6880,9 @@ mod tests {
             &mut edge_vel_h,
             &mut edge_vel_v,
             &mut column_depth,
-            &mut head_field,
             &mask,
             0,
             glam::Vec2::ZERO,
-            false,
-            false,
-            false, false,
             None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
             0.0,
             1.0,
@@ -7620,7 +6933,6 @@ mod tests {
             let mut edge_vel_h = vec![0.0; 64 * 64];
             let mut edge_vel_v = vec![0.0; 64 * 64];
             let mut column_depth = vec![0.0; 64 * 64];
-            let mut head_field = vec![0.0; 64 * 64];
             let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
             let mut last_displacements = vec![1.0; 4];
             let mut last_simulated_ticks = vec![0; 4];
@@ -7643,13 +6955,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 0,
                 glam::Vec2::ZERO,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -7727,7 +7035,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; 128 * 128];
         let mut edge_vel_v = vec![0.0; 128 * 128];
         let mut column_depth = vec![0.0; 128 * 128];
-        let mut head_field = vec![0.0; 128 * 128];
         let mut active_blocks: Vec<crate::BlockActivity> = Vec::new();
         let mut last_displacements = vec![1.0; 16];
         let mut last_simulated_ticks = vec![0; 16];
@@ -7751,13 +7058,9 @@ mod tests {
             &mut edge_vel_h,
             &mut edge_vel_v,
             &mut column_depth,
-            &mut head_field,
             &mask,
             0,
             glam::Vec2::ZERO,
-            false,
-            false,
-            false, false,
             None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
             0.0,
             1.0,
@@ -8039,7 +7342,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; 64 * 64];
             let mut edge_vel_v = vec![0.0; 64 * 64];
             let mut column_depth = vec![0.0; 64 * 64];
-            let mut head_field = vec![0.0; 64 * 64];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -8069,13 +7371,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -8137,7 +7435,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -8170,13 +7467,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -8225,13 +7518,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 (500 + i) as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -8273,7 +7562,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -8301,13 +7589,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -8376,7 +7660,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -8408,13 +7691,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -8851,10 +8130,10 @@ mod tests {
     /// regardless of how much deeper one of them continues below -- the extra depth lives entirely
     /// below the row where a lateral neighbour would need to exist to compare against it. To make
     /// `column_depth` itself differ at a row where a real lateral edge exists, the columns need
-    /// different amounts of material stacked ABOVE that row -- so this builds exactly that, with
-    /// `fresh_pressure_field = true` so `column_depth` is a single deterministic top-down sum over a
-    /// frozen pre-tick snapshot (see `recompute_column_depth`) rather than the order-dependent
-    /// in-loop fallback, making the two `column_depth` values exactly hand-computable:
+    /// different amounts of material stacked ABOVE that row -- so this builds exactly that, with a
+    /// single, otherwise-empty column above `row_cmp` so the default in-loop `column_depth`
+    /// computation reduces to a single deterministic top-down sum, making the two `column_depth`
+    /// values exactly hand-computable:
     ///
     /// Two adjacent columns `xa`/`xb`. One row above the comparison row (`row_stack`), each column
     /// gets a small resting fill (`stack_a`/`stack_b`, deliberately UNEQUAL). Given
@@ -8875,6 +8154,30 @@ mod tests {
     /// it drove `lateral_drift_on = 0.88` here, an order of magnitude over this test's `< 1e-3`
     /// bound, simply because the old `h_b` no longer describes a flat surface once `h`'s units are
     /// fixed).
+    ///
+    /// REWORKED 2026-09-24, along with the deletion of the `fresh_pressure_field` debug toggle:
+    /// that toggle used to be how this test froze `column_depth` to a single, hand-computable,
+    /// once-per-tick value (`recompute_column_depth`, called from inside `settle_tick` before its
+    /// phase loop) instead of the shipped in-loop computation, which recomputes `column_depth`
+    /// from LIVE (already-mutated-this-tick) heights every time a cell is visited in EITHER
+    /// phase -- exactly the right behaviour for the shipped app (it wants the freshest read every
+    /// time), but it means a single fresh `sim.tick()` call can no longer hold `column_depth`
+    /// steady at the two different values this test needs while it evaluates the lateral edge:
+    /// phase 0's vertical dump already drains `row_stack` into `row_cmp` before phase 1 gets to
+    /// read (and immediately overwrite) `column_depth` again, so by the time the lateral pass
+    /// runs, both columns' `column_depth` has decayed to the SAME value (0) regardless of the
+    /// gate -- not the asymmetric one this test is built to exercise.
+    ///
+    /// So this now calls `run_lateral_edge_pass` directly -- the same private function
+    /// `settle_tick`'s phase-1 lateral pass calls, with `multiplicative_lateral_gate` read from
+    /// inside it exactly as before -- over a single injected row, with `column_depth` set
+    /// directly to the hand-derived `depth_a`/`depth_b` (what `recompute_column_depth` would have
+    /// produced for a resting stack of `stack_a`/`stack_b` immediately above `row_cmp`, per this
+    /// doc comment's own derivation above) rather than routed through an actual stacked cell and a
+    /// vertical dump. This is a MORE isolated reproduction of what this test is actually about
+    /// (`run_lateral_edge_pass`'s gate dispatch), not a weaker one -- see this file's own
+    /// `test_neck_pulse_does_not_grow` / `test_draining_vessel_surface_dips` for the tests that
+    /// still exercise `settle_tick`'s full tick pipeline end to end.
     #[test]
     fn test_mult_lateral_flat_surface_same_eta_different_depth_no_flux() {
         let w = 16usize;
@@ -8882,25 +8185,14 @@ mod tests {
         let wall = 2usize;
         let xa = 6usize;
         let xb = 7usize; // lateral neighbour of xa
-        let row_stack = 4usize; // feeds column_depth[row_cmp] via recompute_column_depth
         let row_cmp = 5usize; // the actual lateral edge under test
 
         // A narrow, two-column-wide chamber containing ONLY `xa` and `xb`, walled on every other
-        // side. Two things this closes off, both confirmed empirically, not assumed:
-        //
-        // 1. The floor sits immediately below `row_cmp` (`row_cmp + 1` onward is OUTSIDE) -- not
-        //    merely "pre-filled to capacity", a REAL floor, so there is no vertical edge leaving
-        //    `row_cmp` downward at all. GRAVITY_HEAD_SCALE's flat, depth-independent driving fully
-        //    drains any resting material into any empty room below in a single tick regardless of
-        //    source amount; with an empty row below THAT too, a pre-filled-but-unwalled cushion just
-        //    moved the cascade one row further before spilling into row_cmp+2. `row_stack` draining
-        //    into `row_cmp` is still possible (there IS room there) but has nowhere further to
-        //    cascade to, so it is bounded to that one, equal-on-both-branches transfer.
-        // 2. `xa` and `xb` have no OTHER lateral neighbour (walls immediately outside both) -- with
-        //    open neighbours on the outside, `k_a * LATERAL_PRESSURE_SCALE * depth_a` is large
-        //    enough relative to the cells' own small fill that BOTH cells drain hard toward their
-        //    OWN empty far side simultaneously, which swamps the one edge (`xa` |-> `xb`) this test
-        //    means to isolate with unrelated three- and four-cell redistribution.
+        // side, so `xa`/`xb` have no OTHER lateral neighbour to redistribute through -- with open
+        // neighbours on the outside, `k_a * LATERAL_PRESSURE_SCALE * depth_a` is large enough
+        // relative to the cells' own small fill that both cells would drain hard toward their own
+        // empty far side simultaneously, which would swamp the one edge (`xa` |-> `xb`) this test
+        // means to isolate with unrelated redistribution.
         let mut mask = vec![crate::MASK_OUTSIDE; w * h];
         for y in wall..=row_cmp {
             for x in [xa, xb] {
@@ -8922,20 +8214,36 @@ mod tests {
 
         let gravity_dir = glam::Vec2::new(0.0, 0.04);
         let props = get_test_props(MaterialMode::Water, w * h);
+        let cols = (w + 15) / 16;
+        let rows = (h + 15) / 16;
 
         let run = |mult_enabled: bool| -> (f32, f32, f32, f32) {
             let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 16);
-            sim.fresh_pressure_field = true;
-            sim.hm.data[row_stack * w + xa] = stack_a;
-            sim.hm.data[row_stack * w + xb] = stack_b;
             sim.hm.data[row_cmp * w + xa] = h_a;
             sim.hm.data[row_cmp * w + xb] = h_b;
+            sim.temp_heights.copy_from_slice(&sim.hm.data);
+            sim.column_depth[row_cmp * w + xa] = depth_a;
+            sim.column_depth[row_cmp * w + xb] = depth_b;
+
             multiplicative_lateral_gate::set_enabled(mult_enabled);
-            sim.tick(gravity_dir, usize::MAX);
+            let span = LateralSpan { y: row_cmp, x_start: xa, x_owned_end: xb, has_extra: true };
+            let mut scratch = LateralScratch::default();
+            let mut modified = vec![false; cols * rows];
+            let mut next_displacements = vec![0.0f32; cols * rows];
+            let mut total_flow = 0.0f32;
+            let mut flow_occurred = false;
+            run_lateral_edge_pass(
+                w, h, cols, rows, 16, 1, gravity_dir, 12345u32, 1.0,
+                &sim.mask, &sim.column_depth,
+                &sim.hm.data, &mut sim.temp_heights, &mut sim.cell_props, &mut sim.cell_colors,
+                &mut sim.edge_vel_h, &sim.edge_vel_v,
+                std::slice::from_ref(&span), &mut scratch, &mut modified, &mut next_displacements,
+                &mut total_flow, &mut flow_occurred,
+            );
             multiplicative_lateral_gate::set_enabled(false);
             (
-                sim.hm.data[row_cmp * w + xa],
-                sim.hm.data[row_cmp * w + xb],
+                sim.temp_heights[row_cmp * w + xa],
+                sim.temp_heights[row_cmp * w + xb],
                 sim.column_depth[row_cmp * w + xa],
                 sim.column_depth[row_cmp * w + xb],
             )
@@ -8943,13 +8251,10 @@ mod tests {
 
         let (a_off, b_off, cd_a_off, cd_b_off) = run(false);
         let (a_on, b_on, cd_a_on, cd_b_on) = run(true);
-        // `row_stack` draining vertically into `row_cmp` (see the mask's own doc comment) is
-        // expected and identical regardless of the gate -- it is the phase-0 VERTICAL edge, which
-        // this change does not touch. Isolate LATERAL drift by comparing against
-        // `h_a + stack_a` / `h_b + stack_b` (what each cell holds after that vertical settling but
-        // before any lateral edge could move anything), not against the pre-tick `h_a`/`h_b`.
-        let expect_a = h_a + stack_a;
-        let expect_b = h_b + stack_b;
+        // No vertical dump runs any more (see this test's own doc comment) -- `h_a`/`h_b` are the
+        // pre-lateral-pass heights directly.
+        let expect_a = h_a;
+        let expect_b = h_b;
         let lateral_drift_off = (a_off - expect_a).abs() + (b_off - expect_b).abs();
         let lateral_drift_on = (a_on - expect_a).abs() + (b_on - expect_b).abs();
         println!(
@@ -8998,83 +8303,6 @@ mod tests {
     /// second-hand number, what the multiplicative form actually does to this specific scenario.
     /// Reproduces the exact scenario `test_liquid_flowing_liquid_does_not_stand_in_walls` uses
     /// (same mask, same fill, same 400-tick run, same void-count metric) at `test_scale()`.
-    #[test]
-    #[ignore = "DIAGNOSTIC measurement, not a pass/fail spec — never assert on these numbers. \
-                Run with: cargo test -p sandart-sim --release --lib \
-                physics::tests::diag_mult_lateral_void_count_gate_on_vs_off -- --ignored --nocapture"]
-    fn diag_mult_lateral_void_count_gate_on_vs_off() {
-        let s = test_scale();
-        let w = 64 * s;
-        let h = 64 * s;
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
-        let props = get_test_props(MaterialMode::Water, w * h);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        let count_voids = |sim: &TestSim| -> usize {
-            let mut voids = 0;
-            for y in 1..h - 1 {
-                let mut liquid_to_the_left = false;
-                for x in 0..w {
-                    if mask[y * w + x] == crate::MASK_OUTSIDE {
-                        liquid_to_the_left = false;
-                        continue;
-                    }
-                    let v = sim.hm.data[y * w + x];
-                    if v > 0.5 {
-                        liquid_to_the_left = true;
-                        continue;
-                    }
-                    if !liquid_to_the_left || v > 0.05 {
-                        continue;
-                    }
-                    let liquid_to_the_right = (x + 1..w)
-                        .take_while(|&x2| mask[y * w + x2] != crate::MASK_OUTSIDE)
-                        .any(|x2| sim.hm.data[y * w + x2] > 0.5);
-                    if liquid_to_the_right {
-                        voids += 1;
-                    }
-                }
-            }
-            voids
-        };
-
-        let run = |mult_enabled: bool| -> (usize, usize, usize) {
-            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 32);
-            for y in 0..h / 2 {
-                for x in 0..w {
-                    if mask[y * w + x] != crate::MASK_OUTSIDE {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-            }
-            multiplicative_lateral_gate::set_enabled(mult_enabled);
-            let mut at_120 = 0;
-            let mut at_160 = 0;
-            let mut total = 0;
-            for t in 0..(400 * s) {
-                sim.tick(gravity_dir, usize::MAX);
-                let voids = count_voids(&sim);
-                total += voids;
-                if t + 1 == 120 * s {
-                    at_120 = voids;
-                }
-                if t + 1 == 160 * s {
-                    at_160 = voids;
-                }
-            }
-            multiplicative_lateral_gate::set_enabled(false);
-            (at_120, at_160, total)
-        };
-
-        let (off_120, off_160, off_total) = run(false);
-        let (on_120, on_160, on_total) = run(true);
-        println!(
-            "diag_mult_lateral_void_count_gate_on_vs_off: scale={} \
-             additive(off)   voids@120={} voids@160={} total={} \
-             multiplicative(on) voids@120={} voids@160={} total={}",
-            s, off_120, off_160, off_total, on_120, on_160, on_total
-        );
-    }
 
     /// TASK #55, granular sanity check (Janssen composition): does the gated multiplicative form
     /// stay well-behaved (mass-conserving, no NaN/explosion) for a GRANULAR material, where
@@ -9084,134 +8312,7 @@ mod tests {
     /// needs `test_dry_sand_has_angle_of_repose`'s much more careful rig); just: does draining
     /// DrySand down an Hourglass under the multiplicative gate conserve mass and stay finite,
     /// same as it does under the legacy additive term.
-    #[test]
-    #[ignore = "DIAGNOSTIC measurement, not a pass/fail spec — never assert on these numbers. \
-                Run with: cargo test -p sandart-sim --release --lib \
-                physics::tests::diag_mult_lateral_dry_sand_gate_on_vs_off -- --ignored --nocapture"]
-    fn diag_mult_lateral_dry_sand_gate_on_vs_off() {
-        let w = 64;
-        let h = 64;
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
-        let props = get_test_props(MaterialMode::DrySand, w * h);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
 
-        let run = |mult_enabled: bool| -> (f64, f64, bool) {
-            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 32);
-            for y in 0..h / 2 {
-                for x in 0..w {
-                    if mask[y * w + x] != crate::MASK_OUTSIDE {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-            }
-            let initial_mass = sim.mass();
-            multiplicative_lateral_gate::set_enabled(mult_enabled);
-            let mut any_non_finite = false;
-            for _ in 0..400 {
-                sim.tick(gravity_dir, usize::MAX);
-                if sim.hm.data.iter().any(|v| !v.is_finite()) {
-                    any_non_finite = true;
-                }
-            }
-            multiplicative_lateral_gate::set_enabled(false);
-            (initial_mass, sim.mass(), any_non_finite)
-        };
-
-        let (init_off, final_off, nan_off) = run(false);
-        let (init_on, final_on, nan_on) = run(true);
-        println!(
-            "diag_mult_lateral_dry_sand_gate_on_vs_off: \
-             additive(off)   mass {:.3} -> {:.3} (drift={:.4}) non_finite={}  \
-             multiplicative(on) mass {:.3} -> {:.3} (drift={:.4}) non_finite={}",
-            init_off, final_off, final_off - init_off, nan_off,
-            init_on, final_on, final_on - init_on, nan_on
-        );
-        assert!(!nan_off, "additive (default) path produced non-finite heights");
-        assert!(!nan_on, "multiplicative path produced non-finite heights");
-    }
-
-    #[test]
-    #[ignore = "DIAGNOSTIC measurement, not a pass/fail spec — never assert on these numbers. \
-                Task #54 (\"make pressure drive every flow\") step 2: a 'dam break' scenario -- \
-                the LEFT half of a tall box is filled solid, the RIGHT half is completely empty, \
-                for the full height -- so there is a genuine, unambiguous 'empty space beside \
-                deep material' edge at every depth simultaneously, unlike a symmetric Hourglass \
-                probed at its own centreline (tried first; discarded because the centre of a \
-                symmetric fill has zero driving head BY CONSTRUCTION regardless of pressure, so \
-                it could never show a difference). Reports, at several depths and several tick \
-                counts, the fill-difference term, the k_lateral * LATERAL_PRESSURE_SCALE * \
-                column_depth term, tau, and the outcome that actually matters: how much has \
-                spread into the empty column (`h_b`) by that tick. \
-                Run with: cargo test -p sandart-sim --release --lib \
-                physics::tests::diag_lateral_pressure_term_magnitudes -- --ignored --nocapture"]
-    // Prime suspect going in (see the task brief): `yielded = sign(dH) * max(|dH| - tau, 0)`, so
-    // if `tau` is comparable in magnitude to the depth term, sand's lateral flow is gated off
-    // regardless of how deep the material is -- the depth term gets subtracted away before it
-    // can move anything. `tau` is 0 for liquid by construction (`granular_share == 0`), so this
-    // would explain a sand/water asymmetry in depth-driven spreading even though `column_depth`
-    // and `LATERAL_PRESSURE_SCALE` apply identically to both materials since the Stage C
-    // follow-on.
-    fn diag_lateral_pressure_term_magnitudes() {
-        let w = 64;
-        let h = 90;
-        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        // Same k_of blend the lateral edge itself uses (see the `k_of` closure in `settle_tick`,
-        // Stage C FOLLOW-ON): 1.0 for liquid, `LATERAL_EARTH_PRESSURE_K` for pure granular,
-        // interpolated by the cell's own liquidity.
-        let k_of = |liq: f32| liq + (1.0 - liq) * LATERAL_EARTH_PRESSURE_K;
-
-        let top = 2usize;
-        let bottom = h - 3;
-        let cx = 31usize; // last filled column; cx+1 = 32 is the first empty column
-        let depths = [1usize, 2, 5, 10, 15, 25, 40, 60];
-
-        for &material in &[MaterialMode::Water, MaterialMode::DrySand] {
-            for &ticks in &[1usize, 3, 10, 30] {
-                let props = get_test_props(material, w * h);
-                let threshold_prop = props.threshold[0]; // uniform across the grid in this harness
-                let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-                // Left half solid from `top` to `bottom`, right half left at 0 -- an unambiguous
-                // dam break, with a genuinely deep column pressing on a genuinely empty one at
-                // every depth simultaneously.
-                for y in top..=bottom {
-                    for x in 2..=cx {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-                for _ in 0..ticks {
-                    sim.tick(gravity_dir, usize::MAX);
-                }
-
-                println!("=== {:?}, ticks={} ===", material, ticks);
-                for &depth_rows in &depths {
-                    let y = top + depth_rows;
-                    if y > bottom {
-                        continue;
-                    }
-                    let idx = y * w + cx;
-                    let nb_idx = idx + 1;
-                    let h_a = sim.hm.data[idx];
-                    let h_b = sim.hm.data[nb_idx];
-                    let fill_diff = h_a - h_b;
-                    let wetness_a = sim.cell_props.wetness[idx];
-                    let liq_a = liquidity(wetness_a);
-                    let k_a = k_of(liq_a);
-                    let depth_term = k_a * LATERAL_PRESSURE_SCALE * sim.column_depth[idx];
-                    let granular_share = if gravity_dir.length_squared() > 1e-6 { 1.0 - liq_a } else { 1.0 };
-                    let tau = GRANULAR_TAU_SCALE * threshold_prop * granular_share;
-                    println!(
-                        "  depth={:>3} rows  h_a={:.4} h_b={:.4} fill_diff={:+.4}  \
-                         column_depth={:.4}  k_lateral*scale*column_depth={:+.4}  tau={:.4}  \
-                         depth_term/tau={}",
-                        depth_rows, h_a, h_b, fill_diff, sim.column_depth[idx], depth_term, tau,
-                        if tau > 1e-9 { format!("{:.1}", depth_term.abs() / tau) } else { "inf (tau=0)".to_string() }
-                    );
-                }
-            }
-        }
-    }
 
     #[test]
     // Unit test for the sleeping predicate itself. The two branches of `edge_sleeps` are exact
@@ -9740,19 +8841,6 @@ mod tests {
         a
     }
 
-    /// Ripple amplitude restricted to the vertical strip `x in [x0, x1)`.
-    fn wave_amplitude_in_band(sim: &TestSim, w: usize, h: usize, rest: f32, x0: usize, x1: usize) -> f32 {
-        let mut a = 0.0f32;
-        for y in 0..h {
-            for x in x0..x1.min(w) {
-                let i = y * w + x;
-                if sim.mask[i] != crate::MASK_OUTSIDE {
-                    a = a.max((sim.hm.data[i] - rest).abs());
-                }
-            }
-        }
-        a
-    }
 
     #[test]
     // THE regression test for this bug. A crest dropped on a still pool must lose amplitude and
@@ -10250,57 +9338,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "MARKER, not a regression, and deliberately NOT fixed here: a pool already sitting \
-                at cell capacity has no headroom for a crest, so it cannot ripple. Water's \
-                cell_capacity_for(1.0) is exactly 1.0, and every transfer in `flux_edge` is \
-                limited by the acceptor's `(cap_b - h_b).max(0.0)`, so at h == cap that limit is \
-                zero on every edge in every direction. A refilling trough can therefore rise to \
-                the rest level but can never overshoot it, and overshoot is what ringing IS. \
-                Measured today, the same narrow trough carved into the same pool at two fill \
-                levels: a half-full pool (rest 0.4964) overshoots the rest level by 1.306e-1 and \
-                rings; an at-capacity pool (rest 0.9928) overshoots by 7.220e-3 — which is not a \
-                damped version of the same thing, it is *exactly* the 7.220e-3 of headroom \
-                between that rest level and the cap, to every digit. The crest is not attenuated, \
-                it is clipped by the ceiling. Distinct from the Gauss-Seidel energy injection \
-                fixed alongside these tests (that one made ripples grow; this one stops them \
-                existing). The remedy is headroom — a free surface allowed above the packing \
-                limit, or a capacity above the fill ceiling — which changes what a cell means and \
-                belongs in its own commit."]
-    fn test_sandbox_wave_at_capacity_cannot_ripple() {
-        let (w, h, bs) = (64, 64, 32);
-        // Carve one narrow trough and watch its centre refill. A real damped wave overshoots the
-        // rest level and rings; the question is only whether there is room above rest to do it in.
-        let run = |level: f32| -> (f32, f32) {
-            let mut sim = wave_pool(w, h, bs, SandboxShape::Square, level);
-            add_bump(&mut sim, w, h, 32.0, 32.0, -level, 2.0);
-            let rest = wave_rest_level(&sim);
-            let probe = 32 * w + 32;
-            let mut peak = f32::MIN;
-            for _ in 0..600 {
-                sim.tick(glam::Vec2::ZERO, 4);
-                peak = peak.max(sim.hm.data[probe]);
-            }
-            (rest, peak - rest)
-        };
-
-        let cap = cell_capacity_for(1.0);
-        let (rest_half, over_half) = run(0.50);
-        let (rest_full, over_full) = run(cap);
-        println!(
-            "test_sandbox_wave_at_capacity_cannot_ripple: cap={:.3}; half-full rest={:.4} \
-             overshoot={:.3e}; at-capacity rest={:.4} headroom={:.3e} overshoot={:.3e}",
-            cap, rest_half, over_half, rest_full, cap - rest_full, over_full
-        );
-        assert!(over_half > 1e-3, "control case did not ring at all: {:.3e}", over_half);
-        assert!(
-            over_full > 0.5 * over_half,
-            "A pool at capacity cannot ripple: the same trough overshoots the rest level by \
-             {:.3e} in a half-full pool but only {:.3e} at capacity, where the entire headroom \
-             above rest is {:.3e}",
-            over_half, over_full, cap - rest_full
-        );
-    }
 
 
     #[test]
@@ -10348,82 +9385,6 @@ mod tests {
         assert!(rel_err < 1e-3, "Mass not conserved across a gravity toggle: rel_err={:.6}", rel_err);
     }
 
-    #[test]
-    #[ignore = "STILL FAILING after Phase 5, but for a different reason than before, and the \
-                remaining gap looks like a defect in this test rather than in the solver. \
-                Originally (C4): get_ca_params collapsed every wetness >= 0.75 material to the \
-                same (threshold = 0.0, alpha = 0.50) and wave_params — the only thing that \
-                distinguishes Water/CalmWater/Milk/VegOil — was unreachable under gravity, so \
-                all four produced bit-identical centroids (max_sep = 0.000000). Phase 5 put the \
-                gravity liquid path on the same edge-flux solver as the g = 0 path, so \
-                wave_params IS now reached and the four presets are no longer identical: \
-                max_sep = 0.0237. But that is still far short of the 0.5 this test demands, \
-                because the metric is the centroid of the FINAL SETTLED state after 800 ticks. \
-                A conservative, incompressible solver settles every liquid into the same shape \
-                — that is the point of Phase 1's capacity constraint and Phase 5's conservation \
-                — so the settled centroid cannot distinguish them no matter how different their \
-                dynamics are. What actually differs is how fast they get there: c_sq/damping \
-                span (0.08, 0.76) for Yogurt to (0.24, 0.98) for Water, roughly a 2x spread in \
-                free-fall rate. That is the design doc's own alternative criterion ('settle-time \
-                differing > 10%'), which this test does not implement. Deliberately left \
-                failing and unmodified rather than weakened."]
-    fn test_liquid_presets_are_distinguishable_under_gravity() {
-        let w = 64;
-        let h = 64;
-        let center_x = w as f32 / 2.0;
-        let center_y = h as f32 / 2.0;
-        let r_sq = (0.46 * w as f32) * (0.46 * w as f32);
-        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        let mut centroids = Vec::new();
-        for mat in [MaterialMode::Water, MaterialMode::CalmWater, MaterialMode::Milk, MaterialMode::VegetableOil] {
-            let props = get_test_props(mat, w * h);
-            let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-            for y in 0..h {
-                for x in 0..w {
-                    let dx = x as f32 - center_x;
-                    let dy = y as f32 - center_y;
-                    if dx * dx + dy * dy < r_sq && dy < -2.0 {
-                        sim.hm.data[y * w + x] = 0.8;
-                    }
-                }
-            }
-            for _ in 0..800 {
-                sim.tick(gravity_dir, 256);
-            }
-            let mut total = 0.0f64;
-            let mut wx = 0.0f64;
-            let mut wy = 0.0f64;
-            for y in 0..h {
-                for x in 0..w {
-                    let val = sim.hm.data[y * w + x] as f64;
-                    if val > 0.0 {
-                        total += val;
-                        wx += x as f64 * val;
-                        wy += y as f64 * val;
-                    }
-                }
-            }
-            let centroid = (wx / total, wy / total);
-            println!("test_liquid_presets_are_distinguishable_under_gravity: {:?} centroid={:?}", mat, centroid);
-            centroids.push((mat, centroid));
-        }
-
-        // Pairwise centroid separation: at least one pair should differ by more than 0.5 cells.
-        let mut max_sep = 0.0f64;
-        for i in 0..centroids.len() {
-            for j in (i + 1)..centroids.len() {
-                let (ax, ay) = centroids[i].1;
-                let (bx, by) = centroids[j].1;
-                let sep = ((ax - bx).powi(2) + (ay - by).powi(2)).sqrt();
-                max_sep = max_sep.max(sep);
-            }
-        }
-        println!("test_liquid_presets_are_distinguishable_under_gravity: max pairwise centroid separation={:.6}", max_sep);
-        // Measured today: max_sep = 0.0 (bit-identical).
-        assert!(max_sep > 0.5, "All liquid presets produced statistically identical results under gravity: max_sep={:.6}", max_sep);
-    }
 
     #[test]
     // Phase 1 (C5 fix): the wetness >= 0.75 liquid/granular branch cut must be stable under
@@ -10489,66 +9450,6 @@ mod tests {
         );
     }
 
-    #[test]
-    #[ignore = "Phase 2/3 target: liquid should have essentially no angle of repose (settles \
-                flat, spread <= 1 row) while granular DrySand should retain a real heap (spread \
-                >= 8 rows) under identical pour conditions — this is the user's core complaint. \
-                Measured today (continuous point-source pour, 400 ticks pouring + 600 ticks \
-                settling): Water spread=1 (already flat, min=54 max=55) but DrySand spread=7 \
-                (min=52 max=59) — DrySand falls just short of the 8-row bar too. That is a \
-                second, distinct finding: under Sand-fall gravity mode DrySand's own repose \
-                angle is weaker than expected (get_ca_params halves the threshold again via \
-                'threshold *= 0.35' at physics.rs:226, and lock_chance drops to a flat 0.05 at \
-                physics.rs:241-242 'for smooth avalanching'), so even dry sand piles flatter \
-                than a real angle of repose would allow."]
-    fn test_liquid_has_no_angle_of_repose() {
-        let w = 64;
-        let h = 64;
-        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        let mut spreads = Vec::new();
-        for mat in [MaterialMode::Water, MaterialMode::DrySand] {
-            let props = get_test_props(mat, w * h);
-            let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-            // Continuous point-source pour near the top center (like a tap), so enough mass
-            // accumulates for DrySand to build a real angle-of-repose cone rather than a
-            // single blob settling flat by construction.
-            for _ in 0..400 {
-                for y in 4..8 {
-                    for x in 30..34 {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-                sim.tick(gravity_dir, 256);
-            }
-            // Let it settle without further pouring.
-            for _ in 0..600 {
-                sim.tick(gravity_dir, 256);
-            }
-
-            let mut surface_rows = Vec::new();
-            for x in 6..58 {
-                for y in 0..h {
-                    if sim.hm.data[y * w + x] > 0.05 {
-                        surface_rows.push(y);
-                        break;
-                    }
-                }
-            }
-            let spread = if surface_rows.is_empty() {
-                0
-            } else {
-                surface_rows.iter().max().unwrap() - surface_rows.iter().min().unwrap()
-            };
-            println!("test_liquid_has_no_angle_of_repose: {:?} spread={}", mat, spread);
-            spreads.push(spread);
-        }
-
-        // Measured today: Water spread=1, DrySand spread=7.
-        assert!(spreads[0] <= 1, "Liquid (Water) should settle nearly flat: spread={}", spreads[0]);
-        assert!(spreads[1] >= 8, "DrySand should retain a real heap: spread={}", spreads[1]);
-    }
 
     /// Linear-regression slope of `h(x)` along one row, `-d(height)/d(offset)` so a downhill
     /// flank (height falling away from the peak as `|offset|` grows) reads as a positive slope
@@ -10848,11 +9749,8 @@ mod tests {
         // threshold mechanism is doing something", separate from the four cases' own internal
         // (and, per the finding, threshold-insensitive) cross-consistency.
         let anchor_ticks = measure_ticks * 9 / 2;
-        let prev_gate = head_field_gate::is_enabled();
-        head_field_gate::set_enabled(false);
         let mut sim_water = rig.build_material(s, steep_initial, area, MaterialMode::Water, 1.0);
         let water_anchor_final = rig.settle_and_measure(&mut sim_water, anchor_ticks, half_width_1);
-        head_field_gate::set_enabled(prev_gate);
         let mut sim_dry_anchor = rig.build(s, steep_initial, area);
         let dry_anchor_final = rig.settle_and_measure(&mut sim_dry_anchor, anchor_ticks, half_width_1);
         println!(
@@ -11012,109 +9910,6 @@ mod tests {
         );
     }
 
-    /// TASK #55 step 3 canary. `test_dry_sand_has_angle_of_repose` re-run with
-    /// `head_field_transport` forced ON via `head_field_gate` (the test-only thread-local; see
-    /// its own doc comment -- `ReposeRig`/`TestSim` never expose the real parameter directly, so
-    /// the thread-local is the only way to force it on from a test rig).
-    ///
-    /// This is the positive check that the LIQUID-ONLY restriction (`LIQUID_ELLIPTIC_THRESHOLD`
-    /// gate on both edge sites) actually holds: `test_dry_sand_has_angle_of_repose` builds pure
-    /// DrySand piles (wetness 0.00, `liquidity == 0.0`, far below the gate), so if the gate is
-    /// doing its job the head field must never be consulted for a single edge in that test, and
-    /// the whole suite of angle-of-repose assertions -- CASE 1 through 4 and the NON-VACUITY
-    /// ANCHOR -- must still pass exactly as they do with the toggle off (that baseline is
-    /// unconditionally covered by `test_dry_sand_has_angle_of_repose` itself, which this canary
-    /// runs unmodified, just under the gate). Run with `--nocapture` to see the measured angle and
-    /// anchor numbers printed by the inner test. A prior shipped #55 attempt's multiplicative
-    /// lateral head flattened a 19.29 degree slope to 0.41 degrees under an equivalent forced-on
-    /// check, with its own non-vacuity anchor reading 0.00 for both DrySand and Water; this test
-    /// exists so a regression of that shape cannot ship silently again.
-    #[test]
-    fn test_head_field_transport_repose_non_regression() {
-        head_field_gate::set_enabled(true);
-        let result = std::panic::catch_unwind(test_dry_sand_has_angle_of_repose);
-        head_field_gate::set_enabled(false);
-        assert!(
-            result.is_ok(),
-            "test_dry_sand_has_angle_of_repose FAILED with head_field_transport FORCED ON: the \
-             liquid-only gate (LIQUID_ELLIPTIC_THRESHOLD on both edge endpoints) did not keep the \
-             head field out of a pure-DrySand scenario (DrySand has liquidity == 0.0, far below \
-             the gate) -- see the panic output above (re-run with --nocapture to see the printed \
-             CASE/NON-VACUITY-ANCHOR angles) for which assertion tripped."
-        );
-    }
-
-    #[test]
-    #[ignore = "Phase 3 target: a liquid blob impacting a floor should splash — spreading \
-                laterally beyond its original width AND moving at least 1 row upward against \
-                gravity. Measured today: lateral spread does happen (width 8 -> 30 within 10 \
-                ticks of impact, via the same dispersion noise as C2) but upward movement is \
-                impossible BY CONSTRUCTION: physics.rs:1162 and physics.rs:1248 both `continue` \
-                whenever `gravity_active && gravity_dot < -0.01`, i.e. no cell may ever flow \
-                against gravity in Sand-fall mode. min_row_after (59) never goes above \
-                top_row_at_impact (50)."]
-    fn test_liquid_splashes_on_impact() {
-        let w = 64;
-        let h = 64;
-        let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-        let props = get_test_props(MaterialMode::Water, w * h);
-        let mut sim = TestSim::new(w, h, props, mask, 32);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        // A compact blob close to the floor.
-        for y in 50..54 {
-            for x in 28..36 {
-                sim.hm.data[y * w + x] = 1.0;
-            }
-        }
-        let initial_width = 36 - 28;
-
-        let mut top_row_at_impact = None;
-        for _ in 0..60 {
-            sim.tick(gravity_dir, 256);
-            if top_row_at_impact.is_some() {
-                continue;
-            }
-            // Detect impact: material reaches near the floor (y=58 or 59).
-            let touching_floor = (20..44).any(|x| sim.hm.data[58 * w + x] > 0.05 || sim.hm.data[59 * w + x] > 0.05);
-            if touching_floor {
-                let min_row = (0..h)
-                    .find(|&y| (20..44).any(|x| sim.hm.data[y * w + x] > 0.05))
-                    .expect("material must exist somewhere once it's touching the floor");
-                top_row_at_impact = Some(min_row);
-            }
-        }
-        let top_at_impact = top_row_at_impact.expect("blob never reached the floor within 60 ticks");
-
-        for _ in 0..10 {
-            sim.tick(gravity_dir, 256);
-        }
-
-        let mut min_x = w;
-        let mut max_x = 0;
-        let mut min_row_after = h;
-        for y in 0..h {
-            for x in 0..w {
-                if sim.hm.data[y * w + x] > 0.05 {
-                    min_x = min_x.min(x);
-                    max_x = max_x.max(x);
-                    min_row_after = min_row_after.min(y);
-                }
-            }
-        }
-        let width_after = max_x.saturating_sub(min_x) + 1;
-        let lateral_spread = width_after > initial_width;
-        let upward_move = min_row_after < top_at_impact;
-        println!(
-            "test_liquid_splashes_on_impact: width_after={} (initial={}), min_row_after={} \
-             (top_at_impact={}), lateral_spread={}, upward_move={}",
-            width_after, initial_width, min_row_after, top_at_impact, lateral_spread, upward_move
-        );
-
-        // Measured today: lateral_spread=true, upward_move=false (structurally impossible).
-        assert!(lateral_spread, "Blob did not spread laterally beyond its original width on impact");
-        assert!(upward_move, "Blob did not move upward at all on impact (min_row_after={}, top_at_impact={})", min_row_after, top_at_impact);
-    }
 
     #[test]
     // Companion to `test_sandbox_wave_stays_left_right_symmetric`, for the gravity + liquid path
@@ -11402,203 +10197,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore]
-    // DIAGNOSTIC measurement, not a pass/fail spec — never assert on these numbers.
-    //
-    // `test_water_blob_stays_left_right_symmetric_under_gravity` (above) shows the whole solver
-    // is not invariant under a shift of the global tick phase, but seeding `TestSim.tick_count`
-    // at 1 perturbs all eight `tick_count`-driven mechanisms in `settle_tick` at once (LOD
-    // staleness, block-level x order, three independent parity switches, the cell-level lateral
-    // sweep, the CA checkerboard, and the harness's own RNG seed), so that failure cannot be
-    // attributed to any single one of them.
-    //
-    // This test isolates each mechanism in turn, using the `phase_offset(K_*)` diagnostic knobs
-    // defined just above `settle_tick`: it sets every offset to 0 except one mechanism's, which
-    // it sets to 1, runs the identical centred-water-blob-under-gravity scenario that the failing
-    // test above runs, and records the same three metrics (`worst`, `final_err`,
-    // `late_persistent_run`). It also records two references measured with the same harness:
-    // all offsets 0 (the symmetric baseline — must reproduce the failing test's own `even`/
-    // `initial_tick_count=0` numbers) and all offsets 1 (closely analogous to, but not perfectly
-    // identical to, the failing test's `odd`/`initial_tick_count=1` global tick-count shift — see
-    // the note at the `K_LOD_STALENESS` call site for why the LOD-staleness mechanism in
-    // particular differs slightly between "seed tick_count at 1" and "add 1 to every site that
-    // reads tick_count": a global shift also shifts `last_simulated_ticks[b]`'s write side, so its
-    // staleness bias is transient; the offset here only touches the read side, so its bias is a
-    // small constant every tick).
-    //
-    // SINGLE-THREADED BY CONSTRUCTION: `PHASE_OFFSETS` is process-global mutable state (see the
-    // module comment above `settle_tick`), so every measurement below happens sequentially inside
-    // this one function body — never across threads or interleaved with another test — and each
-    // is bracketed by `reset_phase_offsets()`. A `Guard` with a `Drop` impl resets the offsets
-    // again on the way out even if a measurement panics, so a failure here can't leave nonzero
-    // offsets live for whatever test runs next in the same process. This test is `#[ignore]`d (it
-    // does not run under plain `cargo test`) and touches global state no other test in this file
-    // writes to, but if it is ever run with other tests that also call `set_phase`, pass
-    // `--test-threads=1` to keep the two from interleaving.
-    //
-    // Run with:
-    //   cargo test -p sandart-sim --lib physics::tests::test_tick_phase_mechanism_isolation -- --ignored --nocapture
-    fn test_tick_phase_mechanism_isolation() {
-        struct Guard;
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                reset_phase_offsets();
-            }
-        }
-        let _guard = Guard;
-        reset_phase_offsets();
-
-        let w = 64;
-        let h = 64;
-        const N_TICKS: usize = 150;
-        const EPS: f64 = 1e-6;
-
-        // Identical to the failing test's own helper (duplicated rather than shared, so this
-        // diagnostic can never accidentally change that test's behaviour).
-        let longest_same_sign_run = |samples: &[f64]| -> usize {
-            let mut max_run = 0usize;
-            let mut run_sign = 0i32;
-            let mut run_len = 0usize;
-            for &d in samples {
-                let s = if d > EPS { 1 } else if d < -EPS { -1 } else { 0 };
-                if s != 0 && s == run_sign {
-                    run_len += 1;
-                } else if s != 0 {
-                    run_sign = s;
-                    run_len = 1;
-                } else {
-                    run_sign = 0;
-                    run_len = 0;
-                }
-                max_run = max_run.max(run_len);
-            }
-            max_run
-        };
-
-        // Identical scenario to the failing test above: a centred, bit-symmetric water blob
-        // dropped under gravity onto a Square-mask floor. `TestSim.tick_count` always starts at
-        // 0 here — whatever lean shows up is driven entirely by the `PHASE_OFFSETS` set before
-        // calling this, not by seeding the tick counter.
-        let run_scenario = || -> (f64, f64, usize) {
-            let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-            let props = get_test_props(MaterialMode::Water, w * h);
-            let mut sim = TestSim::new(w, h, props, mask, 32);
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-            for y in 50..54 {
-                for x in 28..37 {
-                    sim.hm.data[y * w + x] = 1.0;
-                }
-            }
-
-            let signed_diff = |s: &TestSim| -> f64 {
-                let mut diff = 0.0f64;
-                for y in 0..h {
-                    for x in 1..w / 2 {
-                        let j = w - x;
-                        let i = y * w + x;
-                        let jj = y * w + j;
-                        if s.mask[i] == crate::MASK_OUTSIDE || s.mask[jj] == crate::MASK_OUTSIDE {
-                            continue;
-                        }
-                        diff += (s.hm.data[i] - s.hm.data[jj]) as f64;
-                    }
-                }
-                diff
-            };
-            let total_mass = |s: &TestSim| -> f64 { s.hm.data.iter().map(|&v| v as f64).sum() };
-
-            let initial = signed_diff(&sim);
-            assert!(
-                initial.abs() < 1e-9,
-                "test setup is not mirror symmetric: {:.3e}",
-                initial
-            );
-
-            let mut trace: Vec<f64> = Vec::with_capacity(N_TICKS);
-            for _ in 0..N_TICKS {
-                sim.tick(gravity_dir, 256);
-                let mass = total_mass(&sim);
-                let rel = if mass > 0.0 { signed_diff(&sim) / mass } else { 0.0 };
-                trace.push(rel);
-            }
-
-            let worst = trace.iter().cloned().fold(0.0f64, |a, b: f64| a.max(b.abs()));
-            let final_err = trace.last().copied().unwrap_or(0.0).abs();
-            let late = &trace[trace.len() / 2..];
-            let late_run = longest_same_sign_run(late);
-
-            (worst, final_err, late_run)
-        };
-
-        let mechanisms: [(&str, usize); 8] = [
-            ("LOD staleness", K_LOD_STALENESS),
-            ("Block-level x order", K_BLOCK_ORDER),
-            ("Non-down-gravity block-order parity switch", K_NONDOWN_BLOCK_PARITY),
-            ("Non-down-gravity row-order parity switch", K_NONDOWN_ROW_PARITY),
-            ("Cell-level lateral sweep (leading candidate)", K_LATERAL_SWEEP),
-            ("Non-gravity-active x-order parity switch", K_NONGRAVITY_X_PARITY),
-            ("CA checkerboard", K_CA_CHECKERBOARD),
-            ("RNG seed", K_RNG_SEED),
-        ];
-
-        let mut rows: Vec<(String, f64, f64, usize)> = Vec::new();
-
-        // Reference 1: symmetric baseline, every offset 0.
-        reset_phase_offsets();
-        let (w0, f0, l0) = run_scenario();
-        rows.push(("REFERENCE: all offsets 0 (symmetric baseline)".to_string(), w0, f0, l0));
-        reset_phase_offsets();
-
-        // Each mechanism flipped alone.
-        for &(name, k) in &mechanisms {
-            reset_phase_offsets();
-            set_phase(k, 1);
-            let (worst, final_err, late_run) = run_scenario();
-            rows.push((format!("{name} (flipped alone)"), worst, final_err, late_run));
-            reset_phase_offsets();
-        }
-
-        // Reference 2: every offset 1, analogous to the failing test's global tick_count=1 shift.
-        reset_phase_offsets();
-        for &(_, k) in &mechanisms {
-            set_phase(k, 1);
-        }
-        let (wa, fa, la) = run_scenario();
-        rows.push(("REFERENCE: all offsets 1 (~= global tick-phase shift)".to_string(), wa, fa, la));
-        reset_phase_offsets();
-
-        // Bonus sanity check (not one of the requested rows): if every mechanism other than
-        // block order and the lateral sweep is a no-op in this scenario (as the single-flip rows
-        // above suggest — gravity here is active and points straight down, so the three
-        // non-down-gravity/non-gravity-active parity switches are dead branches, and this
-        // scenario never puts a granular/CA cell through the checkerboard or RNG-seeded tie
-        // break), then flipping just those two together should reproduce Reference 2 exactly.
-        reset_phase_offsets();
-        set_phase(K_BLOCK_ORDER, 1);
-        set_phase(K_LATERAL_SWEEP, 1);
-        let (wc, fc, lc) = run_scenario();
-        rows.push((
-            "COMBO CHECK: block order + lateral sweep only".to_string(),
-            wc, fc, lc,
-        ));
-        reset_phase_offsets();
-
-        println!();
-        println!(
-            "{:<58} {:>12} {:>12} {:>10}",
-            "mechanism", "worst", "final", "late_run"
-        );
-        println!("{}", "-".repeat(96));
-        for (name, worst, final_err, late_run) in &rows {
-            println!(
-                "{:<58} {:>12.4e} {:>12.4e} {:>10}",
-                name, worst, final_err, late_run
-            );
-        }
-        println!();
-    }
 
     #[test]
     fn test_hourglass_full_drainage() {
@@ -11654,7 +10252,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -11680,13 +10277,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -11745,7 +10338,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -11773,13 +10365,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -11791,167 +10379,7 @@ mod tests {
     }
 
 
-    /// DIAGNOSTIC for the water-asymmetry hunt (2026-09-08). Not an assertion: it prints.
-    ///
-    /// Run with:
-    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_water_hourglass
-    ///
-    /// Reproduces the reported scenario -- water draining an hourglass, one neck against three --
-    /// at the two resolutions the asymmetry was reported to differ between. Runs at FULL budget so
-    /// the LOD scheduler cannot contribute; whatever lean shows up here is geometry plus the
-    /// solver's own sweep order.
-    ///
-    /// `mirror` is the height field against its own reflection, normalised by total mass -- it
-    /// measures shape, not just mass balance. `signed` is (left mass - right mass) / total, which
-    /// keeps the DIRECTION of the lean: a symmetric sloshing noise averages to zero, a one-sided
-    /// bias does not.
-    /// DIAGNOSTIC (2026-09-09): does the water free surface LEVEL, or does it hold a slope?
-    ///
-    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_water_levelling
-    ///
-    /// The reported defect is water sitting at "almost 45 degree walls" in a multi-neck hourglass.
-    /// A liquid free surface must be FLAT whatever the vessel does; holding a slope is sand
-    /// behaviour. This measures the surface directly: for every column that has any water, take the
-    /// topmost filled cell, then report the surface's height RANGE across the vessel and the worst
-    /// slope between horizontally adjacent columns, in cells-per-cell (1.0 == 45 degrees).
-    ///
-    /// Reported at three times: early (still filling), mid, and late (should have levelled).
-    #[test]
-    #[ignore]
-    fn diag_water_levelling() {
-        let bs = crate::DEFAULT_BLOCK_SIZE;
-        for grid in [256usize] {
-            for (name, shape) in [
-                ("ClosedBox", SandboxShape::Square),
-            ] {
-                let mask = make_test_mask(grid, grid, shape, 0.04, 1.0);
-                let props = get_test_props(MaterialMode::Water, grid * grid);
-                let mut sim = TestSim::new(grid, grid, props, mask, bs);
-                // A closed box with all the water piled into the LEFT THIRD, filled to the brim.
-                // Nothing can drain out, so the only thing that can change the surface is lateral
-                // transport. A liquid must flatten this to a level pool; the time it takes and the
-                // slope it stalls at is exactly what "45 degree walls" is complaining about.
-                for y in 0..grid {
-                    for x in 0..grid / 3 {
-                        let i = y * grid + x;
-                        if sim.mask[i] != crate::MASK_OUTSIDE {
-                            sim.hm.data[i] = 1.0;
-                        }
-                    }
-                }
 
-                // Topmost filled cell per column.
-                let surface = |s: &TestSim| -> Vec<Option<usize>> {
-                    (0..grid).map(|x| {
-                        (0..grid).find(|&y| {
-                            let i = y * grid + x;
-                            s.mask[i] != crate::MASK_OUTSIDE && s.hm.data[i] > 0.05
-                        })
-                    }).collect()
-                };
-                let stats = |s: &TestSim| -> (usize, f64, f64) {
-                    let surf = surface(s);
-                    let ys: Vec<usize> = surf.iter().filter_map(|&o| o).collect();
-                    if ys.len() < 2 { return (0, 0.0, 0.0); }
-                    let range = (*ys.iter().max().unwrap() - *ys.iter().min().unwrap()) as f64;
-                    let mut worst = 0.0f64;
-                    for x in 0..grid - 1 {
-                        if let (Some(a), Some(b)) = (surf[x], surf[x + 1]) {
-                            worst = worst.max((a as f64 - b as f64).abs());
-                        }
-                    }
-                    (ys.len(), range, worst)
-                };
-
-                let budget = (grid / bs) * (grid / bs);
-                let mut out = String::new();
-                for t in 1..=3000u32 {
-                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-                    if t == 300 || t == 1200 || t == 3000 {
-                        let (n, range, worst) = stats(&sim);
-                        out.push_str(&format!(
-                            " | t={} cols={} range={:.0} maxslope={:.1}", t, n, range, worst
-                        ));
-                    }
-                }
-                println!("DIAGLEVEL {} grid={}{}", name, grid, out);
-            }
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn diag_water_hourglass_mirror_asymmetry() {
-        let bs = crate::DEFAULT_BLOCK_SIZE;
-        for grid in [128usize, 256] {
-            for (name, shape) in [
-                ("Hourglass ", SandboxShape::Hourglass),
-                ("MultiNeck ", SandboxShape::MultiNeckHourglass),
-            ] {
-                let mask = make_test_mask(grid, grid, shape, 0.04, 1.0);
-                let props = get_test_props(MaterialMode::Water, grid * grid);
-                let mut sim = TestSim::new(grid, grid, props, mask, bs);
-
-                // Water in the UPPER chamber only, so it has to drain through the neck(s).
-                for y in 0..grid / 2 {
-                    for x in 0..grid {
-                        let i = y * grid + x;
-                        if sim.mask[i] != crate::MASK_OUTSIDE {
-                            sim.hm.data[i] = 0.5;
-                        }
-                    }
-                }
-
-                let mirror = |s: &TestSim| -> f64 {
-                    let (mut diff, mut total) = (0.0f64, 0.0f64);
-                    for y in 0..grid {
-                        for x in 0..grid {
-                            let (i, j) = (y * grid + x, y * grid + (grid - 1 - x));
-                            if s.mask[i] == crate::MASK_OUTSIDE || s.mask[j] == crate::MASK_OUTSIDE {
-                                continue;
-                            }
-                            diff += (s.hm.data[i] - s.hm.data[j]).abs() as f64;
-                            total += s.hm.data[i] as f64;
-                        }
-                    }
-                    if total > 0.0 { diff / total } else { 0.0 }
-                };
-                let signed = |s: &TestSim| -> f64 {
-                    let (mut l, mut r) = (0.0f64, 0.0f64);
-                    for y in 0..grid {
-                        for x in 0..grid {
-                            let i = y * grid + x;
-                            if s.mask[i] == crate::MASK_OUTSIDE { continue; }
-                            if x * 2 + 1 < grid { l += s.hm.data[i] as f64; }
-                            else if x * 2 + 1 > grid { r += s.hm.data[i] as f64; }
-                        }
-                    }
-                    let t = l + r;
-                    if t > 0.0 { (l - r) / t } else { 0.0 }
-                };
-
-                let budget = (grid / bs) * (grid / bs);
-                let init_m = mirror(&sim);
-                let (mut worst_m, mut worst_s) = (0.0f64, 0.0f64);
-                // Ticks scale with resolution. Transport is clamped to one cell per tick and a
-                // cell at 256 is half the physical size, so the same physical drain needs twice
-                // the ticks -- comparing equal tick counts across resolutions would report
-                // "unfinished" as "asymmetric".
-                let ticks = 1500u32 * (grid as u32) / 128;
-                for _ in 1..=ticks {
-                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-                    worst_m = worst_m.max(mirror(&sim));
-                    let s = signed(&sim);
-                    if s.abs() > worst_s.abs() { worst_s = s; }
-                }
-                println!(
-                    "DIAGASYM {} grid={} ticks={} init_mirror={:.3e} worst_mirror={:.4} \
-                     final_mirror={:.4} worst_signed={:+.4} final_signed={:+.4}",
-                    name, grid, ticks, init_m, worst_m, mirror(&sim), worst_s, signed(&sim)
-                );
-            }
-        }
-    }
 
     /// Builds `cell_props` exactly the way the web UI's "Linear gradient" distribution does
     /// (`generateMaterialProps`, pattern `'gradient'`, in `sandart-wasm/web/demo.js`): each of the
@@ -11972,307 +10400,7 @@ mod tests {
         props
     }
 
-    /// DIAGNOSTIC (2026-09-12, Oobleck-removal task, step 1). Measures BEFORE any removal the
-    /// standing "vertical cliff" reported with a "Linear gradient" DrySand -> Water distribution in
-    /// a MultiNeckHourglass. Leading theory: `is_oobleck_band` (wetness in [0.50, 0.65)) routes
-    /// that slice of the gradient onto the old granular CA instead of the Stage C lateral flux edge
-    /// every other material uses, so it stands as a slab on its own solver.
-    ///
-    /// Reports, per column and at a few checkpoints, the surface height (topmost cell with
-    /// h > 0.05) in the upper and lower chamber, the worst adjacent-column step, and every
-    /// adjacent-column step >= 6 cells with its column x and that column's initial wetness `t` --
-    /// so a band-caused cliff can be told apart from an ordinary vessel-shape step by whether `t`
-    /// lands in or at the edge of [0.50, 0.65). Runs the same scenario with single-material fills
-    /// (all DrySand, all Water) as controls.
-    ///
-    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_gradient_cliffs
-    #[test]
-    #[ignore]
-    fn diag_gradient_cliffs() {
-        let grid = 256usize;
-        let bs = crate::DEFAULT_BLOCK_SIZE;
-        let mask = make_test_mask(grid, grid, SandboxShape::MultiNeckHourglass, 0.04, 1.0);
-        let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32);
-        let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32);
-        let t_of = |x: usize| -> f32 { x as f32 / (grid - 1) as f32 };
 
-        let run = |label: &str, props: CellProps| {
-            let mut sim = TestSim::new(grid, grid, props, mask.clone(), bs);
-            sim.lateral_substeps = 2.5;
-            // Fill the upper half.
-            for y in 0..grid / 2 {
-                for x in 0..grid {
-                    let i = y * grid + x;
-                    if sim.mask[i] != crate::MASK_OUTSIDE {
-                        sim.hm.data[i] = 0.5;
-                    }
-                }
-            }
-
-            let surface = |s: &TestSim, y_range: std::ops::Range<usize>| -> Vec<Option<usize>> {
-                (0..grid).map(|x| {
-                    y_range.clone().find(|&y| {
-                        let i = y * grid + x;
-                        s.mask[i] != crate::MASK_OUTSIDE && s.hm.data[i] > 0.05
-                    })
-                }).collect()
-            };
-
-            let budget = (grid / bs) * (grid / bs);
-            for t in 1..=3000u32 {
-                sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-                if t == 500 || t == 1500 || t == 3000 {
-                    for (chamber, y_range) in [("upper", 0..grid / 2), ("lower", grid / 2..grid)] {
-                        let surf = surface(&sim, y_range);
-                        let mut worst_step = 0usize;
-                        let mut big_steps = Vec::new();
-                        for x in 0..grid - 1 {
-                            if let (Some(a), Some(b)) = (surf[x], surf[x + 1]) {
-                                let step = (a as i64 - b as i64).unsigned_abs() as usize;
-                                worst_step = worst_step.max(step);
-                                if step >= 6 {
-                                    big_steps.push((x, step, t_of(x)));
-                                }
-                            }
-                        }
-                        println!(
-                            "DIAGCLIFF {} chamber={} t={} worst_step={} big_steps(>=6)={}",
-                            label, chamber, t, worst_step, big_steps.len()
-                        );
-                        for (x, step, tx) in &big_steps {
-                            println!(
-                                "  DIAGCLIFF {} chamber={} t={} step_at_x={} step={} t_x={:.3}",
-                                label, chamber, t, x, step, tx
-                            );
-                        }
-                    }
-                }
-            }
-        };
-
-        run("gradient", gradient_props(grid, grid, dry_sand, water));
-        run("all_dry_sand", get_test_props(MaterialMode::DrySand, grid * grid));
-        run("all_water", get_test_props(MaterialMode::Water, grid * grid));
-    }
-
-    /// DIAGNOSTIC (SESSION-HANDOVER-2026-09-13.md §4). Measures `max(h - cell_capacity_for(wetness))`
-    /// over two mixed-material scenes, to localise the small incompressibility leak reported there
-    /// ("max(h - cap) = 2.68e-2 on the gradient snapshot ... capacity drops 1.5 -> 1.0 while its
-    /// height stays"). A single-material scene is run as a control for each: this quantity must be
-    /// (near) zero whenever wetness never mixes two different values into one cell, because then no
-    /// cell's own capacity ever moves out from under its own height.
-    ///
-    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_capacity_leak
-    #[test]
-    #[ignore]
-    fn diag_capacity_leak() {
-        let over_capacity = |sim: &TestSim| -> f32 {
-            let mut worst = 0.0f32;
-            for i in 0..sim.mask.len() {
-                if sim.mask[i] == crate::MASK_OUTSIDE {
-                    continue;
-                }
-                let cap = cell_capacity_for(sim.cell_props.wetness[i]);
-                worst = worst.max(sim.hm.data[i] - cap);
-            }
-            worst
-        };
-
-        // Scene A: the same DrySand -> Water linear gradient in a MultiNeckHourglass that
-        // `diag_gradient_cliffs` uses, with its own all-dry / all-water controls.
-        {
-            let grid = 256usize;
-            let bs = crate::DEFAULT_BLOCK_SIZE;
-            let mask = make_test_mask(grid, grid, SandboxShape::MultiNeckHourglass, 0.04, 1.0);
-            let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32);
-            let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32);
-            let budget = (grid / bs) * (grid / bs);
-
-            let run = |label: &str, props: CellProps| {
-                let mut sim = TestSim::new(grid, grid, props, mask.clone(), bs);
-                sim.lateral_substeps = 2.5;
-                for y in 0..grid / 2 {
-                    for x in 0..grid {
-                        let i = y * grid + x;
-                        if sim.mask[i] != crate::MASK_OUTSIDE {
-                            sim.hm.data[i] = 0.5;
-                        }
-                    }
-                }
-                let mut worst = 0.0f32;
-                for t in 1..=3000u32 {
-                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-                    let cur = over_capacity(&sim);
-                    if cur > worst {
-                        worst = cur;
-                    }
-                    if t == 500 || t == 1500 || t == 3000 {
-                        println!("DIAGCAP {} t={} over_this_tick={:.5} worst_so_far={:.5}", label, t, cur, worst);
-                    }
-                }
-                println!("DIAGCAP {} FINAL worst_max_h_minus_cap={:.5}", label, worst);
-            };
-
-            run("gradient", gradient_props(grid, grid, dry_sand, water));
-            run("all_dry_sand", get_test_props(MaterialMode::DrySand, grid * grid));
-            run("all_water", get_test_props(MaterialMode::Water, grid * grid));
-        }
-
-        // Scene B: a second mixed-material pair (Water falling onto a DrySand pool packed near
-        // its own capacity, a Square vessel) -- different shape, different material pair,
-        // different dominant flux path (vertical/gravity-aligned edges, not the lateral drain of
-        // Scene A) -- so the finding isn't an artifact of one geometry or one flux direction.
-        {
-            let grid = 128usize;
-            let bs = crate::DEFAULT_BLOCK_SIZE;
-            let mask = make_test_mask(grid, grid, SandboxShape::Square, 0.04, 1.0);
-            let budget = (grid / bs) * (grid / bs);
-
-            let run = |label: &str, top_props: (f32, f32, f32, f32), bottom_props: (f32, f32, f32, f32)| {
-                let mut props = CellProps::new(grid * grid);
-                for y in 0..grid {
-                    for x in 0..grid {
-                        let i = y * grid + x;
-                        let (wetness, threshold, flow_rate, grain_size) =
-                            if y < grid / 3 { top_props } else { bottom_props };
-                        props.wetness[i] = wetness;
-                        props.threshold[i] = threshold;
-                        props.flow_rate[i] = flow_rate;
-                        props.grain_size[i] = grain_size;
-                    }
-                }
-                let mut sim = TestSim::new(grid, grid, props, mask.clone(), bs);
-                // Fill the bottom two thirds close to the POOL MATERIAL's own capacity -- the
-                // leak needs an acceptor that is already near its OWN (pre-mix) capacity before
-                // the wetter inflow arrives (SESSION-HANDOVER-2026-09-13.md's "capacity drops
-                // 1.5 -> 1.0 while its height stays"); a half-full pool has headroom to spare and
-                // cannot show it. `- 0.05` keeps the fill a valid (non-leaking) initial condition
-                // for a single-material pool, so the controls below start at zero, not at
-                // whatever gap this fill height happens to leave against a DIFFERENT material's
-                // capacity. The top third stays clear air so the falling body has room to fall.
-                let bottom_fill = cell_capacity_for(bottom_props.0) - 0.05;
-                for y in grid / 3..grid {
-                    for x in 0..grid {
-                        let i = y * grid + x;
-                        if sim.mask[i] != crate::MASK_OUTSIDE {
-                            sim.hm.data[i] = bottom_fill;
-                        }
-                    }
-                }
-                // Drop a slab of the top material into the top third (still air) so it falls
-                // under gravity into the pool below -- exercises the vertical/gravity-aligned
-                // mixing path specifically (Scene A is dominated by lateral drain through necks).
-                for y in 0..grid / 3 {
-                    for x in grid / 4..3 * grid / 4 {
-                        let i = y * grid + x;
-                        if sim.mask[i] != crate::MASK_OUTSIDE {
-                            sim.hm.data[i] = 0.5;
-                            sim.cell_props.wetness[i] = top_props.0;
-                            sim.cell_props.threshold[i] = top_props.1;
-                            sim.cell_props.flow_rate[i] = top_props.2;
-                            sim.cell_props.grain_size[i] = top_props.3;
-                        }
-                    }
-                }
-                let mut worst = 0.0f32;
-                for t in 1..=1500u32 {
-                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-                    let cur = over_capacity(&sim);
-                    if cur > worst {
-                        worst = cur;
-                    }
-                    if t == 200 || t == 750 || t == 1500 {
-                        println!("DIAGCAP {} t={} over_this_tick={:.5} worst_so_far={:.5}", label, t, cur, worst);
-                    }
-                }
-                println!("DIAGCAP {} FINAL worst_max_h_minus_cap={:.5}", label, worst);
-            };
-
-            // WetSand (wetness 0.45) is below the liquidity ramp's onset (0.65, see
-            // `liquidity`'s doc comment), so its capacity is identical to DrySand's (both 1.5) --
-            // that pairing cannot show this leak no matter how much they mix. Water (wetness
-            // 1.00, capacity 1.0) is the material whose capacity actually differs from DrySand's,
-            // so it is Water falling onto a DrySand pool that stresses the vertical/gravity-
-            // aligned mixing path the way Scene A stresses the lateral one.
-            let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32); // MaterialMode::Water
-            let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32); // MaterialMode::DrySand
-            run("water_on_dry", water, dry_sand);
-            run("water_on_water_control", water, water);
-            run("dry_on_dry_control", dry_sand, dry_sand);
-        }
-
-        // Scene C: a THIRD mixed-material pair specifically targeting the old per-cell granular
-        // Cellular Automata path (the `else` of `settle_tick`'s `if wetness >= 0.75 &&
-        // !gravity_active`), which Scenes A and B never reach: that branch has a `if
-        // gravity_active { continue; }` bail-out (Stage C), so it is unconditionally skipped
-        // whenever gravity is on -- confirmed by reading, not just by A/B measuring zero. It only
-        // runs at `gravity_dir == 0` (a Sandbox wave/settling scene), and only for its OWN
-        // lateral neighbour-flow loop (`try_move`, which -- like `advect_properties` everywhere
-        // else -- mass-weight-averages the acceptor's wetness). To reach it with a REAL capacity
-        // difference, the donor must have wetness >= 0.65 (inside the liquidity ramp) while still
-        // being < 0.75 (the CA/g0-liquid branch cut) -- MaterialMode::ButterCream (wetness 0.70)
-        // is exactly that: it takes the CA branch (unlike Water, wetness 1.00, which would take
-        // the g0-liquid branch instead and never touch this code path at all).
-        {
-            let grid = 96usize;
-            let bs = crate::DEFAULT_BLOCK_SIZE;
-            let mask = make_test_mask(grid, grid, SandboxShape::Square, 0.04, 1.0);
-            let budget = (grid / bs) * (grid / bs);
-
-            let run = |label: &str,
-                       left_props: (f32, f32, f32, f32),
-                       left_fill: f32,
-                       right_props: (f32, f32, f32, f32),
-                       right_fill: f32| {
-                let mut props = CellProps::new(grid * grid);
-                for y in 0..grid {
-                    for x in 0..grid {
-                        let i = y * grid + x;
-                        let (wetness, threshold, flow_rate, grain_size) =
-                            if x < grid / 2 { left_props } else { right_props };
-                        props.wetness[i] = wetness;
-                        props.threshold[i] = threshold;
-                        props.flow_rate[i] = flow_rate;
-                        props.grain_size[i] = grain_size;
-                    }
-                }
-                let mut sim = TestSim::new(grid, grid, props, mask.clone(), bs);
-                for y in 0..grid {
-                    for x in 0..grid {
-                        let i = y * grid + x;
-                        if sim.mask[i] == crate::MASK_OUTSIDE {
-                            continue;
-                        }
-                        sim.hm.data[i] = if x < grid / 2 { left_fill } else { right_fill };
-                    }
-                }
-                let mut worst = 0.0f32;
-                for t in 1..=1000u32 {
-                    // gravity_dir == 0 is what routes wetness < 0.75 cells through the CA branch
-                    // instead of the always-gravity-active flux passes Scenes A/B exercise.
-                    sim.tick(glam::Vec2::ZERO, budget);
-                    let cur = over_capacity(&sim);
-                    if cur > worst {
-                        worst = cur;
-                    }
-                    if t == 200 || t == 500 || t == 1000 {
-                        println!("DIAGCAP {} t={} over_this_tick={:.5} worst_so_far={:.5}", label, t, cur, worst);
-                    }
-                }
-                println!("DIAGCAP {} FINAL worst_max_h_minus_cap={:.5}", label, worst);
-            };
-
-            let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32); // MaterialMode::DrySand, cap 1.5
-            let butter_cream = (0.70f32, 0.04f32, 0.15f32, 0.08f32); // MaterialMode::ButterCream, cap ~1.42, CA branch (< 0.75)
-            // DrySand packed to 1.35 (0.15 headroom of its own 1.5 cap); ButterCream at 1.42
-            // (near its OWN ~1.42 cap) so it is the higher/donor side and pushes into the packed
-            // DrySand region, raising the DrySand cells' wetness (and so lowering their capacity)
-            // as it mixes in.
-            run("buttercream_into_packed_drysand", dry_sand, 1.35, butter_cream, 1.42);
-            run("buttercream_control", butter_cream, 1.35, butter_cream, 1.42);
-            run("drysand_control", dry_sand, 1.35, dry_sand, 1.42f32.min(1.5));
-        }
-    }
 
     /// REGRESSION TEST for SESSION-HANDOVER-2026-09-13.md #4's incompressibility leak ("max(h -
     /// cap) = 2.68e-2 on the gradient snapshot ... capacity drops 1.5 -> 1.0 while its height
@@ -12334,621 +10462,9 @@ mod tests {
         );
     }
 
-    /// MEASUREMENT-ONLY DIAGNOSTIC (LOD-FLUX-BUDGET-SURVEY). Answers: how much of the block-LOD
-    /// scheduler's simulated work, at the app's shipped scale, is spent on blocks doing almost
-    /// nothing, and would a more aggressive `MUST_SIMULATE_THRESHOLD` remove a large share of
-    /// simulated blocks while touching little of the tick's actual flux. Never asserts; reports
-    /// tables via `println!`. Run with:
-    ///   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_lod_flux_budget_survey
-    ///
-    /// Uses `DrawingSimulation`, not `TestSim`: `DrawingSimulation::update` is the literal
-    /// production call path (`sandart-wasm` calls it unchanged) -- it calls `compute_fresh_active`
-    /// once per frame and passes `Some(&fresh_active)` into `settle_tick`, where `TestSim::tick`
-    /// always passes `None` and lets `settle_tick` recompute the same thing internally (documented
-    /// bit-identical, see `precomputed_fresh_active`'s call-site comments). Going through
-    /// `DrawingSimulation` means this diagnostic exercises the same struct and entry point the app
-    /// does, not just an output known to match it.
-    ///
-    /// Scenario, chosen to mirror the app: grid 512 (`GRID_SIZE`, the shipped resolution, giving
-    /// `DEFAULT_BLOCK_SIZE`=8 blocks -> 64x64 = 4096 blocks, matching "549 active of 4096" in the
-    /// reported symptom), `SandboxShape::MultiNeckHourglass` (3 necks; `eval_sandbox_shape`'s
-    /// branch hardcodes the neck count, so there is no separate "neck count" field to set) at
-    /// `DrawingSimulation`'s own production defaults `neck_width=0.005`, `hourglass_curve=0.6`
-    /// (see `new_with_block_divisor`), `MaterialMode::Water` (`apply_preset`, matching
-    /// `get_test_props`'s numbers), the upper half filled to 0.5 (the same fill
-    /// `diag_water_hourglass_mirror_asymmetry` uses, so it has to drain through the necks),
-    /// gravity `(0.0, 0.04)` (the magnitude used everywhere else in this file and by
-    /// `set_gravity`), `lateral_substeps = 2.5` (the page default per commit 8dcbe9b, "Stochastic
-    /// global lateral pass count; page default 2.5"). `last_frame_time_ms`/`target_frame_time_ms`
-    /// are passed as `0.0` on every tick so `update`'s adaptive budget controller never touches
-    /// `budget_n` -- see its guard, `if last_frame_time_ms > 0.0 && target_frame_time_ms > 0.0` --
-    /// which is what lets this diagnostic hold `budget_n` fixed at exactly the two values asked
-    /// for: `budget_throttles(4096).1` (128, the controller's floor at grid 512 -- what a
-    /// consistently-slow, 34ms/frame app settles at) and `4096` (the full block count, i.e. no
-    /// throttling at all).
-    ///
-    /// Per-block realised-flux and phase-cost instrumentation is `lod_diag` (defined earlier in
-    /// this file, next to `phase_flow_stats`) -- see its doc comment for exactly what it counts
-    /// and why a wake hint can never be mistaken for realised flux. Tier counts and the MUST/
-    /// STALE/BUDGETED/INACTIVE split come straight from `sim.active_blocks` (no reimplementation
-    /// of the classification loop); the MUST-by-displacement/fresh_active split is recovered by
-    /// recomputing `compute_fresh_active` on the exact pre-tick snapshot `settle_tick` itself
-    /// would have read (a pure function of state that has not changed yet), rather than by
-    /// threading a new output out of `settle_tick`.
-    #[test]
-    #[ignore]
-    fn diag_lod_flux_budget_survey() {
-        use std::time::Instant;
 
-        let block_size = crate::DEFAULT_BLOCK_SIZE;
-        let cols = (GRID_SIZE + block_size - 1) / block_size;
-        let rows = cols;
-        let block_count = cols * rows;
-        let (_, budget_floor, _, _) = crate::budget_throttles(block_count);
 
-        let sample_ticks: [u32; 3] = [200, 1000, 3000];
-        let max_ticks: u32 = 3000;
 
-        for &(label, budget_n) in &[("budget128(floor)", budget_floor), ("budget_full", block_count)] {
-            let mut sim = DrawingSimulation::new(); // GRID_SIZE = 512, block_size = 8 -> 4096 blocks
-            sim.sandbox_shape = SandboxShape::MultiNeckHourglass;
-            sim.apply_preset(MaterialMode::Water);
-            sim.generate_shape_mask();
-            sim.gravity_dir = glam::Vec2::new(0.0, 0.04);
-            sim.lateral_substeps = 2.5;
-            sim.budget_n = budget_n;
-            sim.active_bounds.active = true;
-
-            // Water in the UPPER chamber only -- same fill as diag_water_hourglass_mirror_asymmetry,
-            // so it has to drain through the neck(s).
-            let mut initial_upper_mass = 0.0f64;
-            for y in 0..GRID_SIZE / 2 {
-                for x in 0..GRID_SIZE {
-                    let i = y * GRID_SIZE + x;
-                    if sim.shape_mask[i] != crate::MASK_OUTSIDE {
-                        sim.heightmap.data[i] = 0.5;
-                        initial_upper_mass += 0.5;
-                    }
-                }
-            }
-
-            println!(
-                "=== LOD-FLUX-BUDGET-SURVEY [{label}] budget_n={budget_n} block_count={block_count} ==="
-            );
-
-            // Per sample tick s, instrumentation runs on three ticks only (running it on every tick
-            // made the 512 run far too slow to finish):
-            //   s-2: phase TIMING only, flux recording OFF, so the cost split measures the solver
-            //        rather than this instrument's per-edge HashMap bookkeeping;
-            //   s-1: flux recording ON, kept as `prev_block_flux` -- this is the flux that set
-            //        `last_displacements` for tick s, so it is what attributes a MUST block's
-            //        displacement to a real flux rather than a wake hint;
-            //   s:   flux recording ON, reported.
-            let mut finished_tick: Option<u32> = None;
-            let mut prev_block_flux: std::collections::HashMap<usize, (f32, f64, bool)> =
-                std::collections::HashMap::new();
-            let mut timing: ((u128, u128, u128), u128) = ((0, 0, 0), 0);
-            for t in 1..=max_ticks {
-                let is_timing = sample_ticks.contains(&(t + 2));
-                let is_prev = sample_ticks.contains(&(t + 1));
-                let sample = sample_ticks.contains(&t);
-                lod_diag::set_enabled(is_timing || is_prev || sample);
-                lod_diag::set_flux(is_prev || sample);
-                lod_diag::reset_tick();
-                lod_diag::reset_cost();
-
-                // Pre-tick snapshot: exactly the inputs `settle_tick`'s own classification loop
-                // reads to decide MUST/STALE/REST for THIS tick. Only needed on the sampled tick.
-                let (pre_disp, fresh_active) = if sample {
-                    (
-                        sim.last_displacements.clone(),
-                        compute_fresh_active(
-                            GRID_SIZE, GRID_SIZE, sim.block_size, cols, rows,
-                            &sim.shape_mask, &sim.heightmap.data, &sim.heightmap.external_mass_this_tick,
-                            &sim.cell_props, &sim.edge_vel_v, &sim.last_displacements,
-                        ),
-                    )
-                } else {
-                    (Vec::new(), Vec::new())
-                };
-
-                let t0 = Instant::now();
-                sim.update(
-                    1.0 / 60.0, &[None; 5], sim.marble_radius, sim.material_mode, sim.sandbox_shape,
-                    0.0, 0.0,
-                );
-                let tick_wall_ns = t0.elapsed().as_nanos();
-
-                if is_timing {
-                    timing = (lod_diag::take_phase_cost(), tick_wall_ns);
-                }
-                if is_prev {
-                    prev_block_flux = lod_diag::take_block_flux();
-                }
-                if sample {
-                    report_lod_sample(
-                        label, t, &sim, &pre_disp, &fresh_active, block_count,
-                        &prev_block_flux, timing.0, timing.1,
-                    );
-                }
-
-                if finished_tick.is_none() {
-                    let mut upper_mass = 0.0f64;
-                    for y in 0..GRID_SIZE / 2 {
-                        for x in 0..GRID_SIZE {
-                            let i = y * GRID_SIZE + x;
-                            if sim.shape_mask[i] != crate::MASK_OUTSIDE {
-                                upper_mass += sim.heightmap.data[i] as f64;
-                            }
-                        }
-                    }
-                    if upper_mass < 0.03 * initial_upper_mass {
-                        finished_tick = Some(t);
-                        println!(
-                            "  [{label}] drain considered FINISHED at tick={t} (upper-chamber mass {:.4} of initial {:.4}, {:.1}%)",
-                            upper_mass, initial_upper_mass,
-                            100.0 * upper_mass / initial_upper_mass.max(1e-9)
-                        );
-                    }
-                }
-            }
-            lod_diag::set_enabled(false);
-            if finished_tick.is_none() {
-                println!("  [{label}] drain NOT finished by tick={max_ticks}");
-            }
-        }
-    }
-
-    /// Per-sampled-tick report body for `diag_lod_flux_budget_survey`, split out only so the loop
-    /// above stays readable. `pre_disp`/`fresh_active` are the pre-tick snapshot the caller took
-    /// immediately before calling `sim.update` for tick `t`; `sim` is read AFTER that call, so
-    /// `sim.active_blocks` reflects this tick's classification while `pre_disp`/`fresh_active`
-    /// reflect the inputs that produced it.
-    fn report_lod_sample(
-        label: &str,
-        t: u32,
-        sim: &DrawingSimulation,
-        pre_disp: &[f32],
-        fresh_active: &[bool],
-        block_count: usize,
-        prev_block_flux: &std::collections::HashMap<usize, (f32, f64, bool)>,
-        phase_cost: (u128, u128, u128),
-        tick_wall_ns: u128,
-    ) {
-        const THRESH: f32 = MUST_SIMULATE_THRESHOLD;
-        let block_flux = lod_diag::take_block_flux();
-        let total_flux = lod_diag::take_total();
-        let extra_lateral = lod_diag::take_extra_lateral();
-        // Timing comes from tick t-2, taken with flux recording OFF (see the caller).
-        let (p0_ns, p1_ns, lat_ns) = phase_cost;
-
-        // 1. Tier counts + MUST split by reason.
-        let (mut n_must_disp_only, mut n_must_fresh_only, mut n_must_both) = (0usize, 0usize, 0usize);
-        let (mut n_stale, mut n_medium, mut n_inactive) = (0usize, 0usize, 0usize);
-        let mut must_blocks: Vec<usize> = Vec::new();
-        for b in 0..block_count {
-            let d = pre_disp.get(b).copied().unwrap_or(0.0);
-            let f = fresh_active.get(b).copied().unwrap_or(false);
-            match sim.active_blocks[b] {
-                crate::BlockActivity::Fast => {
-                    must_blocks.push(b);
-                    match (d >= THRESH, f) {
-                        (true, true) => n_must_both += 1,
-                        (true, false) => n_must_disp_only += 1,
-                        (false, true) => n_must_fresh_only += 1,
-                        (false, false) => println!(
-                            "   [WARN] [{label}] tick={t} block {b} is Fast but neither disp>=thr nor fresh_active (d={d})"
-                        ),
-                    }
-                }
-                crate::BlockActivity::Slow => n_stale += 1,
-                crate::BlockActivity::Medium => n_medium += 1,
-                crate::BlockActivity::Inactive => n_inactive += 1,
-            }
-        }
-        let n_must = n_must_disp_only + n_must_fresh_only + n_must_both;
-
-        println!(
-            "-- [{label}] tick={t} tiers: MUST={n_must} (disp_only={n_must_disp_only} fresh_only={n_must_fresh_only} both={n_must_both}) STALE={n_stale} BUDGETED={n_medium} INACTIVE={n_inactive} (of {block_count})"
-        );
-        println!(
-            "-- [{label}] tick={t} tick_wall={:.3}ms total_realised_flux={:.6}",
-            tick_wall_ns as f64 / 1e6, total_flux
-        );
-
-        // 2. Flux histogram (max |final_flux| per block, excluding wake hints), per tier, for
-        // SIMULATED blocks only (MUST/STALE/BUDGETED) -- an Inactive block is not simulated even
-        // if it happens to appear in `block_flux` via a neighbour's cross-block edge.
-        let bin_labels = ["<1e-5", "<1e-4", "<1e-3", "<1e-2", ">=1e-2"];
-        let bin_of = |m: f32| -> usize {
-            if m < 1e-5 { 0 } else if m < 1e-4 { 1 } else if m < 1e-3 { 2 } else if m < 1e-2 { 3 } else { 4 }
-        };
-        for (tier_name, tier) in [
-            ("MUST", crate::BlockActivity::Fast),
-            ("STALE", crate::BlockActivity::Slow),
-            ("BUDGETED", crate::BlockActivity::Medium),
-        ] {
-            let mut counts = [0usize; 5];
-            let mut flux_share = [0.0f64; 5];
-            let mut n_no_flux = 0usize;
-            for b in 0..block_count {
-                if sim.active_blocks[b] != tier {
-                    continue;
-                }
-                match block_flux.get(&b) {
-                    Some(&(max_abs, sum_abs, _)) => {
-                        let bin = bin_of(max_abs);
-                        counts[bin] += 1;
-                        flux_share[bin] += sum_abs;
-                    }
-                    None => {
-                        n_no_flux += 1;
-                        counts[0] += 1;
-                    }
-                }
-            }
-            let tier_total_flux: f64 = flux_share.iter().sum();
-            print!("   [{label}] tick={t} {tier_name} hist(max|flux| per block):");
-            for i in 0..5 {
-                print!(" {}={}", bin_labels[i], counts[i]);
-            }
-            println!(" (of which no-recorded-flux, folded into <1e-5: {n_no_flux})");
-            print!("   [{label}] tick={t} {tier_name} flux-share-of-tick-total:");
-            for i in 0..5 {
-                print!(
-                    " {}={:.4}",
-                    bin_labels[i],
-                    if total_flux > 0.0 { flux_share[i] / total_flux } else { 0.0 }
-                );
-            }
-            println!(
-                " (tier carries {:.4} of tick total)",
-                if total_flux > 0.0 { tier_total_flux / total_flux } else { 0.0 }
-            );
-        }
-
-        // 3. Displacement source for MUST-by-displacement blocks (disp_only + both): did the value
-        // that cleared MUST_SIMULATE_THRESHOLD come from a real flux on an edge interior to the
-        // block, a real flux on a boundary edge shared with a neighbour block, or (structurally
-        // impossible, checked here rather than assumed) a wake hint.
-        let (mut src_own, mut src_cross, mut src_unattributed) = (0usize, 0usize, 0usize);
-        for &b in &must_blocks {
-            let d = pre_disp.get(b).copied().unwrap_or(0.0);
-            if d < THRESH {
-                continue; // fresh_active-only MUST block -- no displacement claim to attribute
-            }
-            // PREVIOUS tick's flux: `pre_disp` was written by tick t-1, so that is the flux that
-            // can explain it. Comparing against this tick's flux would attribute nothing.
-            match prev_block_flux.get(&b) {
-                Some(&(max_abs, _, is_cross)) if max_abs >= THRESH - 1e-6 => {
-                    if is_cross { src_cross += 1; } else { src_own += 1; }
-                }
-                _ => src_unattributed += 1,
-            }
-        }
-        println!(
-            "   [{label}] tick={t} MUST-by-displacement source: real_flux_own_edge={src_own} real_flux_cross_block_edge={src_cross} unattributed={src_unattributed} (hints are structurally excluded: UPSTREAM_DISPLACEMENT_HINT={:.4} SIDE_DISPLACEMENT_HINT={:.4}, both < MUST_SIMULATE_THRESHOLD={:.4} and `next_displacements` only ever takes a max, never a sum)",
-            UPSTREAM_DISPLACEMENT_HINT, SIDE_DISPLACEMENT_HINT, THRESH
-        );
-
-        // 4. Counterfactual MUST count at higher thresholds. Only the displacement disjunct moves;
-        // fresh_active is a separate, budget-exempt predicate a `MUST_SIMULATE_THRESHOLD` change
-        // does not touch.
-        for &alt in &[2e-2f32, 5e-2, 1e-1] {
-            let mut demoted = 0usize;
-            let mut demoted_flux = 0.0f64;
-            for &b in &must_blocks {
-                let d = pre_disp.get(b).copied().unwrap_or(0.0);
-                let f = fresh_active.get(b).copied().unwrap_or(false);
-                if d >= THRESH && !f && d < alt {
-                    demoted += 1;
-                    if let Some(&(_, sum_abs, _)) = block_flux.get(&b) {
-                        demoted_flux += sum_abs;
-                    }
-                }
-            }
-            println!(
-                "   [{label}] tick={t} counterfactual MUST_SIMULATE_THRESHOLD={:.2}: {demoted} of {n_must} current MUST blocks would drop out, carrying {:.4} of tick-total flux",
-                alt,
-                if total_flux > 0.0 { demoted_flux / total_flux } else { 0.0 }
-            );
-        }
-
-        // 5. Rough cost attribution (NATIVE-ONLY PROXY for wasm; std::time::Instant around the
-        // phase loop's per-iteration wall time, cfg(test)-gated -- see `lod_diag`'s doc comment).
-        let accounted = p0_ns + p1_ns + lat_ns;
-        let other_ns = (tick_wall_ns as i128 - accounted as i128).max(0) as u128;
-        let tot = tick_wall_ns.max(1) as f64;
-        println!(
-            "   [{label}] tick={t} cost (NATIVE PROXY, not wasm): phase0={:.1}% phase1={:.1}% lateral_extra_passes={:.1}% other(classification/head-field/copy-back/etc.)={:.1}% (tick_wall={:.3}ms)",
-            100.0 * p0_ns as f64 / tot,
-            100.0 * p1_ns as f64 / tot,
-            100.0 * lat_ns as f64 / tot,
-            100.0 * other_ns as f64 / tot,
-            tick_wall_ns as f64 / 1e6
-        );
-
-        // Extra-lateral-pass flux (phase >= 2, the `lateral_substeps` passes beyond baseline)
-        // against whether the block was already carrying >= THRESH flux from phase 0/1 anyway.
-        let (mut extra_on_hot, mut extra_on_marginal) = (0.0f64, 0.0f64);
-        for (&b, &sum_extra) in &extra_lateral {
-            let overall_max = block_flux.get(&b).map(|&(m, _, _)| m).unwrap_or(0.0);
-            if overall_max >= THRESH {
-                extra_on_hot += sum_extra;
-            } else {
-                extra_on_marginal += sum_extra;
-            }
-        }
-        let extra_total: f64 = extra_lateral.values().sum();
-        println!(
-            "   [{label}] tick={t} extra-lateral-pass flux: total={:.6} on-blocks-already->=thresh={:.4} on-marginal-blocks={:.4} (shares of extra-pass total)",
-            extra_total,
-            if extra_total > 0.0 { extra_on_hot / extra_total } else { 0.0 },
-            if extra_total > 0.0 { extra_on_marginal / extra_total } else { 0.0 }
-        );
-
-        // Option-1 question: of the blocks the extra lateral passes VISIT (every simulated block),
-        // how many realise negligible extra-pass flux? Those are the passes a "only rerun blocks
-        // still flowing laterally" rule would skip.
-        let mut extra_bins = [0usize; 5]; // none, <1e-4, <1e-3, <1e-2, >=1e-2 (sum over the block)
-        for b in 0..block_count {
-            if sim.active_blocks[b] == crate::BlockActivity::Inactive {
-                continue;
-            }
-            let s = extra_lateral.get(&b).copied().unwrap_or(0.0);
-            let bin = if s <= 0.0 { 0 } else if s < 1e-4 { 1 } else if s < 1e-3 { 2 } else if s < 1e-2 { 3 } else { 4 };
-            extra_bins[bin] += 1;
-        }
-        println!(
-            "   [{label}] tick={t} simulated blocks by extra-pass lateral flux (sum per block): none={} <1e-4={} <1e-3={} <1e-2={} >=1e-2={}",
-            extra_bins[0], extra_bins[1], extra_bins[2], extra_bins[3], extra_bins[4]
-        );
-    }
-
-    /// DIAGNOSTIC: the `lateral_substeps` measurement sweep, run in one process so every N shares
-    /// the same binary/build (`cargo test -p sandart-sim --lib --release -- --ignored --nocapture
-    /// diag_lateral_substeps_sweep`). Each block below is a close copy of an existing test's own
-    /// scenario, with `sim.lateral_substeps` set per N instead of left at the default -- see that
-    /// field's doc comment on `TestSim` and `physics::settle_tick`'s own parameter doc comment for
-    /// the mechanism being measured.
-    #[test]
-    #[ignore]
-    fn diag_lateral_substeps_sweep() {
-        let ns: [f32; 6] = [1.0, 1.5, 2.0, 2.5, 3.0, 4.0];
-        for &n in &ns {
-            // ---- 1. Water levelling (diag_water_levelling's own scenario) ----
-            {
-                let bs = crate::DEFAULT_BLOCK_SIZE;
-                let grid = 256usize;
-                let mask = make_test_mask(grid, grid, SandboxShape::Square, 0.04, 1.0);
-                let props = get_test_props(MaterialMode::Water, grid * grid);
-                let mut sim = TestSim::new(grid, grid, props, mask, bs);
-                sim.lateral_substeps = n;
-                for y in 0..grid {
-                    for x in 0..grid / 3 {
-                        let i = y * grid + x;
-                        if sim.mask[i] != crate::MASK_OUTSIDE {
-                            sim.hm.data[i] = 1.0;
-                        }
-                    }
-                }
-                let surface = |s: &TestSim| -> Vec<Option<usize>> {
-                    (0..grid).map(|x| {
-                        (0..grid).find(|&y| {
-                            let i = y * grid + x;
-                            s.mask[i] != crate::MASK_OUTSIDE && s.hm.data[i] > 0.05
-                        })
-                    }).collect()
-                };
-                let stats = |s: &TestSim| -> (usize, f64, f64) {
-                    let surf = surface(s);
-                    let ys: Vec<usize> = surf.iter().filter_map(|&o| o).collect();
-                    if ys.len() < 2 { return (0, 0.0, 0.0); }
-                    let range = (*ys.iter().max().unwrap() - *ys.iter().min().unwrap()) as f64;
-                    let mut worst = 0.0f64;
-                    for x in 0..grid - 1 {
-                        if let (Some(a), Some(b)) = (surf[x], surf[x + 1]) {
-                            worst = worst.max((a as f64 - b as f64).abs());
-                        }
-                    }
-                    (ys.len(), range, worst)
-                };
-                let budget = (grid / bs) * (grid / bs);
-                let initial_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
-                let mut out = String::new();
-                for t in 1..=3000u32 {
-                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-                    if t == 300 || t == 1200 || t == 3000 {
-                        let (cnt, range, worst) = stats(&sim);
-                        out.push_str(&format!(" | t={} cols={} range={:.0} maxslope={:.1}", t, cnt, range, worst));
-                    }
-                }
-                let final_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
-                println!("SWEEP N={:.1} LEVELLING{} mass {:.3}->{:.3}", n, out, initial_mass, final_mass);
-            }
-
-            // ---- 2. Stream coherence (test_liquid_stream_stays_coherent's own scenario, scale 1) ----
-            {
-                let w = 64usize;
-                let h = 96usize;
-                let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-                let props = get_test_props(MaterialMode::Water, w * h);
-                let mut sim = TestSim::new(w, h, props, mask, 32);
-                sim.lateral_substeps = n;
-                let gravity_dir = glam::Vec2::new(0.0, 0.04);
-                for _ in 0..40 {
-                    for y in 6..10 {
-                        for x in 30..34 {
-                            sim.hm.apply_external_mass(x, y, 1.0);
-                        }
-                    }
-                    sim.tick(gravity_dir, usize::MAX);
-                }
-                let mut max_width = 0usize;
-                let mut peak_h = 0.0f32;
-                for y in 15..70 {
-                    let mut min_x = None;
-                    let mut max_x = None;
-                    for x in 0..w {
-                        let val = sim.hm.data[y * w + x];
-                        if val > 0.05 {
-                            if min_x.is_none() { min_x = Some(x); }
-                            max_x = Some(x);
-                            peak_h = peak_h.max(val);
-                        }
-                    }
-                    if let (Some(mn), Some(mx)) = (min_x, max_x) {
-                        max_width = max_width.max(mx - mn + 1);
-                    }
-                }
-                println!("SWEEP N={:.1} STREAM max_width={} peak_h={:.4}", n, max_width, peak_h);
-            }
-
-            // ---- 3. Repose angle: DrySand (must be unchanged, s=1 always) and a DAMP material
-            //         (Yogurt, wetness=0.75 -> liquidity=0.5 exactly -- see `liquidity`'s doc
-            //         comment for the 0.65..0.85 band), to show the continuous response between
-            //         the sand and water presets. ----
-            {
-                let rig = ReposeRig::new(1);
-                let area = 10.0f32;
-                let measure_ticks = 100usize;
-                let steep_initial = 0.35f32;
-                let half_width_1 = ((area * steep_initial).sqrt() / steep_initial).round() as isize;
-
-                let mut sim_dry = rig.build(1, steep_initial, area);
-                sim_dry.lateral_substeps = n;
-                let dry_final = rig.settle_and_measure(&mut sim_dry, measure_ticks, half_width_1);
-
-                let mut sim_damp = rig.build_material(1, steep_initial, area, MaterialMode::Yogurt, cell_capacity_for(0.75));
-                sim_damp.lateral_substeps = n;
-                let damp_final = rig.settle_and_measure(&mut sim_damp, measure_ticks, half_width_1);
-
-                println!(
-                    "SWEEP N={:.1} REPOSE dry_final={:.4} ({:.2}deg) damp[Yogurt,wetness=0.75,liquidity=0.5]_final={:.4} ({:.2}deg)",
-                    n, dry_final, dry_final.atan().to_degrees(), damp_final, damp_final.atan().to_degrees()
-                );
-            }
-
-            // ---- 4. Mirror asymmetry (diag_water_hourglass_mirror_asymmetry's Hourglass@256 case) ----
-            {
-                let bs = crate::DEFAULT_BLOCK_SIZE;
-                let grid = 256usize;
-                let mask = make_test_mask(grid, grid, SandboxShape::Hourglass, 0.04, 1.0);
-                let props = get_test_props(MaterialMode::Water, grid * grid);
-                let mut sim = TestSim::new(grid, grid, props, mask, bs);
-                sim.lateral_substeps = n;
-                for y in 0..grid / 2 {
-                    for x in 0..grid {
-                        let i = y * grid + x;
-                        if sim.mask[i] != crate::MASK_OUTSIDE {
-                            sim.hm.data[i] = 0.5;
-                        }
-                    }
-                }
-                let mirror = |s: &TestSim| -> f64 {
-                    let (mut diff, mut total) = (0.0f64, 0.0f64);
-                    for y in 0..grid {
-                        for x in 0..grid {
-                            let (i, j) = (y * grid + x, y * grid + (grid - 1 - x));
-                            if s.mask[i] == crate::MASK_OUTSIDE || s.mask[j] == crate::MASK_OUTSIDE {
-                                continue;
-                            }
-                            diff += (s.hm.data[i] - s.hm.data[j]).abs() as f64;
-                            total += s.hm.data[i] as f64;
-                        }
-                    }
-                    if total > 0.0 { diff / total } else { 0.0 }
-                };
-                let budget = (grid / bs) * (grid / bs);
-                let ticks = 1500u32 * (grid as u32) / 128;
-                let mut worst_m = 0.0f64;
-                for _ in 1..=ticks {
-                    sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-                    worst_m = worst_m.max(mirror(&sim));
-                }
-                println!(
-                    "SWEEP N={:.1} MIRROR Hourglass grid=256 ticks={} worst_mirror={:.4} final_mirror={:.4}",
-                    n, ticks, worst_m, mirror(&sim)
-                );
-            }
-
-            // ---- 5. Incompressibility + mass conservation (test_liquid_is_incompressible's own
-            //         scenario) -- must hold at every N. ----
-            {
-                let w = 64;
-                let h = 64;
-                let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-                let props = get_test_props(MaterialMode::Water, w * h);
-                let mut sim = TestSim::new(w, h, props, mask, 32);
-                sim.lateral_substeps = n;
-                for y in 4..60 {
-                    for x in 6..18 {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-                let initial_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
-                let gravity_dir = glam::Vec2::new(0.0, 0.04);
-                for _ in 0..1500 {
-                    sim.tick(gravity_dir, 256);
-                }
-                let max_h = sim.hm.data.iter().cloned().fold(0.0f32, f32::max);
-                let final_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
-                println!(
-                    "SWEEP N={:.1} INCOMPRESSIBLE max_h={:.6} mass {:.4}->{:.4} (diff={:.6})",
-                    n, max_h, initial_mass, final_mass, (final_mass - initial_mass).abs()
-                );
-                assert!(max_h <= 1.0 + 1e-3, "N={}: incompressibility violated: max_h={:.6}", n, max_h);
-                assert!(
-                    (final_mass - initial_mass).abs() < 1e-2,
-                    "N={}: mass not conserved: {} -> {}", n, initial_mass, final_mass
-                );
-            }
-        }
-    }
-
-    /// DIAGNOSTIC: ms/tick at grid 512, a water hourglass draining under full budget, release
-    /// build, for N in {1, 2, 3} -- `cargo test -p sandart-sim --lib --release -- --ignored
-    /// --nocapture diag_lateral_substeps_perf`.
-    #[test]
-    #[ignore]
-    fn diag_lateral_substeps_perf() {
-        let bs = crate::DEFAULT_BLOCK_SIZE;
-        let grid = 512usize;
-        for &n in &[1.0f32, 2.0, 2.5, 3.0] {
-            let mask = make_test_mask(grid, grid, SandboxShape::Hourglass, 0.04, 1.0);
-            let props = get_test_props(MaterialMode::Water, grid * grid);
-            let mut sim = TestSim::new(grid, grid, props, mask, bs);
-            sim.lateral_substeps = n;
-            for y in 0..grid / 2 {
-                for x in 0..grid {
-                    let i = y * grid + x;
-                    if sim.mask[i] != crate::MASK_OUTSIDE {
-                        sim.hm.data[i] = 0.5;
-                    }
-                }
-            }
-            let budget = (grid / bs) * (grid / bs);
-            let ticks = 300u32;
-            // Warm-up tick, excluded from timing (first tick pays one-off allocations).
-            sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-            // Reset just before the timed loop so the tally below covers exactly the measured
-            // ticks (see `lateral_roll_stats_reset`'s doc comment) -- a check on
-            // `lateral_pass_roll`'s distribution, not a timed quantity itself.
-            lateral_roll_stats_reset();
-            let start = std::time::Instant::now();
-            for _ in 0..ticks {
-                sim.tick(glam::Vec2::new(0.0, 0.04), budget);
-            }
-            let elapsed = start.elapsed();
-            let ms_per_tick = elapsed.as_secs_f64() * 1000.0 / ticks as f64;
-            let (bumped, total) = lateral_roll_stats_get();
-            let extra_pass_frac = if total > 0 { bumped as f64 / total as f64 } else { 0.0 };
-            println!(
-                "SWEEP N={:.1} PERF grid=512 hourglass drain ms/tick={:.4} extra_pass_frac={:.4} ({}/{})",
-                n, ms_per_tick, extra_pass_frac, bumped, total
-            );
-        }
-    }
 
     #[test]
     fn test_no_floating_sand_under_gravity() {
@@ -12993,7 +10509,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; 4];
         let mut last_displacements = vec![1.0; 4];
         let mut last_simulated_ticks = vec![0; 4];
@@ -13020,13 +10535,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -13229,7 +10740,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
         let mut last_displacements = vec![1.0; cols * rows];
         let mut last_simulated_ticks = vec![0; cols * rows];
@@ -13256,13 +10766,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -13334,7 +10840,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0f32; w * h];
         let mut edge_vel_v = vec![0.0f32; w * h];
         let mut column_depth = vec![0.0f32; w * h];
-        let mut head_field = vec![0.0f32; w * h];
 
         let center_x = w as f32 / 2.0;
         let center_y = h as f32 / 2.0;
@@ -13439,13 +10944,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i as u32,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -13555,7 +11056,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0f32; w * h];
         let mut edge_vel_v = vec![0.0f32; w * h];
         let mut column_depth = vec![0.0f32; w * h];
-        let mut head_field = vec![0.0f32; w * h];
         let mut bounds = ActiveBounds { min_x: 0, max_x: w - 1, min_y: 0, max_y: h - 1, active: true };
         let n_blocks = (w / 32) * (h / 32);
         let mut active_blocks = vec![crate::BlockActivity::Fast; n_blocks];
@@ -13583,13 +11083,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -13768,7 +11264,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let expected_len = (w / 32) * (h / 32);
         let mut active_blocks = vec![crate::BlockActivity::Fast; expected_len];
         let mut last_displacements = vec![1.0; expected_len];
@@ -13829,13 +11324,9 @@ mod tests {
                 &mut edge_vel_h,
                 &mut edge_vel_v,
                 &mut column_depth,
-                &mut head_field,
                 &mask,
                 i,
                 gravity_dir,
-                false,
-                false,
-                false, false,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -13891,7 +11382,6 @@ mod tests {
         let mut edge_vel_h = vec![0.0; w * h];
         let mut edge_vel_v = vec![0.0; w * h];
         let mut column_depth = vec![0.0; w * h];
-        let mut head_field = vec![0.0; w * h];
         let block_size = 32;
         let (cols, rows) = (w / block_size, h / block_size);
         let mut active_blocks = vec![crate::BlockActivity::Inactive; cols * rows];
@@ -13905,9 +11395,7 @@ mod tests {
                 &mut sliding, &mut bounds, &mut active_blocks, &mut last_displacements,
                 &mut last_simulated_ticks, cols * rows, block_size, &[], t as u32,
                 &mut edge_vel_h,
-                &mut edge_vel_v, &mut column_depth, &mut head_field, &mask, t as u32, gravity_dir, false,
-                false,
-                false, false,
+                &mut edge_vel_v, &mut column_depth, &mask, t as u32, gravity_dir,
                 None, // precomputed_fresh_active (Stage 1 hoist): test call sites recompute internally, bit-identical to pre-hoist behaviour
                 0.0,
                 1.0,
@@ -14034,211 +11522,6 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "DIAGNOSTIC reproduction of the live-reported MultiNeckHourglass water \"tendril\" \
-                bug (thin, ~1-cell-wide, ~45-degree lateral streaks that peel off a falling water \
-                column at the instant it lands, synchronized across all three necks). This does \
-                NOT assert the bug is fixed -- it pins down the measured mechanism so a future fix \
-                has a concrete before/after, following the same pattern as \
-                `test_liquid_splashes_on_impact`. All assertions below PASS today (on \
-                ff7a255b) and describe the defect, not a spec the fix must avoid regressing on \
-                these exact numbers.\n\
-                \n\
-                Setup: a MultiNeckHourglass mask (production defaults: neck_width=0.005, \
-                curve=0.6) at 128x160, with a continuous 3-wide Water tap just below each of the \
-                three neck exits (matching `test_liquid_stream_stays_coherent`'s tap style), left \
-                to fall ~60 rows into the open lower chamber and land on its flat floor. Only the \
-                centre neck (x=64) is instrumented in detail; the other two necks are structurally \
-                identical and land within the same tick (see `impact tick` below), consistent with \
-                the reported synchronization.\n\
-                \n\
-                Measured mechanism, in order:\n\
-                1. Impact tick = 58 (first tick the centre stream's floor cell exceeds h=0.05).\n\
-                2. The FIRST lateral departure from the tap's own 3-cell width happens at tick 59 \
-                -- one tick after impact -- and at that exact moment `column_depth` at the \
-                departing cells is still ~0 (0.00-0.06) and the driving cell is still genuinely \
-                supported (h_below > 0.5). That first departure is ordinary splash physics (the \
-                same `h_a - h_b` leveling `test_liquid_splashes_on_impact` already accepts), not \
-                the bug.\n\
-                3. One tick later (tick 60), `column_depth` at the same location explodes to \
-                22.7, and by tick 62 reaches 31.7 -- a spike coincident with impact (within 1-2 \
-                ticks), matching the depth-spike-at-impact prediction. Crucially, some of the \
-                cells now carrying a large `column_depth` (e.g. 10.0 at one column, measured \
-                directly) have `h_below <= 0.5` -- i.e. they are NOT supported from below, yet \
-                still carry the full `LATERAL_PRESSURE_SCALE * column_depth` push. A cell in \
-                free fall has no hydrostatic pressure (nothing below it is bearing its weight), so \
-                this is physically wrong: `column_depth`'s top-down accumulation asks whether the \
-                cell it read ABOVE was still vertically in transit, but never asks whether the \
-                CURRENT cell itself is supported below before letting it push sideways.\n\
-                4. `max|edge_vel_h|` in the same window reaches 0.9966 at tick 60 and hits exactly \
-                1.0000 at tick 63 -- pinned at the CFL-like ceiling, not proportional to the \
-                (wildly varying, 1.3 to 31.7) driving depth. This is the saturation signature: \
-                once the depth term is large enough to dominate, the realised flux stops tracking \
-                pressure and just rides the clamp every tick, which is what makes the excursion \
-                look like a constant-slope (~45-degree, since vertical fill is *also* CFL-pinned \
-                at 1 row/tick) streak rather than a decaying, pressure-proportional splash.\n\
-                5. Ratio of lateral driving to vertical driving at the depth spike: vertical is \
-                `gravity_dir.y * GRAVITY_HEAD_SCALE` = 0.04 * 25 = 1.0; lateral is \
-                `LATERAL_PRESSURE_SCALE * column_depth` = 5.0 * ~22-32 = ~110-160. That is roughly \
-                twice the ~65x back-of-envelope estimate that motivated this investigation, using \
-                the actual shipped default gravity (0.04, not 0.06).\n\
-                \n\
-                Two temporary experiments were run against this reproduction and reverted (see \
-                the investigation notes, not present in this diff): (a) reading `column_depth`'s \
-                `resting_above` from the frozen `heightmap.data` instead of the live `temp_heights` \
-                changed the exact numbers but did NOT stop the runaway (core width still reached \
-                ~80-90 cells by tick ~75-79, same order as unpatched); voids-metric and \
-                mass-conservation were unaffected. (b) gating the lateral pressure term by a crude \
-                per-cell \"supported fraction\" (h_below / cap_below of the cell directly below) \
-                delayed the catastrophic one-tick jump from width 22->84 (baseline, tick 69->70) to \
-                a more gradual climb through tick ~74 before a similar jump, i.e. it measurably \
-                helped in the critical early window -- but as naively implemented it also \
-                regressed `test_liquid_stream_stays_coherent` (max_width 8 -> 9, now failing that \
-                test's `<= 8` bound) and slightly worsened \
-                `test_liquid_flowing_liquid_does_not_stand_in_walls`'s void count (17570 -> \
-                19217). Neither experiment is a usable fix as tried; see physics.rs history/PR \
-                notes for the full writeup of what a careful version of (b) would need (a frozen, \
-                hysteresis-aware support read) to avoid that regression."]
-    fn test_multineck_hourglass_water_tendril_on_impact() {
-        let w = 128;
-        let h = 160;
-        let block_size = 32;
-        let mask = make_test_mask(w, h, SandboxShape::MultiNeckHourglass, 0.005, 0.6);
-        let props = get_test_props(MaterialMode::Water, w * h);
-        let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        // Three necks, spaced per `eval_sandbox_shape`'s MultiNeckHourglass branch
-        // (neck_offset = 0.22 * w -> +/- 28 about the centre at w/2 = 64).
-        let neck_xs = [36usize, 64usize, 92usize];
-        let floor_of = |nx: usize| -> usize {
-            (0..h)
-                .rev()
-                .find(|&y| ((nx - 5)..=(nx + 5)).any(|x| mask[y * w + x] != crate::MASK_OUTSIDE))
-                .expect("no floor found under this neck")
-        };
-        let floors: Vec<usize> = neck_xs.iter().map(|&nx| floor_of(nx)).collect();
-        // All three necks share one flat floor (the funnel walls have long since merged into one
-        // open chamber by the time they reach the bottom) -- confirms the geometry ties the three
-        // streams to the same impact row, consistent with the reported synchronization.
-        assert!(
-            floors.iter().all(|&f| f == floors[0]),
-            "expected one shared flat floor under all three necks, got {:?}",
-            floors
-        );
-
-        let nx = neck_xs[1];
-        let floor = floors[1];
-        let initial_tap_width = 3usize; // matches the 3-wide tap below
-
-        // Contiguous run of wetted (>0.05) cells in `floor`'s row, containing column `nx`. Walking
-        // outward (rather than scanning the whole row) ignores far-field dispersion noise that is
-        // already a known, separate baseline effect (see `test_liquid_stream_stays_coherent`'s doc
-        // comment) unrelated to this bug.
-        let core_width_at_floor = |sim: &TestSim| -> usize {
-            let mut lo = nx;
-            while lo > 0 && sim.hm.data[floor * w + lo - 1] > 0.05 {
-                lo -= 1;
-            }
-            let mut hi = nx;
-            while hi + 1 < w && sim.hm.data[floor * w + hi + 1] > 0.05 {
-                hi += 1;
-            }
-            hi - lo + 1
-        };
-
-        let mut impact_tick: Option<usize> = None;
-        let mut first_excursion_tick: Option<usize> = None;
-        let mut max_depth_trace: Vec<f32> = Vec::with_capacity(90);
-        let mut max_edge_vel_h_trace: Vec<f32> = Vec::with_capacity(90);
-
-        const N_TICKS: usize = 90;
-        for t in 0..N_TICKS {
-            // Continuous narrow pour at each neck exit, a few rows below the pinch line -- a
-            // steady tap, not an instantaneous blob, so the stream is already the neck's own
-            // (~1-3 cell) width by the time it reaches the open chamber, same style as
-            // `test_liquid_stream_stays_coherent`.
-            for &nxx in &neck_xs {
-                for y in 82..=84usize {
-                    for x in (nxx - 1)..=(nxx + 1) {
-                        sim.hm.apply_external_mass(x, y, 1.0);
-                    }
-                }
-            }
-            sim.tick(gravity_dir, usize::MAX);
-
-            let mut max_depth = 0.0f32;
-            let mut max_edge_vel_h = 0.0f32;
-            for y in (floor - 20)..=floor {
-                for x in (nx - 20)..=(nx + 20) {
-                    let idx = y * w + x;
-                    max_depth = max_depth.max(sim.column_depth[idx]);
-                    max_edge_vel_h = max_edge_vel_h.max(sim.edge_vel_h[idx].abs());
-                }
-            }
-            max_depth_trace.push(max_depth);
-            max_edge_vel_h_trace.push(max_edge_vel_h);
-
-            if impact_tick.is_none() && sim.hm.data[floor * w + nx] > 0.05 {
-                impact_tick = Some(t);
-            }
-            if first_excursion_tick.is_none() && core_width_at_floor(&sim) > initial_tap_width {
-                first_excursion_tick = Some(t);
-            }
-        }
-
-        let impact_tick = impact_tick.expect("centre stream never reached the floor within budget");
-        let first_excursion_tick =
-            first_excursion_tick.expect("core width never exceeded the tap's own width");
-        let peak_depth = max_depth_trace.iter().cloned().fold(0.0f32, f32::max);
-        let peak_edge_vel_h = max_edge_vel_h_trace.iter().cloned().fold(0.0f32, f32::max);
-        let vertical_driving_head = gravity_dir.y * GRAVITY_HEAD_SCALE;
-        let lateral_driving_head = LATERAL_PRESSURE_SCALE * peak_depth;
-        let ratio = lateral_driving_head / vertical_driving_head;
-
-        println!(
-            "test_multineck_hourglass_water_tendril_on_impact: impact_tick={} \
-             first_excursion_tick={} (delta={}) peak_column_depth={:.3} peak_edge_vel_h={:.4} \
-             vertical_driving_head={:.3} lateral_driving_head={:.3} ratio={:.1}x",
-            impact_tick,
-            first_excursion_tick,
-            first_excursion_tick - impact_tick,
-            peak_depth,
-            peak_edge_vel_h,
-            vertical_driving_head,
-            lateral_driving_head,
-            ratio
-        );
-
-        // Prediction 1/2: the lateral excursion is impact-triggered, not a slow independent drift
-        // -- it starts within a couple of ticks of the column reaching the floor, not tens of
-        // ticks later or earlier.
-        assert!(
-            first_excursion_tick >= impact_tick && first_excursion_tick - impact_tick <= 3,
-            "lateral excursion (tick {}) is not tightly coupled to impact (tick {})",
-            first_excursion_tick,
-            impact_tick
-        );
-
-        // Prediction 3: the lateral edge velocity saturates near the same ~1.0-cell/tick CFL
-        // ceiling free fall runs at, rather than staying small/proportional to the (much more
-        // variable) driving pressure.
-        assert!(
-            peak_edge_vel_h >= 0.9,
-            "lateral edge velocity peaked at {:.4}, expected saturation near the 1.0 CFL ceiling",
-            peak_edge_vel_h
-        );
-
-        // Prediction 5: the lateral driving head at the peak is a large multiple of the vertical
-        // driving head that governs ordinary CFL-limited free fall -- i.e. the depth-pressure term
-        // is not a gentle correction, it dominates by roughly two orders of magnitude.
-        assert!(
-            ratio >= 20.0,
-            "lateral/vertical driving head ratio only {:.1}x at peak depth {:.3}; expected >= 20x",
-            ratio,
-            peak_depth
-        );
-    }
 
 
     // ---------------------------------------------------------------------------------------
@@ -14529,62 +11812,6 @@ mod tests {
         (trace, impact_tick, w, h, floor)
     }
 
-    #[test]
-    #[ignore = "DIAGNOSTIC instrument for the live-reported single-neck Hourglass water \"tendril\" \
-                bug: thin, ~1-cell-wide, ~45-degree lateral hairlines that peel off a falling \
-                water column at the instant it lands on the floor. Reported to happen with a \
-                single neck (not just MultiNeckHourglass -- see \
-                test_multineck_hourglass_water_tendril_on_impact for the three-neck reproduction, \
-                which this is deliberately simpler than) and to NOT happen with sand. This test is \
-                the instrument, not a fix: it asserts the detector FIRES on today's build, which \
-                means it documents an open bug rather than a fixed state, following the same \
-                pattern as test_liquid_splashes_on_impact and the multineck reproduction. Do not \
-                weaken, delete, or read a pass here as 'fixed' -- if this ever goes red, the \
-                impact-triggered lateral excursion this test measures has changed shape and the \
-                assertions (not just the ignore reason) need re-deriving against fresh numbers."]
-    fn test_single_neck_hourglass_water_tendril_on_impact() {
-        let s = test_scale();
-        let (trace, impact_tick, w, h, floor) =
-            run_single_neck_hourglass_tendril_scan(MaterialMode::Water, &TENDRIL_THRESHOLDS, s);
-
-        let impact_tick = impact_tick.expect("stream never reached the floor within budget");
-        let first_tendril_tick = trace.iter().find(|&&(t, count, _)| t >= impact_tick.saturating_sub(1) && count > 0).map(|&(t, _, _)| t);
-        let any_tendril_tick = trace.iter().find(|&&(_, count, _)| count > 0).map(|&(t, _, _)| t);
-        let max_count = trace.iter().map(|&(_, c, _)| c).max().unwrap_or(0);
-        let max_length = trace.iter().map(|&(_, _, l)| l).max().unwrap_or(0);
-        let ticks_with_tendril = trace.iter().filter(|&&(_, c, _)| c > 0).count();
-
-        println!(
-            "test_single_neck_hourglass_water_tendril_on_impact: scale={} w={} h={} floor={} \
-             impact_tick={} any_tendril_tick={:?} first_tendril_at_or_after_impact={:?} \
-             ticks_with_tendril={} max_count={} max_length={}",
-            s, w, h, floor, impact_tick, any_tendril_tick, first_tendril_tick, ticks_with_tendril,
-            max_count, max_length
-        );
-
-        // Print a short window of ticks straddling impact so a human reading --nocapture output
-        // can see the count rise right at touchdown, not just the summary numbers.
-        for &(t, count, len) in trace.iter().filter(|&&(t, _, _)| {
-            t + 15 >= impact_tick && t <= impact_tick + 25
-        }) {
-            println!("  tick {:4}: tendril_count={} max_length={}", t, count, len);
-        }
-
-        let any_tendril_tick = any_tendril_tick.expect(
-            "detector never fired anywhere in the run. Per the brief, a detector reading zero \
-             here is BROKEN, not a clean bill of health -- do not weaken thresholds to force a \
-             pass; this must be reported as 'cannot reproduce' and investigated with fresh eyes \
-             on a specific frame instead."
-        );
-        assert!(
-            any_tendril_tick + 5 >= impact_tick,
-            "a tendril was detected at tick {} but the stream didn't touch the floor until tick \
-             {} -- that is more than 5 ticks of daylight, which would mean the detector is firing \
-             on ordinary mid-air stream behaviour rather than the reported impact-triggered \
-             excursion",
-            any_tendril_tick, impact_tick
-        );
-    }
 
     #[test]
     // Both acceptance directions live here as ONE test because they are the same claim read two
@@ -14686,1595 +11913,19 @@ mod tests {
         }
     }
 
-    #[test]
-    #[ignore = "DIAGNOSTIC: reports how sensitive the tendril count is to each threshold in \
-                TENDRIL_THRESHOLDS, and how the detector behaves across grid resolutions, rather \
-                than asserting one fixed pass/fail outcome. Run with --nocapture; the numbers \
-                printed here are cited directly in the task report. Not a spec to keep green by \
-                construction -- if the underlying physics changes, these numbers are expected to \
-                move, and the point of this test is to show the movement, not hide it."]
-    fn test_tendril_detector_thresholds_and_sensitivity() {
-        // --- Part 1: threshold sensitivity, single resolution (scale=1). ---
-        // Sweep each threshold independently around TENDRIL_THRESHOLDS, holding the others fixed,
-        // against the single-neck Hourglass + Water reproduction. A metric that only fires inside
-        // a narrow window is measuring the thresholds, not the physics -- this sweep is how that
-        // gets checked rather than assumed.
-        let variants: Vec<(&str, TendrilThresholds)> = vec![
-            ("shipped", TENDRIL_THRESHOLDS),
-            ("max_height=3 (stricter)", TendrilThresholds { max_height: 3, ..TENDRIL_THRESHOLDS }),
-            ("max_height=10 (looser)", TendrilThresholds { max_height: 10, ..TENDRIL_THRESHOLDS }),
-            ("min_width=3 (looser)", TendrilThresholds { min_width: 3, ..TENDRIL_THRESHOLDS }),
-            ("min_width=8 (stricter)", TendrilThresholds { min_width: 8, ..TENDRIL_THRESHOLDS }),
-            (
-                "max_filled_fraction=0.4 (stricter)",
-                TendrilThresholds { max_filled_fraction: 0.4, ..TENDRIL_THRESHOLDS },
-            ),
-            (
-                "max_filled_fraction=0.9 (looser)",
-                TendrilThresholds { max_filled_fraction: 0.9, ..TENDRIL_THRESHOLDS },
-            ),
-            (
-                "min_unsupported_fraction=0.6 (stricter)",
-                TendrilThresholds { min_unsupported_fraction: 0.6, ..TENDRIL_THRESHOLDS },
-            ),
-            (
-                "min_unsupported_fraction=0.1 (looser)",
-                TendrilThresholds { min_unsupported_fraction: 0.1, ..TENDRIL_THRESHOLDS },
-            ),
-            (
-                "brief's literal `width > height` (strict)",
-                TendrilThresholds { strict_wider_than_taller: true, ..TENDRIL_THRESHOLDS },
-            ),
-        ];
 
-        println!("--- Threshold sensitivity (single-neck Hourglass + Water, scale=1) ---");
-        for (name, thresholds) in &variants {
-            let (trace, impact_tick, _w, _h, _floor) =
-                run_single_neck_hourglass_tendril_scan(MaterialMode::Water, thresholds, 1);
-            let impact_tick = impact_tick.expect("stream never reached the floor");
-            let ticks_with_tendril = trace.iter().filter(|&&(_, c, _)| c > 0).count();
-            let first_tick = trace.iter().find(|&&(_, c, _)| c > 0).map(|&(t, _, _)| t);
-            let max_count = trace.iter().map(|&(_, c, _)| c).max().unwrap_or(0);
-            let max_length = trace.iter().map(|&(_, _, l)| l).max().unwrap_or(0);
-            println!(
-                "  {:42} impact={:3} first_fire={:>5?} ticks_fired={:2} max_count={} max_length={}",
-                name, impact_tick, first_tick, ticks_with_tendril, max_count, max_length
-            );
-        }
 
-        // --- Part 2: resolution behaviour. Same scenario, scaled by `s` in both dimensions (the
-        // Hourglass shape is defined in normalized x/w, y/h coordinates, so this is the same
-        // shape at finer resolution, not a different one), tap width and tick budget scaled with
-        // it (a falling stream advances at a roughly fixed number of CELLS per tick regardless of
-        // resolution, so reaching the same physical point takes proportionally more ticks at
-        // finer resolution -- same reasoning as `test_liquid_stream_stays_coherent`). The
-        // classification thresholds themselves are DELIBERATELY NOT scaled -- the reported defect
-        // is a fixed number of cells wide (a CFL/edge-velocity artifact), not a fraction of the
-        // container, so they need to mean the same thing at every resolution to test the same
-        // claim at every resolution (see docs/ARCHITECTURE.md section 11 on this exact
-        // classification question for the enclosed-void metric, which is the same shape of
-        // argument).
-        println!("--- Resolution behaviour (single-neck Hourglass + Water, shipped thresholds) ---");
-        for scale in [1usize, 2, 4] {
-            let (trace, impact_tick, w, h, floor) =
-                run_single_neck_hourglass_tendril_scan(MaterialMode::Water, &TENDRIL_THRESHOLDS, scale);
-            let impact_tick = impact_tick.expect("stream never reached the floor");
-            let ticks_with_tendril = trace.iter().filter(|&&(_, c, _)| c > 0).count();
-            let first_tick = trace.iter().find(|&&(_, c, _)| c > 0).map(|&(t, _, _)| t);
-            let max_count = trace.iter().map(|&(_, c, _)| c).max().unwrap_or(0);
-            let max_length = trace.iter().map(|&(_, _, l)| l).max().unwrap_or(0);
-            println!(
-                "  scale={} w={} h={} floor={} impact={} first_fire={:?} ticks_fired={} \
-                 max_count={} max_length={}",
-                scale, w, h, floor, impact_tick, first_tick, ticks_with_tendril, max_count,
-                max_length
-            );
-        }
-    }
 
-    #[test]
-    #[ignore = "DIAGNOSTIC: points the tendril detector at four EXISTING liquid scenarios --\
-                test_liquid_splashes_on_impact, test_liquid_flowing_liquid_does_not_stand_in_walls, \
-                test_liquid_stream_stays_coherent, and test_multineck_hourglass_water_tendril_on_impact \
-                -- to map which reproduce this defect and which don't. This is exploratory \
-                documentation, not a fixed spec: it recreates each named test's own setup \
-                independently (rather than calling into it) so it can apply the detector without \
-                touching any of those tests' assertions. Run with --nocapture; see the task report \
-                for the numbers cited from here."]
-    fn test_tendril_detector_maps_existing_liquid_scenarios() {
-        // --- 1. test_liquid_splashes_on_impact: a compact blob dropped onto a Square floor. ---
-        {
-            let w = 64;
-            let h = 64;
-            let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-            let props = get_test_props(MaterialMode::Water, w * h);
-            let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-            for y in 50..54 {
-                for x in 28..36 {
-                    sim.hm.data[y * w + x] = 1.0;
-                }
-            }
-            let mut ticks_with_tendril = 0usize;
-            let mut max_count = 0usize;
-            let mut max_length = 0usize;
-            for _ in 0..70 {
-                sim.tick(gravity_dir, 256);
-                let components =
-                    find_liquid_components(&sim.hm.data, &mask, w, h, 0, h - 1, TENDRIL_THRESHOLDS.liquid_eps);
-                let tendrils: Vec<&LiquidComponent> =
-                    components.iter().filter(|c| TENDRIL_THRESHOLDS.is_tendril(c)).collect();
-                if !tendrils.is_empty() {
-                    ticks_with_tendril += 1;
-                    max_count = max_count.max(tendrils.len());
-                    max_length =
-                        max_length.max(tendrils.iter().map(|c| c.width().max(c.height())).max().unwrap());
-                }
-            }
-            println!(
-                "map [test_liquid_splashes_on_impact]: ticks_with_tendril={} max_count={} max_length={}",
-                ticks_with_tendril, max_count, max_length
-            );
-        }
 
-        // --- 2. test_liquid_flowing_liquid_does_not_stand_in_walls: upper chamber drains into an
-        // empty lower one through a wide-ish Hourglass neck. No single "impact point" -- checked
-        // over the whole grid every tick. ---
-        {
-            let w = 64;
-            let h = 64;
-            let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
-            let props = get_test_props(MaterialMode::Water, w * h);
-            let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-            for y in 0..h / 2 {
-                for x in 0..w {
-                    if mask[y * w + x] != crate::MASK_OUTSIDE {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-            }
-            let mut ticks_with_tendril = 0usize;
-            let mut max_count = 0usize;
-            let mut max_length = 0usize;
-            for _ in 0..400 {
-                sim.tick(gravity_dir, usize::MAX);
-                let components =
-                    find_liquid_components(&sim.hm.data, &mask, w, h, 0, h - 1, TENDRIL_THRESHOLDS.liquid_eps);
-                let tendrils: Vec<&LiquidComponent> =
-                    components.iter().filter(|c| TENDRIL_THRESHOLDS.is_tendril(c)).collect();
-                if !tendrils.is_empty() {
-                    ticks_with_tendril += 1;
-                    max_count = max_count.max(tendrils.len());
-                    max_length =
-                        max_length.max(tendrils.iter().map(|c| c.width().max(c.height())).max().unwrap());
-                }
-            }
-            println!(
-                "map [test_liquid_flowing_liquid_does_not_stand_in_walls]: ticks_with_tendril={} \
-                 max_count={} max_length={}",
-                ticks_with_tendril, max_count, max_length
-            );
-        }
 
-        // --- 3. test_liquid_stream_stays_coherent: a continuous 4-wide tap falling in an open
-        // Square box, checked well clear of the source and before it reaches the floor. ---
-        {
-            let w = 64;
-            let h = 96;
-            let mask = make_test_mask(w, h, SandboxShape::Square, 0.04, 1.0);
-            let props = get_test_props(MaterialMode::Water, w * h);
-            let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-            let mut ticks_with_tendril = 0usize;
-            let mut max_count = 0usize;
-            let mut max_length = 0usize;
-            for _ in 0..40 {
-                for y in 6..10 {
-                    for x in 30..34 {
-                        sim.hm.apply_external_mass(x, y, 1.0);
-                    }
-                }
-                sim.tick(gravity_dir, usize::MAX);
-                let components =
-                    find_liquid_components(&sim.hm.data, &mask, w, h, 0, h - 1, TENDRIL_THRESHOLDS.liquid_eps);
-                let tendrils: Vec<&LiquidComponent> =
-                    components.iter().filter(|c| TENDRIL_THRESHOLDS.is_tendril(c)).collect();
-                if !tendrils.is_empty() {
-                    ticks_with_tendril += 1;
-                    max_count = max_count.max(tendrils.len());
-                    max_length =
-                        max_length.max(tendrils.iter().map(|c| c.width().max(c.height())).max().unwrap());
-                }
-            }
-            println!(
-                "map [test_liquid_stream_stays_coherent]: ticks_with_tendril={} max_count={} \
-                 max_length={}",
-                ticks_with_tendril, max_count, max_length
-            );
-        }
 
-        // --- 4. test_multineck_hourglass_water_tendril_on_impact: three synchronized necks
-        // feeding one shared lower chamber. Uses the same near-floor window as the single-neck
-        // scan (WINDOW_H=20 cells), spanning the full width so it covers all three necks. ---
-        {
-            let w = 128;
-            let h = 160;
-            let block_size = 32;
-            let mask = make_test_mask(w, h, SandboxShape::MultiNeckHourglass, 0.005, 0.6);
-            let props = get_test_props(MaterialMode::Water, w * h);
-            let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-            let neck_xs = [36usize, 64usize, 92usize];
-            let floor = (0..h)
-                .rev()
-                .find(|&y| ((59)..=(69)).any(|x| mask[y * w + x] != crate::MASK_OUTSIDE))
-                .expect("no floor found under the centre neck");
-            const WINDOW_H: usize = 20;
-            let y0 = floor.saturating_sub(WINDOW_H);
 
-            let mut ticks_with_tendril = 0usize;
-            let mut max_count = 0usize;
-            let mut max_length = 0usize;
-            let mut impact_tick = None;
-            for t in 0..90 {
-                for &nxx in &neck_xs {
-                    for y in 82..=84usize {
-                        for x in (nxx - 1)..=(nxx + 1) {
-                            sim.hm.apply_external_mass(x, y, 1.0);
-                        }
-                    }
-                }
-                sim.tick(gravity_dir, usize::MAX);
-                if impact_tick.is_none() && sim.hm.data[floor * w + 64] > 0.05 {
-                    impact_tick = Some(t);
-                }
-                let components =
-                    find_liquid_components(&sim.hm.data, &mask, w, h, y0, floor, TENDRIL_THRESHOLDS.liquid_eps);
-                let tendrils: Vec<&LiquidComponent> =
-                    components.iter().filter(|c| TENDRIL_THRESHOLDS.is_tendril(c)).collect();
-                if !tendrils.is_empty() {
-                    ticks_with_tendril += 1;
-                    max_count = max_count.max(tendrils.len());
-                    max_length =
-                        max_length.max(tendrils.iter().map(|c| c.width().max(c.height())).max().unwrap());
-                }
-            }
-            println!(
-                "map [test_multineck_hourglass_water_tendril_on_impact]: impact_tick={:?} \
-                 ticks_with_tendril={} max_count={} max_length={}",
-                impact_tick, ticks_with_tendril, max_count, max_length
-            );
-        }
-    }
 
-    // =====================================================================================
-    // EXPERIMENTAL DIAGNOSTIC (tick-phase-order hypothesis, step 1 -- measure before touching
-    // the solver). See `phase_flow_stats` above `wave_params` for the instrumentation this
-    // relies on.
-    //
-    // Both diagnostics below share the same measurement plan:
-    //   (a) free capacity (cap - h) in the packed interior vs the free surface vs the drain
-    //       channel around the neck, each tick, before the tick runs;
-    //   (b) of the flux that actually moves each tick, what fraction phase 0 (gravity-aligned)
-    //       realises versus phase 1 (everything else, including the lateral edge/CA);
-    //   (c) a source-depth profile: material is seeded in horizontal color bands (by initial
-    //       row), and the mass-weighted mean band index of whatever has crossed below the neck
-    //       is tracked over time, so "did this drain from the top only, or from all depths"
-    //       becomes a number instead of an impression.
-    //
-    // The defect these diagnostics investigate is OUTLET-SIZE DEPENDENT, so -- exactly like
-    // `diag_mass_vs_core_flow_funnel` below -- the shared body takes `neck_width` as a
-    // parameter and both callers sweep the same [0.02, 0.04, 0.08, 0.12] the mass-vs-core
-    // diagnostics use, labelling output per width (e.g. `sand_nw0.02`) so the two families of
-    // diagnostic are directly comparable. 0.12 is the neck-width slider's MAXIMUM (widest,
-    // least-restrictive neck); a fixed run at 0.12 alone is blind to the defect by
-    // construction.
-    //
-    // NOTE on `band_mass_below`: an earlier version of these diagnostics binned the
-    // mass-weighted-blended color tracer into discrete band indices. Binning a blended value
-    // piles everything into the middle band under exact mass conservation and produces a
-    // plausible-looking false signal (it once showed a band gaining 2.5x its initial mass with
-    // total mass exactly conserved). That histogram has been removed. The continuous
-    // mass-weighted `mean_source_band` below is not subject to that failure mode and is kept.
-    //
-    // DIAGNOSTIC ONLY: never asserts on these numbers. Run with:
-    //   cargo test -p sandart-sim --lib physics::tests::diag_step1 -- --ignored --nocapture
-    // =====================================================================================
 
-    /// Shared body for the sand/liquid variants below. `cap` is the material's cell capacity
-    /// (1.5 for DrySand at wetness 0.0, 1.0 for Water); `fill_height` is the seeded per-cell
-    /// height below that capacity; `surf_eps` is the height threshold used to detect the top
-    /// free surface of the settled pile (0.05 for sand, 0.02 for the thinner-settling liquid).
-    /// `neck_width` is passed straight through to `make_test_mask`'s neck-width slider (the
-    /// same slider exposed in the UI, range roughly [0.02, 0.12] with 0.12 == the slider's
-    /// maximum). Flow regime depends strongly on this, so callers sweep it rather than picking
-    /// one value.
-    fn diag_phase_capacity_attribution_funnel(
-        mode: MaterialMode,
-        cap: f32,
-        fill_height: f32,
-        surf_eps: f32,
-        label: &str,
-        neck_width: f32,
-    ) {
-        phase_flow_stats::reset();
 
-        let w = 64usize;
-        let h = 96usize;
-        let block_size = 16usize;
-        const NUM_BANDS: usize = 6;
-        const FILL_Y0: usize = 12;
-        const FILL_Y1: usize = 44; // exclusive; 32 rows, split into NUM_BANDS equal strips
 
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, neck_width, 0.6);
-        let props = get_test_props(mode, w * h);
-        let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
 
-        // Locate the neck: the row (nearest the grid's vertical centre, in case of ties) with
-        // the fewest inside cells.
-        let row_width = |y: usize| -> usize {
-            (0..w).filter(|&x| mask[y * w + x] != crate::MASK_OUTSIDE).count()
-        };
-        let neck_y = (0..h)
-            .filter(|&y| row_width(y) > 0)
-            .min_by_key(|&y| (row_width(y), (y as i64 - (h as i64 / 2)).abs()))
-            .expect("hourglass mask has no inside rows");
-        println!(
-            "diag_phase_cap[{label}]: neck_y={} neck_width={:.2} (row_width={}) fill rows=[{},{})",
-            neck_y, neck_width, row_width(neck_y), FILL_Y0, FILL_Y1
-        );
 
-        // Seed the upper chamber in horizontal color bands and near-capacity fill.
-        let band_color = |band: usize| -> u8 { (band * (255 / (NUM_BANDS - 1))) as u8 };
-        let mut initial_band_mass = [0.0f64; NUM_BANDS];
-        for y in FILL_Y0..FILL_Y1 {
-            let band = ((y - FILL_Y0) * NUM_BANDS / (FILL_Y1 - FILL_Y0)).min(NUM_BANDS - 1);
-            for x in 0..w {
-                let idx = y * w + x;
-                if mask[idx] != crate::MASK_OUTSIDE {
-                    sim.hm.data[idx] = fill_height;
-                    sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 0, band_color(band));
-                    sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 3, 255);
-                    initial_band_mass[band] += fill_height as f64;
-                }
-            }
-        }
-        let initial_mass = sim.mass();
-        println!(
-            "diag_phase_cap[{label}]: initial_mass={:.3} initial_band_mass={:?}",
-            initial_mass, initial_band_mass
-        );
-
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        const N_TICKS: usize = 400;
-        const REPORT_EVERY: usize = 40;
-
-        let mut cum_phase0 = 0.0f64;
-        let mut cum_phase1 = 0.0f64;
-        // Running sums for the capacity-by-region metric, averaged over the whole run at the
-        // end (also spot-printed every REPORT_EVERY ticks).
-        let mut sum_interior_cap = 0.0f64;
-        let mut sum_surface_cap = 0.0f64;
-        let mut sum_drain_cap = 0.0f64;
-        let mut n_interior_samples = 0u64;
-        let mut n_surface_samples = 0u64;
-        let mut n_drain_samples = 0u64;
-
-        for t in 0..N_TICKS {
-            // --- (a) free-capacity-by-region, measured on the PRE-tick heightmap ---
-            let mut surf_y = vec![usize::MAX; w];
-            for x in 0..w {
-                for y in FILL_Y0.saturating_sub(4)..neck_y {
-                    let idx = y * w + x;
-                    if mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] > surf_eps {
-                        surf_y[x] = y;
-                        break;
-                    }
-                }
-            }
-            let (mut interior_cap, mut surface_cap, mut drain_cap) = (0.0f64, 0.0f64, 0.0f64);
-            let (mut n_int, mut n_surf, mut n_drain) = (0u64, 0u64, 0u64);
-            for y in 0..neck_y + 4 {
-                for x in 0..w {
-                    let idx = y * w + x;
-                    if mask[idx] == crate::MASK_OUTSIDE {
-                        continue;
-                    }
-                    let near_neck = y + 3 >= neck_y && y <= neck_y + 3;
-                    if near_neck {
-                        drain_cap += (cap - sim.hm.data[idx]).max(0.0) as f64;
-                        n_drain += 1;
-                        continue;
-                    }
-                    if surf_y[x] == usize::MAX || sim.hm.data[idx] <= surf_eps {
-                        continue; // empty air above the pile, not part of either region
-                    }
-                    if y <= surf_y[x] + 2 {
-                        surface_cap += (cap - sim.hm.data[idx]).max(0.0) as f64;
-                        n_surf += 1;
-                    } else if y + 4 <= neck_y {
-                        interior_cap += (cap - sim.hm.data[idx]).max(0.0) as f64;
-                        n_int += 1;
-                    }
-                }
-            }
-            sum_interior_cap += interior_cap;
-            sum_surface_cap += surface_cap;
-            sum_drain_cap += drain_cap;
-            n_interior_samples += n_int;
-            n_surface_samples += n_surf;
-            n_drain_samples += n_drain;
-
-            // --- (b) phase attribution for this tick's actual flux ---
-            phase_flow_stats::reset();
-            sim.tick(gravity_dir, 4096);
-            let (p0, p1) = phase_flow_stats::take();
-            cum_phase0 += p0;
-            cum_phase1 += p1;
-
-            if t % REPORT_EVERY == 0 || t == N_TICKS - 1 {
-                // --- (c) source-depth profile: mass-weighted mean band index below the neck.
-                // (See the family doc-comment above: no bucketed histogram here -- continuous
-                // mass-weighted mean only.) ---
-                let mut drained_mass = 0.0f64;
-                let mut drained_band_weighted = 0.0f64;
-                for y in (neck_y + 4)..h {
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        if mask[idx] == crate::MASK_OUTSIDE {
-                            continue;
-                        }
-                        let hgt = sim.hm.data[idx] as f64;
-                        if hgt <= 1e-4 {
-                            continue;
-                        }
-                        let band_est = color_channel(sim.cell_colors[idx], 0) as f64
-                            / (255.0 / (NUM_BANDS as f64 - 1.0));
-                        drained_mass += hgt;
-                        drained_band_weighted += hgt * band_est;
-                    }
-                }
-                let mean_band = if drained_mass > 0.0 { drained_band_weighted / drained_mass } else { -1.0 };
-                let cap_total = interior_cap + surface_cap + drain_cap;
-                let phase_total = cum_phase0 + cum_phase1;
-                println!(
-                    "diag_phase_cap[{label}][t={t}]: drained_mass={:.4} mean_source_band={:.3} \
-                     | this-tick free-cap interior={:.4} surface={:.4} \
-                     drain={:.4} (n={}/{}/{}) | cumulative flux phase0={:.5} phase1={:.5} \
-                     phase1_frac={:.4} (of {cap_total:.4} cap seen, phase_total={phase_total:.5})",
-                    drained_mass, mean_band,
-                    interior_cap, surface_cap, drain_cap, n_int, n_surf, n_drain,
-                    cum_phase0, cum_phase1,
-                    if phase_total > 0.0 { cum_phase1 / phase_total } else { -1.0 },
-                );
-            }
-        }
-
-        let final_mass = sim.mass();
-        let run_phase1_frac = if cum_phase0 + cum_phase1 > 0.0 {
-            cum_phase1 / (cum_phase0 + cum_phase1)
-        } else {
-            -1.0
-        };
-        let run_avg_interior_cap = if n_interior_samples > 0 {
-            sum_interior_cap / n_interior_samples as f64
-        } else {
-            -1.0
-        };
-        let mass_rel_err = (final_mass - initial_mass).abs() / initial_mass;
-        println!(
-            "diag_phase_cap[{label}]: FINAL initial_mass={:.3} final_mass={:.3} mass_rel_err={:.3e} \
-             | run totals: cum_phase0={:.4} cum_phase1={:.4} phase1_frac={:.4} \
-             | avg free-cap/sample interior={:.5} surface={:.5} drain={:.5}",
-            initial_mass, final_mass, mass_rel_err,
-            cum_phase0, cum_phase1, run_phase1_frac,
-            run_avg_interior_cap,
-            if n_surface_samples > 0 { sum_surface_cap / n_surface_samples as f64 } else { -1.0 },
-            if n_drain_samples > 0 { sum_drain_cap / n_drain_samples as f64 } else { -1.0 },
-        );
-        // Cross-width comparison line (the two numbers that actually move with outlet width):
-        println!(
-            "diag_phase_cap[{label}]: SUMMARY neck_width={neck_width:.2} phase1_frac={:.4} \
-             avg_interior_free_cap_per_cell={:.5} mass_rel_err={:.3e}",
-            run_phase1_frac, run_avg_interior_cap, mass_rel_err,
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn diag_step1_phase_capacity_attribution_sand_funnel() {
-        // DrySand, wetness 0.0 -> cell_capacity_for(0.0) == 1.5; fill_height=1.4 matches the
-        // near-capacity fill the mass-vs-core sand diagnostic uses; surf_eps=0.05.
-        for neck_width in [0.02f32, 0.04, 0.08, 0.12] {
-            let label = format!("sand_nw{neck_width:.2}");
-            diag_phase_capacity_attribution_funnel(
-                MaterialMode::DrySand,
-                1.5,
-                1.4,
-                0.05,
-                &label,
-                neck_width,
-            );
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn diag_step1_phase_capacity_attribution_liquid_funnel() {
-        // Water, liquidity == 1 -> cell_capacity_for == 1.0; fill_height=0.95 matches the
-        // mass-vs-core liquid diagnostic; surf_eps=0.02 (thinner settled surface than sand).
-        for neck_width in [0.02f32, 0.04, 0.08, 0.12] {
-            let label = format!("liquid_nw{neck_width:.2}");
-            diag_phase_capacity_attribution_funnel(
-                MaterialMode::Water,
-                1.0,
-                0.95,
-                0.02,
-                &label,
-                neck_width,
-            );
-        }
-    }
-
-    // =====================================================================================
-    // MEASUREMENT (mass-flow vs core/funnel-flow hypothesis) -- see the assigning brief.
-    // Seeds a triangular funnel (the upper, converging chamber of an Hourglass mask: wide
-    // mouth narrowing down to a small neck) with the BOTTOM half of the fill region (by row,
-    // i.e. the half closer to the neck) colored black and the TOP half (the wide mouth, far
-    // from the neck) colored white. Because the chamber narrows going down, the bottom
-    // half's rows are narrower and hold less area/mass than the top half's -- `m_black` is
-    // computed exactly from the actual seeded per-row mass below, never assumed to be 0.25.
-    //
-    // Color is used as a mass-weighted-mean CONSERVED tracer (`advect_properties` blends
-    // color mass-weighted with stochastic rounding; `test_color_conservation` asserts
-    // color*mass conserved to 0.5%) -- the mean is read continuously, never bucketed into
-    // discrete bands (an earlier attempt binned blended greys into bands and produced a false
-    // signal: everything piled into the middle band and looked like a real effect). R = tone
-    // (0 black / 255 white), G = normalised source row, B = normalised source column, each an
-    // independent conserved tracer (alpha is forced to 255).
-    //
-    // MASS FLOW prediction: material leaves in depth order, so exited material stays
-    // essentially all-black until the cumulative drained fraction reaches m_black, then turns
-    // white -- i.e. f_50 (drained fraction at which exited material first reaches 50% white)
-    // approx equals m_black, and white_fraction_of_exited at drained_frac=0.10 approx equals 0.
-    // CORE/FUNNEL FLOW prediction: a narrow vertical channel drains fed from the top surface,
-    // so white appears almost immediately -- white_fraction_of_exited at 10% drained is well
-    // above 0, and f_50 is far below m_black.
-    //
-    // Real granular material in a steep funnel with a small outlet does exhibit SOME core
-    // flow -- the ideal mass-flow step is not necessarily the physical target. A modest
-    // shortfall of f_50 below m_black is not on its own proof of a defect; white appearing at
-    // a drained fraction near zero would be (see the printed PREDICTIONS line and the
-    // magnitude discussion in the final report).
-    //
-    // DIAGNOSTIC ONLY: never asserts on the mass-flow-vs-core-flow numbers themselves (only
-    // on the instrument self-check, which is what makes those numbers trustworthy). Run with:
-    //   cargo test -p sandart-sim --lib physics::tests::diag_step1_mass_vs_core_flow -- --ignored --nocapture
-    // =====================================================================================
-
-    /// Shared body for the sand/liquid variants below. `fill_height` is the seeded per-cell
-    /// height (below each material's cell capacity, matching the fill heights the existing
-    /// `diag_step1_phase_capacity_attribution_*` tests use for the same materials).
-    ///
-    /// `neck_width` is passed straight through to `make_test_mask`'s neck-width slider (the
-    /// same slider exposed in the UI, range roughly [0.02, 0.12] with 0.12 == the slider's
-    /// maximum, i.e. the widest/least-restrictive neck). Flow regime depends strongly on this,
-    /// so callers should sweep it rather than picking one value.
-    fn diag_mass_vs_core_flow_funnel(mode: MaterialMode, fill_height: f32, label: &str, neck_width: f32) {
-        let w = 64usize;
-        let h = 96usize;
-        let block_size = 16usize;
-
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, neck_width, 0.6);
-        let props = get_test_props(mode, w * h);
-        let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
-
-        let row_width = |y: usize| -> usize {
-            (0..w).filter(|&x| mask[y * w + x] != crate::MASK_OUTSIDE).count()
-        };
-        let neck_y = (0..h)
-            .filter(|&y| row_width(y) > 0)
-            .min_by_key(|&y| (row_width(y), (y as i64 - (h as i64 / 2)).abs()))
-            .expect("hourglass mask has no inside rows");
-
-        const FILL_Y0: usize = 12;
-        // Leave a gap above the neck (matches the existing diag_step1_* fill bounds) so the
-        // seeded region is purely the converging chamber, not the packed cells right at it.
-        let fill_y1 = neck_y.saturating_sub(4);
-        assert!(
-            fill_y1 > FILL_Y0 + 4,
-            "funnel fill region too small: FILL_Y0={FILL_Y0} fill_y1={fill_y1} neck_y={neck_y}"
-        );
-
-        // Global column bounding box across the whole fill region, used to normalise B --
-        // read from the mask itself (not derived from the shape formula), so it stays correct
-        // even if the mask geometry is retuned later.
-        let mut min_x = usize::MAX;
-        let mut max_x = 0usize;
-        for y in FILL_Y0..fill_y1 {
-            for x in 0..w {
-                if mask[y * w + x] != crate::MASK_OUTSIDE {
-                    min_x = min_x.min(x);
-                    max_x = max_x.max(x);
-                }
-            }
-        }
-        assert!(max_x > min_x, "degenerate fill region column bounds");
-
-        // Split the fill region into two equal-ROW halves (equal HEIGHT, not equal area):
-        // rows [FILL_Y0, mid) are the wide top of the funnel (far from the neck) -> white;
-        // rows [mid, fill_y1) are the narrow bottom (near the neck) -> black.
-        let mid = FILL_Y0 + (fill_y1 - FILL_Y0) / 2;
-
-        let mut mass_top = 0.0f64;
-        let mut mass_bottom = 0.0f64;
-        for y in FILL_Y0..mid {
-            mass_top += row_width(y) as f64 * fill_height as f64;
-        }
-        for y in mid..fill_y1 {
-            mass_bottom += row_width(y) as f64 * fill_height as f64;
-        }
-        let m_black = mass_bottom / (mass_top + mass_bottom);
-
-        let row_norm = |y: usize| -> u8 {
-            (((y - FILL_Y0) as f32 / (fill_y1 - FILL_Y0 - 1).max(1) as f32) * 255.0)
-                .round()
-                .clamp(0.0, 255.0) as u8
-        };
-        let col_norm = |x: usize| -> u8 {
-            (((x - min_x) as f32 / (max_x - min_x) as f32) * 255.0)
-                .round()
-                .clamp(0.0, 255.0) as u8
-        };
-
-        for y in FILL_Y0..fill_y1 {
-            let r: u8 = if y < mid { 255 } else { 0 };
-            let g = row_norm(y);
-            for x in 0..w {
-                let idx = y * w + x;
-                if mask[idx] != crate::MASK_OUTSIDE {
-                    sim.hm.data[idx] = fill_height;
-                    sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 0, r);
-                    sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 1, g);
-                    sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 2, col_norm(x));
-                    sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 3, 255);
-                }
-            }
-        }
-
-        let initial_mass = sim.mass();
-        assert!(
-            (initial_mass - (mass_top + mass_bottom)).abs() / initial_mass < 1e-6,
-            "seeded mass {:.6} does not match row-summed mass {:.6}",
-            initial_mass, mass_top + mass_bottom
-        );
-
-        let color_mass = |cell_colors: &[u32], hm: &Heightmap, channel: usize| -> f64 {
-            hm.data
-                .iter()
-                .enumerate()
-                .map(|(idx, &hgt)| color_channel(cell_colors[idx], channel) as f64 * hgt as f64)
-                .sum()
-        };
-        let initial_r_mass = color_mass(&sim.cell_colors, &sim.hm, 0);
-        let initial_g_mass = color_mass(&sim.cell_colors, &sim.hm, 1);
-        let initial_b_mass = color_mass(&sim.cell_colors, &sim.hm, 2);
-        let white_fraction_global = initial_r_mass / 255.0 / initial_mass;
-
-        println!(
-            "diag_mass_vs_core[{label}]: neck_width={neck_width:.2} neck_y={neck_y} FILL_Y0={FILL_Y0} \
-             fill_y1={fill_y1} mid={mid} min_x={min_x} max_x={max_x} | initial_mass={:.4} \
-             mass_top(white)={:.4} mass_bottom(black)={:.4} m_black={:.4} white_fraction_global={:.4}",
-            initial_mass, mass_top, mass_bottom, m_black, white_fraction_global,
-        );
-        // Predictions, stated BEFORE the run below is analysed (self-validation item 3).
-        //
-        // THE IDEAL f_50 IS 2 * m_black, NOT m_black. This was wrong in the first version of
-        // this diagnostic and the error propagated into several conclusions, so the derivation
-        // is spelled out. `white_fraction_of_exited` is CUMULATIVE -- it is the composition of
-        // everything that has left so far, which is why it necessarily ends at
-        // `white_fraction_global`. Under ideal plug flow material leaves in strict depth order,
-        // so at drained fraction f the exited mass is all black until f reaches m_black and the
-        // white excess above that is (f - m_black). The cumulative white fraction is therefore
-        //     W(f) = max(0, (f - m_black) / f)
-        // and W(f) = 0.5 gives f - m_black = 0.5 f, i.e. f = 2 * m_black.
-        // Reading `m_black` as the ideal understates it by exactly a factor of two and makes
-        // badly-mixed drainage look close to ideal.
-        let ideal_f50 = 2.0 * m_black;
-        println!(
-            "diag_mass_vs_core[{label}]: PREDICTIONS mass_flow=[white_frac@10%~=0.0, f_50~={:.4} \
-             (= 2*m_black, cumulative metric -- see comment)] \
-             core_flow=[white_frac@10%>>0.0 (near 1.0 in the extreme), f_50<<{:.4} (near 0.0 in the extreme)]",
-            ideal_f50, ideal_f50,
-        );
-
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        let schedule = [0.05f64, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50, 0.75, 1.00];
-        let mut next_sched_idx = 0usize;
-        let mut f_50: Option<f64> = None;
-        let mut white_at_10: Option<f64> = None;
-
-        const MAX_TICKS: usize = 6000;
-        let mut last_drained_frac = 0.0f64;
-        let mut t = 0usize;
-        while t < MAX_TICKS && next_sched_idx < schedule.len() {
-            sim.tick(gravity_dir, 4096);
-            t += 1;
-
-            let mut drained_mass = 0.0f64;
-            let mut drained_r = 0.0f64;
-            let mut drained_g = 0.0f64;
-            let mut drained_b = 0.0f64;
-            for y in (neck_y + 4)..h {
-                for x in 0..w {
-                    let idx = y * w + x;
-                    if mask[idx] == crate::MASK_OUTSIDE {
-                        continue;
-                    }
-                    let hgt = sim.hm.data[idx] as f64;
-                    if hgt <= 1e-4 {
-                        continue;
-                    }
-                    drained_mass += hgt;
-                    drained_r += hgt * color_channel(sim.cell_colors[idx], 0) as f64;
-                    drained_g += hgt * color_channel(sim.cell_colors[idx], 1) as f64;
-                    drained_b += hgt * color_channel(sim.cell_colors[idx], 2) as f64;
-                }
-            }
-            let drained_frac = drained_mass / initial_mass;
-            last_drained_frac = drained_frac;
-
-            if drained_mass > 0.0 {
-                let white_frac = (drained_r / drained_mass) / 255.0;
-                if f_50.is_none() && white_frac >= 0.5 {
-                    f_50 = Some(drained_frac);
-                }
-            }
-
-            while next_sched_idx < schedule.len() && drained_frac >= schedule[next_sched_idx] {
-                let white_frac = if drained_mass > 0.0 { (drained_r / drained_mass) / 255.0 } else { -1.0 };
-                let mean_row = if drained_mass > 0.0 {
-                    FILL_Y0 as f64 + (drained_g / drained_mass) / 255.0 * (fill_y1 - FILL_Y0 - 1) as f64
-                } else {
-                    -1.0
-                };
-                let mean_col = if drained_mass > 0.0 {
-                    min_x as f64 + (drained_b / drained_mass) / 255.0 * (max_x - min_x) as f64
-                } else {
-                    -1.0
-                };
-                println!(
-                    "diag_mass_vs_core[{label}] t={t} drained_frac_target={:.2} drained_frac_actual={:.4} \
-                     drained_mass={:.4} white_fraction_of_exited={:.4} mean_source_row={:.2} mean_source_col={:.2}",
-                    schedule[next_sched_idx], drained_frac, drained_mass, white_frac, mean_row, mean_col,
-                );
-                if (schedule[next_sched_idx] - 0.10).abs() < 1e-9 {
-                    white_at_10 = Some(white_frac);
-                }
-                next_sched_idx += 1;
-            }
-        }
-
-        if next_sched_idx < schedule.len() {
-            println!(
-                "diag_mass_vs_core[{label}]: WARNING did not reach all schedule points within \
-                 {MAX_TICKS} ticks; max drained_frac achieved={:.4}, stalled before target={:.2}",
-                last_drained_frac, schedule[next_sched_idx]
-            );
-        }
-
-        // Run a bounded number of extra ticks past the schedule loop so the self-validation
-        // below sees as-settled a state as practical, whether that means genuinely full
-        // drainage or a plateaued residual pile above the neck (reported honestly either way).
-        const SETTLE_EXTRA_TICKS: usize = 400;
-        for _ in 0..SETTLE_EXTRA_TICKS {
-            sim.tick(gravity_dir, 4096);
-        }
-
-        // ---- Self-validation (2): engine-wide conservation, whole grid, start vs end ----
-        let final_mass_total = sim.mass();
-        let mass_rel_err = (final_mass_total - initial_mass).abs() / initial_mass;
-        let final_r_mass_total = color_mass(&sim.cell_colors, &sim.hm, 0);
-        let final_g_mass_total = color_mass(&sim.cell_colors, &sim.hm, 1);
-        let final_b_mass_total = color_mass(&sim.cell_colors, &sim.hm, 2);
-        let r_rel_err = (final_r_mass_total - initial_r_mass).abs() / initial_r_mass;
-        let g_rel_err = (final_g_mass_total - initial_g_mass).abs() / initial_g_mass;
-        let b_rel_err = (final_b_mass_total - initial_b_mass).abs() / initial_b_mass;
-
-        println!(
-            "diag_mass_vs_core[{label}]: SELF-VALIDATION (engine-wide conservation, whole grid) \
-             initial_mass={:.6} final_mass={:.6} mass_rel_err={:.3e} | \
-             initial_R_mass={:.4} final_R_mass={:.4} R_rel_err={:.3e} | \
-             initial_G_mass={:.4} final_G_mass={:.4} G_rel_err={:.3e} | \
-             initial_B_mass={:.4} final_B_mass={:.4} B_rel_err={:.3e}",
-            initial_mass, final_mass_total, mass_rel_err,
-            initial_r_mass, final_r_mass_total, r_rel_err,
-            initial_g_mass, final_g_mass_total, g_rel_err,
-            initial_b_mass, final_b_mass_total, b_rel_err,
-        );
-
-        // ---- Self-validation (1): composition of everything that exited vs global ----
-        let mut drained_mass = 0.0f64;
-        let mut drained_r = 0.0f64;
-        for y in (neck_y + 4)..h {
-            for x in 0..w {
-                let idx = y * w + x;
-                if mask[idx] == crate::MASK_OUTSIDE {
-                    continue;
-                }
-                let hgt = sim.hm.data[idx] as f64;
-                if hgt <= 1e-4 {
-                    continue;
-                }
-                drained_mass += hgt;
-                drained_r += hgt * color_channel(sim.cell_colors[idx], 0) as f64;
-            }
-        }
-        let final_drained_frac = drained_mass / initial_mass;
-        let white_fraction_of_exited_final =
-            if drained_mass > 0.0 { (drained_r / drained_mass) / 255.0 } else { -1.0 };
-        let rel_diff = (white_fraction_of_exited_final - white_fraction_global).abs() / white_fraction_global;
-
-        println!(
-            "diag_mass_vs_core[{label}]: SELF-VALIDATION (exited composition vs global) \
-             final_drained_frac={:.4} white_fraction_of_exited_final={:.4} white_fraction_global={:.4} \
-             rel_diff={:.4}",
-            final_drained_frac, white_fraction_of_exited_final, white_fraction_global, rel_diff,
-        );
-
-        if final_drained_frac > 0.98 {
-            assert!(
-                rel_diff < 0.005,
-                "instrument self-check FAILED: at drained_frac={:.4} (near-full), exited composition \
-                 white_fraction={:.4} does not match global white_fraction={:.4} (rel_diff={:.4} >= 0.005) \
-                 -- the instrument is measuring something other than the intended composition and the \
-                 mass-flow-vs-core-flow numbers above are not trustworthy",
-                final_drained_frac, white_fraction_of_exited_final, white_fraction_global, rel_diff,
-            );
-        } else {
-            println!(
-                "diag_mass_vs_core[{label}]: NOTE final_drained_frac={:.4} did not reach near-full \
-                 drainage (>0.98) within {} ticks -- a residual pile remains above the neck, so the \
-                 exited-vs-global check above is informative only, not asserted here",
-                final_drained_frac,
-                MAX_TICKS + SETTLE_EXTRA_TICKS,
-            );
-        }
-
-        // Two reference bounds for white_fraction_of_exited@10%, so a reader can place the
-        // observation between them without doing arithmetic:
-        //   - ideal_mass_flow: perfect depth order (top/white drains first) => 0.0
-        //   - no_ordering_null: drainage composition indistinguishable from the global mix,
-        //     i.e. no depth ordering at all => white_fraction_global
-        const IDEAL_MASS_FLOW_WHITE_AT_10: f64 = 0.0;
-        println!(
-            "diag_mass_vs_core[{label}]: SUMMARY neck_width={neck_width:.2} m_black={:.4} \
-             f_50: ideal={:.4} observed={:?} \
-             | white_fraction_of_exited@10%: ideal_mass_flow={:.4} observed={:?} no_ordering_null={:.4}",
-            m_black, 2.0 * m_black, f_50, IDEAL_MASS_FLOW_WHITE_AT_10, white_at_10, white_fraction_global,
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn diag_step1_mass_vs_core_flow_sand_funnel() {
-        for neck_width in [0.02f32, 0.04, 0.08, 0.12] {
-            let label = format!("sand_nw{neck_width:.2}");
-            diag_mass_vs_core_flow_funnel(MaterialMode::DrySand, 1.4, &label, neck_width);
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn diag_step1_mass_vs_core_flow_liquid_funnel() {
-        for neck_width in [0.02f32, 0.04, 0.08, 0.12] {
-            let label = format!("liquid_nw{neck_width:.2}");
-            diag_mass_vs_core_flow_funnel(MaterialMode::Water, 0.95, &label, neck_width);
-        }
-    }
-
-    // =====================================================================================
-    // DIAGNOSTIC: does GRAIN_JITTER_SCALE actually raise spatial color/property variance among
-    // neighbouring sand cells, the way its doc comment on `edge_arbitration_scale` /
-    // `grain_jitter_strength` claims it should? No existing test measures spatial color/property
-    // variance at all -- every other conservation/symmetry test either sums mass (conservation)
-    // or tracks a single scalar signed difference (symmetry), neither of which would notice
-    // color and properties homogenising into mush as they blend.
-    //
-    // SCENARIO: narrow vertical stripes of material poured into an Hourglass funnel's upper
-    // chamber and left to drain through the neck. The neck (and the avalanching within the
-    // chamber above it) is where `budget_term` is actually contested -- an open flat bed rarely
-    // oversubscribes a cell's free capacity or available mass; a narrowing funnel constantly
-    // does. Stripe width is deliberately narrow relative to the fill width (stripe_width=4 out of
-    // a ~50-wide chamber) so a large share of cells start adjacent to a stripe boundary rather
-    // than a handful at the edges.
-    //
-    // GRAIN_JITTER_SCALE is a compile-time const (see its doc comment on l.721-ish), so the
-    // 0.0-vs-1.25 A/B this diagnostic exists for is NOT performed inside one process -- it can't
-    // be done at runtime. Run this test twice, editing the const between runs (0.0, then 1.25)
-    // and diff the printed numbers by hand; that is what the accompanying task report does.
-    // NEVER assert on these numbers: they are a measurement, not a spec, and are expected to
-    // change if the arbitration mechanism changes.
-    //
-    // WHY BOTH VARIANCE AND LOCAL CONTRAST: global spatial variance can stay high while
-    // everything smooths out locally -- two large flat regions of different color, each
-    // internally uniform, still have high global variance across the whole grid. That is not what
-    // "grainy" means. Local contrast (mean |a - b| between adjacent OCCUPIED cells, reported
-    // separately for the horizontal and vertical directions since the jitter's edge-orientation
-    // salts (EDGE_SALT_H/EDGE_SALT_V) could in principle introduce a directional bias) is closer
-    // to what a grainy *look* actually is.
-    //
-    // WHY TWO VARIANTS BELOW: a single uniform material's props never vary spatially, and
-    // blending two identical values together (jittered split or not) is a no-op -- so a
-    // same-material-both-stripes scenario can only ever show a color effect, with prop variance
-    // pinned at exactly 0 by construction. `diag_grain_variance_mixed_materials` stripes two
-    // different DrySand-family presets (both wetness=0, i.e. granular_share=1 for both --
-    // apples-to-apples granular, not granular-vs-liquid) so PROP_GRAIN_SIZE/THRESHOLD/FLOW_RATE
-    // also start with real spatial contrast, exercising the property side of `advect_properties`.
-    fn diag_grain_variance_scenario(
-        mode_a: MaterialMode,
-        mode_b: MaterialMode,
-        label: &str,
-        tick_checkpoints: &[usize],
-    ) {
-        let w = 64usize;
-        let h = 96usize;
-        let block_size = 16usize;
-        let neck_width = 0.05f32;
-        let stripe_width = 4usize;
-
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, neck_width, 0.6);
-
-        let row_width = |y: usize| -> usize {
-            (0..w).filter(|&x| mask[y * w + x] != crate::MASK_OUTSIDE).count()
-        };
-        let neck_y = (0..h)
-            .filter(|&y| row_width(y) > 0)
-            .min_by_key(|&y| (row_width(y), (y as i64 - (h as i64 / 2)).abs()))
-            .expect("hourglass mask has no inside rows");
-        const FILL_Y0: usize = 12;
-        let fill_y1 = neck_y.saturating_sub(4);
-        assert!(
-            fill_y1 > FILL_Y0 + 4,
-            "fill region too small: FILL_Y0={FILL_Y0} fill_y1={fill_y1} neck_y={neck_y}"
-        );
-
-        let is_stripe_a = |x: usize| -> bool { (x / stripe_width) % 2 == 0 };
-
-        let mut props = CellProps::new(w * h);
-        for y in FILL_Y0..fill_y1 {
-            for x in 0..w {
-                let idx = y * w + x;
-                if mask[idx] == crate::MASK_OUTSIDE {
-                    continue;
-                }
-                let mode = if is_stripe_a(x) { mode_a } else { mode_b };
-                let (wetness, threshold, flow_rate, grain_size) = mode.preset_props();
-                props.wetness[idx] = wetness;
-                props.threshold[idx] = threshold;
-                props.flow_rate[idx] = flow_rate;
-                props.grain_size[idx] = grain_size;
-            }
-        }
-
-        let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
-        let fill_height = 1.0f32;
-        for y in FILL_Y0..fill_y1 {
-            for x in 0..w {
-                let idx = y * w + x;
-                if mask[idx] == crate::MASK_OUTSIDE {
-                    continue;
-                }
-                sim.hm.data[idx] = fill_height;
-                let (r, g, b) = if is_stripe_a(x) { (255u8, 255u8, 255u8) } else { (20u8, 20u8, 20u8) };
-                sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 0, r);
-                sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 1, g);
-                sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 2, b);
-                sim.cell_colors[idx] = set_color_channel(sim.cell_colors[idx], 3, 255);
-            }
-        }
-
-        const CHANNEL_NAMES: [&str; 7] = [
-            "color_R", "color_G", "color_B",
-            "prop_WETNESS", "prop_THRESHOLD", "prop_FLOW_RATE", "prop_GRAIN_SIZE",
-        ];
-        // Channel index convention: 0..3 = color RGB, 3..7 = props (WETNESS/THRESHOLD/
-        // FLOW_RATE/GRAIN_SIZE), matching CHANNEL_NAMES above.
-        let read_channel = |sim: &TestSim, idx: usize, c: usize| -> f32 {
-            if c < 3 { color_channel(sim.cell_colors[idx], c) as f32 } else { sim.cell_props.get(idx, c - 3) }
-        };
-
-        let report = |sim: &TestSim, tick: usize| {
-            let occupied: Vec<usize> = (0..w * h)
-                .filter(|&idx| mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] > 0.05)
-                .collect();
-            let n = occupied.len();
-            if n == 0 {
-                println!("diag_grain_variance[{label}] t={tick}: no occupied cells left");
-                return;
-            }
-            for (c, name) in CHANNEL_NAMES.iter().enumerate() {
-                let mean: f64 = occupied.iter().map(|&i| read_channel(sim, i, c) as f64).sum::<f64>() / n as f64;
-                let var: f64 = occupied
-                    .iter()
-                    .map(|&i| { let d = read_channel(sim, i, c) as f64 - mean; d * d })
-                    .sum::<f64>()
-                    / n as f64;
-                let sd = var.sqrt();
-
-                let (mut h_sum, mut h_n) = (0.0f64, 0usize);
-                let (mut v_sum, mut v_n) = (0.0f64, 0usize);
-                for &idx in &occupied {
-                    let x = idx % w;
-                    let y = idx / w;
-                    if x + 1 < w {
-                        let ridx = idx + 1;
-                        if mask[ridx] != crate::MASK_OUTSIDE && sim.hm.data[ridx] > 0.05 {
-                            h_sum += (read_channel(sim, idx, c) as f64 - read_channel(sim, ridx, c) as f64).abs();
-                            h_n += 1;
-                        }
-                    }
-                    if y + 1 < h {
-                        let didx = idx + w;
-                        if mask[didx] != crate::MASK_OUTSIDE && sim.hm.data[didx] > 0.05 {
-                            v_sum += (read_channel(sim, idx, c) as f64 - read_channel(sim, didx, c) as f64).abs();
-                            v_n += 1;
-                        }
-                    }
-                }
-                let local_h = if h_n > 0 { h_sum / h_n as f64 } else { 0.0 };
-                let local_v = if v_n > 0 { v_sum / v_n as f64 } else { 0.0 };
-                println!(
-                    "diag_grain_variance[{label}] t={tick:>4} n_occ={n:>5} {name:<16} \
-                     mean={mean:>9.4} sd={sd:>9.4} local_h={local_h:>8.4} local_v={local_v:>8.4}",
-                );
-            }
-        };
-
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        report(&sim, 0);
-        let mut next = 0usize;
-        let mut t = 0usize;
-        let max_tick = *tick_checkpoints.last().expect("tick_checkpoints must be non-empty");
-        while t < max_tick {
-            sim.tick(gravity_dir, 4096);
-            t += 1;
-            if next < tick_checkpoints.len() && t == tick_checkpoints[next] {
-                report(&sim, t);
-                next += 1;
-            }
-        }
-    }
-
-    #[test]
-    #[ignore]
-    // DIAGNOSTIC measurement, not pass/fail -- see `diag_grain_variance_scenario`'s doc comment.
-    // Same material on both stripes (only color differs): isolates the color-only effect and
-    // lets grain size be swept cleanly across presets (FinePowder 0.05 .. CoarseSand 0.80)
-    // without also perturbing property contrast between the stripes.
-    // Run with (editing GRAIN_JITTER_SCALE between runs):
-    //   cargo test -p sandart-sim --release --lib \
-    //     physics::tests::diag_grain_variance_color_only -- --ignored --nocapture
-    fn diag_grain_variance_color_only() {
-        for mode in [MaterialMode::FinePowder, MaterialMode::DrySand, MaterialMode::CoarseSand] {
-            let label = format!("{mode:?}_color_only");
-            diag_grain_variance_scenario(mode, mode, &label, &[50, 150, 300]);
-        }
-    }
-
-    #[test]
-    #[ignore]
-    // DIAGNOSTIC measurement, not pass/fail -- see `diag_grain_variance_scenario`'s doc comment.
-    // Two DIFFERENT DrySand-family materials striped together (both wetness=0, so
-    // granular_share=1 for both -- an apples-to-apples granular comparison, not granular-vs-
-    // liquid), so PROP_GRAIN_SIZE/THRESHOLD/FLOW_RATE start with real spatial contrast, not just
-    // color -- this is what actually exercises property mixing.
-    fn diag_grain_variance_mixed_materials() {
-        diag_grain_variance_scenario(
-            MaterialMode::FinePowder, MaterialMode::CoarseSand, "finepowder_vs_coarsesand", &[50, 150, 300],
-        );
-    }
-
-    #[test]
-    #[ignore]
-    // DIAGNOSTIC (reproduce-only, no assertions): user report is that falling sand "falls in
-    // chunks with almost clear separation of blocks" -- "large slabs that separate and merge in
-    // the end" -- seen on Circle and on Hourglass after a flip, and NOT present a few days before
-    // the flux-solver / frozen-state Jacobi conversion for sand's gravity-aligned edge (see the
-    // Stage B comment on `test_granular_flowing_fall_conserves_mass_and_respects_cfl`, which moved
-    // sand's vertical edge onto the same conservative `flux_edge` solver liquid already used).
-    //
-    // Scenario: drop a solid 24x24 DrySand block into an open Circle container with clear air
-    // below it, and watch the block while it free-falls. A solid block has no reason to develop
-    // internal gaps: nothing is metering it against anything except gravity and its own capacity.
-    // If it does, that gap structure over time is the artifact.
-    //
-    // Three metrics, all computed every tick against the material's own current footprint (so a
-    // shrinking/settling block doesn't inflate them just by having a smaller bounding box):
-    //   - num_components: 8-connected components of h > 0.05 cells over the WHOLE grid, reusing
-    //     `find_liquid_components` from the tendril detector (it is a generic connectivity pass,
-    //     nothing liquid-specific about it -- it is called here on `sim.hm.data` for DrySand). A
-    //     solid falling block is exactly one component; slabs separating means > 1.
-    //   - void_cells / void_fraction: cells with h <= 0.05 strictly INSIDE the tight bounding box
-    //     of all currently-occupied cells (mask != OUTSIDE only), i.e. gaps enclosed by the
-    //     material's own convex extent -- the same style of measurement as `count_voids` in
-    //     `test_liquid_flowing_liquid_does_not_stand_in_walls`, adapted from "liquid on either
-    //     side in a row" to "inside the occupied bbox" because a solid block (unlike a draining
-    //     channel) has no natural left/right liquid landmark to test against.
-    //   - a vertical fill-fraction profile (rows x fill fraction across the bbox's column span),
-    //     printed at the tick where void_cells peaks, to read off whether any banding has a short
-    //     (~1-2 cell) wavelength (hypothesis 1: damped-Jacobi's least-damped mode is the highest
-    //     frequency one) or is organised into a few large irregular bands (hypothesis 2: the
-    //     uniform `edge_arbitration_scale` factor per cell plus `budget_term`'s hard
-    //     `raw_total > budget` branch creating a fracture plane where neighbouring cells land on
-    //     opposite sides of it).
-    fn diag_falling_block_slab_separation() {
-        let s = test_scale();
-        let w = 128 * s;
-        let h = 128 * s;
-        let eps = 0.05f32;
-
-        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
-        let props = get_test_props(MaterialMode::DrySand, w * h);
-        let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        // 24x24 block (scaled), centered horizontally, starting well inside the Circle's top
-        // (r_x = 0.46*w =~ 58.9 at s=1; the block's farthest corner from center is at dist_sq
-        // 2080 against r_x_sq 3467, comfortably inside) with the whole lower ~85% of the circle
-        // open air below it to fall through.
-        let block_w = 24 * s;
-        let block_h = 24 * s;
-        let x0 = w / 2 - block_w / 2;
-        let x1 = x0 + block_w;
-        let y0 = 20 * s;
-        let y1 = y0 + block_h;
-
-        let mut filled = 0usize;
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let idx = y * w + x;
-                if mask[idx] != crate::MASK_OUTSIDE {
-                    sim.hm.data[idx] = 1.0;
-                    filled += 1;
-                }
-            }
-        }
-        assert_eq!(
-            filled, block_w * block_h,
-            "block placement clipped by the Circle mask -- adjust y0/block size, this scenario \
-             needs a genuinely solid rectangular block to start"
-        );
-
-        let bbox = |sim: &TestSim| -> Option<(usize, usize, usize, usize)> {
-            let (mut min_x, mut max_x, mut min_y, mut max_y) = (usize::MAX, 0usize, usize::MAX, 0usize);
-            let mut any = false;
-            for y in 0..h {
-                for x in 0..w {
-                    if sim.hm.data[y * w + x] > eps {
-                        any = true;
-                        min_x = min_x.min(x);
-                        max_x = max_x.max(x);
-                        min_y = min_y.min(y);
-                        max_y = max_y.max(y);
-                    }
-                }
-            }
-            any.then_some((min_x, max_x, min_y, max_y))
-        };
-
-        // "Eroded interior" void count: same as void_cells but excluding any cell within
-        // `erosion` of the bbox boundary. A rectangular bbox around a naturally sloped/triangular
-        // settled heap always has some void along its edges (the heap's corners) even with zero
-        // internal defect; this strips that geometric slack out so a nonzero count here can only
-        // come from a genuine enclosed pocket, not the heap's outline.
-        let erosion = 3usize;
-        let interior_void = |sim: &TestSim, min_x: usize, max_x: usize, min_y: usize, max_y: usize| -> usize {
-            if max_x - min_x <= 2 * erosion || max_y - min_y <= 2 * erosion {
-                return 0;
-            }
-            let mut count = 0usize;
-            for y in (min_y + erosion)..=(max_y - erosion) {
-                for x in (min_x + erosion)..=(max_x - erosion) {
-                    let idx = y * w + x;
-                    if mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] <= eps {
-                        count += 1;
-                    }
-                }
-            }
-            count
-        };
-
-        let mut peak_void_cells = 0usize;
-        let mut peak_void_frac = 0.0f32;
-        let mut peak_void_tick = 0usize;
-        let mut peak_void_bbox = (0usize, 0usize, 0usize, 0usize);
-        let mut peak_components = 0usize;
-        let mut peak_components_tick = 0usize;
-        let mut final_components = 0usize;
-        let mut final_void_cells = 0usize;
-        let mut peak_interior_void = 0usize;
-        let mut peak_interior_void_tick = 0usize;
-        let mut final_interior_void = 0usize;
-        let checkpoints: Vec<usize> = [2, 4, 6, 8, 10, 15, 20, 30, 38, 50, 80, 120, 180, 260]
-            .iter()
-            .map(|&t| t * s)
-            .collect();
-
-        let max_ticks = 260 * s;
-        for t in 0..max_ticks {
-            sim.tick(gravity_dir, usize::MAX);
-
-            let components = find_liquid_components(&sim.hm.data, &mask, w, h, 0, h - 1, eps);
-            let num_components = components.len();
-            if num_components > peak_components {
-                peak_components = num_components;
-                peak_components_tick = t + 1;
-            }
-
-            let (void_cells, void_frac, this_bbox, this_interior_void) = match bbox(&sim) {
-                Some((min_x, max_x, min_y, max_y)) => {
-                    let mut inside_cells = 0usize;
-                    let mut void_cells = 0usize;
-                    for y in min_y..=max_y {
-                        for x in min_x..=max_x {
-                            let idx = y * w + x;
-                            if mask[idx] == crate::MASK_OUTSIDE {
-                                continue;
-                            }
-                            inside_cells += 1;
-                            if sim.hm.data[idx] <= eps {
-                                void_cells += 1;
-                            }
-                        }
-                    }
-                    let frac = void_cells as f32 / inside_cells.max(1) as f32;
-                    let iv = interior_void(&sim, min_x, max_x, min_y, max_y);
-                    (void_cells, frac, (min_x, max_x, min_y, max_y), iv)
-                }
-                None => (0, 0.0, (0, 0, 0, 0), 0),
-            };
-            if void_cells > peak_void_cells {
-                peak_void_cells = void_cells;
-                peak_void_tick = t + 1;
-                peak_void_bbox = this_bbox;
-            }
-            peak_void_frac = peak_void_frac.max(void_frac);
-            if this_interior_void > peak_interior_void {
-                peak_interior_void = this_interior_void;
-                peak_interior_void_tick = t + 1;
-            }
-
-            if checkpoints.contains(&(t + 1)) {
-                println!(
-                    "diag_falling_block_slab_separation: t={:>4} components={} void_cells={:>4} \
-                     void_frac={:.4} interior_void={:>4} bbox=({},{})-({},{})",
-                    t + 1, num_components, void_cells, void_frac, this_interior_void,
-                    this_bbox.0, this_bbox.2, this_bbox.1, this_bbox.3
-                );
-            }
-
-            if t + 1 == max_ticks {
-                final_components = num_components;
-                final_void_cells = void_cells;
-                final_interior_void = this_interior_void;
-            }
-        }
-
-        println!(
-            "diag_falling_block_slab_separation: scale={s} w={w} h={h} block={block_w}x{block_h} \
-             peak_void_cells={peak_void_cells} (@tick {peak_void_tick}) peak_void_frac={peak_void_frac:.4} \
-             peak_components={peak_components} (@tick {peak_components_tick}) \
-             peak_interior_void={peak_interior_void} (@tick {peak_interior_void_tick}) \
-             final_components={final_components} final_void_cells={final_void_cells} \
-             final_interior_void={final_interior_void}"
-        );
-
-        // Re-run just the peak-void tick's row profile for a banding-wavelength read. Rerunning
-        // rather than caching per-tick history keeps the main loop's memory flat; the sim is
-        // deterministic (fixed RNG seed schedule in `TestSim::tick`), so replaying to the same
-        // tick count reproduces the identical state.
-        if peak_void_cells > 0 {
-            let mask2 = mask.clone();
-            let props2 = get_test_props(MaterialMode::DrySand, w * h);
-            let mut sim2 = TestSim::new(w, h, props2, mask2.clone(), 32);
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let idx = y * w + x;
-                    if mask2[idx] != crate::MASK_OUTSIDE {
-                        sim2.hm.data[idx] = 1.0;
-                    }
-                }
-            }
-            for _ in 0..peak_void_tick {
-                sim2.tick(gravity_dir, usize::MAX);
-            }
-            let (min_x, max_x, min_y, max_y) = peak_void_bbox;
-            println!(
-                "diag_falling_block_slab_separation: row fill-fraction profile at peak tick {peak_void_tick}, \
-                 bbox x=[{min_x},{max_x}] y=[{min_y},{max_y}]"
-            );
-            for y in min_y..=max_y {
-                let mut inside = 0usize;
-                let mut filled = 0usize;
-                for x in min_x..=max_x {
-                    let idx = y * w + x;
-                    if mask2[idx] == crate::MASK_OUTSIDE {
-                        continue;
-                    }
-                    inside += 1;
-                    if sim2.hm.data[idx] > eps {
-                        filled += 1;
-                    }
-                }
-                let frac = filled as f32 / inside.max(1) as f32;
-                let bar_len = (frac * 40.0).round() as usize;
-                let bar: String = "#".repeat(bar_len);
-                println!("  y={y:>4} fill={frac:.3} {bar}");
-            }
-
-            // Raw 2D snapshot of a central column strip, to tell horizontal row-banding (the
-            // whole row's fill fraction moves together, columns roughly agree within a row) apart
-            // from a true 2D checkerboard (fill alternates cell-by-cell independent of neighbours
-            // in the SAME row too). '#'=h>0.5, '+'=0.05<h<=0.5, '.'=h<=0.05(void).
-            let strip_x0 = min_x + (max_x - min_x) / 2 - 6.min((max_x - min_x) / 2);
-            let strip_x1 = (strip_x0 + 12).min(max_x);
-            println!(
-                "diag_falling_block_slab_separation: 2D snapshot cols [{strip_x0},{strip_x1}], \
-                 rows [{min_y},{max_y}]"
-            );
-            for y in min_y..=max_y {
-                let mut line = String::new();
-                for x in strip_x0..=strip_x1 {
-                    let idx = y * w + x;
-                    if mask2[idx] == crate::MASK_OUTSIDE {
-                        line.push(' ');
-                        continue;
-                    }
-                    let v = sim2.hm.data[idx];
-                    line.push(if v > 0.5 { '#' } else if v > eps { '+' } else { '.' });
-                }
-                println!("  y={y:>4} {line}");
-            }
-
-            // Quantitative parity correlation, over the SAME eroded interior region
-            // `interior_void` uses (excludes the bbox's outer `erosion` rim, so this isn't just
-            // picking up the block's outline). Splits mean(h) by row parity, column parity, and
-            // (x+y) parity (the checkerboard combination). If hypothesis 1 (damped-Jacobi's
-            // least-damped mode = highest spatial frequency) is what's firing, the (x+y) parity
-            // split should show the largest mean(h) gap of the three, since a 2D checkerboard
-            // mode is `(-1)^(x+y)`, not purely `(-1)^x` or `(-1)^y`. If instead this is
-            // hypothesis 2 (a few large irregular slabs from the `budget_term` branch), none of
-            // the three parity splits should show a meaningfully large gap -- the low-h region
-            // would be spatially contiguous, not alternating cell-by-cell.
-            let (min_x, max_x, min_y, max_y) = peak_void_bbox;
-            if max_x - min_x > 2 * erosion && max_y - min_y > 2 * erosion {
-                let mut sums = [[0.0f64; 2]; 3]; // [row, col, checker][parity]
-                let mut counts = [[0usize; 2]; 3];
-                for y in (min_y + erosion)..=(max_y - erosion) {
-                    for x in (min_x + erosion)..=(max_x - erosion) {
-                        let idx = y * w + x;
-                        if mask2[idx] == crate::MASK_OUTSIDE {
-                            continue;
-                        }
-                        let v = sim2.hm.data[idx] as f64;
-                        let py = y % 2;
-                        let px = x % 2;
-                        let pc = (x + y) % 2;
-                        sums[0][py] += v;
-                        counts[0][py] += 1;
-                        sums[1][px] += v;
-                        counts[1][px] += 1;
-                        sums[2][pc] += v;
-                        counts[2][pc] += 1;
-                    }
-                }
-                let mean = |k: usize, p: usize| sums[k][p] / counts[k][p].max(1) as f64;
-                let gap = |k: usize| (mean(k, 0) - mean(k, 1)).abs();
-                println!(
-                    "diag_falling_block_slab_separation: parity split @ tick {peak_void_tick} \
-                     (interior region, n={}): row_parity mean(even,odd)=({:.4},{:.4}) gap={:.4} | \
-                     col_parity mean(even,odd)=({:.4},{:.4}) gap={:.4} | \
-                     checker(x+y) mean(even,odd)=({:.4},{:.4}) gap={:.4}",
-                    counts[0][0] + counts[0][1],
-                    mean(0, 0), mean(0, 1), gap(0),
-                    mean(1, 0), mean(1, 1), gap(1),
-                    mean(2, 0), mean(2, 1), gap(2),
-                );
-            }
-        }
-    }
-
-    #[test]
-    #[ignore]
-    // DIAGNOSTIC (reproduce-only, no assertions), follow-up to `diag_falling_block_slab_separation`
-    // after the user supplied a photo of the actual defect: DrySand in a Circle container breaks
-    // into large horizontal slabs with clean straight-edged empty gaps *while still falling* --
-    // the material is never asleep, the slabs keep moving, and the gaps close again once the pile
-    // settles. That rules out edge-sleeping (asleep material cannot be what the user sees falling)
-    // and reframes the question: gaps opening between falling layers means different layers are
-    // falling at different SPEEDS, since uniform free fall cannot open a gap between two layers
-    // that started in contact and share one gravitational acceleration.
-    //
-    // This tracks, at each checkpoint during free fall, the mass-weighted vertical centroid of the
-    // object's EVEN-row mass separately from its ODD-row mass (over the same eroded-interior
-    // region `diag_falling_block_slab_separation` uses for its parity split), so a per-checkpoint
-    // finite difference gives a directly-measured fall SPEED for each parity class. If the two
-    // diverge and the divergence grows, rows are provably falling at different speeds and the
-    // effect is compounding rather than static. Alongside that it prints the mean `column_depth`
-    // (the one hand-rolled, non-flux-solver overburden term -- see its own doc comment -- that
-    // feeds the LATERAL edge's driving head, never the vertical one) split the same way, to check
-    // whether the seed of the divergence (if any) is visible there too, or is a distinct signal.
-    fn diag_falling_block_layer_velocity() {
-        let s = test_scale();
-        let w = 128 * s;
-        let h = 128 * s;
-
-        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
-        let props = get_test_props(MaterialMode::DrySand, w * h);
-        let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        let block_w = 24 * s;
-        let block_h = 24 * s;
-        let x0 = w / 2 - block_w / 2;
-        let x1 = x0 + block_w;
-        let y0 = 20 * s;
-        let y1 = y0 + block_h;
-
-        let mut filled = 0usize;
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let idx = y * w + x;
-                if mask[idx] != crate::MASK_OUTSIDE {
-                    sim.hm.data[idx] = 1.0;
-                    filled += 1;
-                }
-            }
-        }
-        assert_eq!(
-            filled, block_w * block_h,
-            "block placement clipped by the Circle mask -- adjust y0/block size"
-        );
-
-        let bbox = |sim: &TestSim| -> Option<(usize, usize, usize, usize)> {
-            let (mut min_x, mut max_x, mut min_y, mut max_y) = (usize::MAX, 0usize, usize::MAX, 0usize);
-            let mut any = false;
-            for y in 0..h {
-                for x in 0..w {
-                    if sim.hm.data[y * w + x] > 0.05 {
-                        any = true;
-                        min_x = min_x.min(x);
-                        max_x = max_x.max(x);
-                        min_y = min_y.min(y);
-                        max_y = max_y.max(y);
-                    }
-                }
-            }
-            any.then_some((min_x, max_x, min_y, max_y))
-        };
-
-        let erosion = 3usize;
-        let checkpoint_every = 5 * s;
-        let max_ticks = 150 * s;
-
-        println!(
-            "diag_falling_block_layer_velocity: scale={s} w={w} h={h} block={block_w}x{block_h}"
-        );
-
-        let mut last: Option<(usize, f64, f64)> = None;
-        for t in 0..max_ticks {
-            sim.tick(gravity_dir, usize::MAX);
-            let tick_no = t + 1;
-            if tick_no % checkpoint_every != 0 {
-                continue;
-            }
-            let Some((min_x, max_x, min_y, max_y)) = bbox(&sim) else { continue };
-            if max_x - min_x <= 2 * erosion || max_y - min_y <= 2 * erosion {
-                continue;
-            }
-
-            let mut m_even = 0f64;
-            let mut ysum_even = 0f64;
-            let mut m_odd = 0f64;
-            let mut ysum_odd = 0f64;
-            let mut cd_even_sum = 0f64;
-            let mut cd_even_cnt = 0usize;
-            let mut cd_odd_sum = 0f64;
-            let mut cd_odd_cnt = 0usize;
-            for y in (min_y + erosion)..=(max_y - erosion) {
-                for x in (min_x + erosion)..=(max_x - erosion) {
-                    let idx = y * w + x;
-                    if mask[idx] == crate::MASK_OUTSIDE {
-                        continue;
-                    }
-                    let hh = sim.hm.data[idx] as f64;
-                    let cd = sim.column_depth[idx] as f64;
-                    if y % 2 == 0 {
-                        m_even += hh;
-                        ysum_even += hh * y as f64;
-                        cd_even_sum += cd;
-                        cd_even_cnt += 1;
-                    } else {
-                        m_odd += hh;
-                        ysum_odd += hh * y as f64;
-                        cd_odd_sum += cd;
-                        cd_odd_cnt += 1;
-                    }
-                }
-            }
-            let cy_even = if m_even > 0.0 { ysum_even / m_even } else { f64::NAN };
-            let cy_odd = if m_odd > 0.0 { ysum_odd / m_odd } else { f64::NAN };
-            let cd_even = cd_even_sum / cd_even_cnt.max(1) as f64;
-            let cd_odd = cd_odd_sum / cd_odd_cnt.max(1) as f64;
-            let bbox_h = max_y - min_y;
-
-            let vel_str = if let Some((pt, pcy_e, pcy_o)) = last {
-                let dt = (tick_no - pt) as f64;
-                let v_even = (cy_even - pcy_e) / dt;
-                let v_odd = (cy_odd - pcy_o) / dt;
-                format!(" v_even={:.4} v_odd={:.4} dv={:.4}", v_even, v_odd, v_even - v_odd)
-            } else {
-                String::new()
-            };
-
-            println!(
-                "diag_falling_block_layer_velocity: t={:>4} bbox_h={:>4} cy_even={:.2} \
-                 cy_odd={:.2} gap_cy={:.3} m_even={:.1} m_odd={:.1} cd_even={:.5} cd_odd={:.5} \
-                 cd_gap={:.5}{vel_str}",
-                tick_no, bbox_h, cy_even, cy_odd, cy_even - cy_odd, m_even, m_odd, cd_even,
-                cd_odd, cd_even - cd_odd
-            );
-
-            last = Some((tick_no, cy_even, cy_odd));
-        }
-    }
-
-    /// Writes one binary PPM (P6) frame of the occupancy field, nearest-neighbour upscaled by
-    /// `scale`, to `path`. Black = empty, light tan = occupied (h > 0.05), and -- when
-    /// `overlay_grid` is set -- a dim red line marks every `block_size`'th cell boundary so a
-    /// human viewer can read off whether gaps land on activation-block boundaries directly from
-    /// the image, without cross-referencing coordinates by hand.
-    fn write_ppm_frame(
-        path: &std::path::Path,
-        data: &[f32],
-        mask: &[u8],
-        w: usize,
-        h: usize,
-        scale: usize,
-        block_size: usize,
-        overlay_grid: bool,
-    ) {
-        use std::io::Write;
-        let out_w = w * scale;
-        let out_h = h * scale;
-        let mut buf = Vec::with_capacity(out_w * out_h * 3);
-        for oy in 0..out_h {
-            let y = oy / scale;
-            let grid_line_y = overlay_grid && y % block_size == 0;
-            for ox in 0..out_w {
-                let x = ox / scale;
-                let idx = y * w + x;
-                let grid_line_x = overlay_grid && x % block_size == 0;
-                let (r, g, b) = if mask[idx] == crate::MASK_OUTSIDE {
-                    (30u8, 30u8, 30u8)
-                } else if grid_line_x || grid_line_y {
-                    (140u8, 20u8, 20u8)
-                } else if data[idx] > 0.05 {
-                    (222u8, 197u8, 145u8)
-                } else {
-                    (0u8, 0u8, 0u8)
-                };
-                buf.push(r);
-                buf.push(g);
-                buf.push(b);
-            }
-        }
-        let mut f = std::fs::File::create(path).expect("create ppm frame");
-        write!(f, "P6\n{out_w} {out_h}\n255\n").unwrap();
-        f.write_all(&buf).unwrap();
-    }
 
     /// Mirrors a DrawingSimulation-style "flip the apparatus" for a symmetric (Circle) container
     /// on the lower-level `TestSim` harness: reflects the heightmap about `center_y = h / 2`
@@ -16305,14 +11956,21 @@ mod tests {
         sim.tick_count = 0;
     }
 
-    /// Task #47: mirrors `DrawingSimulation::update`'s "perfect simulation" debug toggle (see its
-    /// own doc comment in `lib.rs`) on the lower-level `TestSim` harness -- force every in-mask,
-    /// material-holding block's recorded displacement to `MUST_SIMULATE_THRESHOLD` before calling
-    /// `tick`, the exact same admission path (and the same `crate::PERFECT_SIM_MATERIAL_EPSILON`
-    /// material bar) the real toggle uses. This is what makes the comparison below "against ground
-    /// truth" rather than "against a second, test-only approximation of ground truth": both this
-    /// function and `DrawingSimulation`'s toggle route through the identical `must_simulate`
-    /// admission `settle_tick` already has, rather than adding a second bypass mechanism.
+    /// Height above which a cell counts as "holding material" for `perfect_sim_tick`'s
+    /// non-trivial-block scan below. Not `0.0` exactly — draining can leave a cell at a sub-float
+    /// residue that will never itself flow anywhere, and forcing its block to simulate forever
+    /// over dust like that would turn "every tick" into pointless busywork. Comfortably below
+    /// `MUST_SIMULATE_THRESHOLD` (1e-4): this only decides whether a block is worth waking up at
+    /// all, not whether it's expected to move once it has. Was formerly shared with
+    /// `DrawingSimulation::update`'s own "perfect simulation" debug toggle (deleted 2026-09-24,
+    /// along with the toggle) -- `perfect_sim_tick` below is test-only scaffolding, unrelated to
+    /// that toggle beyond sharing the same admission technique, so this constant stays.
+    const PERFECT_SIM_MATERIAL_EPSILON: f32 = 1e-5;
+
+    /// Task #47: force every in-mask, material-holding block's recorded displacement to
+    /// `MUST_SIMULATE_THRESHOLD` before calling `tick`, the same admission path `settle_tick`'s
+    /// own MUST tier uses. This is what makes the comparison below "against ground truth" rather
+    /// than "against a second, test-only approximation of ground truth".
     fn perfect_sim_tick(sim: &mut TestSim, mask: &[u8], gravity_dir: glam::Vec2) -> f32 {
         let w = sim.hm.width;
         let h = sim.hm.height;
@@ -16331,7 +11989,7 @@ mod tests {
                     for x in start_x..end_x {
                         let idx = row_offset + x;
                         if mask[idx] != crate::MASK_OUTSIDE
-                            && sim.hm.data[idx] > crate::PERFECT_SIM_MATERIAL_EPSILON
+                            && sim.hm.data[idx] > PERFECT_SIM_MATERIAL_EPSILON
                         {
                             has_material = true;
                             break 'scan;
@@ -16388,268 +12046,7 @@ mod tests {
         sim
     }
 
-    /// Task #47: every `FreshOverburdenVariant` a diagnostic can report by name (round 1's
-    /// `OverburdenOnly`/`OverburdenAndRoom`, round 2's `CapacityBelowOnly`/
-    /// `OverburdenOrCapacityBelow`/`RoomOnly`, round 3's `UnsupportedOnly`/`UnsupportedAndRoom`).
-    const ALL_FRESH_OVERBURDEN_VARIANTS: [(FreshOverburdenVariant, &str); 7] = [
-        (FreshOverburdenVariant::OverburdenOnly, "overburden_only"),
-        (FreshOverburdenVariant::OverburdenAndRoom, "overburden_and_room(round1)"),
-        (FreshOverburdenVariant::CapacityBelowOnly, "capacity_below_only"),
-        (FreshOverburdenVariant::OverburdenOrCapacityBelow, "overburden_or_capacity"),
-        (FreshOverburdenVariant::RoomOnly, "room_only"),
-        (FreshOverburdenVariant::UnsupportedOnly, "unsupported_only"),
-        (FreshOverburdenVariant::UnsupportedAndRoom, "unsupported_and_room(shipped)"),
-    ];
 
-    /// Task #47: prints, for one scenario snapshot, the fraction of blocks (of `cols * rows`
-    /// total) each `FreshOverburdenVariant` would promote, alongside perfect simulation's own
-    /// admission rule (every in-mask block holding material -- the same scan `perfect_sim_tick`
-    /// runs) as the 100% reference. Used by `diag_task47_block_fraction_table`.
-    fn report_fresh_overburden_fraction(label: &str, grid: usize, sim: &TestSim, mask: &[u8], block_size: usize) {
-        let w = sim.hm.width;
-        let h = sim.hm.height;
-        let cols = (w + block_size - 1) / block_size;
-        let rows = (h + block_size - 1) / block_size;
-        let total_blocks = cols * rows;
-
-        let mut perfect_n = 0usize;
-        for by in 0..rows {
-            let start_y = by * block_size;
-            let end_y = ((by + 1) * block_size).min(h);
-            for bx in 0..cols {
-                let start_x = bx * block_size;
-                let end_x = ((bx + 1) * block_size).min(w);
-                let mut has_material = false;
-                'scan: for y in start_y..end_y {
-                    let row_offset = y * w;
-                    for x in start_x..end_x {
-                        let idx = row_offset + x;
-                        if mask[idx] != crate::MASK_OUTSIDE
-                            && sim.hm.data[idx] > crate::PERFECT_SIM_MATERIAL_EPSILON
-                        {
-                            has_material = true;
-                            break 'scan;
-                        }
-                    }
-                }
-                if has_material {
-                    perfect_n += 1;
-                }
-            }
-        }
-
-        for (variant, name) in ALL_FRESH_OVERBURDEN_VARIANTS {
-            let promoted = fresh_overburden_must_blocks(
-                w, h, block_size, cols, rows, mask, &sim.hm.data, &sim.hm.external_mass_this_tick,
-                &sim.cell_props, &sim.edge_vel_v, variant,
-                &vec![true; cols * rows],
-            );
-            let n = promoted.iter().filter(|&&x| x).count();
-            println!(
-                "diag_task47_block_fraction_table: {label:<20} grid={grid:>3} variant={name:<30} \
-                 total_blocks={total_blocks:>6} promoted={n:>6} ({:.4}) perfect={perfect_n:>6} ({:.4})",
-                n as f64 / total_blocks as f64,
-                perfect_n as f64 / total_blocks as f64,
-            );
-        }
-    }
-
-    #[test]
-    #[ignore]
-    // DIAGNOSTIC (reproduce-only, no assertions). The user's exact repro: fill a Circle
-    // container with DrySand, run until it is FULLY AT REST, then FLIP it (which -- per
-    // `flip_hourglass` in lib.rs -- mirrors the settled pile from the bottom of the container to
-    // the top, clears stored edge momentum, and forces every block to be reconsidered) and watch
-    // what happens as it falls again. This is a stronger, more direct instrument than the
-    // dropped-block scenario: nothing about a resting-then-flipped pile artificially assumes a
-    // rectangular shape, and "run to rest first" is exactly what the user reported doing.
-    //
-    // Runs the WHOLE scenario twice from the same seed: once with the upstream/side block-wake
-    // fix (`activate_neighbor_upstream` / `activate_neighbor_side`) disabled via
-    // `upstream_wake_gate`, once with it enabled (the shipped default), so the printed metrics
-    // are a true same-build A/B rather than a before/after across two separate compiles.
-    //
-    // Metrics per tick: interior void count (same eroded-bbox definition as
-    // `diag_falling_block_slab_separation`), and a BLOCK-BOUNDARY ALIGNMENT score -- of the rows
-    // that are mostly empty (mean fill < 0.15) while sandwiched between two rows that are not
-    // (a "gap row"), what fraction sit at `y % block_size == 0`, i.e. exactly on an
-    // activation-block boundary. Chance alignment is `1 / block_size` (50% at grid=64's
-    // block_size=2, 6.25% at grid=512's block_size=16) -- a rate well above that is the
-    // block-boundary signature; a rate near chance is not.
-    //
-    // Writes PPM frames (nearest-neighbour upscaled 8x) for a subsample of post-flip ticks into
-    // `/tmp/.../scratchpad/slabframes/{before,after}/` for the "before" (fix disabled) and
-    // "after" (fix enabled) runs, plus a `grid/` set with activation-block gridlines overlaid
-    // (before-fix only, since that's the run the alignment claim is about) for the caller to
-    // build contact sheets from outside this test (no image/video crate is a dependency of this
-    // crate, and none is added here — see the task brief).
-    fn diag_flip_release_front_and_block_alignment() {
-        let frame_root = std::path::PathBuf::from(
-            "/tmp/claude-1000/-home-deck-projects-sandart/6dbad8f7-de15-4c1a-aae8-0d4d41f500d8/scratchpad/slabframes",
-        );
-
-        for grid in [64usize, 512usize] {
-            let w = grid;
-            let h = grid;
-            let block_size = (grid / 32).max(1);
-            let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
-            let props = get_test_props(MaterialMode::DrySand, w * h);
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-            for (disabled, tag) in [(true, "before"), (false, "after")] {
-                upstream_wake_gate::set_disabled(disabled);
-
-                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
-                // Fill roughly the bottom 60% of the circle to h=1.0 -- a solid packed mass with
-                // clear air above it, the shape "pour DrySand into Circle and let it settle"
-                // naturally produces.
-                let fill_y0 = (0.40 * h as f32) as usize;
-                for y in fill_y0..h {
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        if mask[idx] != crate::MASK_OUTSIDE {
-                            sim.hm.data[idx] = 1.0;
-                        }
-                    }
-                }
-
-                // Run to rest: total per-tick flow below a tiny bar for 15 consecutive ticks.
-                let mut quiet_run = 0usize;
-                let mut rest_tick = 0usize;
-                let max_rest_ticks = 4000usize;
-                for t in 0..max_rest_ticks {
-                    let flow = sim.tick(gravity_dir, usize::MAX);
-                    if flow < 1e-3 {
-                        quiet_run += 1;
-                        if quiet_run >= 15 {
-                            rest_tick = t + 1;
-                            break;
-                        }
-                    } else {
-                        quiet_run = 0;
-                    }
-                }
-                let settled_mass: f64 = sim.hm.data.iter().map(|&v| v as f64).sum();
-                println!(
-                    "diag_flip: grid={grid} [{tag}] rest reached at tick={rest_tick} (0 = did \
-                     not settle within {max_rest_ticks}) settled_mass={settled_mass:.1}"
-                );
-
-                flip_sim(&mut sim);
-
-                let post_flip_ticks = if grid == 64 { 260 } else { 400 };
-                let frame_every = if grid == 64 { 2 } else { 6 };
-                let frame_scale = if grid == 64 { 8 } else { 1 };
-                let frame_dir = frame_root.join(tag);
-                let grid_dir = frame_root.join("grid");
-                if grid == 64 {
-                    let _ = std::fs::create_dir_all(&frame_dir);
-                    if !disabled {
-                        // grid-overlay sheet is requested for the shipped (fixed) behaviour too,
-                        // in addition to "before" — write both, distinguished by filename.
-                    }
-                    let _ = std::fs::create_dir_all(&grid_dir);
-                }
-
-                let mut peak_interior_void = 0usize;
-                let mut peak_interior_void_tick = 0usize;
-                let mut align_hits = 0usize;
-                let mut align_total = 0usize;
-                let mut frames_written = 0usize;
-
-                for t in 0..post_flip_ticks {
-                    sim.tick(gravity_dir, usize::MAX);
-                    let tick_no = t + 1;
-
-                    // bbox + interior void (same definition as diag_falling_block_slab_separation)
-                    let (mut min_x, mut max_x, mut min_y, mut max_y) =
-                        (usize::MAX, 0usize, usize::MAX, 0usize);
-                    let mut any = false;
-                    for y in 0..h {
-                        for x in 0..w {
-                            if sim.hm.data[y * w + x] > 0.05 {
-                                any = true;
-                                min_x = min_x.min(x);
-                                max_x = max_x.max(x);
-                                min_y = min_y.min(y);
-                                max_y = max_y.max(y);
-                            }
-                        }
-                    }
-                    let mut interior_void = 0usize;
-                    if any && max_x > min_x + 6 && max_y > min_y + 6 {
-                        for y in (min_y + 3)..=(max_y - 3) {
-                            for x in (min_x + 3)..=(max_x - 3) {
-                                let idx = y * w + x;
-                                if mask[idx] != crate::MASK_OUTSIDE && sim.hm.data[idx] <= 0.05 {
-                                    interior_void += 1;
-                                }
-                            }
-                        }
-                    }
-                    if interior_void > peak_interior_void {
-                        peak_interior_void = interior_void;
-                        peak_interior_void_tick = tick_no;
-                    }
-
-                    // Gap-row block-boundary alignment, over the object's column span.
-                    if any && max_x > min_x + 6 && max_y > min_y + 4 {
-                        let row_fill = |y: usize| -> f32 {
-                            let mut inside = 0usize;
-                            let mut filled = 0usize;
-                            for x in min_x..=max_x {
-                                let idx = y * w + x;
-                                if mask[idx] == crate::MASK_OUTSIDE {
-                                    continue;
-                                }
-                                inside += 1;
-                                if sim.hm.data[idx] > 0.05 {
-                                    filled += 1;
-                                }
-                            }
-                            if inside == 0 { 1.0 } else { filled as f32 / inside as f32 }
-                        };
-                        for y in (min_y + 1)..max_y {
-                            let f_above = row_fill(y - 1);
-                            let f_here = row_fill(y);
-                            let f_below = row_fill(y + 1);
-                            if f_here < 0.15 && f_above > 0.4 && f_below > 0.4 {
-                                align_total += 1;
-                                if y % block_size == 0 {
-                                    align_hits += 1;
-                                }
-                            }
-                        }
-                    }
-
-                    if grid == 64 && tick_no % frame_every == 0 {
-                        let path = frame_dir.join(format!("frame_{tick_no:04}.ppm"));
-                        write_ppm_frame(&path, &sim.hm.data, &mask, w, h, frame_scale, block_size, false);
-                        frames_written += 1;
-                        if !disabled {
-                            let gpath = grid_dir.join(format!("frame_{tick_no:04}.ppm"));
-                            write_ppm_frame(&gpath, &sim.hm.data, &mask, w, h, frame_scale, block_size, true);
-                        }
-                    }
-                }
-
-                let align_frac = if align_total > 0 {
-                    align_hits as f64 / align_total as f64
-                } else {
-                    -1.0
-                };
-                let chance = 1.0 / block_size as f64;
-                println!(
-                    "diag_flip: grid={grid} [{tag}] block_size={block_size} \
-                     peak_interior_void={peak_interior_void} (@tick {peak_interior_void_tick}) \
-                     gap_rows_sampled={align_total} block_boundary_aligned={align_hits} \
-                     align_frac={align_frac:.3} chance_frac={chance:.3} frames_written={frames_written}"
-                );
-            }
-        }
-
-        upstream_wake_gate::set_disabled(false);
-    }
 
 
 
@@ -16760,1546 +12157,20 @@ mod tests {
         );
     }
 
-    /// Task #47 round 3. The coordinator's corrected, more specific hypothesis, tested rather
-    /// than trusted: NOT that the overburden clause is conceptually catching the wrong body (round
-    /// 2's story), but that `in_transit_at` under-detects free fall in the first place, so a
-    /// falling body's OWN `resting_above` never actually reaches zero -- it reads roughly
-    /// `h - in_transit`, tens of percent of `h` per row instead of ~0, which accumulates down the
-    /// column and crosses `FRESH_OVERBURDEN_SKIN_CELLS` (1.5, resolution-normalised) after only a
-    /// few rows even though every one of those rows is unambiguously in free fall.
-    ///
-    /// DIAGNOSTIC (reproduce-only, no assertions). For a column inside the falling body in the
-    /// same settled-then-flipped Circle/DrySand scenario the other round-2/3 diagnostics use,
-    /// ticked with the REAL adaptive scheduler at `budget_n = 256` (shipped `OverburdenAndRoom`
-    /// variant, i.e. exactly what ships today), dumps per row `h`, `in_transit_at`,
-    /// `resting_above` (the un-accumulated per-row contribution), and the accumulated
-    /// `fresh_overburden` (the same buffer `fresh_overburden_must_blocks` computes) -- at several
-    /// ticks during the fall, PRE-tick (the same snapshot the classification loop actually reads).
-    /// Reports how many consecutive rows from the top of material in that column stay under the
-    /// effective threshold (`FRESH_OVERBURDEN_SKIN_CELLS * depth_scale`), and separately, the
-    /// fraction of perfect-simulation's promoted blocks that `RoomOnly` (no overburden clause)
-    /// promotes but the shipped `OverburdenAndRoom` does not -- blocks with material and somewhere
-    /// to go, excluded purely by the overburden clause. Run with --ignored --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task47_in_transit_underdetection() {
-        let w = 64;
-        let h = 64;
-        let block_size = 2;
-        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
-        let props = get_test_props(MaterialMode::DrySand, w * h);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        let cols = (w + block_size - 1) / block_size;
-        let rows_blk = (h + block_size - 1) / block_size;
 
-        let mut sim = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
-        fresh_overburden_gate::set_disabled(false);
-        fresh_overburden_gate::set_variant(FreshOverburdenVariant::OverburdenAndRoom);
 
-        let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-        let pressure_epsilon = FRESH_OVERBURDEN_SKIN_CELLS * depth_scale;
-        println!(
-            "diag_task47_in_transit_underdetection: grid={w} depth_scale={depth_scale:.3} \
-             effective_threshold={pressure_epsilon:.3} (raw FRESH_OVERBURDEN_SKIN_CELLS={FRESH_OVERBURDEN_SKIN_CELLS})"
-        );
 
-        let probe_col = w / 2;
-        let probe_ticks: [usize; 6] = [1, 2, 3, 5, 8, 12];
-        let mut next_probe = 0usize;
 
-        for t in 0..15usize {
-            if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                next_probe += 1;
-                // PRE-tick snapshot: exactly what `settle_tick`'s classification loop for tick t
-                // would read (frozen `heightmap.data`, `edge_vel_v` as last tick left it).
-                let mut fresh_overburden = vec![0.0f32; w * h];
-                recompute_column_depth(
-                    w, h, &mask, &sim.hm.data, &sim.hm.data, &sim.hm.external_mass_this_tick,
-                    &sim.cell_props, &sim.edge_vel_v, &mut fresh_overburden[..],
-                );
 
-                let mut rows_under_threshold = 0usize;
-                let mut first_material_row: Option<usize> = None;
-                let mut row_lines = Vec::new();
-                for y in 0..h {
-                    let idx = y * w + probe_col;
-                    if mask[idx] == crate::MASK_OUTSIDE {
-                        continue;
-                    }
-                    let hv = sim.hm.data[idx];
-                    if hv <= FRESH_OVERBURDEN_MATERIAL_EPSILON {
-                        continue;
-                    }
-                    if first_material_row.is_none() {
-                        first_material_row = Some(y);
-                    }
-                    let it = in_transit_at(
-                        idx, w, h, &sim.hm.data, &sim.hm.data, &sim.cell_props, &sim.edge_vel_v, &mask,
-                    );
-                    let resting_above_raw = (hv - it - sim.hm.external_mass_this_tick[idx].max(0.0)).max(0.0);
-                    let cd = fresh_overburden[idx];
-                    if cd < pressure_epsilon {
-                        rows_under_threshold += 1;
-                    }
-                    row_lines.push(format!(
-                        "y={y:>3} h={hv:.3} in_transit={it:.3} resting_above_raw={resting_above_raw:.3} \
-                         column_depth={cd:>7.3}{}",
-                        if cd < pressure_epsilon { " [UNDER]" } else { "" }
-                    ));
-                }
-                println!(
-                    "diag_task47_in_transit_underdetection: --- tick={t} probe_col={probe_col} \
-                     first_material_row={first_material_row:?} rows_under_threshold={rows_under_threshold} ---"
-                );
-                for line in &row_lines {
-                    println!("diag_task47_in_transit_underdetection:   {line}");
-                }
 
-                // Exclusion fraction: of perfect-sim's promoted blocks this tick, how many does
-                // RoomOnly promote that OverburdenAndRoom does not.
-                let mut perfect_n = 0usize;
-                for by in 0..rows_blk {
-                    let start_y = by * block_size;
-                    let end_y = ((by + 1) * block_size).min(h);
-                    for bx in 0..cols {
-                        let start_x = bx * block_size;
-                        let end_x = ((bx + 1) * block_size).min(w);
-                        let mut has_material = false;
-                        'scan: for yy in start_y..end_y {
-                            let ro = yy * w;
-                            for xx in start_x..end_x {
-                                let ix = ro + xx;
-                                if mask[ix] != crate::MASK_OUTSIDE
-                                    && sim.hm.data[ix] > crate::PERFECT_SIM_MATERIAL_EPSILON
-                                {
-                                    has_material = true;
-                                    break 'scan;
-                                }
-                            }
-                        }
-                        if has_material {
-                            perfect_n += 1;
-                        }
-                    }
-                }
-                let room_only = fresh_overburden_must_blocks(
-                    w, h, block_size, cols, rows_blk, &mask, &sim.hm.data,
-                    &sim.hm.external_mass_this_tick, &sim.cell_props, &sim.edge_vel_v,
-                    FreshOverburdenVariant::RoomOnly,
-                    &vec![true; cols * rows_blk],
-                );
-                let shipped = fresh_overburden_must_blocks(
-                    w, h, block_size, cols, rows_blk, &mask, &sim.hm.data,
-                    &sim.hm.external_mass_this_tick, &sim.cell_props, &sim.edge_vel_v,
-                    FreshOverburdenVariant::OverburdenAndRoom,
-                    &vec![true; cols * rows_blk],
-                );
-                let excluded_by_overburden = room_only
-                    .iter()
-                    .zip(shipped.iter())
-                    .filter(|&(&r, &s)| r && !s)
-                    .count();
-                println!(
-                    "diag_task47_in_transit_underdetection: tick={t} perfect_n={perfect_n} \
-                     room_only_n={} shipped_n={} excluded_by_overburden_clause={excluded_by_overburden} \
-                     ({:.4} of perfect_n)",
-                    room_only.iter().filter(|&&x| x).count(),
-                    shipped.iter().filter(|&&x| x).count(),
-                    excluded_by_overburden as f64 / perfect_n.max(1) as f64,
-                );
-            }
-            sim.tick(gravity_dir, 256);
-        }
-    }
 
-    /// Task #47 round 2. The coordinator's diagnosis, tested rather than trusted: round 1's
-    /// shipped predicate (`OverburdenAndRoom`) requires near-zero overburden, and `column_depth`
-    /// has `in_transit` subtracted, so a body already in free fall reads near-zero overburden and
-    /// IS caught -- but a resting block whose support just opened up below it, while it still has
-    /// its OWN material stacked on top, reads a HIGH overburden and is NOT caught. That resting-
-    /// but-about-to-fall block is exactly what produces a slab gap, so the hypothesis is that the
-    /// conjunction catches "already falling" (which needed the least help) and misses "about to
-    /// fall" (the actual defect).
-    ///
-    /// Same harness, same scenario, same `budget_n = 256` as
-    /// `test_fresh_overburden_predicate_reduces_slab_divergence` (round 1 measured `budget_n =
-    /// usize::MAX` shows zero divergence for ANY variant, including "disabled" -- an unbound
-    /// budget masks this defect entirely, so this comparison only runs at the realistic,
-    /// budget-constrained setting where the defect actually shows). One `sim_perfect` ground-truth
-    /// run plus one adaptive run per row below (`disabled` = round-1 "before", plus the five
-    /// `FreshOverburdenVariant`s), all from bit-identical starting states.
-    ///
-    /// DIAGNOSTIC (reproduce-only, no assertions) -- this is the measurement the recommendation in
-    /// the task report is based on, not a permanent regression gate (that remains
-    /// `test_fresh_overburden_predicate_reduces_slab_divergence`, pinned to whichever variant
-    /// `fresh_overburden_gate`'s `#[cfg(not(test))]` twin hardcodes). Run with --ignored
-    /// --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task47_variant_divergence_comparison() {
-        let w = 64;
-        let h = 64;
-        let block_size = 2;
-        let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
-        let props = get_test_props(MaterialMode::DrySand, w * h);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        let post_flip_ticks = 200usize;
-        let budget_n = 256;
 
-        // (label, None = gate disabled entirely (round-1 "before"), Some(variant) = gate enabled
-        // with that variant).
-        let rows: Vec<(&str, Option<FreshOverburdenVariant>)> = vec![
-            ("disabled (round-1 before)", None),
-            ("overburden_only", Some(FreshOverburdenVariant::OverburdenOnly)),
-            ("overburden_and_room (round1)", Some(FreshOverburdenVariant::OverburdenAndRoom)),
-            ("capacity_below_only", Some(FreshOverburdenVariant::CapacityBelowOnly)),
-            ("overburden_or_capacity", Some(FreshOverburdenVariant::OverburdenOrCapacityBelow)),
-            ("room_only", Some(FreshOverburdenVariant::RoomOnly)),
-            ("unsupported_only", Some(FreshOverburdenVariant::UnsupportedOnly)),
-            ("unsupported_and_room (shipped)", Some(FreshOverburdenVariant::UnsupportedAndRoom)),
-        ];
 
-        let sim_perfect_seed = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
 
-        println!(
-            "diag_task47_variant_divergence_comparison: grid={w} budget_n={budget_n} \
-             post_flip_ticks={post_flip_ticks}"
-        );
-        for (label, variant) in rows {
-            let mut sim_perfect = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
-            let mut sim = settled_then_flipped(w, h, &mask, &props, block_size, gravity_dir);
-            assert_eq!(sim_perfect.hm.data, sim_perfect_seed.hm.data, "harness determinism check");
-            assert_eq!(sim.hm.data, sim_perfect_seed.hm.data, "harness determinism check");
 
-            match variant {
-                None => fresh_overburden_gate::set_disabled(true),
-                Some(v) => {
-                    fresh_overburden_gate::set_disabled(false);
-                    fresh_overburden_gate::set_variant(v);
-                }
-            }
 
-            let mut peak = 0.0f64;
-            let mut cumulative = 0.0f64;
-            for _ in 0..post_flip_ticks {
-                perfect_sim_tick(&mut sim_perfect, &mask, gravity_dir);
-                sim.tick(gravity_dir, budget_n);
 
-                let mut diff = 0.0f64;
-                for i in 0..mask.len() {
-                    if mask[i] == crate::MASK_OUTSIDE {
-                        continue;
-                    }
-                    diff += (sim.hm.data[i] - sim_perfect.hm.data[i]).abs() as f64;
-                }
-                cumulative += diff;
-                peak = f64::max(peak, diff);
-            }
-            fresh_overburden_gate::set_disabled(false);
-            fresh_overburden_gate::set_variant(FreshOverburdenVariant::OverburdenAndRoom);
 
-            println!(
-                "diag_task47_variant_divergence_comparison: {label:<32} peak={peak:>10.3} \
-                 cumulative={cumulative:>12.3}"
-            );
-        }
-    }
-
-    /// Task #47: the block-fraction table the task brief asks for -- "MEASURE THE COST BEFORE
-    /// COMMITTING TO IT" -- for a resting pile, a mid-drain hourglass, and a fresh flip, at grid
-    /// 64 and 512, for every `FreshOverburdenVariant` (round 2: extended from round 1's loose/
-    /// tight-only table). DIAGNOSTIC (reproduce-only, no assertions): prints, per scenario/grid/
-    /// variant, the fraction of blocks it would promote against perfect simulation's own 100%
-    /// reference. Run with --ignored --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task47_block_fraction_table() {
-        for grid in [64usize, 512usize] {
-            let w = grid;
-            let h = grid;
-            let block_size = (grid / 32).max(1);
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-            // --- Scenario 1: resting pile (settled Circle, DrySand, pre-flip) ---
-            {
-                let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
-                let props = get_test_props(MaterialMode::DrySand, w * h);
-                let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
-                let fill_y0 = (0.40 * h as f32) as usize;
-                for y in fill_y0..h {
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        if mask[idx] != crate::MASK_OUTSIDE {
-                            sim.hm.data[idx] = 1.0;
-                        }
-                    }
-                }
-                let mut quiet_run = 0usize;
-                for _ in 0..4000usize {
-                    let flow = perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                    if flow < 1e-3 {
-                        quiet_run += 1;
-                        if quiet_run >= 15 {
-                            break;
-                        }
-                    } else {
-                        quiet_run = 0;
-                    }
-                }
-                report_fresh_overburden_fraction("resting pile", grid, &sim, &mask, block_size);
-            }
-
-            // --- Scenario 2: mid-drain hourglass ---
-            {
-                let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
-                let props = get_test_props(MaterialMode::DrySand, w * h);
-                let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
-                for y in 0..h / 2 {
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        if mask[idx] != crate::MASK_OUTSIDE {
-                            sim.hm.data[idx] = 1.0;
-                        }
-                    }
-                }
-                let drain_ticks = if grid == 64 { 150 } else { 400 };
-                for _ in 0..drain_ticks {
-                    perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                }
-                report_fresh_overburden_fraction("mid-drain hourglass", grid, &sim, &mask, block_size);
-            }
-
-            // --- Scenario 3: fresh flip (immediately post-flip, before any post-flip tick) ---
-            {
-                let mask = make_test_mask(w, h, SandboxShape::Circle, 0.04, 1.0);
-                let props = get_test_props(MaterialMode::DrySand, w * h);
-                let mut sim = TestSim::new(w, h, props, mask.clone(), block_size);
-                let fill_y0 = (0.40 * h as f32) as usize;
-                for y in fill_y0..h {
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        if mask[idx] != crate::MASK_OUTSIDE {
-                            sim.hm.data[idx] = 1.0;
-                        }
-                    }
-                }
-                let mut quiet_run = 0usize;
-                for _ in 0..4000usize {
-                    let flow = perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                    if flow < 1e-3 {
-                        quiet_run += 1;
-                        if quiet_run >= 15 {
-                            break;
-                        }
-                    } else {
-                        quiet_run = 0;
-                    }
-                }
-                flip_sim(&mut sim);
-                report_fresh_overburden_fraction("fresh flip", grid, &sim, &mask, block_size);
-            }
-        }
-    }
-
-    /// Task #55 diagnostic harness. Sums material in `[y0, y1) x [x0, x1)` -- used by every
-    /// `diag_task55_*` test below to read off a scalar "how much material is here" without
-    /// repeating the double loop at each call site.
-    fn diag_task55_region_mass(data: &[f32], w: usize, x0: usize, x1: usize, y0: usize, y1: usize) -> f64 {
-        let mut m = 0.0f64;
-        for y in y0..y1 {
-            let row = y * w;
-            for x in x0..x1 {
-                m += data[row + x] as f64;
-            }
-        }
-        m
-    }
-
-    /// Task #55 diagnostic harness. Topmost row in `[y_lo, y_hi)` at column `x` holding more than
-    /// `eps` material -- the free-surface readout every `diag_task55_*` test below uses. `None`
-    /// means the whole probed range is empty (dry) at this column.
-    fn diag_task55_surface_row(
-        data: &[f32], w: usize, x: usize, y_lo: usize, y_hi: usize, eps: f32,
-    ) -> Option<usize> {
-        (y_lo..y_hi).find(|&y| data[y * w + x] > eps)
-    }
-
-    /// TASK #55 RESOLUTION SWEEP helper: the original `diag_task55_*` diagnostics' `probe_ticks`
-    /// arrays were literal tick numbers tuned to one fixed `run_ticks`. Regenerates the same
-    /// RELATIVE sampling (as fractions of `run_ticks`) for whatever per-width `run_ticks` budget a
-    /// given width actually uses, so every width's printed time series samples the same relative
-    /// points in its own run (0%, 0.25%, 0.5%, ... 100%) instead of a table of tick numbers that
-    /// only makes sense for one specific `run_ticks`.
-    fn task55_probe_ticks(run_ticks: usize) -> Vec<usize> {
-        const FRACS: [f64; 20] = [
-            0.0, 0.0025, 0.005, 0.0075, 0.01, 0.0125, 0.015, 0.0175, 0.02, 0.025, 0.0375, 0.05,
-            0.075, 0.125, 0.1875, 0.25, 0.375, 0.5, 0.75, 1.0,
-        ];
-        let mut ticks: Vec<usize> = FRACS
-            .iter()
-            .map(|f| ((f * run_ticks as f64).round() as usize).min(run_ticks))
-            .collect();
-        ticks.dedup();
-        ticks
-    }
-
-    /// TASK #55 RESOLUTION SWEEP geometry for `diag_task55_pocket_equalisation`'s two-well probe.
-    /// `left_x0..left_x1` / `right_x0..right_x1` are INTERSECTED across the whole `[well_top,
-    /// well_bot)` band (see `find_two_well_topology`), so every cell in either rectangle over that
-    /// row range is guaranteed open -- the caller does not need to re-check the mask row by row.
-    struct TwoWellGeometry {
-        left_x0: usize,
-        left_x1: usize,
-        right_x0: usize,
-        right_x1: usize,
-        well_top: usize,
-        well_bot: usize,
-        basin_bot: usize,
-    }
-
-    /// TASK #55 RESOLUTION SWEEP helper for `diag_task55_pocket_equalisation`: locates a "two
-    /// disjoint open wells that only communicate through a single shared basin beneath them"
-    /// topology directly in an arbitrary mask, instead of trusting the hand-found w=128 pixel
-    /// coordinates the original, single-resolution version of this test used
-    /// (`left_x0=55..66`/`right_x0=83..91`/etc, found by dumping that one mask as ASCII) to still
-    /// be there at another width.
-    ///
-    /// They are not guaranteed to be: `ProceduralFunnel`'s cave-noise terms (`eval_sandbox_shape`,
-    /// e.g. `(dx * 0.14).sin() + (dy * 0.16).cos() + ...`) run on `dx`/`dy` in raw PIXEL units at
-    /// FIXED frequencies -- not frequencies scaled by `w` -- so a wider grid packs strictly more
-    /// noise oscillations across the same physical span of the cave. Measured directly (dump the
-    /// row-by-row open-run count): at w=64 the noise band is too thin to carve anything (max
-    /// run-count briefly touches 2 for a single row and is otherwise 0/1 -- no real well). At
-    /// w=128 it carves a clean two-well split (the original hand-found case). At w=256 and w=512
-    /// it carves MANY separate pockets in the same row -- run-counts of 3 to 9 are typical through
-    /// the noise band -- not a clean two-well split at all. So an early version of this function
-    /// that required "exactly two runs in the row" found nothing at w=64/256/512 and only ever
-    /// worked at the original w=128. That is a real trap-2 finding in its own right (see this
-    /// test's caller for how it is reported), but it need not be a dead end: the physical
-    /// requirement is only "two open columns whose sole connection is a basin beneath them", not
-    /// "the cave has exactly two pockets total". A multi-pocket cave still contains that topology
-    /// as long as some two of its pockets qualify; the other pockets are just inert extra rock
-    /// features this test does not fill.
-    ///
-    /// So this searches for a band `[y0, y0+bh)` (tried at several candidate heights `bh`, largest
-    /// first, as a fraction of `h`) in which at least two columns are open for the WHOLE band, and
-    /// picks the two WIDEST such column-runs (`min_well_span` wide or more) as the wells --
-    /// whatever else the row contains at that height is ignored. Below the band, the span from the
-    /// left well's start to the right well's end must be fully open for at least
-    /// `min_basin_height` rows (the shared basin). Returns the first (topmost, tallest-band-first)
-    /// qualifying result, or `None` if no such pair exists in this mask at this width at all --
-    /// which is itself a valid, reportable outcome (see the task brief's own instruction: "if it
-    /// does not survive, find the wells per-resolution and say so").
-    fn find_two_well_topology(mask: &[u8], w: usize, h: usize) -> Option<TwoWellGeometry> {
-        let is_open = |x: usize, y: usize| mask[y * w + x] != crate::MASK_OUTSIDE;
-        let margin = ((0.05 * h as f64).round() as usize).max(2);
-        let min_well_span = ((0.02 * w as f64).round() as usize).max(3);
-        let min_basin_height = ((0.02 * h as f64).round() as usize).max(3);
-        // Tried tallest-first: a taller band gives the two fill levels more room to differ, but
-        // is also stricter (every column in the run must stay open for the WHOLE band), so this
-        // falls back to shorter bands only if no tall one works anywhere in the mask.
-        let band_height_fracs = [0.10f64, 0.08, 0.06, 0.045, 0.035];
-
-        let column_open_band = |x: usize, y0: usize, bh: usize| -> bool {
-            (y0..y0 + bh).all(|y| is_open(x, y))
-        };
-
-        let lo = margin;
-        let hi = h.saturating_sub(margin);
-
-        for &frac in &band_height_fracs {
-            let bh = ((frac * h as f64).round() as usize).max(4);
-            if lo + bh >= hi || hi - (lo + bh) < min_basin_height {
-                continue;
-            }
-            let mut y0 = lo;
-            while y0 + bh < hi {
-                let mut segs: Vec<(usize, usize)> = Vec::new();
-                let mut x = 0usize;
-                while x < w {
-                    if column_open_band(x, y0, bh) {
-                        let start = x;
-                        while x < w && column_open_band(x, y0, bh) {
-                            x += 1;
-                        }
-                        if x - start >= min_well_span {
-                            segs.push((start, x));
-                        }
-                    } else {
-                        x += 1;
-                    }
-                }
-                if segs.len() >= 2 {
-                    segs.sort_by_key(|&(s, e)| std::cmp::Reverse(e - s));
-                    let mut top2 = [segs[0], segs[1]];
-                    top2.sort_by_key(|&(s, _)| s);
-                    let (left, right) = (top2[0], top2[1]);
-                    let well_bot = y0 + bh;
-                    let mut basin_end = well_bot;
-                    while basin_end < hi && (left.0..right.1).all(|x| is_open(x, basin_end)) {
-                        basin_end += 1;
-                    }
-                    if basin_end - well_bot >= min_basin_height {
-                        return Some(TwoWellGeometry {
-                            left_x0: left.0,
-                            left_x1: left.1,
-                            right_x0: right.0,
-                            right_x1: right.1,
-                            well_top: y0,
-                            well_bot,
-                            basin_bot: basin_end,
-                        });
-                    }
-                }
-                y0 += 1;
-            }
-        }
-        None
-    }
-
-    /// TASK #55, defect 1, RESOLUTION SWEEP: "a standing arch of liquid over a void does not
-    /// collapse... it slowly drains instead of flattening fast". Same hand-built container and the
-    /// same POSITION-INDEPENDENT `unsupported_span` metric as the original single-resolution
-    /// version of this test (see the metric's own inline comment below for why a "does the
-    /// original 4-row band still hold material" version is wrong), now run at w = 64/128/256/512.
-    ///
-    /// Every hand-built coordinate is derived from ONE isotropic scale factor, `s = w / 64.0`
-    /// (`h` scaled the same way, `h = round(100 * s)`, preserving the original construction's
-    /// h/w = 1.5625 aspect ratio and, with it, every coordinate's fraction of w or h exactly,
-    /// since they all began life as literal pixel numbers at the original w=64). This is also what
-    /// makes the "3 rows above the pile" trap safe: `gap_buffer = round(3 * s)` is exactly 3 at
-    /// w=64 (s=1, the value this test always used) and 24 at w=512 (s=8) -- the SAME 3% of the
-    /// container's height (3/100 = 24/800) at both, rather than a shrinking fraction as w grows if
-    /// left as a literal `3`.
-    ///
-    /// `run_ticks` is allowed to differ ACROSS widths (never between gate-on/off AT a width, which
-    /// stays identical by construction -- both sides of the inner loop share one `run_ticks` for a
-    /// given `w`) purely for wall-clock budget: `perfect_sim_tick` simulates every one of this
-    /// scenario's 1600 blocks (32 cols x 50 rows -- constant across widths, because
-    /// `block_size = w / 32` keeps that ratio fixed) EVERY tick, and per-block cost grows with
-    /// `block_size^2 = (w/32)^2`, so a w=512 pass costs 64x a w=64 pass at the same `run_ticks`.
-    /// Reduced for the two larger widths accordingly; each width's own budget is printed so the
-    /// table can be read honestly rather than assuming one number throughout.
-    ///
-    /// DIAGNOSTIC (reproduce-only, no assertions). Run with --ignored --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task55_arch_collapse_rate() {
-        for &(w, run_ticks) in &[(64usize, 400usize), (128, 400), (256, 400), (512, 600)] {
-            let s = w as f64 / 64.0;
-            let sc = |base: usize| ((base as f64 * s).round() as usize).max(1);
-            let h = sc(100);
-            let margin = sc(2);
-            let block_size = (w / 32).max(1);
-            let mut mask = vec![crate::MASK_OUTSIDE; w * h];
-            for y in margin..h - margin {
-                for x in margin..w - margin {
-                    mask[y * w + x] = crate::MASK_INSIDE;
-                }
-            }
-
-            let pillar_w = sc(12);
-            let gap_x0 = margin + pillar_w; // first void column
-            let gap_x1 = w - margin - pillar_w; // one past the last void column
-            let arch_top = sc(36); // top row of both piers and the arch slab
-            let arch_bot = arch_top + sc(4); // one past the arch slab's rows
-            let floor = h - margin; // first OUTSIDE row
-            // Trap: "at least 3 rows above the pile" is a fixed CELL count at the original w=64,
-            // h=100 (3/100 = 3% of the container height). Scaled by `sc` the same way as every
-            // other coordinate here so it stays 3% of the container at every width instead of a
-            // different (shrinking) physical fraction as w grows.
-            let gap_buffer = sc(3);
-
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-            let props = get_test_props(MaterialMode::Water, w * h);
-
-            let build_sim = || -> TestSim {
-                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
-                for y in arch_top..floor {
-                    for x in margin..gap_x0 {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                    for x in gap_x1..w - margin {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-                for y in arch_top..arch_bot {
-                    for x in gap_x0..gap_x1 {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-                sim
-            };
-
-            // POSITION-INDEPENDENT metric -- deliberately NOT "how much of the original 4 arch
-            // rows still has material in them" (a first version tried that: a completely
-            // unsupported liquid slab free-falls as a coherent body, vacating its ORIGINAL rows
-            // within 1-2 ticks regardless of whether it is flattening or just falling intact, which
-            // reported a meaningless `ticks_to_halve = 1` under both schedulers). This version
-            // tracks, per void column, the CURRENT floor-connected pile (walking up from the floor
-            // while cells are continuously filled) and sums material sitting at least `gap_buffer`
-            // empty rows above that pile's own top -- i.e. still genuinely hanging with real
-            // clearance beneath it, wherever it currently is.
-            let eps = 0.05f32;
-            let unsupported_span = |data: &[f32]| -> f64 {
-                let mut total = 0.0f64;
-                for x in gap_x0..gap_x1 {
-                    let mut pile_top = floor;
-                    while pile_top > arch_top && data[(pile_top - 1) * w + x] > eps {
-                        pile_top -= 1;
-                    }
-                    let hanging_hi = pile_top.saturating_sub(gap_buffer).max(arch_top);
-                    total += diag_task55_region_mass(data, w, x, x + 1, arch_top, hanging_hi);
-                }
-                total
-            };
-
-            let budget_n = 256usize;
-            let probe_ticks = task55_probe_ticks(run_ticks);
-
-            println!(
-                "diag_task55_arch_collapse_rate: w={w:>4} h={h} block_size={block_size} \
-                 budget_n={budget_n} run_ticks={run_ticks} scale={s:.4} gap=[{gap_x0},{gap_x1}) \
-                 arch_rows=[{arch_top},{arch_bot}) gap_buffer={gap_buffer} (3% of h, resolution-\
-                 normalised)"
-            );
-
-            // TASK #55 cross-measurement: defensive reset before this width's own loop runs, in
-            // case a prior test on this same thread panicked mid-toggle (same pattern as
-            // `diag_task47_variant_divergence_comparison`'s use of `fresh_overburden_gate`).
-            multiplicative_lateral_gate::set_enabled(false);
-            for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
-                for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
-                    let mut sim = build_sim();
-                    multiplicative_lateral_gate::set_enabled(mult_enabled);
-                    let initial = unsupported_span(&sim.hm.data);
-                    let target = initial * 0.5;
-                    let mut half_life_tick: Option<usize> = None;
-                    let mut next_probe = 0usize;
-                    println!(
-                        "diag_task55_arch_collapse_rate: w={w:>4} --- {gate_label} / {label} --- \
-                         initial_unsupported={initial:.4}"
-                    );
-                    for t in 0..=run_ticks {
-                        let span = unsupported_span(&sim.hm.data);
-                        if half_life_tick.is_none() && t > 0 && span <= target {
-                            half_life_tick = Some(t);
-                        }
-                        if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                            next_probe += 1;
-                            println!(
-                                "diag_task55_arch_collapse_rate: w={w:>4} {gate_label:<22} \
-                                 {label:<20} tick={t:>4} unsupported_span={span:>10.4} \
-                                 fraction_of_initial={:.4}",
-                                span / initial.max(1e-9)
-                            );
-                        }
-                        if t == run_ticks {
-                            break;
-                        }
-                        if use_perfect {
-                            perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                        } else {
-                            sim.tick(gravity_dir, budget_n);
-                        }
-                    }
-                    multiplicative_lateral_gate::set_enabled(false);
-                    println!(
-                        "diag_task55_arch_collapse_rate: w={w:>4} {gate_label:<22} {label:<20} \
-                         ticks_to_halve={half_life_tick:?} run_ticks_budget={run_ticks} \
-                         (initial={initial:.4}, target<={target:.4})"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Task #55, defect 2, RESOLUTION SWEEP: "enclosed pockets in a procedural cave do not
-    /// equalise their surface level" -- the user's own suggested reproduction. Uses the actual
-    /// procedural-cave shape, `SandboxShape::ProceduralFunnel`, at its production default
-    /// parameters (`neck_width=0.005, hourglass_curve=0.6`), now at w = h = 64/128/256/512.
-    ///
-    /// The original, single-resolution version of this test hand-found its two-well-plus-basin
-    /// coordinates by dumping the w=128 mask as ASCII. Per this test's own doc comment on
-    /// `find_two_well_topology` above, that topology is NOT guaranteed to survive a resolution
-    /// change -- `ProceduralFunnel`'s cave noise runs at fixed pixel-space frequencies, so a wider
-    /// grid carves a genuinely different pattern, not the same pattern at more pixels. This version
-    /// therefore RE-FINDS the two-well+shared-basin structure in each width's own mask via
-    /// `find_two_well_topology` rather than assuming w=128's pixel coordinates scale. If the
-    /// topology is not present at a given width, that width is skipped and reported as absent --
-    /// not fabricated from scaled coordinates that would silently read a wall.
-    ///
-    /// `level_diff(t)`: `|surface_row(right probe column) - surface_row(left probe column)|`, read
-    /// from `diag_task55_surface_row` over each well's own row range. The two wells are filled to
-    /// FRACTIONS of their own found band height (35% / 65% down from the band's top) rather than a
-    /// fixed row offset, so the initial imbalance is the same relative shape at every width even
-    /// though the band's absolute height differs.
-    ///
-    /// Reported as a time series plus ticks-to-halve, for both the shipped adaptive scheduler and
-    /// `perfect_sim_tick`. `run_ticks` differs across widths for wall-clock budget (see
-    /// `diag_task55_arch_collapse_rate`'s doc comment for why), never between gate-on/off at a
-    /// given width. DIAGNOSTIC (reproduce-only, no assertions). Run with --ignored --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task55_pocket_equalisation() {
-        for &(w, run_ticks) in &[(64usize, 300usize), (128, 300), (256, 200), (512, 150)] {
-            let h = w;
-            let block_size = (w / 32).max(1);
-            let mask = make_test_mask(w, h, SandboxShape::ProceduralFunnel, 0.005, 0.6);
-
-            let topo = match find_two_well_topology(&mask, w, h) {
-                Some(t) => t,
-                None => {
-                    println!(
-                        "diag_task55_pocket_equalisation: w={w:>4} h={h} -- NO two-well+shared-\
-                         basin topology found in this mask at this width (ProceduralFunnel's cave \
-                         noise uses fixed pixel-space frequencies, so the topology hand-found at \
-                         w=128 is not guaranteed to survive a resolution change -- see \
-                         `find_two_well_topology`'s doc comment). SKIPPING this width; reported as \
-                         absent in the table, not fabricated from scaled coordinates."
-                    );
-                    continue;
-                }
-            };
-
-            let band_h = topo.well_bot - topo.well_top;
-            let mut left_surface0 = topo.well_top + ((0.35 * band_h as f64).round() as usize);
-            let mut right_surface0 = topo.well_top + ((0.65 * band_h as f64).round() as usize);
-            left_surface0 = left_surface0.min(topo.well_bot.saturating_sub(1));
-            if right_surface0 <= left_surface0 {
-                right_surface0 = (left_surface0 + 1).min(topo.well_bot.saturating_sub(1));
-            }
-
-            // Bound the basin fill to a fixed fraction of h (matches the original w=128 test's
-            // basin depth of 9/128 = 7.03% of h) rather than filling however far the connected
-            // single-run region happens to extend at this width -- purely a compute-budget bound;
-            // the equalisation mechanism only needs SOME connected basin, not the largest one that
-            // exists.
-            let basin_cap = ((0.09 * h as f64).round() as usize).max(3);
-            let basin_bot = (topo.well_bot + basin_cap).min(topo.basin_bot);
-            let basin_x0 = topo.left_x0.min(topo.right_x0);
-            let basin_x1 = topo.left_x1.max(topo.right_x1);
-
-            let left_probe = (topo.left_x0 + topo.left_x1) / 2;
-            let right_probe = (topo.right_x0 + topo.right_x1) / 2;
-
-            println!(
-                "diag_task55_pocket_equalisation: w={w:>4} h={h} block_size={block_size} \
-                 budget_n=256 run_ticks={run_ticks} left_well=[{},{})x[{},{}) \
-                 right_well=[{},{})x[{},{}) basin=[{},{})x[{},{}) left_probe={left_probe} \
-                 right_probe={right_probe}",
-                topo.left_x0, topo.left_x1, left_surface0, topo.well_bot,
-                topo.right_x0, topo.right_x1, right_surface0, topo.well_bot,
-                basin_x0, basin_x1, topo.well_bot, basin_bot
-            );
-
-            // Harness sanity, same defensive spirit as the original hand-coordinate version:
-            // every cell this test is about to fill must actually be open.
-            // `find_two_well_topology` guarantees this by construction (run bounds are
-            // intersected across the whole band before being returned), but this fails loudly
-            // instead of silently reading a wall if that guarantee is ever violated.
-            for x in topo.left_x0..topo.left_x1 {
-                for y in left_surface0..topo.well_bot {
-                    assert_ne!(
-                        mask[y * w + x], crate::MASK_OUTSIDE,
-                        "w={w}: left well cell (x={x}, y={y}) outside -- geometry search is wrong"
-                    );
-                }
-            }
-            for x in topo.right_x0..topo.right_x1 {
-                for y in right_surface0..topo.well_bot {
-                    assert_ne!(
-                        mask[y * w + x], crate::MASK_OUTSIDE,
-                        "w={w}: right well cell (x={x}, y={y}) outside -- geometry search is wrong"
-                    );
-                }
-            }
-            for x in basin_x0..basin_x1 {
-                for y in topo.well_bot..basin_bot {
-                    assert_ne!(
-                        mask[y * w + x], crate::MASK_OUTSIDE,
-                        "w={w}: basin cell (x={x}, y={y}) outside -- geometry search is wrong"
-                    );
-                }
-            }
-
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-            let props = get_test_props(MaterialMode::Water, w * h);
-
-            let build_sim = || -> TestSim {
-                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
-                for y in 0..h {
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        if mask[idx] == crate::MASK_OUTSIDE {
-                            continue;
-                        }
-                        let in_basin =
-                            y >= topo.well_bot && y < basin_bot && x >= basin_x0 && x < basin_x1;
-                        let in_left_well = x >= topo.left_x0 && x < topo.left_x1
-                            && y >= left_surface0 && y < topo.well_bot;
-                        let in_right_well = x >= topo.right_x0 && x < topo.right_x1
-                            && y >= right_surface0 && y < topo.well_bot;
-                        if in_basin || in_left_well || in_right_well {
-                            sim.hm.data[idx] = 1.0;
-                        }
-                    }
-                }
-                sim
-            };
-
-            let eps = 0.05f32;
-            let level_diff = |data: &[f32]| -> f64 {
-                let left = diag_task55_surface_row(data, w, left_probe, topo.well_top, topo.well_bot, eps)
-                    .unwrap_or(topo.well_bot);
-                let right = diag_task55_surface_row(data, w, right_probe, topo.well_top, topo.well_bot, eps)
-                    .unwrap_or(topo.well_bot);
-                (right as f64 - left as f64).abs()
-            };
-
-            let budget_n = 256usize;
-            let probe_ticks = task55_probe_ticks(run_ticks);
-
-            // TASK #55 cross-measurement: defensive reset before this width's own loop runs (same
-            // pattern as `diag_task47_variant_divergence_comparison`'s `fresh_overburden_gate`).
-            multiplicative_lateral_gate::set_enabled(false);
-            for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
-                for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
-                    let mut sim = build_sim();
-                    multiplicative_lateral_gate::set_enabled(mult_enabled);
-                    let initial = level_diff(&sim.hm.data);
-                    let target = initial * 0.5;
-                    let mut half_life_tick: Option<usize> = None;
-                    let mut next_probe = 0usize;
-                    println!(
-                        "diag_task55_pocket_equalisation: w={w:>4} --- {gate_label} / {label} --- \
-                         initial_level_diff={initial:.4} rows"
-                    );
-                    for t in 0..=run_ticks {
-                        let diff = level_diff(&sim.hm.data);
-                        if half_life_tick.is_none() && t > 0 && diff <= target {
-                            half_life_tick = Some(t);
-                        }
-                        if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                            next_probe += 1;
-                            let left = diag_task55_surface_row(&sim.hm.data, w, left_probe, topo.well_top, topo.well_bot, eps)
-                                .unwrap_or(topo.well_bot);
-                            let right = diag_task55_surface_row(&sim.hm.data, w, right_probe, topo.well_top, topo.well_bot, eps)
-                                .unwrap_or(topo.well_bot);
-                            println!(
-                                "diag_task55_pocket_equalisation: w={w:>4} {gate_label:<22} \
-                                 {label:<20} tick={t:>4} left_surface_row={left:>3} \
-                                 right_surface_row={right:>3} level_diff={diff:>7.4} \
-                                 fraction_of_initial={:.4}",
-                                diff / initial.max(1e-9)
-                            );
-                        }
-                        if t == run_ticks {
-                            break;
-                        }
-                        if use_perfect {
-                            perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                        } else {
-                            sim.tick(gravity_dir, budget_n);
-                        }
-                    }
-                    multiplicative_lateral_gate::set_enabled(false);
-                    println!(
-                        "diag_task55_pocket_equalisation: w={w:>4} {gate_label:<22} {label:<20} \
-                         ticks_to_halve={half_life_tick:?} run_ticks_budget={run_ticks} \
-                         (initial={initial:.4}, target<={target:.4})"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Task #55, defect 3, RESOLUTION SWEEP: "a draining lake does not stay level while it
-    /// drains". Reuses the `Hourglass` mid-drain recipe (`neck_width=0.15, hourglass_curve=0.6`)
-    /// with Water and a shallow initial fill, now at w = h = 64/128/256/512. Unlike
-    /// `ProceduralFunnel`, `Hourglass`'s own geometry (`eval_sandbox_shape`) is purely parametric
-    /// in `dx / w_f`, `dy / h_f` -- no fixed-pixel-frequency noise term -- so its shape genuinely
-    /// IS the same at every width once expressed as a fraction of w/h, unlike the pocket-
-    /// equalisation cave. `fill_lo` is expressed as that fraction (12/64 = 0.1875 of h, the
-    /// original construction's own ratio) rather than a literal row count.
-    ///
-    /// `spread(t)`: max - min of the per-column free-surface row over every wetted column. Also
-    /// reports the mean surface row each probe tick to confirm the lake is actually draining.
-    /// DIAGNOSTIC (reproduce-only, no assertions, reported as a full time series plus the run's
-    /// peak spread rather than a ticks-to-halve number -- a lake that starts flat by construction
-    /// has nothing to halve from). `run_ticks` differs across widths for wall-clock budget only
-    /// (see `diag_task55_arch_collapse_rate`'s doc comment), never between gate-on/off at a given
-    /// width. Run with --ignored --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task55_draining_lake_flatness() {
-        for &(w, run_ticks) in &[(64usize, 400usize), (128, 500), (256, 700), (512, 1300)] {
-            let h = w;
-            let block_size = (w / 32).max(1);
-            let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
-            let center_y = h / 2;
-            // 12/64 = 0.1875 of h at the original w=h=64 construction, expressed here as a
-            // fraction so the same physical fill line (comfortably below the chamber ceiling,
-            // leaving room to visibly drain) is used at every width.
-            let fill_lo = ((0.1875 * h as f64).round() as usize).max(1);
-            let fill_hi = center_y; // bottom of the top chamber, i.e. down to the neck
-
-            let gravity_dir = glam::Vec2::new(0.0, 0.04);
-            let props = get_test_props(MaterialMode::Water, w * h);
-
-            let build_sim = || -> TestSim {
-                let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), block_size);
-                for y in fill_lo..fill_hi {
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        if mask[idx] != crate::MASK_OUTSIDE {
-                            sim.hm.data[idx] = 1.0;
-                        }
-                    }
-                }
-                sim
-            };
-
-            let eps = 0.05f32;
-            // (spread, mean_row, wetted_columns) over every column with material anywhere in the
-            // top chamber's row range.
-            let surface_stats = |data: &[f32]| -> (f64, f64, usize) {
-                let mut rows = Vec::new();
-                for x in 0..w {
-                    if mask[fill_lo * w + x] == crate::MASK_OUTSIDE
-                        && (fill_lo..center_y).all(|y| mask[y * w + x] == crate::MASK_OUTSIDE)
-                    {
-                        continue;
-                    }
-                    if let Some(r) = diag_task55_surface_row(data, w, x, fill_lo, center_y, eps) {
-                        rows.push(r);
-                    }
-                }
-                if rows.is_empty() {
-                    return (0.0, center_y as f64, 0);
-                }
-                let min_r = *rows.iter().min().unwrap();
-                let max_r = *rows.iter().max().unwrap();
-                let mean_r = rows.iter().sum::<usize>() as f64 / rows.len() as f64;
-                ((max_r - min_r) as f64, mean_r, rows.len())
-            };
-
-            let budget_n = 256usize;
-            let probe_ticks = task55_probe_ticks(run_ticks);
-
-            println!(
-                "diag_task55_draining_lake_flatness: w={w:>4} h={h} block_size={block_size} \
-                 budget_n={budget_n} run_ticks={run_ticks} fill=[{fill_lo},{fill_hi}) \
-                 neck_width=0.15 hourglass_curve=0.6"
-            );
-
-            // TASK #55 cross-measurement: defensive reset before this width's own loop runs (same
-            // pattern as `diag_task47_variant_divergence_comparison`'s `fresh_overburden_gate`).
-            multiplicative_lateral_gate::set_enabled(false);
-            for (gate_label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
-                for (label, use_perfect) in [("adaptive(shipped)", false), ("perfect_sim", true)] {
-                    let mut sim = build_sim();
-                    multiplicative_lateral_gate::set_enabled(mult_enabled);
-                    let mut peak_spread = 0.0f64;
-                    let mut peak_spread_tick = 0usize;
-                    let mut next_probe = 0usize;
-                    println!(
-                        "diag_task55_draining_lake_flatness: w={w:>4} --- {gate_label} / {label} ---"
-                    );
-                    for t in 0..=run_ticks {
-                        let (spread, mean_row, wetted) = surface_stats(&sim.hm.data);
-                        if spread > peak_spread {
-                            peak_spread = spread;
-                            peak_spread_tick = t;
-                        }
-                        if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                            next_probe += 1;
-                            println!(
-                                "diag_task55_draining_lake_flatness: w={w:>4} {gate_label:<22} \
-                                 {label:<20} tick={t:>4} spread={spread:>7.4} \
-                                 mean_surface_row={mean_row:>7.3} wetted_columns={wetted:>3}"
-                            );
-                        }
-                        if t == run_ticks {
-                            break;
-                        }
-                        if use_perfect {
-                            perfect_sim_tick(&mut sim, &mask, gravity_dir);
-                        } else {
-                            sim.tick(gravity_dir, budget_n);
-                        }
-                    }
-                    multiplicative_lateral_gate::set_enabled(false);
-                    println!(
-                        "diag_task55_draining_lake_flatness: w={w:>4} {gate_label:<22} {label:<20} \
-                         peak_spread={peak_spread:.4} at tick={peak_spread_tick} \
-                         run_ticks_budget={run_ticks}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Task #55 "cheap prediction worth testing": today's lateral driving head is ADDITIVE
-    /// (`head_a = h_a + k * LATERAL_PRESSURE_SCALE * depth_a`, see `LATERAL_PRESSURE_SCALE`'s own
-    /// doc comment) -- the brief's hypothesis is that a FLAT liquid surface sitting over columns of
-    /// DIFFERENT depth (e.g. a flat lake over a sloping floor) might still be driven to flow,
-    /// because the `depth_a`/`depth_b` (`column_depth`) terms differ even though the surfaces do
-    /// not.
-    ///
-    /// Hand-built container: a step in the floor (left region's floor 10 rows deeper than the
-    /// right region's, `step_x` splits the two), filled with Water so BOTH regions' material tops
-    /// out at the exact same row (`top_row`) -- a genuinely flat free surface over a stepped floor,
-    /// left column 18 rows deep, right column 8 rows deep at the moment of construction. This
-    /// mirrors the already-in-tree `test_mult_lateral_flat_surface_over_sloping_floor_no_drift`'s
-    /// construction (same idea, independently sized here) rather than inventing a new one, since
-    /// that scenario is already known to isolate the mechanism cleanly.
-    ///
-    /// Reports two independent things: (1) an ANALYTIC check -- `column_depth` at a row comfortably
-    /// inside both columns and above the step (row 25, i.e. 5 rows below the shared surface on both
-    /// sides), computed directly via `recompute_column_depth` before any tick runs, for both
-    /// columns; `column_depth` is a per-CELL top-down accumulation of resting material above THAT
-    /// cell (see its own doc comment), which counts filled rows above the free surface -- at equal
-    /// depth-below-a-shared-flat-surface this should read identically regardless of how deep the
-    /// floor is beneath either column, so this check is a direct test of whether the mechanism the
-    /// brief names is even live at a row unaffected by the step's own sidewall. (2) an EMPIRICAL
-    /// check -- net mass drift into the shallow (right) region over 60 ticks, both under the
-    /// shipped additive head (`perfect_sim_tick`, ground truth) and, as a bonus (this gate already
-    /// exists in the tree, `multiplicative_lateral_gate` -- an experimental candidate fix for
-    /// exactly this mechanism; toggling it is read-only, it changes no default), under the
-    /// multiplicative alternative, so a reader can see both numbers from one build.
-    ///
-    /// DIAGNOSTIC (reproduce-only, no assertions). Reports the answer plainly either way --  a null
-    /// result (no drift, `column_depth` equal) is as useful as a positive one. Run with --ignored
-    /// --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task55_flat_surface_over_sloping_floor() {
-        let w = 24usize;
-        let h = 40usize;
-        let wall = 2usize;
-        let step_x = 12usize; // x < step_x: deep (left) region; x >= step_x: shallow (right) region
-        let floor_left = h - wall; // first OUTSIDE row, left region
-        let floor_right = floor_left - 10; // right region's floor is 10 rows shallower
-        let top_row = 20usize; // shared, flat top row for both regions
-        let probe_row = 25usize; // 5 rows below the shared surface, above the step's own sidewall
-        assert!(top_row < floor_right && probe_row < floor_right, "harness sanity");
-
-        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
-        for y in 0..h {
-            for x in 0..w {
-                if x < wall || x >= w - wall {
-                    continue;
-                }
-                let floor = if x < step_x { floor_left } else { floor_right };
-                if y >= wall && y < floor {
-                    mask[y * w + x] = crate::MASK_INSIDE;
-                }
-            }
-        }
-
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-        let props = get_test_props(MaterialMode::Water, w * h);
-
-        let build_sim = || -> TestSim {
-            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 4);
-            for y in top_row..h {
-                for x in wall..w - wall {
-                    let floor = if x < step_x { floor_left } else { floor_right };
-                    if y < floor {
-                        sim.hm.data[y * w + x] = 0.9; // see the in-tree sibling test: 0.9, not 1.0,
-                        // so `room_a`/`room_b` aren't both zero everywhere, which would sleep
-                        // every edge on the "pooled interior" branch regardless of driving head.
-                    }
-                }
-            }
-            sim
-        };
-
-        // --- (1) Analytic check: column_depth at equal depth-below-surface, both sides of the step.
-        {
-            let sim0 = build_sim();
-            let mut column_depth = vec![0.0f32; w * h];
-            recompute_column_depth(
-                w, h, &mask, &sim0.hm.data, &sim0.hm.data, &sim0.hm.external_mass_this_tick,
-                &sim0.cell_props, &sim0.edge_vel_v, &mut column_depth[..],
-            );
-            let left_x = step_x - 1;
-            let right_x = step_x + 1;
-            let left_depth = column_depth[probe_row * w + left_x];
-            let right_depth = column_depth[probe_row * w + right_x];
-            println!(
-                "diag_task55_flat_surface_over_sloping_floor: ANALYTIC row={probe_row} \
-                 (both sides {}rows below shared surface row={top_row}) \
-                 left_x={left_x} (floor={floor_left}, depth-to-floor={}) column_depth={left_depth:.4} | \
-                 right_x={right_x} (floor={floor_right}, depth-to-floor={}) column_depth={right_depth:.4} | \
-                 delta={:.4}",
-                probe_row - top_row, floor_left - probe_row, floor_right - probe_row,
-                (left_depth - right_depth).abs()
-            );
-        }
-
-        // --- (2) Empirical check: net mass drift into the shallow region over time, shipped head
-        // vs. (bonus) the multiplicative candidate.
-        let right_mass = |data: &[f32]| -> f64 {
-            diag_task55_region_mass(data, w, step_x, w - wall, top_row, floor_right)
-        };
-        let run_ticks = 60usize;
-        let probe_ticks: [usize; 8] = [0, 1, 2, 5, 10, 20, 40, 60];
-
-        for (label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(bonus,gated)", true)] {
-            let mut sim = build_sim();
-            let initial = right_mass(&sim.hm.data);
-            multiplicative_lateral_gate::set_enabled(mult_enabled);
-            let mut next_probe = 0usize;
-            println!(
-                "diag_task55_flat_surface_over_sloping_floor: EMPIRICAL --- {label} --- \
-                 initial_right_mass={initial:.4}"
-            );
-            for t in 0..=run_ticks {
-                if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                    next_probe += 1;
-                    let mass = right_mass(&sim.hm.data);
-                    println!(
-                        "diag_task55_flat_surface_over_sloping_floor: {label:<28} tick={t:>3} \
-                         right_mass={mass:>9.4} drift={:>9.4}",
-                        mass - initial
-                    );
-                }
-                if t == run_ticks {
-                    break;
-                }
-                perfect_sim_tick(&mut sim, &mask, gravity_dir);
-            }
-            multiplicative_lateral_gate::set_enabled(false);
-        }
-    }
-
-    /// TASK #55, Job 2 investigation: why does `test_liquid_flowing_liquid_does_not_stand_in_walls`
-    /// regress at tick 160 (6 -> 12 voids) under `multiplicative_lateral_gate` even though it
-    /// improves at tick 120 (60 -> 54, see `diag_mult_lateral_void_count_gate_on_vs_off`)? Hypothesis
-    /// under test (from the task brief): `mult_lateral_conveyance` raises local depth to a POWER
-    /// (`MULT_LATERAL_CONVEYANCE_EXPONENT = 1.5`), so once the scenario is past its deep-pool phase
-    /// and into a thin trickle, conveyance collapses super-linearly (`x^1.5 < x` for `x < 1`) exactly
-    /// where the additive form's driving stays merely linear in depth -- i.e. the multiplicative form
-    /// may be too weak in the endgame, precisely when the last few voids need closing.
-    ///
-    /// Reads `h` and `column_depth` directly off the running `TestSim` post-tick (not a separate
-    /// recompute) and reproduces `settle_tick`'s own horizontal-edge formulas exactly (both forms),
-    /// for every edge flanking a still-open void, at each probe tick -- `gravity_dir.x == 0` in this
-    /// scenario so the tilt term both formulas carry (`gravity_dir.x * GRAVITY_HEAD_SCALE`) is
-    /// identically zero and dropped here. `liq == 1.0` unconditionally (Water, no granular blend),
-    /// so `k_of_liquidity(1.0) == 1.0` and `janssen_effective_depth` is the identity transform for
-    /// both forms -- this scenario never exercises the Janssen saturation curve either.
-    ///
-    /// Same scenario, same 64x64 Hourglass/Water/half-fill setup, same `budget_n = usize::MAX` as
-    /// `test_liquid_flowing_liquid_does_not_stand_in_walls` itself (not the 256-budget adaptive
-    /// scheduler the other `diag_task55_*` tests use) -- this is specifically about that test's own
-    /// regression, not the scheduler. DIAGNOSTIC (reproduce-only, no assertions). Run with --ignored
-    /// --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task55_mult_lateral_settling_falloff() {
-        let w = 64usize;
-        let h = 64usize;
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
-        let props = get_test_props(MaterialMode::Water, w * h);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        let mut sim = TestSim::new(w, h, props, mask.clone(), 32);
-        for y in 0..h / 2 {
-            for x in 0..w {
-                if mask[y * w + x] != crate::MASK_OUTSIDE {
-                    sim.hm.data[y * w + x] = 1.0;
-                }
-            }
-        }
-
-        // Same void definition as `test_liquid_flowing_liquid_does_not_stand_in_walls`'s own
-        // `count_voids`, but returning the void cells themselves rather than just a count.
-        let find_voids = |data: &[f32]| -> Vec<(usize, usize)> {
-            let mut voids = Vec::new();
-            for y in 1..h - 1 {
-                let mut liquid_to_the_left = false;
-                for x in 0..w {
-                    if mask[y * w + x] == crate::MASK_OUTSIDE {
-                        liquid_to_the_left = false;
-                        continue;
-                    }
-                    let v = data[y * w + x];
-                    if v > 0.5 {
-                        liquid_to_the_left = true;
-                        continue;
-                    }
-                    if !liquid_to_the_left || v > 0.05 {
-                        continue;
-                    }
-                    let liquid_to_the_right = (x + 1..w)
-                        .take_while(|&x2| mask[y * w + x2] != crate::MASK_OUTSIDE)
-                        .any(|x2| data[y * w + x2] > 0.5);
-                    if liquid_to_the_right {
-                        voids.push((y, x));
-                    }
-                }
-            }
-            voids
-        };
-
-        let liq = 1.0f32; // Water: liquidity(wetness) == 1 everywhere in this scenario.
-        let k = k_of_liquidity(liq); // == 1.0 for a fully liquid cell, both forms.
-        let mult_edge = |data: &[f32], cd: &[f32], a: usize, b: usize| -> (f32, f32, f32) {
-            let eta_a = data[a] + cd[a];
-            let eta_b = data[b] + cd[b];
-            let conveyance_a = mult_lateral_conveyance(data[a], cd[a], k, liq);
-            let conveyance_b = mult_lateral_conveyance(data[b], cd[b], k, liq);
-            let conveyance = 0.5 * (conveyance_a + conveyance_b);
-            (eta_a - eta_b, conveyance, MULT_LATERAL_SCALE * conveyance * (eta_a - eta_b))
-        };
-        let additive_edge = |data: &[f32], cd: &[f32], a: usize, b: usize| -> f32 {
-            let depth_a = janssen_effective_depth(cd[a], liq);
-            let depth_b = janssen_effective_depth(cd[b], liq);
-            (data[a] + k * LATERAL_PRESSURE_SCALE * depth_a)
-                - (data[b] + k * LATERAL_PRESSURE_SCALE * depth_b)
-        };
-
-        multiplicative_lateral_gate::set_enabled(true);
-        let probe_ticks: [usize; 13] = [80, 100, 110, 120, 130, 140, 150, 155, 160, 165, 170, 175, 180];
-        let mut next_probe = 0usize;
-        println!(
-            "diag_task55_mult_lateral_settling_falloff: w={w} h={h} \
-             (multiplicative gate ON, budget_n=usize::MAX, matching test_liquid_flowing_liquid_does_not_stand_in_walls)"
-        );
-        for t in 0..=180usize {
-            if next_probe < probe_ticks.len() && probe_ticks[next_probe] == t {
-                next_probe += 1;
-                let voids = find_voids(&sim.hm.data);
-                let mut sum_grad = 0.0f64;
-                let mut sum_conv = 0.0f64;
-                let mut sum_mult_drive = 0.0f64;
-                let mut sum_add_drive = 0.0f64;
-                let mut n_edges = 0usize;
-                for &(y, x) in &voids {
-                    for &nx in &[x.wrapping_sub(1), x + 1] {
-                        if nx >= w || mask[y * w + nx] == crate::MASK_OUTSIDE {
-                            continue;
-                        }
-                        let a = y * w + x.min(nx);
-                        let b = y * w + x.max(nx);
-                        let (grad, conv, drive) = mult_edge(&sim.hm.data, &sim.column_depth, a, b);
-                        let add_drive = additive_edge(&sim.hm.data, &sim.column_depth, a, b);
-                        sum_grad += grad.abs() as f64;
-                        sum_conv += conv as f64;
-                        sum_mult_drive += drive.abs() as f64;
-                        sum_add_drive += add_drive.abs() as f64;
-                        n_edges += 1;
-                    }
-                }
-                let n = n_edges.max(1) as f64;
-                println!(
-                    "diag_task55_mult_lateral_settling_falloff: tick={t:>4} voids={:>3} void_edges={n_edges:>3} \
-                     mean|eta_grad|={:>9.5} mean_conveyance={:>10.4} mean|mult_drive|={:>10.6} mean|additive_drive|={:>9.5}",
-                    voids.len(), sum_grad / n, sum_conv / n, sum_mult_drive / n, sum_add_drive / n
-                );
-            }
-            if t == 180 {
-                break;
-            }
-            sim.tick(gravity_dir, usize::MAX);
-        }
-        multiplicative_lateral_gate::set_enabled(false);
-    }
-
-    /// TASK #55, Job 2 investigation, part 2: `diag_task55_mult_lateral_settling_falloff`'s
-    /// per-probe void counts under the multiplicative gate are NOT monotonically decreasing near
-    /// tick 160 (9 at t=155, 12 at t=160, 6 at t=165 -- a bump, not a plateau or a stall). Before
-    /// concluding "conveyance is too weak to close the endgame", this checks whether that kind of
-    /// transient bump is a normal feature of this scenario's settling (i.e. would show up under the
-    /// shipped additive form too, just at different ticks, and `test_liquid_flowing_liquid_does_not_
-    /// stand_in_walls`'s fixed 120/160 probes simply catch the multiplicative form's bump and miss
-    /// the additive form's), or whether it is specific to the multiplicative gate.
-    ///
-    /// Same scenario as `diag_task55_mult_lateral_settling_falloff`, EVERY tick from 100 to 180
-    /// (not sparse probes) under both gate states from one fresh sim each. DIAGNOSTIC
-    /// (reproduce-only, no assertions). Run with --ignored --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task55_mult_lateral_settling_void_trajectory() {
-        let w = 64usize;
-        let h = 64usize;
-        let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.15, 0.6);
-        let props = get_test_props(MaterialMode::Water, w * h);
-        let gravity_dir = glam::Vec2::new(0.0, 0.04);
-
-        let count_voids = |sim: &TestSim| -> usize {
-            let mut voids = 0;
-            for y in 1..h - 1 {
-                let mut liquid_to_the_left = false;
-                for x in 0..w {
-                    if mask[y * w + x] == crate::MASK_OUTSIDE {
-                        liquid_to_the_left = false;
-                        continue;
-                    }
-                    let v = sim.hm.data[y * w + x];
-                    if v > 0.5 {
-                        liquid_to_the_left = true;
-                        continue;
-                    }
-                    if !liquid_to_the_left || v > 0.05 {
-                        continue;
-                    }
-                    let liquid_to_the_right = (x + 1..w)
-                        .take_while(|&x2| mask[y * w + x2] != crate::MASK_OUTSIDE)
-                        .any(|x2| sim.hm.data[y * w + x2] > 0.5);
-                    if liquid_to_the_right {
-                        voids += 1;
-                    }
-                }
-            }
-            voids
-        };
-
-        multiplicative_lateral_gate::set_enabled(false);
-        for (label, mult_enabled) in [("additive(shipped)", false), ("multiplicative(gated)", true)] {
-            let mut sim = TestSim::new(w, h, props.clone(), mask.clone(), 32);
-            for y in 0..h / 2 {
-                for x in 0..w {
-                    if mask[y * w + x] != crate::MASK_OUTSIDE {
-                        sim.hm.data[y * w + x] = 1.0;
-                    }
-                }
-            }
-            multiplicative_lateral_gate::set_enabled(mult_enabled);
-            let mut trajectory = String::new();
-            for t in 0..=180usize {
-                if t >= 100 {
-                    trajectory.push_str(&format!("{}:{} ", t, count_voids(&sim)));
-                }
-                if t == 180 {
-                    break;
-                }
-                sim.tick(gravity_dir, usize::MAX);
-            }
-            multiplicative_lateral_gate::set_enabled(false);
-            println!("diag_task55_mult_lateral_settling_void_trajectory: {label}\n  {trajectory}");
-        }
-    }
-
-    /// TASK #55, Job 3 investigation: is `eta = h + column_depth` (the free-surface elevation the
-    /// gated multiplicative lateral head's `grad(eta)` term reads, see `mult_lateral_conveyance`'s
-    /// doc comment) actually a coherent height, or off by `depth_scale = REFERENCE_GRID_HEIGHT / w`
-    /// (see `REFERENCE_GRID_HEIGHT`'s own doc comment) away from reference resolution?
-    ///
-    /// `column_depth` is DELIBERATELY resolution-normalised: `recompute_column_depth` multiplies
-    /// each row's `resting_above` contribution by `depth_scale` before accumulating specifically SO
-    /// THAT a column spanning many LOCAL rows contributes the same total regardless of grid
-    /// resolution (see `REFERENCE_GRID_HEIGHT`'s doc comment, "The fix"). `h`, by contrast, is never
-    /// touched by `depth_scale` anywhere -- it stays a fraction of ONE local cell's own capacity
-    /// (`cell_capacity_for`, ~1.0-1.5), which does not shrink or grow with grid resolution. Summing
-    /// them (`h + column_depth`) therefore adds a resolution-INDEPENDENT quantity to a resolution-
-    /// DEPENDENT one: only at `w == REFERENCE_GRID_HEIGHT == 512` (`depth_scale == 1.0`) do the two
-    /// terms share units. This test computes `column_depth` (via `recompute_column_depth`, the same
-    /// function `eta`'s `column_depth` term reads) for the IDENTICAL physical fill pattern (same
-    /// count of fully-filled rows above the probe, same probe-row fill fraction) at two different
-    /// grid widths, to show the resulting `eta` numerically, not just algebraically.
-    ///
-    /// DIAGNOSTIC (reproduce-only, no assertions -- this is a correctness question the task brief
-    /// asks be checked, not a regression gate). Run with --ignored --nocapture.
-    #[test]
-    #[ignore]
-    fn diag_task55_eta_depth_scale_consistency() {
-        // PART 1 -- single column, SAME PHYSICAL GEOMETRY across w = 64/128/256/512.
-        //
-        // `column_depth`'s own design (`REFERENCE_GRID_HEIGHT`'s doc comment, "The fix") makes a
-        // FIXED PHYSICAL depth correspond to a row COUNT that scales linearly with `w`: refining
-        // the grid N-fold to cover the same physical container multiplies the rows spanning it by
-        // N, and `depth_scale = REFERENCE_GRID_HEIGHT / w` divides that back out. So "the same
-        // physical pile" at different `w` is NOT "the same number of stacked rows" (that was the
-        // original version of this test, and is itself a physically SHRINKING pile at higher `w`
-        // -- more on that below) -- it is `stacked_rows(w) = stacked_rows_ref * w /
-        // REFERENCE_GRID_HEIGHT`, i.e. a row count derived from a FIXED reference-row-unit
-        // quantity `stacked_rows_ref`, the same quantity `column_depth` itself is designed to
-        // report regardless of `w`.
-        //
-        // Consistency requires going further than the original test did: `probe_h`, the LOCAL
-        // partial-row remainder at the probe, must be derived from a fixed reference-row-unit
-        // quantity the SAME way -- `probe_h(w) = probe_h_ref / depth_scale(w) = probe_h_ref * w /
-        // REFERENCE_GRID_HEIGHT` -- not held at one constant LOCAL fraction across every `w` (the
-        // original test's choice). Holding `probe_h` fixed in LOCAL units is itself a hidden unit
-        // bug of exactly the same shape this task fixes: a fixed local fraction represents a
-        // SHRINKING physical remainder as `w` grows (thinner local rows), so it is not "the same
-        // physical geometry" either, and using it here would corrupt this very test's premise
-        // with the same mistake being fixed in `settle_tick`. Deriving `probe_h` from
-        // `probe_h_ref` the way `stacked_rows` is derived from `stacked_rows_ref` keeps the WHOLE
-        // scenario -- not just the stacked full rows -- pinned to one fixed physical shape at
-        // every resolution.
-        //
-        // Two depths swept: `40` (SHALLOW -- reduces to the original test's literal "5 rows at
-        // w=64" case, where `column_depth` and `h`'s reference-row-scaled contribution are close
-        // enough in magnitude that the old bug is clearly visible) and `320` (DEEP -- typical of
-        // an established pile, where `column_depth` dominates and the bug's effect on `eta`'s
-        // absolute value is small in percentage terms even though it is exactly the same
-        // dimensional error). Both `stacked_rows_ref` values divide evenly by every swept width's
-        // `REFERENCE_GRID_HEIGHT / w`, so `stacked_rows(w)` stays an exact integer throughout.
-        let probe_h_ref = 0.4f32;
-
-        for &(label, stacked_rows_ref) in &[("SHALLOW", 40usize), ("DEEP", 320usize)] {
-        println!(
-            "diag_task55_eta_depth_scale_consistency PART 1 [{label}]: single column, SAME \
-             physical geometry at every w (stacked_rows_ref={stacked_rows_ref}, \
-             probe_h_ref={probe_h_ref:.4}, both expressed in fixed reference-row units and \
-             converted to this w's local grid representation before simulating)"
-        );
-        let mut part1_new_eta = Vec::new();
-        let mut part1_old_eta = Vec::new();
-        for &w in &[64usize, 128usize, 256usize, 512usize] {
-            let h = w;
-            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-            let stacked_rows = stacked_rows_ref * w / REFERENCE_GRID_HEIGHT;
-            let probe_h_local = probe_h_ref * w as f32 / REFERENCE_GRID_HEIGHT as f32;
-            let probe_row = stacked_rows + 10;
-            let mask = vec![crate::MASK_INSIDE; w * h];
-            let mut heights = vec![0.0f32; w * h];
-            let probe_x = w / 2;
-            for r in (probe_row - stacked_rows)..probe_row {
-                heights[r * w + probe_x] = 1.0;
-            }
-            heights[probe_row * w + probe_x] = probe_h_local;
-
-            let external_mass_this_tick = vec![0.0f32; w * h];
-            let cell_props = get_test_props(MaterialMode::Water, w * h);
-            let edge_vel_v = vec![0.0f32; w * h];
-            let mut column_depth = vec![0.0f32; w * h];
-            recompute_column_depth(
-                w, h, &mask, &heights, &heights, &external_mass_this_tick, &cell_props, &edge_vel_v,
-                &mut column_depth[..],
-            );
-
-            let cd = column_depth[probe_row * w + probe_x];
-            let h_local = heights[probe_row * w + probe_x];
-            let eta_old = h_local + cd; // pre-fix: raw h, unscaled
-            let eta_new = h_local * depth_scale + cd; // post-fix: h lifted to column_depth's units
-            part1_old_eta.push(eta_old);
-            part1_new_eta.push(eta_new);
-            println!(
-                "  w={w:>4} depth_scale={depth_scale:>7.4} stacked_rows={stacked_rows:>3} \
-                 probe_h_local={probe_h_local:>8.5} column_depth={cd:>9.4} | \
-                 eta_OLD(h+cd)={eta_old:>9.4} eta_NEW(h*scale+cd)={eta_new:>9.4}"
-            );
-        }
-        let part1_new_baseline = *part1_new_eta.last().unwrap(); // w=512, depth_scale==1, no-op
-        let part1_old_baseline = *part1_old_eta.last().unwrap();
-        for (i, &w) in [64usize, 128, 256, 512].iter().enumerate() {
-            let pct_old = 100.0 * (part1_old_eta[i] - part1_old_baseline) / part1_old_baseline;
-            let pct_new = 100.0 * (part1_new_eta[i] - part1_new_baseline) / part1_new_baseline;
-            println!(
-                "  w={w:>4} eta deviation from w=512 baseline: OLD={pct_old:+7.2}%  \
-                 NEW={pct_new:+7.2}%"
-            );
-        }
-        } // end SHALLOW/DEEP loop
-
-        // PART 2 -- lateral EDGE (two adjacent columns, same row), same fixed-physical-geometry
-        // construction as PART 1 (both `stacked_rows` and `probe_h` derived from fixed
-        // reference-row-unit quantities), reporting the actual quantity the flux solver uses:
-        // `conveyance * (eta_a - eta_b)`. This is the acceptance criterion that matters -- Job 1
-        // asks for the FLUX to be resolution invariant, and an invariant absolute `eta` alone is
-        // necessary but not sufficient proof of that (a per-resolution offset that cancelled in
-        // the subtraction would still pass PART 1's per-column check but fail here). Column A
-        // gets `stacked_a_ref = 320` / `probe_h_a_ref = 0.4`, column B gets `stacked_b_ref = 192`
-        // / `probe_h_b_ref = 0.25` -- a fixed physical elevation difference between the two
-        // columns at every resolution. Swept at the same SHALLOW (40/24 rows at reference
-        // resolution) and DEEP (320/192) depths as PART 1, for the same reason.
-        let probe_h_a_ref = 0.4f32;
-        let probe_h_b_ref = 0.25f32;
-        for &(label, stacked_a_ref, stacked_b_ref) in &[("SHALLOW", 40usize, 24usize), ("DEEP", 320usize, 192usize)] {
-        println!(
-            "\ndiag_task55_eta_depth_scale_consistency PART 2 [{label}]: lateral edge, two \
-             columns at a fixed physical elevation difference (A taller than B), reporting \
-             conveyance*(eta_a-eta_b) -- the actual driving-head magnitude the gated \
-             multiplicative flux term computes"
-        );
-        let mut part2_new_driving = Vec::new();
-        let mut part2_old_driving = Vec::new();
-        for &w in &[64usize, 128usize, 256usize, 512usize] {
-            let h = w;
-            let depth_scale = REFERENCE_GRID_HEIGHT as f32 / w as f32;
-            let stacked_a = stacked_a_ref * w / REFERENCE_GRID_HEIGHT;
-            let stacked_b = stacked_b_ref * w / REFERENCE_GRID_HEIGHT;
-            let probe_h_a_local = probe_h_a_ref * w as f32 / REFERENCE_GRID_HEIGHT as f32;
-            let probe_h_b_local = probe_h_b_ref * w as f32 / REFERENCE_GRID_HEIGHT as f32;
-            let probe_row = stacked_a.max(stacked_b) + 10;
-            let mask = vec![crate::MASK_INSIDE; w * h];
-            let mut heights = vec![0.0f32; w * h];
-            let col_a = w / 2;
-            let col_b = col_a + 1;
-            for r in (probe_row - stacked_a)..probe_row {
-                heights[r * w + col_a] = 1.0;
-            }
-            heights[probe_row * w + col_a] = probe_h_a_local;
-            for r in (probe_row - stacked_b)..probe_row {
-                heights[r * w + col_b] = 1.0;
-            }
-            heights[probe_row * w + col_b] = probe_h_b_local;
-
-            let external_mass_this_tick = vec![0.0f32; w * h];
-            let cell_props = get_test_props(MaterialMode::Water, w * h); // liquidity==1: k==1,
-                                                                          // janssen_effective_depth
-                                                                          // is the identity
-                                                                          // transform, keeping this
-                                                                          // a clean unit-scale
-                                                                          // demonstration.
-            let edge_vel_v = vec![0.0f32; w * h];
-            let mut column_depth = vec![0.0f32; w * h];
-            recompute_column_depth(
-                w, h, &mask, &heights, &heights, &external_mass_this_tick, &cell_props, &edge_vel_v,
-                &mut column_depth[..],
-            );
-
-            let cd_a = column_depth[probe_row * w + col_a];
-            let cd_b = column_depth[probe_row * w + col_b];
-            let h_a = heights[probe_row * w + col_a];
-            let h_b = heights[probe_row * w + col_b];
-            let k = 1.0f32;
-            let liq = 1.0f32;
-
-            // OLD (pre-fix): raw h, unscaled.
-            let eta_a_old = h_a + cd_a;
-            let eta_b_old = h_b + cd_b;
-            let conv_a_old = mult_lateral_conveyance(h_a, cd_a, k, liq);
-            let conv_b_old = mult_lateral_conveyance(h_b, cd_b, k, liq);
-            let driving_old =
-                MULT_LATERAL_SCALE * 0.5 * (conv_a_old + conv_b_old) * (eta_a_old - eta_b_old);
-
-            // NEW (post-fix): h lifted into column_depth's reference-row units.
-            let h_a_ref = h_a * depth_scale;
-            let h_b_ref = h_b * depth_scale;
-            let eta_a_new = h_a_ref + cd_a;
-            let eta_b_new = h_b_ref + cd_b;
-            let conv_a_new = mult_lateral_conveyance(h_a_ref, cd_a, k, liq);
-            let conv_b_new = mult_lateral_conveyance(h_b_ref, cd_b, k, liq);
-            let driving_new =
-                MULT_LATERAL_SCALE * 0.5 * (conv_a_new + conv_b_new) * (eta_a_new - eta_b_new);
-
-            part2_old_driving.push(driving_old);
-            part2_new_driving.push(driving_new);
-            println!(
-                "  w={w:>4} depth_scale={depth_scale:>7.4} stacked_a={stacked_a:>3} \
-                 stacked_b={stacked_b:>3} | driving_OLD={driving_old:>14.4} \
-                 driving_NEW={driving_new:>14.4}"
-            );
-        }
-        let part2_new_baseline = *part2_new_driving.last().unwrap(); // w=512 anchor
-        let part2_old_baseline = *part2_old_driving.last().unwrap();
-        for (i, &w) in [64usize, 128, 256, 512].iter().enumerate() {
-            let pct_new = 100.0 * (part2_new_driving[i] - part2_new_baseline) / part2_new_baseline;
-            let pct_old = 100.0 * (part2_old_driving[i] - part2_old_baseline) / part2_old_baseline;
-            println!(
-                "  w={w:>4} driving deviation from w=512 baseline: OLD={pct_old:+9.2}%  \
-                 NEW={pct_new:+9.2}%"
-            );
-        }
-        } // end SHALLOW/DEEP loop
-    }
 
     // ---- Task #61: U-tube flow-through vessel ------------------------------------------------
     //
@@ -18765,145 +12636,329 @@ mod tests {
         }
     }
 
+    /// General determinism property of the DEFAULT simulation path: two independently constructed
+    /// simulations run through the identical tick sequence must produce bit-identical output.
+    /// This is the coverage `perfect_simulation_determinism.rs` (deleted 2026-09-24 along with the
+    /// `perfect_simulation` toggle it was actually testing -- its own two assertions were both
+    /// about that toggle's on/off behaviour, not about default-path determinism in general) is
+    /// replaced by.
     #[test]
-    #[ignore]
-    // Whole-state bit-identity instrument for the cell_props/cell_colors storage-layout refactor
-    // (pure data-layout change, must be bit-identical). Hashes each scenario's final state in the
-    // historical interleaved terms -- heights (f32 bits), props as
-    // [wetness, threshold, flow_rate, grain_size] PER CELL, colors as r,g,b,a bytes PER CELL, and
-    // edge_vel_h/edge_vel_v bits -- so the same test (with only field accesses updated for
-    // whatever storage layout is live) must produce the identical hash before and after the
-    // refactor.
-    //
-    //   cargo test -p sandart-sim --lib --release -- --ignored --nocapture diag_state_checksum
-    fn diag_state_checksum() {
-        fn fnv1a_bytes(bytes: &[u8], mut hash: u64) -> u64 {
-            for &b in bytes {
-                hash ^= b as u64;
-                hash = hash.wrapping_mul(0x100000001b3);
-            }
-            hash
-        }
-        fn fnv1a_f32(data: &[f32], mut hash: u64) -> u64 {
-            for &v in data {
-                hash = fnv1a_bytes(&v.to_bits().to_le_bytes(), hash);
-            }
-            hash
-        }
-        fn hash_state(
-            label: &str,
-            heights: &[f32],
-            props_interleaved: &[f32],
-            colors_interleaved: &[u8],
-            edge_vel_h: &[f32],
-            edge_vel_v: &[f32],
-        ) {
-            let mut hash: u64 = 0xcbf29ce484222325;
-            hash = fnv1a_f32(heights, hash);
-            hash = fnv1a_f32(props_interleaved, hash);
-            hash = fnv1a_bytes(colors_interleaved, hash);
-            hash = fnv1a_f32(edge_vel_h, hash);
-            hash = fnv1a_f32(edge_vel_v, hash);
-            println!("diag_state_checksum[{label}]: {:#018x}", hash);
-        }
-
-        // Scenario 1: Sand-fall, MultiNeckHourglass, Water, N=2.5, grid 256, 400 ticks.
-        {
-            let mut sim = DrawingSimulation::new_with_size(256);
-            sim.sandbox_shape = SandboxShape::MultiNeckHourglass;
-            sim.apply_preset(MaterialMode::Water);
-            sim.generate_shape_mask();
-            sim.gravity_dir = Vec2::new(0.0, 0.04);
-            sim.lateral_substeps = 2.5;
-            sim.initialize_hourglass();
-            let targets = [None; 5];
-            for _ in 0..400 {
-                sim.update(1.0 / 60.0, &targets, 0.08, MaterialMode::Water, SandboxShape::MultiNeckHourglass, 16.0, 16.0);
-            }
-            hash_state("sandfall_3neck_water_n2.5", &sim.heightmap.data, &sim.cell_props.to_interleaved(), &crate::colors_to_interleaved(&sim.cell_colors), &sim.edge_vel_h, &sim.edge_vel_v);
-        }
-
-        // Scenario 2: Sand-fall, Hourglass, Dry sand -> Water linear gradient of props.
-        {
-            let mut sim = DrawingSimulation::new_with_size(256);
+    fn test_default_run_is_deterministic() {
+        fn run() -> (Vec<f32>, Vec<u32>, Vec<f32>) {
+            let mut sim = DrawingSimulation::new_with_size(128);
             sim.sandbox_shape = SandboxShape::Hourglass;
-            sim.apply_preset(MaterialMode::DrySand);
-            sim.generate_shape_mask();
             sim.gravity_dir = Vec2::new(0.0, 0.04);
             sim.initialize_hourglass();
-            let w = sim.heightmap.width;
-            let h = sim.heightmap.height;
-            let dry_sand = (0.00f32, 0.08f32, 0.25f32, 0.45f32);
-            let water = (1.00f32, 0.00f32, 0.00f32, 0.00f32);
-            sim.cell_props = gradient_props(w, h, dry_sand, water);
             let targets = [None; 5];
-            for _ in 0..400 {
-                sim.update(1.0 / 60.0, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 16.0, 16.0);
+            for _ in 0..150 {
+                sim.update(0.016, &targets, 0.08, MaterialMode::DrySand, SandboxShape::Hourglass, 16.0, 16.0);
             }
-            hash_state("sandfall_gradient", &sim.heightmap.data, &sim.cell_props.to_interleaved(), &crate::colors_to_interleaved(&sim.cell_colors), &sim.edge_vel_h, &sim.edge_vel_v);
+            (sim.heightmap.data.clone(), sim.cell_colors.clone(), sim.cell_props.to_interleaved())
+        }
+        let a = run();
+        let b = run();
+        assert_eq!(
+            a, b,
+            "two identical default runs diverged -- the default simulation path is not deterministic"
+        );
+    }
+
+
+    // =============================================================================================
+    // Formerly `task55_head_spec.rs` (task #55's pressure-field isolation spec module, deleted
+    // 2026-09-24 along with the `perfect_simulation`/`fresh_pressure_field`/`head_field_transport`/
+    // `pressure_heatmap_head_field`/`pressure_sensitive_flow` debug toggles and the persistent
+    // `head_field` buffer they drove -- none of the five was ever set by `sandart-wasm`, `sandart`
+    // or `sandart-wasm/web`, and all five defaulted to `false`/the shipped behaviour). These two
+    // tests are the ones the user asked to keep: both exercise the DEFAULT (toggle-off) path only,
+    // with the same exact assertions/baselines they had in `task55_head_spec.rs`.
+    // =============================================================================================
+
+    /// `depth_scale` as defined identically in `recompute_column_depth`: `REFERENCE_GRID_HEIGHT /
+    /// w`. The natural per-resolution unit for `identity_tol` below.
+    fn depth_scale(w: usize) -> f32 {
+        REFERENCE_GRID_HEIGHT as f32 / w as f32
+    }
+
+    /// Tolerance for "meaningfully more than f32 accumulation roundoff" -- see the former
+    /// `task55_head_spec.rs`'s own doc comment on this function for the derivation.
+    fn identity_tol(w: usize) -> f32 {
+        0.02 * depth_scale(w)
+    }
+
+    /// Maps a fraction of the grid extent to an interior row/column index, clamped to
+    /// `recompute_column_depth`'s active interior range (`1..=n-2`).
+    fn frac_idx(frac: f32, n: usize) -> usize {
+        ((frac * n as f32).round() as usize).clamp(1, n.saturating_sub(2))
+    }
+
+    /// `cell_props` for the scenarios below: `MaterialMode::Water`'s own preset, fully liquid
+    /// water at every cell.
+    fn build_water_cell_props(cell_count: usize) -> crate::CellProps {
+        let mut cell_props = crate::CellProps::new(cell_count);
+        for c in 0..cell_count {
+            cell_props.wetness[c] = 1.0;
+        }
+        cell_props
+    }
+
+    /// Minimal `settle_tick` harness for the two specs below. Unbounded budget (`usize::MAX`)
+    /// deliberately: these specs are about the physics the flux solver produces, not the LOD
+    /// scheduler's approximation of it.
+    struct DynSim {
+        hm: Heightmap,
+        temp_heights: Vec<f32>,
+        cell_colors: Vec<u32>,
+        cell_props: crate::CellProps,
+        sliding: Vec<bool>,
+        bounds: ActiveBounds,
+        active_blocks: Vec<crate::BlockActivity>,
+        last_displacements: Vec<f32>,
+        last_simulated_ticks: Vec<u32>,
+        edge_vel_h: Vec<f32>,
+        edge_vel_v: Vec<f32>,
+        column_depth: Vec<f32>,
+        mask: Vec<u8>,
+        block_size: usize,
+        tick_count: u32,
+    }
+
+    impl DynSim {
+        fn new(w: usize, h: usize, mask: Vec<u8>, heights: Vec<f32>, cell_props: crate::CellProps) -> Self {
+            let block_size = 32;
+            let cols = (w + block_size - 1) / block_size;
+            let rows = (h + block_size - 1) / block_size;
+            let expected_len = cols * rows;
+            let mut hm = Heightmap::new(w, h, 0.0);
+            hm.data.copy_from_slice(&heights);
+            DynSim {
+                temp_heights: heights.clone(),
+                hm,
+                cell_colors: vec![0u32; w * h],
+                cell_props,
+                sliding: vec![false; w * h],
+                bounds: ActiveBounds {
+                    min_x: 0,
+                    max_x: w.saturating_sub(1),
+                    min_y: 0,
+                    max_y: h.saturating_sub(1),
+                    active: true,
+                },
+                active_blocks: vec![crate::BlockActivity::Inactive; expected_len],
+                last_displacements: vec![1.0; expected_len],
+                last_simulated_ticks: vec![0; expected_len],
+                edge_vel_h: vec![0.0; w * h],
+                edge_vel_v: vec![0.0; w * h],
+                column_depth: vec![0.0; w * h],
+                mask,
+                block_size,
+                tick_count: 0,
+            }
         }
 
-        // Scenario 3: Sandbox mode (gravity zero), marbles moving in spirals (same
-        // targets-array drive `profile_sim.rs`/`test_simulation_color_preservation` use), so the
-        // marble/groove and colour advection paths run.
-        {
-            let mut sim = DrawingSimulation::new_with_size(256);
-            sim.sandbox_shape = SandboxShape::Circle;
-            sim.apply_preset(MaterialMode::ButterCream);
-            sim.generate_shape_mask();
-            sim.gravity_dir = Vec2::ZERO;
-            let mut targets = [None; 5];
-            for i in 0..300 {
-                let angle = i as f32 * 0.1;
-                let radius = i as f32 * 0.002;
-                targets[0] = Some(Vec2::new(angle.cos() * radius, angle.sin() * radius));
-                targets[1] = Some(Vec2::new(-angle.cos() * radius * 0.7, angle.sin() * radius * 0.7));
-                sim.update(1.0 / 60.0, &targets, 0.05, MaterialMode::ButterCream, SandboxShape::Circle, 16.0, 16.0);
-            }
-            hash_state("sandbox_marbles", &sim.heightmap.data, &sim.cell_props.to_interleaved(), &crate::colors_to_interleaved(&sim.cell_colors), &sim.edge_vel_h, &sim.edge_vel_v);
-        }
-
-        // Scenario 4: TestSim-based Water and DrySand scenarios.
-        {
-            let w = 96usize;
-            let h = 96usize;
-            let mask = make_test_mask(w, h, SandboxShape::Hourglass, 0.05, 0.6);
-            for (mode, label) in [(MaterialMode::Water, "testsim_water"), (MaterialMode::DrySand, "testsim_drysand")] {
-                let props = get_test_props(mode, w * h);
-                let mut sim = TestSim::new(w, h, props, mask.clone(), 16);
-                for y in 10..40 {
-                    for x in 0..w {
-                        let idx = y * w + x;
-                        if sim.mask[idx] != crate::MASK_OUTSIDE {
-                            sim.hm.data[idx] = 1.0;
-                        }
-                    }
-                }
-                for _ in 0..300 {
-                    sim.tick(Vec2::new(0.0, 0.04), usize::MAX);
-                }
-                hash_state(label, &sim.hm.data, &sim.cell_props.to_interleaved(), &crate::colors_to_interleaved(&sim.cell_colors), &sim.edge_vel_h, &sim.edge_vel_v);
-            }
+        /// Advances one tick on the DEFAULT path, returning this tick's realised flux total.
+        fn tick(&mut self, gravity_dir: Vec2) -> f32 {
+            let flow = settle_tick(
+                &mut self.hm,
+                &mut self.temp_heights,
+                &mut self.cell_colors,
+                &mut self.cell_props,
+                &mut self.sliding,
+                &mut self.bounds,
+                &mut self.active_blocks,
+                &mut self.last_displacements,
+                &mut self.last_simulated_ticks,
+                usize::MAX,
+                self.block_size,
+                &[],
+                12345u32.wrapping_add(self.tick_count),
+                &mut self.edge_vel_h,
+                &mut self.edge_vel_v,
+                &mut self.column_depth,
+                &self.mask,
+                self.tick_count,
+                gravity_dir,
+                None,
+                0.0,
+                1.0,
+            );
+            self.tick_count += 1;
+            flow
         }
     }
+
+    const DYN_GRAVITY: f32 = 0.04;
+    const DYN_SWEEP_W: [usize; 2] = [64, 512];
+
+    /// A basin of water draining through a narrow neck at its floor's right edge into a wide,
+    /// empty lower reservoir.
+    struct DrainScenario {
+        mask: Vec<u8>,
+        heights: Vec<f32>,
+        left: usize,
+        fill_row: usize,
+        basin_floor: usize,
+        neck_left: usize,
+        neck_right: usize,
+    }
+
+    fn build_drain_scenario(w: usize, h: usize) -> DrainScenario {
+        let left = frac_idx(0.20, w);
+        let right = frac_idx(0.80, w) + 1;
+        let top_row = frac_idx(0.10, h);
+        let basin_floor = frac_idx(0.45, h);
+        let reservoir_floor = frac_idx(0.90, h);
+        let neck_width = ((right - left) / 8).max(2);
+        let neck_right = right;
+        let neck_left = right - neck_width;
+
+        let mut mask = vec![crate::MASK_OUTSIDE; w * h];
+        for y in top_row..=basin_floor {
+            for x in left..right {
+                mask[y * w + x] = crate::MASK_INSIDE;
+            }
+        }
+        // Seal the basin floor except the neck -- everything else in the floor row is a solid wall.
+        for x in left..right {
+            if x < neck_left || x >= neck_right {
+                mask[basin_floor * w + x] = crate::MASK_OUTSIDE;
+            }
+        }
+        // Wide-open lower reservoir below the neck, so drained water has somewhere to go without
+        // backing up and re-flooding the neck within this spec's tick budget.
+        for y in (basin_floor + 1)..=reservoir_floor {
+            for x in left..right {
+                mask[y * w + x] = crate::MASK_INSIDE;
+            }
+        }
+
+        let fill_row = frac_idx(0.15, h);
+        let mut heights = vec![0.0f32; w * h];
+        for y in fill_row..=basin_floor {
+            for x in left..right {
+                let idx = y * w + x;
+                if mask[idx] != crate::MASK_OUTSIDE {
+                    heights[idx] = 1.0;
+                }
+            }
+        }
+        DrainScenario { mask, heights, left, fill_row, basin_floor, neck_left, neck_right }
+    }
+
+    /// Total material currently in a column's basin span.
+    fn column_mass(heights: &[f32], w: usize, x: usize, y0: usize, y1: usize) -> f32 {
+        (y0..=y1).map(|y| heights[y * w + x]).sum()
+    }
+
+    /// Spec: the basin's free surface must dip meaningfully toward the outlet while actively
+    /// draining -- measured as `far_mass - near_mass` (the far wall's column against the
+    /// near-neck column, same row span) averaged over the last `DIP_WINDOW` ticks (the near-neck
+    /// column pulses tick to tick -- see `test_neck_pulse_does_not_grow` below -- so a single-tick
+    /// sample would measure which phase it landed on, not whether the surface dips).
+    #[test]
+    fn test_draining_vessel_surface_dips() {
+        const TICKS: usize = 150;
+        const DIP_WINDOW: usize = 50;
+        let mut table = String::new();
+        let mut fail = false;
+        for &w in &DYN_SWEEP_W {
+            let h = w;
+            let s = build_drain_scenario(w, h);
+            let cell_props = build_water_cell_props(w * h);
+            let mut sim = DynSim::new(w, h, s.mask.clone(), s.heights.clone(), cell_props);
+            let near_x = s.neck_left.saturating_sub(2).max(s.left);
+            let far_x = s.left + 2;
+            let mass_near_initial = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+            let mass_far_initial = column_mass(&sim.hm.data, w, far_x, s.fill_row, s.basin_floor);
+            let mut total_flow = 0.0f64;
+            let mut dip_sum = 0.0f64;
+            for t in 0..TICKS {
+                total_flow += sim.tick(Vec2::new(0.0, DYN_GRAVITY)) as f64;
+                if t + DIP_WINDOW >= TICKS {
+                    let near = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+                    let far = column_mass(&sim.hm.data, w, far_x, s.fill_row, s.basin_floor);
+                    dip_sum += (far - near) as f64;
+                }
+            }
+            let mass_near_final = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+            let mass_far_final = column_mass(&sim.hm.data, w, far_x, s.fill_row, s.basin_floor);
+            let dip = (dip_sum / DIP_WINDOW as f64) as f32;
+            let tol = identity_tol(w);
+            table.push_str(&format!(
+                "w={w}: near(x={near_x}) {mass_near_initial:.4}->{mass_near_final:.4} \
+                 far(x={far_x}) {mass_far_initial:.4}->{mass_far_final:.4} mean_dip(last 50 ticks)={dip:.5} cells tol={tol:.5} \
+                 total_flow={total_flow:.2} neck=[{},{})\n",
+                s.neck_left, s.neck_right
+            ));
+            assert!(
+                total_flow > 1.0,
+                "test_draining_vessel_surface_dips: w={w}: SCENARIO INVALID -- total_flow \
+                 ({total_flow:.4}) over {TICKS} ticks suggests the vessel never actually drained, \
+                 so a flat or dipping surface would be vacuous, not a real measurement.\n{table}"
+            );
+            if dip <= tol {
+                fail = true;
+            }
+        }
+        println!("{table}");
+        assert!(
+            !fail,
+            "the basin's free surface did NOT dip meaningfully toward the outlet while actively \
+             draining (dip <= identity_tol) -- this is the dead-flat-surface defect the refuted \
+             elliptic pass produced over three active necks.\n{table}"
+        );
+    }
+
+    /// REGRESSION GUARD, not a spec: the near-neck column pulse must not GROW.
+    ///
+    /// In `build_drain_scenario`, the column next to the neck swings in mass from tick to tick. On
+    /// the shipped path it is a strict period-2 pulse, with the dip alternating ~2 and ~35-48
+    /// cells at w=512. It predates the array-form lateral pass: identical before and after it
+    /// (traced 2026-09-13).
+    ///
+    /// The user reviewed it and accepted it at the current level ("I am not concerned with
+    /// oscillation at this level"). They asked for a test that fails if it gets worse. So this
+    /// measures the mean absolute tick-to-tick change of that column's mass over the last `WINDOW`
+    /// ticks, and asserts it stays within `GROWTH_ALLOWANCE` of the value measured when the guard
+    /// was written.
+    ///
+    /// If a change REDUCES the pulse, lower the baseline. Never raise it to silence a regression;
+    /// that would re-accept a larger oscillation without the user seeing it.
+    #[test]
+    fn test_neck_pulse_does_not_grow() {
+        const TICKS: usize = 150;
+        const WINDOW: usize = 50;
+        const GROWTH_ALLOWANCE: f32 = 1.25;
+        // (w, mean |near(t) - near(t-1)| over the last WINDOW ticks), measured 2026-09-13 at eeefce7.
+        const BASELINE: [(usize, f32); 2] = [(64, 6.4508), (512, 37.8867)];
+        let mut report = String::new();
+        let mut fail = false;
+        for &(w, baseline) in &BASELINE {
+            let h = w;
+            let s = build_drain_scenario(w, h);
+            let cell_props = build_water_cell_props(w * h);
+            let mut sim = DynSim::new(w, h, s.mask.clone(), s.heights.clone(), cell_props);
+            let near_x = s.neck_left.saturating_sub(2).max(s.left);
+            let mut prev = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+            let mut pulse_sum = 0.0f64;
+            for t in 0..TICKS {
+                sim.tick(Vec2::new(0.0, DYN_GRAVITY));
+                let m = column_mass(&sim.hm.data, w, near_x, s.fill_row, s.basin_floor);
+                if t + WINDOW >= TICKS {
+                    pulse_sum += (m - prev).abs() as f64;
+                }
+                prev = m;
+            }
+            let pulse = (pulse_sum / WINDOW as f64) as f32;
+            let ceiling = baseline * GROWTH_ALLOWANCE;
+            report.push_str(&format!(
+                "w={w}: near-neck pulse {pulse:.4} cells/tick (baseline {baseline:.4}, ceiling {ceiling:.4})\n"
+            ));
+            if pulse > ceiling {
+                fail = true;
+            }
+        }
+        println!("{report}");
+        assert!(!fail, "near-neck tick-to-tick pulse grew past its accepted level:\n{report}");
+    }
 }
-
-// Task #55, step 2: the STATIC hydraulic head field itself (see that file's module doc comment
-// for the physics). Declared as a CHILD of `physics`, exactly like `task55_head_spec` below, so
-// it can call `support_fraction` and read `REFERENCE_GRID_HEIGHT` without widening either's
-// visibility. Promoted out of `#[cfg(test)]` (task 2.32 visualisation step): the pressure
-// heat-map overlay's new-field source (`DrawingSimulation::pressure_heatmap_head_field`, gated
-// exactly like `pressure_heatmap_enabled` -- see `pressure_field_texels`) is now a real, shipping
-// caller, so this must compile and run outside test builds too. Still `pub(crate)`, not `pub`:
-// the only caller outside this crate's own test suite is `DrawingSimulation::pressure_field_texels`
-// in `lib.rs`, reached via the full `physics::task55_head_field::...` path.
-#[path = "task55_head_field.rs"]
-pub(crate) mod task55_head_field;
-
-// Task #55, step 1: an ISOLATION SPEC for the pressure field, kept in its own file (see that
-// file's module doc comment for why). Declared as a CHILD of `physics` (not of the crate root)
-// so `use super::*` there reaches `recompute_column_depth`, `REFERENCE_GRID_HEIGHT`, and every
-// other private item it needs without widening anyone's visibility.
-#[cfg(test)]
-#[path = "task55_head_spec.rs"]
-mod task55_head_spec;
