@@ -149,15 +149,13 @@ active development.
 ## License & Disclaimers
 
 ### Disclaimer
-This is not an officially supported Google product. 
-
-This repository is a personal project authored by an employee of Google LLC. The views, code, and implementation details do not represent Google LLC or its affiliate companies.
+This is a personal project, made in the author's own time. It is not affiliated with, endorsed by, or supported by the author's employer, and it does not represent the views of the author's employer.
 
 ### Vibe Coding
 This project was built using "vibe coding" — designed, refactored, and implemented in partnership with agentic AI coding assistants.
 
 ### License
-Copyright 2026 Google LLC
+Copyright 2026 tanaeem-moosa
 
 Licensed under the Apache License, Version 2.0 (the "License") — full text in [`LICENSE`](LICENSE); you may not use this file except in compliance with the License. You may obtain a copy of the License at
 
